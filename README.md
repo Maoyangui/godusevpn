@@ -26,7 +26,21 @@ go build -tags with_quic,with_utls,with_clash_api,with_gvisor -trimpath -ldflags
 
 测试:`go test -tags with_quic,with_utls,with_clash_api,with_gvisor ./...`(含内嵌 sing-box 对生成配置的干跑校验、管道往返、状态机全路径)。
 
-## 使用(M0,命令行)
+## 安装与使用
+
+从 [Releases](https://github.com/Maoyangui/godusevpn/releases) 下载安装包运行即可:
+
+| 包 | 说明 |
+|---|---|
+| `godusevpn-<版本>-x64-setup.exe` | 标准版,缺 WebView2 时联网安装运行时 |
+| `godusevpn-<版本>-x64-setup-offline.exe` | 离线完整版,内嵌 WebView2 运行时,给精简系统与内网机器 |
+| `godusevpn-<版本>-arm64-setup.exe` | ARM64 设备 |
+
+安装包会注册后台服务(自动启动)、装托盘客户端与命令行,可勾选"登录时自动启动"。装完在「订阅」页填面板给的订阅地址,回首页点连接。关窗口只收到托盘,连接不断;托盘右键可连接 / 断开、切模式。程序未签名,SmartScreen 提示时点"更多信息 → 仍要运行"。
+
+主窗口:首页(开关、模式、节点、实时速度、订阅用量)、节点(延迟、全部测速、切换)、订阅、连接、设置、日志(含诊断信息一键复制)、关于(修复服务)。
+
+## 命令行(排障)
 
 以管理员身份:
 
