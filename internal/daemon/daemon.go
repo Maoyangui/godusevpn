@@ -310,6 +310,9 @@ func (d *Daemon) registerHandlers() {
 		return map[string]any{"version": buildinfo.Version, "protocol": ipc.Version, "name": DisplayName}, nil
 	})
 	h(ipc.MGetState, func(json.RawMessage) (any, error) { return d.stateView(), nil })
+	h(ipc.MGetClashInfo, func(json.RawMessage) (any, error) {
+		return ipc.ClashInfo{Port: d.getSettings().ClashPort, Secret: d.secret, Running: d.core.Running()}, nil
+	})
 	h(ipc.MConnect, func(json.RawMessage) (any, error) {
 		if strings.TrimSpace(d.getSettings().ProfileURL) == "" {
 			return nil, &ipc.CallError{Code: state.CodeProfileMissing, Msg: "还没有设置订阅地址"}

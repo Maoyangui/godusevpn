@@ -17,6 +17,13 @@ type ProfileView struct {
 	Usage     profile.Usage `json:"usage"`
 }
 
+// ClashInfo 内核 Clash API 的连接信息;Running 为假时端口未监听。
+type ClashInfo struct {
+	Port    int    `json:"port"`
+	Secret  string `json:"secret"`
+	Running bool   `json:"running"`
+}
+
 type StateView struct {
 	Version  string            `json:"version"`
 	Protocol int               `json:"protocol"`

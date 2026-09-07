@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"time"
 
+	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/svc"
 	"golang.org/x/sys/windows/svc/mgr"
 )
@@ -147,6 +148,36 @@ func Stop() error {
 		return errors.New("服务停止超时")
 	}
 	return nil
+}
+
+// QueryStatus 不需要管理员权限的状态查询(托盘客户端用):只申请"连接"和"查询状态"两个权限。
+func QueryStatus() string {
+	m, err := windows.OpenSCManager(nil, nil, windows.SC_MANAGER_CONNECT)
+	if err != nil {
+		return "unknown"
+	}
+	defer windows.CloseServiceHandle(m)
+	s, err := windows.OpenService(m, windows.StringToUTF16Ptr(Name), windows.SERVICE_QUERY_STATUS)
+	if err != nil {
+		return "not-installed"
+	}
+	defer windows.CloseServiceHandle(s)
+	var st windows.SERVICE_STATUS
+	if err := windows.QueryServiceStatus(s, &st); err != nil {
+		return "unknown"
+	}
+	switch st.CurrentState {
+	case windows.SERVICE_RUNNING:
+		return "running"
+	case windows.SERVICE_STOPPED:
+		return "stopped"
+	case windows.SERVICE_START_PENDING:
+		return "starting"
+	case windows.SERVICE_STOP_PENDING:
+		return "stopping"
+	default:
+		return "unknown"
+	}
 }
 
 // Status 服务状态文本:not-installed / stopped / running / …

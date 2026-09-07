@@ -1,0 +1,99 @@
+name: build
+
+on:
+  push:
+    branches: [master]
+    tags: ["v*"]
+  pull_request:
+
+permissions:
+  contents: write
+
+env:
+  TAGS: with_quic,with_utls,with_clash_api,with_gvisor
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Version
+        id: ver
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then v="${GITHUB_REF#refs/tags/v}"; else v="0.0.0-ci-${GITHUB_SHA::7}"; fi
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+
+      - name: Test
+        shell: bash
+        run: |
+          go vet -tags "$TAGS" ./internal/... ./cmd/godusevpn-svc ./cmd/godusevpn-cli
+          go vet -tags desktop,production ./cmd/godusevpn
+          go test -count=1 -tags "$TAGS" ./...
+
+      - name: Build binaries (amd64, arm64)
+        shell: bash
+        run: |
+          set -e
+          V="${{ steps.ver.outputs.version }}"
+          LD="-s -w -X github.com/Maoyangui/godusevpn/internal/buildinfo.Version=$V"
+          for arch in amd64 arm64; do
+            mkdir -p dist/$arch
+            CGO_ENABLED=0 GOOS=windows GOARCH=$arch go build -tags "$TAGS" -trimpath -ldflags "$LD" -o dist/$arch/godusevpn-svc.exe ./cmd/godusevpn-svc
+            CGO_ENABLED=0 GOOS=windows GOARCH=$arch go build -trimpath -ldflags "$LD" -o dist/$arch/godusevpn-cli.exe ./cmd/godusevpn-cli
+            CGO_ENABLED=0 GOOS=windows GOARCH=$arch go build -tags desktop,production -trimpath -ldflags "$LD -H windowsgui" -o dist/$arch/godusevpn.exe ./cmd/godusevpn
+          done
+          ls -la dist/amd64 dist/arm64
+
+      - name: Fetch WebView2 installers
+        shell: bash
+        run: |
+          mkdir -p installer/deps
+          curl -fsSL -o installer/deps/MicrosoftEdgeWebview2Setup.exe "https://go.microsoft.com/fwlink/p/?LinkId=2124703"
+          curl -fsSL -o installer/deps/MicrosoftEdgeWebView2RuntimeInstallerX64.exe "https://go.microsoft.com/fwlink/?linkid=2124701"
+          ls -la installer/deps
+
+      - name: Build installers (Inno Setup)
+        shell: pwsh
+        run: |
+          $v = "${{ steps.ver.outputs.version }}"
+          $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+          & $iscc /DAppVersion=$v /DArch=amd64 installer\godusevpn.iss
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          & $iscc /DAppVersion=$v /DArch=amd64 /DOfflineWebView2=1 installer\godusevpn.iss
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          & $iscc /DAppVersion=$v /DArch=arm64 installer\godusevpn.iss
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          Get-ChildItem dist\installer
+
+      - name: Checksums
+        shell: bash
+        run: |
+          cd dist/installer && sha256sum *.exe > SHA256SUMS && cat SHA256SUMS
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: godusevpn-${{ steps.ver.outputs.version }}
+          path: |
+            dist/installer/*
+            dist/amd64/*.exe
+            dist/arm64/*.exe
+
+      - name: Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "佛跳墙 v${{ steps.ver.outputs.version }}"
+          prerelease: ${{ contains(github.ref, '-') }}
+          generate_release_notes: true
+          files: |
+            dist/installer/*.exe
+            dist/installer/SHA256SUMS
+            dist/amd64/godusevpn-svc.exe
+            dist/amd64/godusevpn-cli.exe
+            dist/amd64/godusevpn.exe

@@ -29,6 +29,7 @@ const (
 	MGetLogs        = "GetLogs"
 	MDiagnose       = "Diagnose"
 	MPing           = "Ping"
+	MGetClashInfo   = "GetClashInfo" // 内核 Clash API 的端口与密钥,托盘客户端据此读实时速度、连接与节点延迟
 )
 
 type Request struct {
