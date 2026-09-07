@@ -1,0 +1,61 @@
+// 中英文案;t(key, vars) 取当前语言,缺就回落中文
+const I18N = {
+  zh: {
+    'nav.home': '首页', 'nav.nodes': '节点', 'nav.sub': '订阅', 'nav.conns': '连接', 'nav.settings': '设置', 'nav.logs': '日志', 'nav.about': '关于',
+    'svc.running': '服务运行中', 'svc.down': '服务未运行', 'svc.notInstalled': '服务未安装', 'svc.unknown': '服务状态未知',
+    'banner.svcDown': '后台服务没有运行,连接、设置都不可用。', 'banner.repair': '修复服务', 'banner.noProfile': '还没有设置订阅地址。', 'banner.goSub': '去设置',
+    'home.title': '首页', 'home.connect': '连接', 'home.disconnect': '断开', 'home.connecting': '连接中', 'home.status': '状态', 'home.mode': '模式',
+    'home.node': '当前节点', 'home.test': '测速', 'home.up': '上传', 'home.down': '下载', 'home.uptime': '已连接', 'home.sub': '订阅', 'home.refresh': '刷新订阅',
+    'st.disconnected': '未连接', 'st.preparing': '准备中', 'st.starting': '启动中', 'st.connected': '已连接', 'st.degraded': '已连接(节点不稳)', 'st.stopping': '断开中', 'st.error': '出错,自动重试中',
+    'mode.rule': '规则', 'mode.global': '全局', 'mode.direct': '直连',
+    'code.E_PROFILE_MISSING': '还没有设置订阅地址', 'code.E_PROFILE_NET': '拉取订阅失败,检查网络或地址', 'code.E_PROFILE_AUTH': '订阅无效、已用完或已到期', 'code.E_PROFILE_PARSE': '订阅内容无法解析',
+    'code.E_CONFIG': '配置生成或校验失败', 'code.E_TUN_DRIVER': 'TUN 网卡创建失败(服务是否以管理员运行、是否被安全软件拦截)', 'code.E_ROUTE_CONFLICT': '路由设置失败,可能与其它 VPN 冲突',
+    'code.E_CORE_START': '内核启动失败', 'code.E_CORE_CRASH': '内核异常退出,正在重连', 'code.E_NODE_DOWN': '当前节点不可用', 'code.E_UNKNOWN': '未知错误',
+    'sub.title': '订阅', 'sub.url': '订阅地址', 'sub.urlHelp': '面板落地页上的订阅链接;客户端会自动补 format=json', 'sub.save': '保存并更新', 'sub.refresh': '立即更新',
+    'sub.name': '名称', 'sub.nodes': '节点数', 'sub.updated': '更新时间', 'sub.usage': '用量', 'sub.expire': '到期', 'sub.unlimited': '不限', 'sub.none': '未设置', 'sub.saved': '订阅已更新',
+    'nodes.title': '节点', 'nodes.testAll': '全部测速', 'nodes.testing': '测速中…', 'nodes.auto': '自动选择(延迟最低)', 'nodes.empty': '还没有节点,先设置订阅', 'nodes.selected': '已切换到 {n}',
+    'conns.title': '连接', 'conns.host': '目标', 'conns.chain': '出站', 'conns.rule': '规则', 'conns.up': '上传', 'conns.down': '下载', 'conns.close': '断开', 'conns.empty': '没有活动连接', 'conns.needCore': '连接后才能查看',
+    'set.title': '设置', 'set.save': '保存', 'set.saved': '已保存', 'set.restartNote': '除模式与节点外的改动会重新应用配置,已连接时会短暂断开',
+    'set.tun': 'TUN 模式', 'set.tunHelp': '关掉后只有 127.0.0.1 的混合端口,需要软件自己设置代理', 'set.tunStack': 'TUN 协议栈', 'set.strict': '严格路由', 'set.strictHelp': '防泄漏;局域网访问受影响时开"局域网直通"',
+    'set.lan': '局域网直通', 'set.lanHelp': '10 / 172.16 / 192.168 网段不进 TUN', 'set.mixed': '本地混合端口', 'set.mixedHelp': '0 = 关闭;HTTP 与 SOCKS5 同端口,只监听 127.0.0.1',
+    'set.remoteDns': '远程 DNS(DoH,经代理)', 'set.localDns': '本地 DNS(DoH,直连;system = 系统 DNS)', 'set.fakeip': 'fake-ip', 'set.ipv6': '允许 IPv6', 'set.ipv6Help': '关闭时代理链路全程禁用 IPv6',
+    'set.adblock': '拦截广告域名', 'set.update': '订阅刷新间隔(小时)', 'set.logLevel': '日志级别', 'set.autostart': '登录时自动启动客户端', 'set.autostartHelp': '后台服务随系统启动,这里只管托盘;开机后按上次状态自动连接',
+    'set.lang': '语言 / Language', 'set.autoConnect': '服务启动后自动连接', 'set.autoConnectHelp': '按上次是否处于连接状态',
+    'logs.title': '日志', 'logs.service': '服务日志', 'logs.core': '内核日志', 'logs.lines': '行数', 'logs.refresh': '刷新', 'logs.auto': '自动刷新', 'logs.open': '打开日志目录', 'logs.diag': '复制诊断信息', 'logs.copied': '诊断信息已复制到剪贴板',
+    'about.title': '关于', 'about.ui': '客户端版本', 'about.svc': '服务版本', 'about.svcState': '服务状态', 'about.repair': '修复服务(需管理员)', 'about.repairHelp': '重新注册并启动后台服务,会弹一次 UAC', 'about.repairDone': '已发起修复,几秒后看状态',
+    'about.core': '内核', 'about.license': 'GPL-3.0 开源,内嵌 sing-box', 'about.quit': '退出程序', 'about.quitHelp': '退出托盘;后台服务与连接不受影响',
+    'common.on': '开', 'common.off': '关', 'common.failed': '失败', 'common.ok': '完成', 'common.ms': '毫秒', 'common.timeout': '超时', 'common.day': '天',
+  },
+  en: {
+    'nav.home': 'Home', 'nav.nodes': 'Nodes', 'nav.sub': 'Subscription', 'nav.conns': 'Connections', 'nav.settings': 'Settings', 'nav.logs': 'Logs', 'nav.about': 'About',
+    'svc.running': 'Service running', 'svc.down': 'Service not running', 'svc.notInstalled': 'Service not installed', 'svc.unknown': 'Service state unknown',
+    'banner.svcDown': 'The background service is not running; connecting and settings are unavailable.', 'banner.repair': 'Repair service', 'banner.noProfile': 'No subscription URL yet.', 'banner.goSub': 'Set it up',
+    'home.title': 'Home', 'home.connect': 'Connect', 'home.disconnect': 'Disconnect', 'home.connecting': 'Connecting', 'home.status': 'Status', 'home.mode': 'Mode',
+    'home.node': 'Node', 'home.test': 'Test', 'home.up': 'Upload', 'home.down': 'Download', 'home.uptime': 'Connected for', 'home.sub': 'Subscription', 'home.refresh': 'Refresh',
+    'st.disconnected': 'Disconnected', 'st.preparing': 'Preparing', 'st.starting': 'Starting', 'st.connected': 'Connected', 'st.degraded': 'Connected (node unstable)', 'st.stopping': 'Stopping', 'st.error': 'Error, retrying',
+    'mode.rule': 'Rule', 'mode.global': 'Global', 'mode.direct': 'Direct',
+    'code.E_PROFILE_MISSING': 'No subscription URL', 'code.E_PROFILE_NET': 'Failed to fetch the subscription', 'code.E_PROFILE_AUTH': 'Subscription invalid, exhausted or expired', 'code.E_PROFILE_PARSE': 'Subscription could not be parsed',
+    'code.E_CONFIG': 'Config generation or validation failed', 'code.E_TUN_DRIVER': 'TUN adapter could not be created (service privileges or security software)', 'code.E_ROUTE_CONFLICT': 'Route setup failed, maybe another VPN',
+    'code.E_CORE_START': 'Core failed to start', 'code.E_CORE_CRASH': 'Core exited unexpectedly, reconnecting', 'code.E_NODE_DOWN': 'Current node unavailable', 'code.E_UNKNOWN': 'Unknown error',
+    'sub.title': 'Subscription', 'sub.url': 'Subscription URL', 'sub.urlHelp': 'The link from the panel landing page; format=json is added automatically', 'sub.save': 'Save & update', 'sub.refresh': 'Update now',
+    'sub.name': 'Name', 'sub.nodes': 'Nodes', 'sub.updated': 'Updated', 'sub.usage': 'Usage', 'sub.expire': 'Expires', 'sub.unlimited': 'Unlimited', 'sub.none': 'Not set', 'sub.saved': 'Subscription updated',
+    'nodes.title': 'Nodes', 'nodes.testAll': 'Test all', 'nodes.testing': 'Testing…', 'nodes.auto': 'Auto (lowest latency)', 'nodes.empty': 'No nodes yet, set a subscription first', 'nodes.selected': 'Switched to {n}',
+    'conns.title': 'Connections', 'conns.host': 'Destination', 'conns.chain': 'Outbound', 'conns.rule': 'Rule', 'conns.up': 'Up', 'conns.down': 'Down', 'conns.close': 'Close', 'conns.empty': 'No active connections', 'conns.needCore': 'Connect first',
+    'set.title': 'Settings', 'set.save': 'Save', 'set.saved': 'Saved', 'set.restartNote': 'Changes other than mode and node re-apply the config; an active connection drops briefly',
+    'set.tun': 'TUN mode', 'set.tunHelp': 'Off = only the local mixed port; apps must set the proxy themselves', 'set.tunStack': 'TUN stack', 'set.strict': 'Strict route', 'set.strictHelp': 'Leak protection; enable LAN bypass if LAN access breaks',
+    'set.lan': 'LAN bypass', 'set.lanHelp': '10 / 172.16 / 192.168 ranges skip the TUN', 'set.mixed': 'Local mixed port', 'set.mixedHelp': '0 = off; HTTP and SOCKS5 on one port, 127.0.0.1 only',
+    'set.remoteDns': 'Remote DNS (DoH via proxy)', 'set.localDns': 'Local DNS (DoH direct; system = OS DNS)', 'set.fakeip': 'fake-ip', 'set.ipv6': 'Allow IPv6', 'set.ipv6Help': 'Off = IPv6 disabled end to end on the proxy path',
+    'set.adblock': 'Block ad domains', 'set.update': 'Subscription refresh (hours)', 'set.logLevel': 'Log level', 'set.autostart': 'Start client at login', 'set.autostartHelp': 'The service starts with Windows; this only covers the tray. It reconnects if it was connected before',
+    'set.lang': 'Language / 语言', 'set.autoConnect': 'Auto connect when service starts', 'set.autoConnectHelp': 'Follows the last connected state',
+    'logs.title': 'Logs', 'logs.service': 'Service log', 'logs.core': 'Core log', 'logs.lines': 'Lines', 'logs.refresh': 'Refresh', 'logs.auto': 'Auto refresh', 'logs.open': 'Open log folder', 'logs.diag': 'Copy diagnostics', 'logs.copied': 'Diagnostics copied',
+    'about.title': 'About', 'about.ui': 'Client version', 'about.svc': 'Service version', 'about.svcState': 'Service state', 'about.repair': 'Repair service (admin)', 'about.repairHelp': 'Re-registers and starts the background service; one UAC prompt', 'about.repairDone': 'Repair started, check the state in a few seconds',
+    'about.core': 'Core', 'about.license': 'GPL-3.0, embeds sing-box', 'about.quit': 'Quit', 'about.quitHelp': 'Quits the tray; the service and the connection keep running',
+    'common.on': 'On', 'common.off': 'Off', 'common.failed': 'Failed', 'common.ok': 'Done', 'common.ms': 'ms', 'common.timeout': 'timeout', 'common.day': 'd',
+  },
+};
+let LANG = 'zh';
+function t(key, vars) {
+  let s = (I18N[LANG] && I18N[LANG][key]) || I18N.zh[key] || key;
+  if (vars) for (const k in vars) s = s.replace('{' + k + '}', vars[k]);
+  return s;
+}

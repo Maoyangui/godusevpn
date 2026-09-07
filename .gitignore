@@ -1,4 +1,5 @@
-dist/
+/dist/
 *.exe
 *.log
 *.db
+installer/deps/
