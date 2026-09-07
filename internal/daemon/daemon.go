@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"sync"
@@ -36,7 +37,8 @@ type Daemon struct {
 	coreLog  *logx.Rotator
 	core     *core.Core
 	settings settings.Settings
-	profile  *profile.Profile
+	profiles map[string]*profile.Profile // 订阅 id → 节点缓存
+	fetchErr map[string]string           // 订阅 id → 最近一次拉取失败原因
 	machine  *state.Machine
 	server   *ipc.Server
 	secret   string
@@ -53,9 +55,11 @@ func New() (*Daemon, error) {
 		return nil, fmt.Errorf("建数据目录: %w", err)
 	}
 	d := &Daemon{
-		log:     logx.New(filepath.Join(paths.Logs(), "service.log"), 5<<20, 3),
-		coreLog: logx.New(filepath.Join(paths.Logs(), "core.log"), 5<<20, 3),
-		http:    &http.Client{Timeout: 30 * time.Second},
+		log:      logx.New(filepath.Join(paths.Logs(), "service.log"), 5<<20, 3),
+		coreLog:  logx.New(filepath.Join(paths.Logs(), "core.log"), 5<<20, 3),
+		http:     &http.Client{Timeout: 30 * time.Second},
+		profiles: map[string]*profile.Profile{},
+		fetchErr: map[string]string{},
 	}
 	d.core = core.New(core.Writer{Printf: d.coreLog.Printf})
 	s, err := settings.Load(paths.Settings())
@@ -63,9 +67,7 @@ func New() (*Daemon, error) {
 		d.logf("设置加载失败,用默认值: %v", err)
 	}
 	d.settings = s
-	if p, err := profile.Load(paths.ProfileCache()); err == nil {
-		d.profile = p
-	}
+	d.loadProfileCaches()
 	b := make([]byte, 16)
 	_, _ = rand.Read(b)
 	d.secret = hex.EncodeToString(b)
@@ -86,6 +88,22 @@ func New() (*Daemon, error) {
 }
 
 func (d *Daemon) logf(format string, a ...any) { d.log.Printf("INFO", format, a...) }
+
+// loadProfileCaches 读每条订阅的缓存;schema 1 留下的单文件缓存归到当前订阅名下。
+func (d *Daemon) loadProfileCaches() {
+	for _, p := range d.settings.Profiles {
+		if c, err := profile.Load(paths.ProfileCache(p.ID)); err == nil {
+			d.profiles[p.ID] = c
+		}
+	}
+	if legacy, err := profile.Load(paths.LegacyProfileCache()); err == nil {
+		if a := d.settings.Active(); a != nil && d.profiles[a.ID] == nil && legacy.URL == a.URL {
+			d.profiles[a.ID] = legacy
+			_ = legacy.Save(paths.ProfileCache(a.ID))
+		}
+		_ = os.Remove(paths.LegacyProfileCache())
+	}
+}
 
 // Run 起控制接口,按上次状态自动连接,定时刷新订阅;ctx 结束时全部停掉。
 func (d *Daemon) Run(ctx context.Context) error {
@@ -146,24 +164,70 @@ func (d *Daemon) setSettings(s settings.Settings) error {
 	return nil
 }
 
-func (d *Daemon) getProfile() *profile.Profile {
+// activeProfile 当前订阅的设置项与缓存(任一为空返回 nil)。
+func (d *Daemon) activeProfile() (*settings.Profile, *profile.Profile) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	return d.profile
+	a := d.settings.Active()
+	if a == nil {
+		return nil, nil
+	}
+	return a, d.profiles[a.ID]
 }
 
-func (d *Daemon) setProfile(p *profile.Profile) {
+func (d *Daemon) setProfileCache(id string, p *profile.Profile) {
 	d.mu.Lock()
-	d.profile = p
+	d.profiles[id] = p
+	delete(d.fetchErr, id)
 	d.mu.Unlock()
-	if err := p.Save(paths.ProfileCache()); err != nil {
+	if err := p.Save(paths.ProfileCache(id)); err != nil {
 		d.logf("写订阅缓存失败: %v", err)
 	}
 }
 
-// fetchProfile 拉订阅并把拉取错误映射成错误码。
+func (d *Daemon) noteFetchErr(id string, err error) {
+	d.mu.Lock()
+	d.fetchErr[id] = err.Error()
+	d.mu.Unlock()
+}
+
+// fetchProfile 拉订阅:内核在跑时先经当前代理;失败就经 auto 组再试三次;auto 也不行走直连。
+// 这条回退链只用于刷新订阅,不影响任何其它流量,也不改用户选中的节点。内核没跑时直接用系统网络。
+// 订阅无效 / 到期这类错误不换路径,直接返回。
 func (d *Daemon) fetchProfile(ctx context.Context, url string) (*profile.Profile, error) {
-	p, err := profile.Fetch(ctx, url, d.http)
+	if !d.core.Running() {
+		return d.fetchWith(ctx, url, d.http)
+	}
+	routes := []string{"proxy", "auto", "auto", "auto", "direct"} // 当前代理一次、auto 三次、最后直连
+	var last error
+	for i, tag := range routes {
+		cl, err := d.core.HTTPClient(tag, 30*time.Second)
+		if err != nil {
+			continue
+		}
+		p, err := d.fetchWith(ctx, url, cl)
+		if err == nil {
+			if tag != "proxy" {
+				d.logf("订阅经 %s 拉取成功(当前代理不通)", tag)
+			}
+			return p, nil
+		}
+		if state.CodeOf(err) == state.CodeProfileAuth || state.CodeOf(err) == state.CodeProfileParse {
+			return nil, err
+		}
+		d.logf("订阅经 %s 拉取失败: %v", tag, err)
+		last = err
+		if ctx.Err() != nil || i == len(routes)-1 {
+			break
+		}
+		time.Sleep(2 * time.Second) // 隔两秒再试下一条路径
+	}
+	return nil, last
+}
+
+// fetchWith 用给定客户端拉一次,并把错误映射成错误码。
+func (d *Daemon) fetchWith(ctx context.Context, url string, client *http.Client) (*profile.Profile, error) {
+	p, err := profile.Fetch(ctx, url, client)
 	if err == nil {
 		return p, nil
 	}
@@ -180,24 +244,45 @@ func (d *Daemon) fetchProfile(ctx context.Context, url string) (*profile.Profile
 	}
 }
 
-// prepare 状态机的第一步:订阅过期就刷新(失败用缓存),生成配置,干跑。
+// refreshProfile 拉指定订阅并更新缓存,返回节点是否有变化。
+func (d *Daemon) refreshProfile(ctx context.Context, id string) (changed bool, err error) {
+	d.mu.Lock()
+	var url string
+	for _, p := range d.settings.Profiles {
+		if p.ID == id {
+			url = p.URL
+		}
+	}
+	old := d.profiles[id]
+	d.mu.Unlock()
+	if url == "" {
+		return false, state.Errf(state.CodeProfileMissing, "没有这条订阅")
+	}
+	np, err := d.fetchProfile(ctx, url)
+	if err != nil {
+		d.noteFetchErr(id, err)
+		return false, err
+	}
+	d.setProfileCache(id, np)
+	return old == nil || !sameNodes(old, np), nil
+}
+
+// prepare 状态机的第一步:当前订阅过期就刷新(失败用缓存),生成配置,干跑。
 func (d *Daemon) prepare(ctx context.Context) ([]byte, error) {
 	s := d.getSettings()
-	if strings.TrimSpace(s.ProfileURL) == "" {
-		return nil, state.Errf(state.CodeProfileMissing, "还没有设置订阅地址")
+	a, p := d.activeProfile()
+	if a == nil {
+		return nil, state.Errf(state.CodeProfileMissing, "还没有添加订阅")
 	}
-	p := d.getProfile()
-	if p == nil || p.URL != s.ProfileURL || p.Stale(time.Duration(s.UpdateHours)*time.Hour) {
-		np, err := d.fetchProfile(ctx, s.ProfileURL)
-		if err != nil {
-			if p == nil || p.URL != s.ProfileURL {
+	if p == nil || p.URL != a.URL || p.Stale(time.Duration(s.UpdateHours)*time.Hour) {
+		if _, err := d.refreshProfile(ctx, a.ID); err != nil {
+			if p == nil || p.URL != a.URL {
 				return nil, err
 			}
 			d.logf("订阅刷新失败,先用缓存: %v", err)
 		} else {
-			d.logf("订阅已更新:%d 个节点", len(np.Outbounds))
-			d.setProfile(np)
-			p = np
+			_, p = d.activeProfile()
+			d.logf("订阅「%s」已更新:%d 个节点", a.Name, len(p.Outbounds))
 		}
 	}
 	cfg, err := builder.Build(builder.Input{Profile: p, Settings: s, DataDir: paths.DataDir(), ClashSecret: d.secret, RuleSetDir: paths.RuleSets()})
@@ -225,9 +310,8 @@ func (d *Daemon) start(cfg []byte) error {
 		}
 	}
 	_ = os.WriteFile(paths.LastGood(), cfg, 0o600)
-	// 内核里的当前节点跟着设置走(cache_file 也会记,这里是双保险)
 	if s := d.getSettings(); s.Selected != "" {
-		_ = d.core.Select("proxy", s.Selected)
+		_ = d.core.Select("proxy", s.Selected) // 内核里的当前节点跟着设置走(cache_file 也会记,双保险)
 	}
 	return nil
 }
@@ -243,20 +327,18 @@ func (d *Daemon) health(ctx context.Context) error {
 	return nil
 }
 
-// maybeRefresh 定时刷新订阅;节点变了就重连(下一版改成热换出站)。
+// maybeRefresh 定时刷新当前订阅;节点变了就重连。
 func (d *Daemon) maybeRefresh(ctx context.Context) {
 	s := d.getSettings()
-	p := d.getProfile()
-	if s.ProfileURL == "" || (p != nil && p.URL == s.ProfileURL && !p.Stale(time.Duration(s.UpdateHours)*time.Hour)) {
+	a, p := d.activeProfile()
+	if a == nil || (p != nil && p.URL == a.URL && !p.Stale(time.Duration(s.UpdateHours)*time.Hour)) {
 		return
 	}
-	np, err := d.fetchProfile(ctx, s.ProfileURL)
+	changed, err := d.refreshProfile(ctx, a.ID)
 	if err != nil {
 		d.logf("定时刷新订阅失败: %v", err)
 		return
 	}
-	changed := p == nil || !sameNodes(p, np)
-	d.setProfile(np)
 	if changed {
 		d.logf("订阅节点有变化,重新应用")
 		d.machine.Restart()
@@ -275,19 +357,31 @@ func sameNodes(a, b *profile.Profile) bool {
 	return true
 }
 
-// ---- 控制接口 ----
+// ---- 视图 ----
 
-func (d *Daemon) profileView() *ipc.ProfileView {
-	p := d.getProfile()
-	if p == nil {
-		return nil
+func (d *Daemon) profileViews() ([]ipc.ProfileView, *ipc.ProfileView) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	var active *ipc.ProfileView
+	out := make([]ipc.ProfileView, 0, len(d.settings.Profiles))
+	for _, sp := range d.settings.Profiles {
+		v := ipc.ProfileView{ID: sp.ID, Name: sp.Name, URL: sp.URL, Active: sp.ID == d.settings.ActiveProfile, Error: d.fetchErr[sp.ID]}
+		if c := d.profiles[sp.ID]; c != nil {
+			v.Title, v.FetchedAt, v.NodeCount, v.Tags, v.Usage = c.Title, c.FetchedAt, len(c.Outbounds), c.Tags, c.Usage
+		}
+		out = append(out, v)
+		if v.Active {
+			vv := v
+			active = &vv
+		}
 	}
-	return &ipc.ProfileView{URL: p.URL, Title: p.Title, FetchedAt: p.FetchedAt, NodeCount: len(p.Outbounds), Tags: p.Tags, Usage: p.Usage}
+	return out, active
 }
 
 func (d *Daemon) stateView() ipc.StateView {
 	s := d.getSettings()
-	v := ipc.StateView{Version: buildinfo.Version, Protocol: ipc.Version, State: d.machine.Snapshot(), Mode: s.Mode, Node: s.Selected, Profile: d.profileView(), Settings: s, Uptime: int64(d.core.Uptime().Seconds())}
+	profiles, active := d.profileViews()
+	v := ipc.StateView{Version: buildinfo.Version, Protocol: ipc.Version, State: d.machine.Snapshot(), Mode: s.Mode, Node: s.Selected, Profile: active, Profiles: profiles, Settings: s, Uptime: int64(d.core.Uptime().Seconds())}
 	if v.Node == "" {
 		v.Node = "auto"
 	}
@@ -298,11 +392,16 @@ func (d *Daemon) stateView() ipc.StateView {
 		if now, all, err := d.core.Group("proxy"); err == nil {
 			v.Node, v.Nodes = now, all
 		}
-	} else if p := d.getProfile(); p != nil {
-		v.Nodes = append([]string{"auto"}, p.Tags...)
+	} else if active != nil && len(active.Tags) > 0 {
+		v.Nodes = append([]string{"auto"}, active.Tags...)
+	}
+	if v.Nodes == nil {
+		v.Nodes = []string{}
 	}
 	return v
 }
+
+// ---- 控制接口 ----
 
 func (d *Daemon) registerHandlers() {
 	h := d.server.Handle
@@ -313,9 +412,16 @@ func (d *Daemon) registerHandlers() {
 	h(ipc.MGetClashInfo, func(json.RawMessage) (any, error) {
 		return ipc.ClashInfo{Port: d.getSettings().ClashPort, Secret: d.secret, Running: d.core.Running()}, nil
 	})
+	h(ipc.MExportDiag, func(json.RawMessage) (any, error) {
+		p, err := d.exportDiag()
+		if err != nil {
+			return nil, err
+		}
+		return map[string]string{"path": p}, nil
+	})
 	h(ipc.MConnect, func(json.RawMessage) (any, error) {
-		if strings.TrimSpace(d.getSettings().ProfileURL) == "" {
-			return nil, &ipc.CallError{Code: state.CodeProfileMissing, Msg: "还没有设置订阅地址"}
+		if a, _ := d.activeProfile(); a == nil {
+			return nil, &ipc.CallError{Code: state.CodeProfileMissing, Msg: "还没有添加订阅"}
 		}
 		d.savePersisted(persisted{Wanted: true})
 		d.machine.Connect()
@@ -384,7 +490,180 @@ func (d *Daemon) registerHandlers() {
 		}
 		return map[string]any{"tag": in.Tag, "ms": ms}, nil
 	})
-	h(ipc.MGetProfile, func(json.RawMessage) (any, error) { return d.profileView(), nil })
+
+	// ---- 订阅 ----
+	h(ipc.MGetProfiles, func(json.RawMessage) (any, error) { v, _ := d.profileViews(); return v, nil })
+	h(ipc.MGetProfile, func(json.RawMessage) (any, error) { _, a := d.profileViews(); return a, nil })
+	h(ipc.MAddProfile, func(p json.RawMessage) (any, error) {
+		in, err := ipc.Decode[struct {
+			Name string `json:"name"`
+			URL  string `json:"url"`
+		}](p)
+		if err != nil {
+			return nil, err
+		}
+		url := strings.TrimSpace(in.URL)
+		if !settings.ValidURL(url) {
+			return nil, errors.New("订阅地址必须以 http:// 或 https:// 开头")
+		}
+		np, err := d.fetchProfile(context.Background(), url) // 先拉一次,拉不到就不加
+		if err != nil {
+			return nil, &ipc.CallError{Code: state.CodeOf(err), Msg: err.Error()}
+		}
+		s := d.getSettings()
+		name := strings.TrimSpace(in.Name)
+		if name == "" {
+			name = np.Title
+		}
+		if name == "" {
+			name = fmt.Sprintf("订阅 %d", len(s.Profiles)+1)
+		}
+		sp := settings.Profile{ID: settings.NewID(), Name: name, URL: url}
+		s.Profiles = append(s.Profiles, sp)
+		first := len(s.Profiles) == 1
+		if first {
+			s.ActiveProfile = sp.ID
+		}
+		if err := d.setSettings(s); err != nil {
+			return nil, err
+		}
+		d.setProfileCache(sp.ID, np)
+		if first {
+			d.machine.Restart()
+		}
+		views, _ := d.profileViews()
+		return views, nil
+	})
+	h(ipc.MRemoveProfile, func(p json.RawMessage) (any, error) {
+		in, err := ipc.Decode[struct {
+			ID string `json:"id"`
+		}](p)
+		if err != nil {
+			return nil, err
+		}
+		s := d.getSettings()
+		kept := s.Profiles[:0:0]
+		for _, sp := range s.Profiles {
+			if sp.ID != in.ID {
+				kept = append(kept, sp)
+			}
+		}
+		if len(kept) == len(s.Profiles) {
+			return nil, errors.New("没有这条订阅")
+		}
+		wasActive := s.ActiveProfile == in.ID
+		s.Profiles = kept
+		if err := d.setSettings(s); err != nil {
+			return nil, err
+		}
+		d.mu.Lock()
+		delete(d.profiles, in.ID)
+		delete(d.fetchErr, in.ID)
+		d.mu.Unlock()
+		_ = os.Remove(paths.ProfileCache(in.ID))
+		if wasActive {
+			if len(kept) == 0 {
+				d.savePersisted(persisted{Wanted: false})
+				d.machine.Disconnect()
+			} else {
+				d.machine.Restart()
+			}
+		}
+		views, _ := d.profileViews()
+		return views, nil
+	})
+	h(ipc.MSelectProfile, func(p json.RawMessage) (any, error) {
+		in, err := ipc.Decode[struct {
+			ID string `json:"id"`
+		}](p)
+		if err != nil {
+			return nil, err
+		}
+		s := d.getSettings()
+		found := false
+		for _, sp := range s.Profiles {
+			if sp.ID == in.ID {
+				found = true
+			}
+		}
+		if !found {
+			return nil, errors.New("没有这条订阅")
+		}
+		if s.ActiveProfile != in.ID {
+			s.ActiveProfile = in.ID
+			if err := d.setSettings(s); err != nil {
+				return nil, err
+			}
+			d.machine.Restart()
+		}
+		return d.stateView(), nil
+	})
+	h(ipc.MRenameProfile, func(p json.RawMessage) (any, error) {
+		in, err := ipc.Decode[struct {
+			ID   string `json:"id"`
+			Name string `json:"name"`
+			URL  string `json:"url"`
+		}](p)
+		if err != nil {
+			return nil, err
+		}
+		s := d.getSettings()
+		idx := -1
+		for i, sp := range s.Profiles {
+			if sp.ID == in.ID {
+				idx = i
+			}
+		}
+		if idx < 0 {
+			return nil, errors.New("没有这条订阅")
+		}
+		urlChanged := false
+		if n := strings.TrimSpace(in.Name); n != "" {
+			s.Profiles[idx].Name = n
+		}
+		if u := strings.TrimSpace(in.URL); u != "" && u != s.Profiles[idx].URL {
+			if !settings.ValidURL(u) {
+				return nil, errors.New("订阅地址必须以 http:// 或 https:// 开头")
+			}
+			s.Profiles[idx].URL = u
+			urlChanged = true
+		}
+		if err := d.setSettings(s); err != nil {
+			return nil, err
+		}
+		if urlChanged {
+			if _, err := d.refreshProfile(context.Background(), in.ID); err != nil {
+				return nil, &ipc.CallError{Code: state.CodeOf(err), Msg: err.Error()}
+			}
+			if s.ActiveProfile == in.ID {
+				d.machine.Restart()
+			}
+		}
+		views, _ := d.profileViews()
+		return views, nil
+	})
+	h(ipc.MRefreshProfile, func(p json.RawMessage) (any, error) {
+		in, _ := ipc.Decode[struct {
+			ID string `json:"id"`
+		}](p)
+		id := in.ID
+		if id == "" {
+			id = d.getSettings().ActiveProfile
+		}
+		if id == "" {
+			return nil, &ipc.CallError{Code: state.CodeProfileMissing, Msg: "还没有添加订阅"}
+		}
+		changed, err := d.refreshProfile(context.Background(), id)
+		if err != nil {
+			return nil, &ipc.CallError{Code: state.CodeOf(err), Msg: err.Error()}
+		}
+		if changed && id == d.getSettings().ActiveProfile {
+			d.machine.Restart()
+		}
+		views, _ := d.profileViews()
+		return views, nil
+	})
+	// SetProfileURL 兼容命令行:有当前订阅就改它的地址,没有就新增一条
 	h(ipc.MSetProfileURL, func(p json.RawMessage) (any, error) {
 		in, err := ipc.Decode[struct {
 			URL string `json:"url"`
@@ -393,37 +672,23 @@ func (d *Daemon) registerHandlers() {
 			return nil, err
 		}
 		s := d.getSettings()
-		s.ProfileURL = strings.TrimSpace(in.URL)
-		if err := s.Validate(); err != nil {
-			return nil, err
+		var raw json.RawMessage
+		if a := s.Active(); a != nil {
+			raw, _ = json.Marshal(map[string]string{"id": a.ID, "url": in.URL})
+			if _, err := d.server.Dispatch(ipc.MRenameProfile, raw); err != nil {
+				return nil, err
+			}
+		} else {
+			raw, _ = json.Marshal(map[string]string{"url": in.URL})
+			if _, err := d.server.Dispatch(ipc.MAddProfile, raw); err != nil {
+				return nil, err
+			}
 		}
-		np, err := d.fetchProfile(context.Background(), s.ProfileURL)
-		if err != nil {
-			return nil, &ipc.CallError{Code: state.CodeOf(err), Msg: err.Error()}
-		}
-		if err := d.setSettings(s); err != nil {
-			return nil, err
-		}
-		d.setProfile(np)
-		d.machine.Restart()
-		return d.profileView(), nil
+		_, a := d.profileViews()
+		return a, nil
 	})
-	h(ipc.MRefreshProfile, func(json.RawMessage) (any, error) {
-		s := d.getSettings()
-		if s.ProfileURL == "" {
-			return nil, &ipc.CallError{Code: state.CodeProfileMissing, Msg: "还没有设置订阅地址"}
-		}
-		np, err := d.fetchProfile(context.Background(), s.ProfileURL)
-		if err != nil {
-			return nil, &ipc.CallError{Code: state.CodeOf(err), Msg: err.Error()}
-		}
-		old := d.getProfile()
-		d.setProfile(np)
-		if old == nil || !sameNodes(old, np) {
-			d.machine.Restart()
-		}
-		return d.profileView(), nil
-	})
+
+	// ---- 设置 ----
 	h(ipc.MGetSettings, func(json.RawMessage) (any, error) { return d.getSettings(), nil })
 	h(ipc.MSetSettings, func(p json.RawMessage) (any, error) {
 		next, err := ipc.Decode[settings.Settings](p)
@@ -432,14 +697,14 @@ func (d *Daemon) registerHandlers() {
 		}
 		prev := d.getSettings()
 		next.Schema = settings.Schema
+		next.Profiles, next.ActiveProfile = prev.Profiles, prev.ActiveProfile // 订阅另有接口管,这里不动
 		if err := d.setSettings(next); err != nil {
 			return nil, err
 		}
 		if d.core.Running() {
-			// 模式与节点是运行时可改的,别的都要重新生成配置
-			live := prev
+			live := prev // 模式与节点是运行时可改的,别的都要重新生成配置
 			live.Mode, live.Selected = next.Mode, next.Selected
-			if live != next {
+			if !reflect.DeepEqual(live, next) {
 				d.machine.Restart()
 			} else {
 				if next.Mode != prev.Mode {
@@ -474,7 +739,7 @@ func (d *Daemon) registerHandlers() {
 		return logx.Tail(path, in.Lines), nil
 	})
 	h(ipc.MDiagnose, func(json.RawMessage) (any, error) {
-		p := d.getProfile()
+		_, p := d.activeProfile()
 		out := map[string]any{
 			"version": buildinfo.Version, "os": runtime.GOOS + "/" + runtime.GOARCH,
 			"state": d.stateView(), "dataDir": paths.DataDir(),

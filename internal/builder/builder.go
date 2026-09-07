@@ -78,7 +78,7 @@ func Build(in Input) ([]byte, error) {
 	// ---- 出站 ----
 	outbounds := []any{
 		obj("type", "selector", "tag", "proxy", "outbounds", append([]string{"auto"}, tags...), "default", selected, "interrupt_exist_connections", true),
-		obj("type", "urltest", "tag", "auto", "outbounds", tags, "url", TestURL, "interval", "3m", "tolerance", 50),
+		obj("type", "urltest", "tag", "auto", "outbounds", tags, "url", TestURL, "interval", itoa(s.ProbeMinutes)+"m", "tolerance", 50), // 定时测速:每隔 ProbeMinutes 分钟测一轮
 	}
 	for _, raw := range in.Profile.Outbounds {
 		outbounds = append(outbounds, json.RawMessage(raw))
@@ -157,6 +157,9 @@ func Build(in Input) ([]byte, error) {
 		obj("protocol", "dns", "action", "hijack-dns"),
 		obj("port", 53, "action", "hijack-dns"), // 不走系统解析、自己发 53 的程序也收进来,不泄漏
 	}
+	if len(s.BypassApps) > 0 {
+		rules = append(rules, obj("process_name", s.BypassApps, "outbound", "direct")) // 指定进程直连,放在最前
+	}
 	if !s.IPv6 {
 		// 先按 ipv4_only 把目标域名解析成 IPv4(fake-ip 只是给客户端的占位,这里查的是真实地址),
 		// 之后不管直连还是经代理,拿到的都是 IPv4;否则代理服务器会自己解析出 AAAA 走 IPv6 出去。
@@ -175,6 +178,9 @@ func Build(in Input) ([]byte, error) {
 	}
 	rules = append(rules, obj("rule_set", []string{"geosite-cn", "geoip-cn"}, "outbound", "direct"))
 	route := obj("rules", rules, "rule_set", ruleSets, "final", "proxy", "auto_detect_interface", true, "default_domain_resolver", "local")
+	if len(s.BypassApps) > 0 {
+		route["find_process"] = true
+	}
 
 	cfg := obj(
 		"log", obj("level", s.LogLevel, "timestamp", true),

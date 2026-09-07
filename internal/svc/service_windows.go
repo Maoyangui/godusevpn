@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os/exec"
 	"time"
 
 	"golang.org/x/sys/windows"
@@ -83,6 +84,8 @@ func Install(exe string) error {
 		return fmt.Errorf("创建服务: %w", err)
 	}
 	defer s.Close()
+	// 让本机已登录用户能启停服务(托盘"退出"要把服务一起停掉,登录时再拉起,都不弹 UAC)
+	_ = exec.Command("sc.exe", "sdset", Name, userStartStopSDDL).Run()
 	_ = s.SetRecoveryActions([]mgr.RecoveryAction{
 		{Type: mgr.ServiceRestart, Delay: 5 * time.Second},
 		{Type: mgr.ServiceRestart, Delay: 15 * time.Second},
@@ -148,6 +151,66 @@ func Stop() error {
 		return errors.New("服务停止超时")
 	}
 	return nil
+}
+
+// userStartStopSDDL 默认服务 ACL 基础上给 Authenticated Users 加 RP(启动)与 WP(停止)。
+const userStartStopSDDL = "D:(A;;CCLCSWRPWPDTLOCRRC;;;SY)(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;BA)(A;;CCLCSWRPWPLOCRRC;;;AU)(A;;CCLCSWLOCRRC;;;IU)(A;;CCLCSWLOCRRC;;;SU)S:(AU;FA;CCDCLCSWRPWPDTLOCRSDRCWDWO;;WD)"
+
+// openUser 以普通用户能拿到的权限打开服务。
+func openUser(access uint32) (windows.Handle, windows.Handle, error) {
+	m, err := windows.OpenSCManager(nil, nil, windows.SC_MANAGER_CONNECT)
+	if err != nil {
+		return 0, 0, err
+	}
+	s, err := windows.OpenService(m, windows.StringToUTF16Ptr(Name), access)
+	if err != nil {
+		windows.CloseServiceHandle(m)
+		return 0, 0, errors.New("服务未安装")
+	}
+	return m, s, nil
+}
+
+// StartUser 普通用户启动服务(安装时已放开 ACL)。已在运行返回 nil。
+func StartUser() error {
+	m, s, err := openUser(windows.SERVICE_START | windows.SERVICE_QUERY_STATUS)
+	if err != nil {
+		return err
+	}
+	defer windows.CloseServiceHandle(m)
+	defer windows.CloseServiceHandle(s)
+	var st windows.SERVICE_STATUS
+	if windows.QueryServiceStatus(s, &st) == nil && (st.CurrentState == windows.SERVICE_RUNNING || st.CurrentState == windows.SERVICE_START_PENDING) {
+		return nil
+	}
+	if err := windows.StartService(s, 0, nil); err != nil {
+		return fmt.Errorf("启动服务: %w", err)
+	}
+	return nil
+}
+
+// StopUser 普通用户停止服务;未运行返回 nil。
+func StopUser() error {
+	m, s, err := openUser(windows.SERVICE_STOP | windows.SERVICE_QUERY_STATUS)
+	if err != nil {
+		return err
+	}
+	defer windows.CloseServiceHandle(m)
+	defer windows.CloseServiceHandle(s)
+	var st windows.SERVICE_STATUS
+	if windows.QueryServiceStatus(s, &st) == nil && st.CurrentState == windows.SERVICE_STOPPED {
+		return nil
+	}
+	if err := windows.ControlService(s, windows.SERVICE_CONTROL_STOP, &st); err != nil {
+		return fmt.Errorf("停止服务: %w", err)
+	}
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		if windows.QueryServiceStatus(s, &st) == nil && st.CurrentState == windows.SERVICE_STOPPED {
+			return nil
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	return errors.New("服务停止超时")
 }
 
 // QueryStatus 不需要管理员权限的状态查询(托盘客户端用):只申请"连接"和"查询状态"两个权限。

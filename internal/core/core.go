@@ -6,9 +6,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
+	"net/http"
 	"strings"
 	"sync"
 	"time"
+
+	M "github.com/sagernet/sing/common/metadata"
 
 	sb "github.com/sagernet/sing-box"
 	"github.com/sagernet/sing-box/adapter"
@@ -223,6 +227,27 @@ func (c *Core) Select(group, tag string) error {
 		return fmt.Errorf("选择组里没有 %q", tag)
 	}
 	return nil
+}
+
+// HTTPClient 经某个出站(节点、选择组或 direct)发 HTTP 请求的客户端。
+// direct 出站绑定物理网卡,所以即使 TUN 在跑,经它的请求也不会绕回内核。
+func (c *Core) HTTPClient(tag string, timeout time.Duration) (*http.Client, error) {
+	box, _, ok := c.snapshot()
+	if !ok {
+		return nil, errors.New("内核未运行")
+	}
+	ob, found := box.Outbound().Outbound(tag)
+	if !found {
+		return nil, fmt.Errorf("没有出站 %q", tag)
+	}
+	tr := &http.Transport{
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			return ob.DialContext(ctx, "tcp", M.ParseSocksaddr(addr))
+		},
+		TLSHandshakeTimeout: 10 * time.Second,
+		ForceAttemptHTTP2:   true,
+	}
+	return &http.Client{Transport: tr, Timeout: timeout}, nil
 }
 
 // URLTest 经某个出站(节点或选择组)测一次延迟,毫秒。

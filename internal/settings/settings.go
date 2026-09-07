@@ -1,8 +1,10 @@
-// Package settings 客户端本地设置:模式、TUN、DNS、IPv6、端口、自启等。带 schema 版本,升级时迁移。
-// 订阅地址也在这里(它是"设置",节点内容是"订阅缓存",两者分开存)。
+// Package settings 客户端本地设置:订阅列表、模式、TUN、DNS、IPv6、端口、测速间隔等。带 schema 版本,升级时迁移。
+// 订阅内容(节点)是缓存,另存;这里只记地址与名字。
 package settings
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,7 +13,7 @@ import (
 	"strings"
 )
 
-const Schema = 1
+const Schema = 2
 
 const (
 	ModeRule   = "rule"
@@ -19,24 +21,36 @@ const (
 	ModeDirect = "direct"
 )
 
+// Profile 一条订阅。
+type Profile struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+	URL  string `json:"url"`
+}
+
 type Settings struct {
-	Schema      int    `json:"schema"`
-	ProfileURL  string `json:"profileUrl"`
-	Mode        string `json:"mode"`        // rule | global | direct
-	TUN         bool   `json:"tun"`         // TUN 模式(默认开);关掉只留混合端口
-	TUNStack    string `json:"tunStack"`    // mixed | system | gvisor
-	StrictRoute bool   `json:"strictRoute"` // 严格路由:防泄漏,代价是部分局域网访问要靠 lanBypass
-	LANBypass   bool   `json:"lanBypass"`   // 私网段不进 TUN(打印机、NAS 直通)
-	MixedPort   int    `json:"mixedPort"`   // 本机混合端口,0 = 关
-	RemoteDNS   string `json:"remoteDns"`   // 经代理的 DoH 服务器(IP 或域名)
-	LocalDNS    string `json:"localDns"`    // 直连的 DoH 服务器;"system" = 用系统 DNS
-	FakeIP      bool   `json:"fakeIp"`
-	IPv6        bool   `json:"ipv6"` // false = 全链路禁用
-	AdBlock     bool   `json:"adBlock"`
-	UpdateHours int    `json:"updateHours"` // 订阅刷新间隔(小时)
-	LogLevel    string `json:"logLevel"`    // debug | info | warn | error
-	ClashPort   int    `json:"clashPort"`   // 内核 Clash API 端口(只监听回环)
-	Selected    string `json:"selected"`    // proxy 组当前选中的节点;空 = auto
+	Schema        int       `json:"schema"`
+	Profiles      []Profile `json:"profiles"`
+	ActiveProfile string    `json:"activeProfile"`        // 当前用的订阅 id
+	ProfileURL    string    `json:"profileUrl,omitempty"` // schema 1 遗留,加载时迁成 Profiles
+	Mode          string    `json:"mode"`                 // rule | global | direct
+	TUN           bool      `json:"tun"`                  // TUN 模式(默认开);关掉只留混合端口
+	TUNStack      string    `json:"tunStack"`             // mixed | system | gvisor
+	StrictRoute   bool      `json:"strictRoute"`          // 严格路由:防泄漏,代价是部分局域网访问要靠 lanBypass
+	LANBypass     bool      `json:"lanBypass"`            // 私网段不进 TUN(打印机、NAS 直通)
+	MixedPort     int       `json:"mixedPort"`            // 本机混合端口,0 = 关
+	RemoteDNS     string    `json:"remoteDns"`            // 经代理的 DoH 服务器(IP 或域名)
+	LocalDNS      string    `json:"localDns"`             // 直连的 DoH 服务器;"system" = 用系统 DNS
+	FakeIP        bool      `json:"fakeIp"`
+	IPv6          bool      `json:"ipv6"` // false = 全链路禁用
+	AdBlock       bool      `json:"adBlock"`
+	UpdateHours   int       `json:"updateHours"`  // 订阅刷新间隔(小时)
+	ProbeMinutes  int       `json:"probeMinutes"` // 定时测速:auto 组每隔多少分钟测一轮全部节点(1 到 60)
+	LogLevel      string    `json:"logLevel"`     // debug | info | warn | error
+	ClashPort     int       `json:"clashPort"`    // 内核 Clash API 端口(只监听回环)
+	Selected      string    `json:"selected"`     // proxy 组当前选中的节点;空 = auto
+	// BypassApps 这些进程(如 steam.exe)的流量不走代理,直连出去;按进程名匹配,不分大小写
+	BypassApps []string `json:"bypassApps"`
 }
 
 // Default 出厂默认:TUN + 规则模式 + DoH + fake-ip + 禁 IPv6。
@@ -44,8 +58,15 @@ func Default() Settings {
 	return Settings{
 		Schema: Schema, Mode: ModeRule, TUN: true, TUNStack: "mixed", StrictRoute: true, LANBypass: true,
 		MixedPort: 2080, RemoteDNS: "1.1.1.1", LocalDNS: "223.5.5.5", FakeIP: true, IPv6: false,
-		UpdateHours: 6, LogLevel: "info", ClashPort: 9090,
+		UpdateHours: 6, ProbeMinutes: 3, LogLevel: "info", ClashPort: 9090,
 	}
+}
+
+// NewID 订阅 id:8 字节随机十六进制。
+func NewID() string {
+	b := make([]byte, 8)
+	_, _ = rand.Read(b)
+	return hex.EncodeToString(b)
 }
 
 // Load 读设置;文件不存在给默认值。旧 schema 在这里迁移。
@@ -61,16 +82,28 @@ func Load(path string) (Settings, error) {
 	if err := json.Unmarshal(b, &s); err != nil {
 		return Default(), fmt.Errorf("设置文件损坏: %w", err)
 	}
-	if s.Schema == 0 {
-		s.Schema = Schema
-	}
 	if s.Schema > Schema {
 		return Default(), fmt.Errorf("设置文件来自更新的版本(schema %d),请升级客户端", s.Schema)
 	}
+	s.migrate()
 	if err := s.Validate(); err != nil {
 		return Default(), err
 	}
 	return s, nil
+}
+
+// migrate schema 1 → 2:单个 profileUrl 变成订阅列表。
+func (s *Settings) migrate() {
+	if s.ProfileURL != "" && len(s.Profiles) == 0 {
+		id := NewID()
+		s.Profiles = []Profile{{ID: id, Name: "默认", URL: s.ProfileURL}}
+		s.ActiveProfile = id
+	}
+	s.ProfileURL = ""
+	if s.ProbeMinutes == 0 {
+		s.ProbeMinutes = 3
+	}
+	s.Schema = Schema
 }
 
 func (s Settings) Save(path string) error {
@@ -83,6 +116,22 @@ func (s Settings) Save(path string) error {
 		return err
 	}
 	return os.Rename(tmp, path)
+}
+
+// Active 当前订阅(没有返回 nil)。
+func (s Settings) Active() *Profile {
+	for i := range s.Profiles {
+		if s.Profiles[i].ID == s.ActiveProfile {
+			return &s.Profiles[i]
+		}
+	}
+	return nil
+}
+
+// ValidURL 订阅地址是否合法。
+func ValidURL(u string) bool {
+	l := strings.ToLower(strings.TrimSpace(u))
+	return strings.HasPrefix(l, "http://") || strings.HasPrefix(l, "https://")
 }
 
 // Validate 检查取值范围;界面与命令行改设置都走它。
@@ -118,14 +167,47 @@ func (s *Settings) Validate() error {
 	if s.UpdateHours < 1 || s.UpdateHours > 168 {
 		return errors.New("订阅刷新间隔须在 1 到 168 小时之间")
 	}
+	if s.ProbeMinutes < 1 || s.ProbeMinutes > 60 {
+		return errors.New("测速间隔须在 1 到 60 分钟之间")
+	}
 	switch s.LogLevel {
 	case "debug", "info", "warn", "error":
 	default:
 		return fmt.Errorf("日志级别无效: %q", s.LogLevel)
 	}
-	if strings.TrimSpace(s.ProfileURL) != "" && !strings.HasPrefix(strings.ToLower(s.ProfileURL), "http://") && !strings.HasPrefix(strings.ToLower(s.ProfileURL), "https://") {
-		return errors.New("订阅地址必须以 http:// 或 https:// 开头")
+	seen := map[string]bool{}
+	for i := range s.Profiles {
+		p := &s.Profiles[i]
+		p.Name, p.URL = strings.TrimSpace(p.Name), strings.TrimSpace(p.URL)
+		if p.ID == "" || seen[p.ID] {
+			return errors.New("订阅 id 重复或为空")
+		}
+		seen[p.ID] = true
+		if !ValidURL(p.URL) {
+			return fmt.Errorf("订阅「%s」的地址必须以 http:// 或 https:// 开头", p.Name)
+		}
+		if p.Name == "" {
+			p.Name = fmt.Sprintf("订阅 %d", i+1)
+		}
 	}
+	if len(s.Profiles) > 0 && !seen[s.ActiveProfile] {
+		s.ActiveProfile = s.Profiles[0].ID
+	}
+	if len(s.Profiles) == 0 {
+		s.ActiveProfile = ""
+	}
+	var apps []string
+	for _, a := range s.BypassApps {
+		a = strings.TrimSpace(a)
+		if a == "" {
+			continue
+		}
+		if strings.ContainsAny(a, "/*?<>|\"") || strings.Contains(a, string(os.PathSeparator)) {
+			return fmt.Errorf("进程名无效: %q(只写文件名,如 steam.exe)", a)
+		}
+		apps = append(apps, a)
+	}
+	s.BypassApps = apps
 	return nil
 }
 

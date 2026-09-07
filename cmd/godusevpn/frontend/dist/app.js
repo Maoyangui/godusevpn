@@ -1,10 +1,14 @@
-// 佛跳墙 托盘客户端页面:纯 JS,后端方法在 window.go.main.App,状态由服务端每 1.5 秒推一次 "state" 事件。
+// 佛跳墙 竖向客户端页面。后端方法在 window.go.main.App;服务端每 1.5 秒推 "state",内核每秒推 "traffic"。
 const App = () => window.go.main.App;
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-let state = null, page = 'home', pageTimer = null;
+let state = null;          // 最新 UIState
+let view = null;           // 当前页面名:onboard / home / settings / profiles / conns / logs / about
+let pageTimer = null;      // 页面自己的定时刷新
+let lastPing = 0;          // 最近一次测得的延迟
+let tweens = {};           // 数字过渡
 
-// ---- 格式化 ----
+// ---- 工具 ----
 function fmtBytes(n, d = 1) {
   n = Number(n) || 0;
   const u = ['B', 'KB', 'MB', 'GB', 'TB'];
@@ -16,294 +20,420 @@ const fmtSpeed = n => fmtBytes(n) + '/s';
 function fmtDuration(sec) {
   sec = Math.max(0, Math.floor(sec));
   const h = Math.floor(sec / 3600), m = Math.floor(sec % 3600 / 60), s = sec % 60;
-  return h ? `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}` : `${m}:${String(s).padStart(2, '0')}`;
+  return (h ? h + ':' : '') + String(m).padStart(2, '0') + ':' + String(s).padStart(2, '0');
 }
 const fmtDay = ts => ts ? new Date(ts * 1000).toLocaleDateString() : '';
-const fmtTime = ts => ts ? new Date(ts * 1000).toLocaleString() : '';
+const fmtTime = ts => ts ? new Date(ts * 1000).toLocaleString([], { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '';
 function errText(e) {
   const m = String((e && e.message) || e || '');
   if (m === 'SERVICE_DOWN') return t('svc.down');
   const code = m.match(/^(E_[A-Z_]+):\s*(.*)$/);
-  if (code) return t('code.' + code[1]) + (code[2] ? ' · ' + code[2] : '');
+  if (code) return t('code.' + code[1]) + (code[2] && code[2] !== t('code.' + code[1]) ? ' · ' + code[2] : '');
   return m;
 }
 let toastTimer = null;
 function toast(msg, kind = '') {
   const el = $('#toast');
   el.textContent = msg;
-  el.className = 'toast ' + kind;
-  el.hidden = false;
+  el.className = 'toast ' + kind + ' show';
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => { el.hidden = true; }, 2600);
+  toastTimer = setTimeout(() => { el.classList.remove('show'); }, 2400);
+}
+function tween(el, from, to, fmt, ms = 500) {
+  const key = el.id || el;
+  if (tweens[key]) cancelAnimationFrame(tweens[key]);
+  const start = performance.now();
+  const step = now => {
+    const k = Math.min(1, (now - start) / ms), e = 1 - Math.pow(1 - k, 3);
+    el.textContent = fmt(from + (to - from) * e);
+    if (k < 1) tweens[key] = requestAnimationFrame(step);
+  };
+  tweens[key] = requestAnimationFrame(step);
+}
+function applyTheme(theme) {
+  const html = document.documentElement;
+  if (theme === 'light' || theme === 'dark') html.setAttribute('data-theme', theme); else html.removeAttribute('data-theme');
+}
+function svcText(st) {
+  if (st.service) return t('svc.running');
+  if (st.svcState === 'not-installed') return t('svc.notInstalled');
+  if (st.svcState === 'starting') return t('svc.starting');
+  return t('svc.down');
 }
 
-// ---- 导航 ----
-const ICONS = {
-  home: '<path d="M3 11 12 3l9 8"/><path d="M5 10v10h14V10"/>',
-  nodes: '<circle cx="12" cy="5" r="2"/><circle cx="5" cy="19" r="2"/><circle cx="19" cy="19" r="2"/><path d="M12 7v5l-7 5M12 12l7 5"/>',
-  sub: '<path d="M4 4h16v16H4z"/><path d="M8 9h8M8 13h8M8 17h5"/>',
-  conns: '<path d="M4 6h16M4 12h16M4 18h10"/>',
+// ---- 顶栏、抽屉、面板 ----
+const ICON = {
   settings: '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/>',
+  profiles: '<path d="M4 5h16v14H4z"/><path d="M8 10h8M8 14h5"/>',
+  conns: '<path d="M4 7h16M4 12h16M4 17h10"/>',
   logs: '<path d="M6 3h9l5 5v13H6z"/><path d="M14 3v6h6M9 13h6M9 17h6"/>',
   about: '<circle cx="12" cy="12" r="9"/><path d="M12 8h.01M11 12h1v4h1"/>',
 };
-const NAV = ['home', 'nodes', 'sub', 'conns', 'settings', 'logs', 'about'];
-const icon = k => `<svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">${ICONS[k]}</svg>`;
-function renderNav() {
-  $('#nav').innerHTML = NAV.map(n => `<a data-page="${n}" class="${n === page ? 'active' : ''}">${icon(n)}${t('nav.' + n)}</a>`).join('');
-  $('#nav').querySelectorAll('a').forEach(a => a.addEventListener('click', () => route(a.dataset.page)));
+const MENU = ['settings', 'profiles', 'conns', 'logs', 'about'];
+function renderDrawer() {
+  $('#drawer-items').innerHTML = MENU.map(m => `<a data-page="${m}"><svg viewBox="0 0 24 24">${ICON[m]}</svg><span>${t('menu.' + m)}</span>${m === 'about' && state && state.update ? '<span class="grow"></span><span class="pill-badge">NEW</span>' : ''}</a>`).join('');
+  $('#drawer-items').querySelectorAll('a').forEach(a => a.addEventListener('click', () => { closeDrawer(); nav(a.dataset.page); }));
+  $('#drawer-ver').textContent = 'v' + (state ? state.version : '');
 }
-function route(name) {
-  page = name;
-  clearInterval(pageTimer); pageTimer = null;
-  renderNav();
-  const el = $('#page');
-  el.innerHTML = '';
-  ({ home: renderHome, nodes: renderNodes, sub: renderSub, conns: renderConns, settings: renderSettings, logs: renderLogs, about: renderAbout })[name](el);
+function openDrawer() { renderDrawer(); $('#drawer').classList.add('show'); $('#drawer-backdrop').classList.add('show'); }
+function closeDrawer() { $('#drawer').classList.remove('show'); $('#drawer-backdrop').classList.remove('show'); }
+let sheetOnClose = null;
+function openSheet(title, html, opts = {}) {
+  $('#sheet-head').innerHTML = `<span class="grow">${esc(title)}</span>${opts.action ? `<button class="btn sm ghost" id="sheet-action">${esc(opts.action)}</button>` : ''}`;
+  $('#sheet-body').innerHTML = html;
+  $('#sheet').classList.add('show'); $('#sheet-backdrop').classList.add('show');
+  sheetOnClose = opts.onClose || null;
+  if (opts.action && opts.onAction) $('#sheet-action').addEventListener('click', opts.onAction);
+}
+function closeSheet() {
+  $('#sheet').classList.remove('show'); $('#sheet-backdrop').classList.remove('show');
+  if (sheetOnClose) { const f = sheetOnClose; sheetOnClose = null; f(); }
+}
+function setTop(title, back) {
+  $('#topbar-title').textContent = title;
+  $('#back-btn').hidden = !back;
+  $('#menu-btn').hidden = !!back || view === 'onboard';
 }
 
-// ---- 侧栏与横幅 ----
-function updateSide() {
-  const dot = $('#svc-dot'), txt = $('#svc-text');
-  if (!state.service) { dot.className = 'dot err'; txt.textContent = t(state.svcState === 'not-installed' ? 'svc.notInstalled' : 'svc.down'); }
-  else { dot.className = 'dot on'; txt.textContent = t('svc.running'); }
-  $('#ver').textContent = 'v' + state.version;
-  const b = $('#banner');
-  if (!state.service) {
-    b.hidden = false;
-    b.innerHTML = `<span class="grow">${esc(t('banner.svcDown'))}</span><button class="btn sm" id="b-repair">${t('banner.repair')}</button>`;
-    $('#b-repair').addEventListener('click', repairService);
-  } else if (!state.view.profile) {
-    b.hidden = false;
-    b.innerHTML = `<span class="grow">${esc(t('banner.noProfile'))}</span><button class="btn sm" id="b-sub">${t('banner.goSub')}</button>`;
-    $('#b-sub').addEventListener('click', () => route('sub'));
-  } else b.hidden = true;
+// ---- 页面切换 ----
+function nav(name) {
+  const stage = $('#stage');
+  const old = stage.querySelector('.view');
+  if (old && name === 'home' && view !== 'home') { old.classList.add('pop'); setTimeout(() => old.remove(), 240); } else if (old) old.remove();
+  view = name;
+  clearInterval(pageTimer); pageTimer = null;
+  const el = document.createElement('div');
+  el.className = 'view ' + (name === 'home' ? 'home' : '');
+  stage.appendChild(el);
+  ({ onboard: renderOnboard, home: renderHome, settings: renderSettings, profiles: renderProfiles, conns: renderConns, logs: renderLogs, about: renderAbout })[name](el);
+  setTop(name === 'home' || name === 'onboard' ? t('app.name') : t({ settings: 'set.title', profiles: 'prof.title', conns: 'conns.title', logs: 'logs.title', about: 'about.title' }[name]), name !== 'home' && name !== 'onboard');
+}
+function navHome() { nav(state && state.view.profiles && state.view.profiles.length ? 'home' : 'onboard'); }
+
+// ---- 引导 ----
+function renderOnboard(el) {
+  el.innerHTML = `<div class="onboard">
+    <svg class="logo" viewBox="-16 -50 400 400"><defs><linearGradient id="g2" gradientUnits="userSpaceOnUse" x1="70" y1="70" x2="310" y2="270"><stop offset="0" stop-color="#6a44f2"/><stop offset=".55" stop-color="#2f8bff"/><stop offset="1" stop-color="#18e3e8"/></linearGradient></defs><g fill="none" stroke="url(#g2)" stroke-width="44" stroke-linecap="round" stroke-linejoin="round"><path d="M86 248V84l146 124v52"/><path d="M332 78l-88 96"/></g><path fill="url(#g2)" d="M118 192l52 30-52 30z"/></svg>
+    <h1>${t('onboard.title')}</h1><p>${t('onboard.desc')}</p>
+    <div class="field"><input type="url" id="ob-url" placeholder="${t('onboard.url')}" autofocus></div>
+    <div class="field"><input type="text" id="ob-name" placeholder="${t('onboard.name')}"></div>
+    <button class="btn primary block" id="ob-go">${t('onboard.go')}</button>
+    <div id="ob-err" class="small" style="color:var(--danger);min-height:18px"></div>
+    <div id="ob-svc"></div>
+  </div>`;
+  updateOnboardSvc();
+  const submit = async () => {
+    const url = $('#ob-url').value.trim();
+    if (!url) { $('#ob-url').focus(); return; }
+    const b = $('#ob-go'); b.disabled = true; b.textContent = t('onboard.adding'); $('#ob-err').textContent = '';
+    try { await App().AddProfile($('#ob-name').value, url); toast(t('prof.added'), 'ok'); state = await App().GetState(); nav('home'); }
+    catch (e) { $('#ob-err').textContent = errText(e); b.disabled = false; b.textContent = t('onboard.go'); }
+  };
+  $('#ob-go').addEventListener('click', submit);
+  $('#ob-url').addEventListener('keydown', e => { if (e.key === 'Enter') submit(); });
+  setTimeout(() => $('#ob-url').focus(), 120);
+}
+function updateOnboardSvc() {
+  const b = $('#ob-svc'); if (!b || !state) return;
+  b.innerHTML = state.service ? '' : `<div class="banner"><span class="grow">${t('banner.svcDown')}</span><button class="btn sm" id="ob-repair">${t('banner.repair')}</button></div>`;
+  if (!state.service) $('#ob-repair').addEventListener('click', repairService);
+}
+
+// ---- 首页 ----
+function renderHome(el) {
+  el.innerHTML = `
+    <div id="home-banner"></div>
+    <div class="power-wrap" id="power-wrap">
+      <svg viewBox="0 0 208 208"><defs><linearGradient id="ringGrad" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#6a44f2"/><stop offset=".55" stop-color="#2f8bff"/><stop offset="1" stop-color="#18e3e8"/></linearGradient></defs>
+        <circle class="ring-bg" cx="104" cy="104" r="99"/><circle class="ring" cx="104" cy="104" r="99"/></svg>
+      <button class="power" id="power"><svg viewBox="0 0 24 24"><path d="M12 3v9"/><path d="M6.3 6.3a8 8 0 1 0 11.4 0"/></svg><b id="power-text"></b></button>
+    </div>
+    <div class="status-text" id="status"></div>
+    <div class="status-sub" id="status-sub"></div>
+    <div class="stats">
+      <div class="stat"><b id="s-down">0 B/s</b><span>↓ ${t('stat.down')}</span></div>
+      <div class="stat"><b id="s-up">0 B/s</b><span>↑ ${t('stat.up')}</span></div>
+      <div class="stat"><b id="s-ping">–</b><span>${t('stat.ping')}</span></div>
+      <div class="stat"><b id="s-time">–</b><span>${t('stat.time')}</span></div>
+    </div>
+    <div class="pickers">
+      <button class="picker" id="pk-mode"><span>${t('pick.mode')}</span><b id="pk-mode-v"></b></button>
+      <button class="picker" id="pk-prof"><span>${t('pick.profile')}</span><b id="pk-prof-v"></b></button>
+      <button class="picker" id="pk-node"><span>${t('pick.node')}</span><b id="pk-node-v"></b><em id="pk-node-ms"></em></button>
+    </div>`;
+  $('#power').addEventListener('click', togglePower);
+  $('#pk-mode').addEventListener('click', sheetMode);
+  $('#pk-prof').addEventListener('click', sheetProfiles);
+  $('#pk-node').addEventListener('click', sheetNodes);
+  updateHome();
+}
+async function togglePower() {
+  if (!state || !state.service) { toast(t('svc.down'), 'err'); return; }
+  try { if (state.view.state.wanted) await App().Disconnect(); else await App().Connect(); }
+  catch (e) { toast(errText(e), 'err'); }
+}
+function updateHome() {
+  if (view !== 'home' || !state) return;
+  const v = state.view, st = v.state.status, wanted = v.state.wanted;
+  const wrap = $('#power-wrap'); if (!wrap) return;
+  const on = st === 'connected' || st === 'degraded';
+  wrap.className = 'power-wrap ' + (on ? 'on' : (wanted && st !== 'error') ? 'busy' : (st === 'error' || !state.service) ? 'err' : '');
+  $('#power-text').textContent = on ? t('home.disconnect') : wanted ? (st === 'stopping' ? t('home.stopping') : t('home.connecting')) : t('home.connect');
+  $('#status').textContent = state.service ? t('st.' + st) : t('svc.down');
+  let sub = '';
+  if (v.state.error) sub = (t('code.' + v.state.code) !== 'code.' + v.state.code ? t('code.' + v.state.code) : v.state.error);
+  else if (on) sub = (v.node === 'auto' ? t('pick.auto') : v.node) + ' · ' + t('mode.' + v.mode);
+  $('#status-sub').textContent = sub;
+  $('#s-time').textContent = on && v.uptime ? fmtDuration(v.uptime) : '–';
+  $('#s-ping').textContent = on && lastPing ? lastPing + ' ' + t('common.ms') : '–';
+  if (!on) { $('#s-down').textContent = '0 B/s'; $('#s-up').textContent = '0 B/s'; }
+  $('#pk-mode-v').textContent = t('mode.' + v.mode);
+  $('#pk-prof-v').textContent = v.profile ? v.profile.name : t('prof.empty');
+  $('#pk-node-v').textContent = v.node === 'auto' || !v.node ? t('pick.auto') : v.node;
+  $('#pk-node-ms').textContent = '';
+  const b = $('#home-banner');
+  b.innerHTML = state.service ? '' : `<div class="banner"><span class="grow">${t('banner.svcDown')}</span><button class="btn sm" id="repair">${t('banner.repair')}</button></div>`;
+  if (!state.service) $('#repair').addEventListener('click', repairService);
 }
 async function repairService() {
   try { await App().RepairService(); toast(t('about.repairDone'), 'ok'); } catch (e) { toast(errText(e), 'err'); }
 }
 
-// ---- 首页 ----
-function statusText(v) {
-  const st = v.state.status;
-  return t('st.' + st) || st;
-}
-function renderHome(el) {
-  el.innerHTML = `
-    <h1>${t('home.title')}</h1><p class="sub">&nbsp;</p>
-    <div class="card"><div class="big">
-      <div id="power" class="power"></div>
-      <div class="grow">
-        <div id="status" class="status-line"></div>
-        <div id="status-err" class="status-err"></div>
-        <div class="speed">
-          <div><b id="sp-down">0 B/s</b><span>↓ ${t('home.down')}</span></div>
-          <div><b id="sp-up">0 B/s</b><span>↑ ${t('home.up')}</span></div>
-          <div><b id="uptime">–</b><span>${t('home.uptime')}</span></div>
-        </div>
-      </div>
-    </div></div>
-    <div class="grid2">
-      <div class="card"><h2>${t('home.mode')}</h2>
-        <div class="seg" id="mode">${['rule', 'global', 'direct'].map(m => `<button data-mode="${m}">${t('mode.' + m)}</button>`).join('')}</div>
-        <div style="margin-top:14px" class="row"><span class="muted">${t('home.node')}</span><b id="node" class="sel"></b><span class="grow"></span><button class="btn sm" id="test">${t('home.test')}</button><span id="test-r" class="muted small"></span></div>
-      </div>
-      <div class="card"><h2>${t('home.sub')}</h2><div id="sub-info"></div>
-        <div class="row" style="margin-top:12px"><button class="btn sm" id="refresh">${t('home.refresh')}</button></div></div>
-    </div>`;
-  $('#power').addEventListener('click', togglePower);
-  $('#mode').querySelectorAll('button').forEach(b => b.addEventListener('click', async () => {
-    try { await App().SetMode(b.dataset.mode); } catch (e) { toast(errText(e), 'err'); }
+// ---- 首页三个面板 ----
+function sheetMode() {
+  const cur = state.view.mode;
+  openSheet(t('sheet.mode'), `<div class="list">${['rule', 'global', 'direct'].map(m => `<div class="item ${m === cur ? 'current' : ''}" data-mode="${m}"><span class="check"></span><div class="name"><b>${t('mode.' + m)}</b><span>${t('mode.' + m + '.d')}</span></div></div>`).join('')}</div>`);
+  $('#sheet-body').querySelectorAll('.item').forEach(it => it.addEventListener('click', async () => {
+    try { await App().SetMode(it.dataset.mode); closeSheet(); } catch (e) { toast(errText(e), 'err'); }
   }));
-  $('#test').addEventListener('click', async () => {
-    $('#test-r').textContent = '…';
-    try { const ms = await App().TestLatency('proxy'); $('#test-r').textContent = ms + ' ' + t('common.ms'); }
-    catch (e) { $('#test-r').textContent = t('common.failed'); }
-  });
-  $('#refresh').addEventListener('click', async () => {
-    try { await App().RefreshProfile(); toast(t('sub.saved'), 'ok'); } catch (e) { toast(errText(e), 'err'); }
-  });
+}
+function profileLine(p) {
+  const u = p.usage || {}, used = (u.upload || 0) + (u.download || 0);
+  const parts = [t('prof.nodes', { n: p.nodeCount })];
+  if (u.total) parts.push(t('prof.usage', { u: fmtBytes(used), t: fmtBytes(u.total) }));
+  if (u.expire) parts.push(t('prof.expire', { d: fmtDay(u.expire) }));
+  return parts.join(' · ');
+}
+function sheetProfiles() {
+  const list = state.view.profiles || [];
+  openSheet(t('sheet.profile'), list.length ? `<div class="list">${list.map(p => `<div class="item ${p.active ? 'current' : ''}" data-id="${esc(p.id)}"><span class="check"></span><div class="name"><b>${esc(p.name)}</b><span>${esc(profileLine(p))}${p.error ? ' · <span style="color:var(--danger)">' + esc(p.error) + '</span>' : ''}</span></div></div>`).join('')}</div>` : `<div class="empty">${t('prof.empty')}</div>`,
+    { action: t('sheet.manage'), onAction: () => { closeSheet(); nav('profiles'); } });
+  $('#sheet-body').querySelectorAll('.item').forEach(it => it.addEventListener('click', async () => {
+    try { await App().SelectProfile(it.dataset.id); closeSheet(); } catch (e) { toast(errText(e), 'err'); }
+  }));
+}
+function msClass(d) { return d < 0 ? 'bad' : !d ? 'none' : d < 150 ? 'good' : d < 400 ? 'mid' : 'bad'; }
+function msText(d, testing) { if (testing) return '<span class="spinner"></span>'; if (d < 0) return t('node.fail'); return d ? d + ' ms' : '–'; }
+let nodeTesting = false;
+async function sheetNodes() {
+  openSheet(t('sheet.nodes'), `<div class="empty"><span class="spinner"></span></div>`, { action: t('sheet.retest'), onAction: () => testNodes(true) });
+  await drawNodes(false);
+  testNodes(false);
+}
+async function drawNodes(testing) {
+  let nodes = [];
+  try { nodes = await App().GetNodes() || []; } catch (e) { $('#sheet-body').innerHTML = `<div class="empty">${esc(errText(e))}</div>`; return; }
+  if (!nodes.length) { $('#sheet-body').innerHTML = `<div class="empty">${t('prof.empty')}</div>`; return; }
+  const max = Math.max(1, ...nodes.filter(n => n.delay > 0).map(n => n.delay));
+  $('#sheet-body').innerHTML = `<div class="list">${nodes.map((n, i) => `<div class="item ${n.current ? 'current' : ''}" data-name="${esc(n.name)}" style="animation-delay:${i * 25}ms"><span class="check"></span>
+    <div class="name"><b>${esc(n.name === 'auto' ? t('node.auto') : n.name)}</b><span>${n.name === 'auto' ? (n.autoNow ? t('node.now', { n: n.autoNow }) : t('node.autoDesc')) : esc(n.type || '')}</span>${n.name !== 'auto' && n.delay > 0 ? `<div class="bar"><i style="width:${Math.max(6, 100 - n.delay / max * 80)}%"></i></div>` : ''}</div>
+    <span class="ms ${msClass(n.delay)}">${n.name === 'auto' ? '' : msText(n.delay, testing)}</span></div>`).join('')}</div>`;
+  $('#sheet-body').querySelectorAll('.item').forEach(it => it.addEventListener('click', async () => {
+    try { await App().SelectNode(it.dataset.name); closeSheet(); } catch (e) { toast(errText(e), 'err'); }
+  }));
+}
+async function testNodes(force) {
+  if (nodeTesting && !force) return;
+  nodeTesting = true;
+  $('#sheet-body').querySelectorAll('.ms').forEach((el, i) => { if (i > 0) el.innerHTML = '<span class="spinner"></span>'; });
+  try { await App().TestAll(); } catch (e) { /* 内核没跑时没法测 */ }
+  nodeTesting = false;
+  if ($('#sheet').classList.contains('show')) await drawNodes(false);
+  try { lastPing = await App().TestLatency('proxy'); } catch (e) { lastPing = 0; }
   updateHome();
 }
-async function togglePower() {
-  if (!state || !state.service) return;
-  try {
-    if (state.view.state.wanted) await App().Disconnect(); else await App().Connect();
-  } catch (e) { toast(errText(e), 'err'); }
-}
-function updateHome() {
-  if (page !== 'home' || !state) return;
-  const v = state.view, st = v.state.status, wanted = v.state.wanted;
-  const p = $('#power');
-  p.textContent = wanted ? t('home.disconnect') : t('home.connect');
-  p.className = 'power ' + (st === 'connected' ? 'on' : (st === 'error' || st === 'degraded' || !state.service) ? 'err' : wanted ? 'busy' : '');
-  $('#status').textContent = state.service ? statusText(v) : t('svc.down');
-  $('#status-err').textContent = v.state.error ? (t('code.' + v.state.code) !== 'code.' + v.state.code ? t('code.' + v.state.code) + ' · ' : '') + v.state.error : '';
-  $('#sp-down').textContent = fmtSpeed(state.down);
-  $('#sp-up').textContent = fmtSpeed(state.up);
-  $('#uptime').textContent = v.uptime ? fmtDuration(v.uptime) : '–';
-  $('#mode').querySelectorAll('button').forEach(b => b.classList.toggle('active', b.dataset.mode === v.mode));
-  $('#node').textContent = v.node || 'auto';
-  const pr = v.profile;
-  $('#sub-info').innerHTML = pr ? subInfoHTML(pr) : `<span class="muted">${t('sub.none')}</span>`;
-}
-function subInfoHTML(pr) {
-  const u = pr.usage || {}, used = (u.upload || 0) + (u.download || 0);
-  const pct = u.total ? Math.min(100, used / u.total * 100) : 0;
-  return `<dl class="kv">
-    <dt>${t('sub.name')}</dt><dd>${esc(pr.title || '—')}</dd>
-    <dt>${t('sub.nodes')}</dt><dd>${pr.nodeCount}</dd>
-    <dt>${t('sub.usage')}</dt><dd>${fmtBytes(used)} / ${u.total ? fmtBytes(u.total) : t('sub.unlimited')}${u.total ? `<div class="progress"><i class="${pct > 90 ? 'warn' : ''}" style="width:${pct}%"></i></div>` : ''}</dd>
-    <dt>${t('sub.expire')}</dt><dd>${u.expire ? fmtDay(u.expire) : t('sub.unlimited')}</dd>
-    <dt>${t('sub.updated')}</dt><dd>${fmtTime(pr.fetchedAt)}</dd>
-  </dl>`;
+
+// ---- 订阅管理 ----
+function renderProfiles(el, editId) {
+  el.innerHTML = `<div id="prof-form"></div><div class="list" id="prof-list"></div><div style="height:12px"></div><button class="btn primary block" id="prof-add">${t('prof.add')}</button>`;
+  const showForm = (p) => {
+    $('#prof-form').innerHTML = `<div class="card"><div class="field"><label>${t('prof.name')}</label><input type="text" id="pf-name" value="${esc(p ? p.name : '')}"></div>
+      <div class="field"><label>${t('prof.url')}</label><input type="url" id="pf-url" value="${esc(p ? p.url : '')}"></div>
+      <div class="row"><button class="btn primary" id="pf-save">${t('prof.save')}</button><button class="btn" id="pf-cancel">${t('prof.cancel')}</button><span id="pf-busy"></span></div></div>`;
+    $('#pf-cancel').addEventListener('click', () => { $('#prof-form').innerHTML = ''; });
+    $('#pf-save').addEventListener('click', async () => {
+      const b = $('#pf-save'); b.disabled = true; $('#pf-busy').innerHTML = '<span class="spinner"></span>';
+      try {
+        if (p) await App().UpdateProfile(p.id, $('#pf-name').value, $('#pf-url').value); else await App().AddProfile($('#pf-name').value, $('#pf-url').value);
+        toast(t(p ? 'prof.saved' : 'prof.added'), 'ok'); $('#prof-form').innerHTML = ''; await load();
+      } catch (e) { toast(errText(e), 'err'); }
+      b.disabled = false; $('#pf-busy').innerHTML = '';
+    });
+    setTimeout(() => $(p ? '#pf-name' : '#pf-url').focus(), 80);
+  };
+  $('#prof-add').addEventListener('click', () => showForm(null));
+  const load = async () => {
+    let list = [];
+    try { list = await App().GetProfiles(); } catch (e) { $('#prof-list').innerHTML = `<div class="empty">${esc(errText(e))}</div>`; return; }
+    if (!list.length) { $('#prof-list').innerHTML = `<div class="empty">${t('prof.empty')}</div>`; return; }
+    $('#prof-list').innerHTML = list.map(p => `<div class="item" style="flex-wrap:wrap">
+      <div class="name" style="flex-basis:100%"><b>${esc(p.name)} ${p.active ? `<span class="tag">${t('prof.inUse')}</span>` : ''}</b><span>${esc(profileLine(p))}<br>${p.fetchedAt ? t('prof.updated', { t: fmtTime(p.fetchedAt) }) : t('prof.never')}${p.error ? ' · <span style="color:var(--danger)">' + esc(p.error) + '</span>' : ''}</span></div>
+      <div class="row" style="flex-basis:100%;gap:6px">
+        ${p.active ? '' : `<button class="btn sm" data-act="use" data-id="${esc(p.id)}">${t('prof.use')}</button>`}
+        <button class="btn sm" data-act="refresh" data-id="${esc(p.id)}">${t('prof.refresh')}</button>
+        <button class="btn sm" data-act="edit" data-id="${esc(p.id)}">${t('prof.edit')}</button>
+        <span class="grow"></span><button class="btn sm danger ghost" data-act="del" data-id="${esc(p.id)}" data-name="${esc(p.name)}">${t('prof.del')}</button>
+      </div></div>`).join('');
+    $('#prof-list').querySelectorAll('button[data-act]').forEach(b => b.addEventListener('click', async () => {
+      const id = b.dataset.id;
+      try {
+        if (b.dataset.act === 'use') { await App().SelectProfile(id); }
+        else if (b.dataset.act === 'refresh') { b.disabled = true; b.innerHTML = '<span class="spinner"></span>'; await App().RefreshProfile(id); toast(t('prof.refreshed'), 'ok'); }
+        else if (b.dataset.act === 'edit') { showForm(list.find(x => x.id === id)); return; }
+        else if (b.dataset.act === 'del') { if (!confirm(t('prof.delConfirm', { n: b.dataset.name }))) return; await App().RemoveProfile(id); toast(t('prof.deleted'), 'ok'); }
+      } catch (e) { toast(errText(e), 'err'); }
+      await load();
+    }));
+  };
+  load();
+  if (editId) showForm({ id: '', name: '', url: editId });
 }
 
-// ---- 节点 ----
-function delayClass(d) { return !d ? '' : d < 150 ? 'good' : d < 400 ? 'mid' : 'bad'; }
-async function renderNodes(el) {
-  el.innerHTML = `<h1>${t('nodes.title')}</h1><p class="sub">&nbsp;</p>
-    <div class="card"><div class="row" style="margin-bottom:12px"><span class="grow"></span><button class="btn sm" id="testall">${t('nodes.testAll')}</button></div><div id="nodes" class="list"></div></div>`;
-  $('#testall').addEventListener('click', async () => {
-    const b = $('#testall'); b.disabled = true; b.textContent = t('nodes.testing');
-    try { await App().TestAll(); } catch (e) { toast(errText(e), 'err'); }
-    b.disabled = false; b.textContent = t('nodes.testAll');
-    loadNodes();
+// ---- 设置 ----
+async function renderSettings(el) {
+  let s;
+  try { s = await App().GetSettings(); } catch (e) { el.innerHTML = `<div class="empty">${esc(errText(e))}</div>`; return; }
+  const auto = await App().GetAutostart();
+  const sw = (id, label, on, help) => `<div class="srow"><div class="lbl">${label}${help ? `<div>${help}</div>` : ''}</div><label class="switch"><input type="checkbox" id="${id}" ${on ? 'checked' : ''}></label></div>`;
+  const num = (id, label, val, help) => `<div class="srow"><div class="lbl">${label}${help ? `<div>${help}</div>` : ''}</div><input type="number" id="${id}" value="${esc(val)}"></div>`;
+  const txt = (id, label, val, help) => `<div class="srow"><div class="lbl">${label}${help ? `<div>${help}</div>` : ''}</div><input type="text" id="${id}" value="${esc(val)}"></div>`;
+  const sel = (id, label, val, opts, help) => `<div class="srow"><div class="lbl">${label}${help ? `<div>${help}</div>` : ''}</div><select id="${id}">${opts.map(o => `<option value="${o[0]}" ${o[0] === val ? 'selected' : ''}>${o[1]}</option>`).join('')}</select></div>`;
+  el.innerHTML = `
+    <div class="card"><h3>${t('set.g.conn')}</h3>
+      ${sw('f-tun', t('set.tun'), s.tun, t('set.tunHelp'))}
+      ${sel('f-stack', t('set.tunStack'), s.tunStack, [['mixed', 'mixed'], ['system', 'system'], ['gvisor', 'gvisor']])}
+      ${sw('f-strict', t('set.strict'), s.strictRoute, t('set.strictHelp'))}
+      ${sw('f-lan', t('set.lan'), s.lanBypass, t('set.lanHelp'))}
+      ${num('f-mixed', t('set.mixed'), s.mixedPort, t('set.mixedHelp'))}
+      ${num('f-probe', t('set.probe'), s.probeMinutes, t('set.probeHelp'))}
+      ${num('f-update', t('set.update'), s.updateHours)}
+    </div>
+    <div class="card"><h3>${t('set.g.dns')}</h3>
+      ${txt('f-rdns', t('set.remoteDns'), s.remoteDns, t('set.remoteDnsHelp'))}
+      ${txt('f-ldns', t('set.localDns'), s.localDns, t('set.localDnsHelp'))}
+      ${sw('f-fakeip', t('set.fakeip'), s.fakeIp)}
+      ${sw('f-ipv6', t('set.ipv6'), s.ipv6, t('set.ipv6Help'))}
+    </div>
+    <div class="card"><h3>${t('set.g.route')}</h3>
+      ${sw('f-ad', t('set.adblock'), s.adBlock)}
+      <div class="field" style="margin-top:8px"><label>${t('set.bypass')}</label><textarea id="f-bypass" placeholder="steam.exe">${esc((s.bypassApps || []).join('\n'))}</textarea><span class="help">${t('set.bypassHelp')}</span></div>
+      ${sel('f-log', t('set.logLevel'), s.logLevel, [['debug', 'debug'], ['info', 'info'], ['warn', 'warn'], ['error', 'error']])}
+    </div>
+    <div class="card"><h3>${t('set.g.app')} <span class="tag">${t('set.instant')}</span></h3>
+      ${sw('f-autostart', t('set.autostart'), auto, t('set.autostartHelp'))}
+      ${sel('f-lang', t('set.lang'), LANG, [['zh', '中文'], ['en', 'English']])}
+      ${sel('f-theme', t('set.theme'), state.theme || 'system', [['system', t('theme.system')], ['light', t('theme.light')], ['dark', t('theme.dark')]])}
+    </div>
+    <div class="savebar" id="savebar"><div class="small muted grow" id="save-note">${t('set.note')}</div><button class="btn primary" id="save" disabled>${t('set.save')}</button></div>`;
+  const watch = ['f-tun', 'f-stack', 'f-strict', 'f-lan', 'f-mixed', 'f-probe', 'f-update', 'f-rdns', 'f-ldns', 'f-fakeip', 'f-ipv6', 'f-ad', 'f-bypass', 'f-log'];
+  const dirty = on => { $('#save').disabled = !on; $('#savebar').classList.toggle('dirty', on); $('#save-note').textContent = on ? t('set.unsaved') : t('set.note'); };
+  watch.forEach(id => ['input', 'change'].forEach(ev => $('#' + id).addEventListener(ev, () => dirty(true))));
+  $('#save').addEventListener('click', async () => {
+    const n = { ...s, tun: $('#f-tun').checked, tunStack: $('#f-stack').value, strictRoute: $('#f-strict').checked, lanBypass: $('#f-lan').checked,
+      mixedPort: Number($('#f-mixed').value), probeMinutes: Number($('#f-probe').value), updateHours: Number($('#f-update').value),
+      remoteDns: $('#f-rdns').value.trim(), localDns: $('#f-ldns').value.trim(), fakeIp: $('#f-fakeip').checked, ipv6: $('#f-ipv6').checked, adBlock: $('#f-ad').checked,
+      bypassApps: $('#f-bypass').value.split(/\r?\n/).map(x => x.trim()).filter(Boolean), logLevel: $('#f-log').value };
+    try { s = await App().SaveSettings(n); dirty(false); toast(t('set.saved'), 'ok'); } catch (e) { toast(errText(e), 'err'); }
   });
-  loadNodes();
-}
-async function loadNodes() {
-  const box = $('#nodes');
-  if (!box) return;
-  let nodes = [];
-  try { nodes = await App().GetNodes() || []; } catch (e) { box.innerHTML = `<div class="empty">${esc(errText(e))}</div>`; return; }
-  if (!nodes.length) { box.innerHTML = `<div class="empty">${t('nodes.empty')}</div>`; return; }
-  box.innerHTML = nodes.map(n => `<div class="item ${n.current ? 'current' : ''}" data-name="${esc(n.name)}">
-    <span class="radio"></span><span class="grow">${esc(n.name === 'auto' ? t('nodes.auto') : n.name)}</span>
-    ${n.type ? `<span class="tag">${esc(n.type)}</span>` : ''}<span class="delay ${delayClass(n.delay)}">${n.delay ? n.delay + ' ms' : '–'}</span></div>`).join('');
-  box.querySelectorAll('.item').forEach(it => it.addEventListener('click', async () => {
-    try { await App().SelectNode(it.dataset.name); toast(t('nodes.selected', { n: it.dataset.name }), 'ok'); loadNodes(); } catch (e) { toast(errText(e), 'err'); }
-  }));
-}
-
-// ---- 订阅 ----
-function renderSub(el) {
-  const pr = state && state.view.profile;
-  const url = (state && state.view.settings && state.view.settings.profileUrl) || '';
-  el.innerHTML = `<h1>${t('sub.title')}</h1><p class="sub">&nbsp;</p>
-    <div class="card"><div class="field"><label>${t('sub.url')}</label><input type="url" id="sub-url" value="${esc(url)}" placeholder="https://…/sub/…"><span class="help">${t('sub.urlHelp')}</span></div>
-      <div class="row" style="margin-top:12px"><button class="btn primary" id="sub-save">${t('sub.save')}</button><button class="btn" id="sub-refresh" ${pr ? '' : 'disabled'}>${t('sub.refresh')}</button></div></div>
-    <div class="card" id="sub-card">${pr ? subInfoHTML(pr) : `<span class="muted">${t('sub.none')}</span>`}</div>`;
-  $('#sub-save').addEventListener('click', async () => {
-    const b = $('#sub-save'); b.disabled = true;
-    try { const p = await App().SetProfileURL($('#sub-url').value); $('#sub-card').innerHTML = subInfoHTML(p); toast(t('sub.saved'), 'ok'); }
-    catch (e) { toast(errText(e), 'err'); }
-    b.disabled = false;
-  });
-  $('#sub-refresh').addEventListener('click', async () => {
-    try { const p = await App().RefreshProfile(); $('#sub-card').innerHTML = subInfoHTML(p); toast(t('sub.saved'), 'ok'); } catch (e) { toast(errText(e), 'err'); }
-  });
+  $('#f-autostart').addEventListener('change', async e => { try { await App().SetAutostart(e.target.checked); toast(t('set.saved'), 'ok'); } catch (err) { toast(errText(err), 'err'); e.target.checked = !e.target.checked; } });
+  $('#f-lang').addEventListener('change', async e => { LANG = e.target.value; await App().SetLang(LANG); nav('settings'); });
+  $('#f-theme').addEventListener('change', async e => { applyTheme(e.target.value); await App().SetTheme(e.target.value); });
 }
 
 // ---- 连接 ----
 function renderConns(el) {
-  el.innerHTML = `<h1>${t('conns.title')}</h1><p class="sub">&nbsp;</p><div class="card"><div id="conns"></div></div>`;
+  el.innerHTML = `<div id="conns"></div>`;
   const load = async () => {
-    const box = $('#conns');
-    if (!box) return;
+    const box = $('#conns'); if (!box) return;
     let list;
-    try { list = await App().GetConnections() || []; } catch (e) { box.innerHTML = `<div class="empty">${esc(state && state.view.state.status === 'connected' ? errText(e) : t('conns.needCore'))}</div>`; return; }
+    try { list = await App().GetConnections() || []; } catch (e) { box.innerHTML = `<div class="empty">${esc(state && (state.view.state.status === 'connected') ? errText(e) : t('conns.needCore'))}</div>`; return; }
     if (!list.length) { box.innerHTML = `<div class="empty">${t('conns.empty')}</div>`; return; }
-    box.innerHTML = `<table><thead><tr><th>${t('conns.host')}</th><th></th><th>${t('conns.chain')}</th><th>${t('conns.rule')}</th><th class="num">${t('conns.up')}</th><th class="num">${t('conns.down')}</th><th></th></tr></thead><tbody>
-      ${list.map(c => `<tr><td class="sel" title="${esc(c.host)}">${esc(c.host)}</td><td><span class="tag">${esc(c.net)}</span></td><td title="${esc(c.chain)}">${esc(c.chain)}</td><td class="muted small">${esc(c.rule)}</td><td class="num">${fmtBytes(c.up)}</td><td class="num">${fmtBytes(c.down)}</td><td><button class="btn sm" data-id="${esc(c.id)}">${t('conns.close')}</button></td></tr>`).join('')}</tbody></table>`;
+    box.innerHTML = `<div class="list">${list.map(c => `<div class="item"><div class="name"><b class="sel">${esc(c.host)}</b><span>${esc(c.app || '')} ${c.app ? '·' : ''} ${esc(c.chain)} · ${esc(c.net)} · ↓${fmtBytes(c.down)} ↑${fmtBytes(c.up)}</span></div><button class="btn sm ghost" data-id="${esc(c.id)}">${t('conns.close')}</button></div>`).join('')}</div>`;
     box.querySelectorAll('button[data-id]').forEach(b => b.addEventListener('click', async () => { try { await App().CloseConnection(b.dataset.id); load(); } catch (e) { toast(errText(e), 'err'); } }));
   };
   load();
   pageTimer = setInterval(load, 2000);
 }
 
-// ---- 设置 ----
-async function renderSettings(el) {
-  let s;
-  try { s = await App().GetSettings(); } catch (e) { el.innerHTML = `<h1>${t('set.title')}</h1><div class="card"><div class="empty">${esc(errText(e))}</div></div>`; return; }
-  const auto = await App().GetAutostart();
-  const chk = (id, label, on, help) => `<div class="field"><label class="switch"><input type="checkbox" id="${id}" ${on ? 'checked' : ''}> ${label}</label>${help ? `<span class="help">${help}</span>` : ''}</div>`;
-  const inp = (id, label, val, type = 'text', help = '') => `<div class="field"><label>${label}</label><input type="${type}" id="${id}" value="${esc(val)}">${help ? `<span class="help">${help}</span>` : ''}</div>`;
-  const sel = (id, label, val, opts, help = '') => `<div class="field"><label>${label}</label><select id="${id}">${opts.map(o => `<option value="${o[0]}" ${o[0] === val ? 'selected' : ''}>${o[1]}</option>`).join('')}</select>${help ? `<span class="help">${help}</span>` : ''}</div>`;
-  el.innerHTML = `<h1>${t('set.title')}</h1><p class="sub">${t('set.restartNote')}</p>
-    <div class="card"><div class="form">
-      ${chk('f-tun', t('set.tun'), s.tun, t('set.tunHelp'))}
-      ${sel('f-stack', t('set.tunStack'), s.tunStack, [['mixed', 'mixed'], ['system', 'system'], ['gvisor', 'gvisor']])}
-      ${chk('f-strict', t('set.strict'), s.strictRoute, t('set.strictHelp'))}
-      ${chk('f-lan', t('set.lan'), s.lanBypass, t('set.lanHelp'))}
-      ${inp('f-mixed', t('set.mixed'), s.mixedPort, 'number', t('set.mixedHelp'))}
-      ${inp('f-update', t('set.update'), s.updateHours, 'number')}
-      ${inp('f-rdns', t('set.remoteDns'), s.remoteDns)}
-      ${inp('f-ldns', t('set.localDns'), s.localDns)}
-      ${chk('f-fakeip', t('set.fakeip'), s.fakeIp)}
-      ${chk('f-ipv6', t('set.ipv6'), s.ipv6, t('set.ipv6Help'))}
-      ${chk('f-ad', t('set.adblock'), s.adBlock)}
-      ${sel('f-log', t('set.logLevel'), s.logLevel, [['debug', 'debug'], ['info', 'info'], ['warn', 'warn'], ['error', 'error']])}
-    </div><div class="row" style="margin-top:16px"><button class="btn primary" id="save">${t('set.save')}</button></div></div>
-    <div class="card"><div class="form">
-      ${chk('f-autostart', t('set.autostart'), auto, t('set.autostartHelp'))}
-      ${sel('f-lang', t('set.lang'), LANG, [['zh', '中文'], ['en', 'English']])}
-    </div></div>`;
-  $('#save').addEventListener('click', async () => {
-    const n = { ...s, tun: $('#f-tun').checked, tunStack: $('#f-stack').value, strictRoute: $('#f-strict').checked, lanBypass: $('#f-lan').checked,
-      mixedPort: Number($('#f-mixed').value), updateHours: Number($('#f-update').value), remoteDns: $('#f-rdns').value.trim(), localDns: $('#f-ldns').value.trim(),
-      fakeIp: $('#f-fakeip').checked, ipv6: $('#f-ipv6').checked, adBlock: $('#f-ad').checked, logLevel: $('#f-log').value };
-    try { s = await App().SaveSettings(n); toast(t('set.saved'), 'ok'); } catch (e) { toast(errText(e), 'err'); }
-  });
-  $('#f-autostart').addEventListener('change', async e => { try { await App().SetAutostart(e.target.checked); toast(t('set.saved'), 'ok'); } catch (err) { toast(errText(err), 'err'); e.target.checked = !e.target.checked; } });
-  $('#f-lang').addEventListener('change', async e => { LANG = e.target.value; await App().SetLang(LANG); renderNav(); route('settings'); });
-}
-
 // ---- 日志 ----
 function renderLogs(el) {
-  el.innerHTML = `<h1>${t('logs.title')}</h1><p class="sub">&nbsp;</p>
-    <div class="card"><div class="row wrap" style="margin-bottom:10px">
-      <div class="seg" id="logsrc"><button data-core="0" class="active">${t('logs.service')}</button><button data-core="1">${t('logs.core')}</button></div>
-      <span class="muted small">${t('logs.lines')}</span><select id="lines" style="width:90px"><option>100</option><option>300</option><option>1000</option></select>
-      <label class="switch"><input type="checkbox" id="auto" checked> ${t('logs.auto')}</label>
-      <span class="grow"></span>
-      <button class="btn sm" id="reload">${t('logs.refresh')}</button><button class="btn sm" id="open">${t('logs.open')}</button><button class="btn sm" id="diag">${t('logs.diag')}</button>
-    </div><pre class="log sel" id="log"></pre></div>`;
-  let core = false;
+  el.innerHTML = `<div class="row" style="margin-bottom:10px;flex-wrap:wrap">
+      <div class="seg" id="logsrc"><span class="pill"></span><button data-core="0" class="active">${t('logs.service')}</button><button data-core="1">${t('logs.core')}</button></div>
+      <button class="btn sm" id="pause">${t('logs.pause')}</button><span class="grow"></span>
+      <button class="btn sm" id="open">${t('logs.open')}</button><button class="btn sm" id="diag">${t('logs.diag')}</button>
+    </div><pre class="log sel" id="log"></pre>`;
+  let core = false, paused = false;
+  const colorize = l => { const e = esc(l); if (/ERROR|FATAL|panic/i.test(l)) return `<span class="err">${e}</span>`; if (/WARN/i.test(l)) return `<span class="warn">${e}</span>`; if (/DEBUG/i.test(l)) return `<span class="dim">${e}</span>`; return e; };
   const load = async () => {
-    const pre = $('#log'); if (!pre) return;
-    try { const lines = await App().GetLogs(Number($('#lines').value), core) || []; const atBottom = pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 8; pre.textContent = lines.join('\n'); if (atBottom) pre.scrollTop = pre.scrollHeight; }
+    const pre = $('#log'); if (!pre || paused) return;
+    try { const lines = await App().GetLogs(300, core) || []; const atBottom = pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 8; pre.innerHTML = lines.map(colorize).join('\n'); if (atBottom) pre.scrollTop = pre.scrollHeight; }
     catch (e) { pre.textContent = errText(e); }
   };
-  $('#logsrc').querySelectorAll('button').forEach(b => b.addEventListener('click', () => { core = b.dataset.core === '1'; $('#logsrc').querySelectorAll('button').forEach(x => x.classList.toggle('active', x === b)); load(); }));
-  $('#reload').addEventListener('click', load);
-  $('#lines').addEventListener('change', load);
+  segInit($('#logsrc'), b => { core = b.dataset.core === '1'; load(); });
+  $('#pause').addEventListener('click', () => { paused = !paused; $('#pause').textContent = t(paused ? 'logs.resume' : 'logs.pause'); if (!paused) load(); });
   $('#open').addEventListener('click', () => App().OpenLogs().catch(e => toast(errText(e), 'err')));
-  $('#diag').addEventListener('click', async () => {
-    try { const txt = await App().Diagnose(); await copyText(txt); toast(t('logs.copied'), 'ok'); } catch (e) { toast(errText(e), 'err'); }
-  });
+  $('#diag').addEventListener('click', exportDiag);
   load();
-  pageTimer = setInterval(() => { if ($('#auto') && $('#auto').checked) load(); }, 3000);
+  pageTimer = setInterval(load, 3000);
 }
-async function copyText(txt) {
-  try { await navigator.clipboard.writeText(txt); return; } catch (e) { /* 回退 */ }
-  const ta = document.createElement('textarea'); ta.value = txt; document.body.appendChild(ta); ta.select(); document.execCommand('copy'); ta.remove();
+function segInit(seg, onPick) {
+  const pill = seg.querySelector('.pill');
+  const move = b => { pill.style.left = b.offsetLeft + 'px'; pill.style.width = b.offsetWidth + 'px'; };
+  const btns = [...seg.querySelectorAll('button')];
+  btns.forEach(b => b.addEventListener('click', () => { btns.forEach(x => x.classList.toggle('active', x === b)); move(b); onPick(b); }));
+  requestAnimationFrame(() => move(seg.querySelector('button.active')));
+}
+async function exportDiag() {
+  try { await App().ExportDiag(); toast(t('logs.exported'), 'ok'); } catch (e) { toast(errText(e), 'err'); }
 }
 
 // ---- 关于 ----
 function renderAbout(el) {
   const v = state ? state.view : {};
-  el.innerHTML = `<h1>${t('about.title')}</h1><p class="sub">&nbsp;</p>
-    <div class="card"><dl class="kv">
-      <dt>${t('about.ui')}</dt><dd>${esc(state ? state.version : '')}</dd>
-      <dt>${t('about.svc')}</dt><dd>${esc(v.version || '—')}</dd>
-      <dt>${t('about.svcState')}</dt><dd id="about-svc">${esc(state ? state.svcState : '')}</dd>
-      <dt>${t('about.core')}</dt><dd>sing-box</dd>
-      <dt></dt><dd class="muted small">${t('about.license')} · <a id="repo">github.com/Maoyangui/godusevpn</a></dd>
-    </dl>
-    <div class="row wrap" style="margin-top:14px"><button class="btn" id="repair">${t('about.repair')}</button><span class="muted small">${t('about.repairHelp')}</span></div>
-    <div class="row wrap" style="margin-top:10px"><button class="btn danger" id="quit">${t('about.quit')}</button><span class="muted small">${t('about.quitHelp')}</span></div></div>`;
+  el.innerHTML = `<div class="card">
+      <div class="srow"><div class="lbl">${t('about.ui')}</div><b>v${esc(state ? state.version : '')}</b></div>
+      <div class="srow"><div class="lbl">${t('about.svc')}</div><b>v${esc(v.version || '—')}</b></div>
+      <div class="srow"><div class="lbl">${t('about.svcState')}</div><b id="about-svc">${esc(svcText(state))}</b></div>
+      <div class="srow"><div class="lbl">sing-box</div><span class="muted small">${t('about.license')}</span></div>
+    </div>
+    <div class="card" id="upd-card">
+      <div class="row"><div class="grow" id="upd-text">${state && state.update ? t('about.found', { v: state.update.version }) : ''}</div><button class="btn sm" id="upd-check">${t('about.check')}</button></div>
+      <div id="upd-body" style="margin-top:10px"></div>
+      <p class="small muted" style="margin:8px 0 0">${t('about.updateNote')}</p>
+    </div>
+    <div class="card">
+      <div class="srow"><div class="lbl">${t('about.repair')}</div><button class="btn sm" id="repair">${t('about.repair')}</button></div>
+      <div class="srow"><div class="lbl">${t('about.diag')}</div><button class="btn sm" id="diag">${t('about.diag')}</button></div>
+      <div class="srow"><div class="lbl">${t('about.quit')}<div>${t('about.quitHelp')}</div></div><button class="btn sm danger" id="quit">${t('about.quit')}</button></div>
+    </div>
+    <p class="small muted center"><a id="repo" style="color:var(--brand2)">github.com/Maoyangui/godusevpn</a></p>`;
+  const showUpdate = rel => {
+    $('#upd-text').textContent = rel ? t('about.found', { v: rel.version }) : t('about.latest');
+    $('#upd-body').innerHTML = rel ? `<button class="btn primary block" id="upd-go">${t('about.update')}</button><div class="progress" id="upd-prog" style="margin-top:10px" hidden><i></i></div>` : '';
+    if (rel) $('#upd-go').addEventListener('click', async () => {
+      const b = $('#upd-go'); b.disabled = true; $('#upd-prog').hidden = false;
+      try { await App().ApplyUpdate(); $('#upd-text').textContent = t('about.installing'); }
+      catch (e) { toast(errText(e), 'err'); b.disabled = false; }
+    });
+  };
+  if (state && state.update) showUpdate(state.update);
+  $('#upd-check').addEventListener('click', async () => {
+    const b = $('#upd-check'); b.disabled = true; $('#upd-text').textContent = t('about.checking');
+    try { showUpdate(await App().CheckUpdate()); } catch (e) { $('#upd-text').textContent = errText(e); }
+    b.disabled = false;
+  });
   $('#repair').addEventListener('click', repairService);
+  $('#diag').addEventListener('click', exportDiag);
   $('#quit').addEventListener('click', () => App().QuitApp());
   $('#repo').addEventListener('click', () => App().OpenURL('https://github.com/Maoyangui/godusevpn'));
 }
@@ -312,21 +442,42 @@ function renderAbout(el) {
 async function init() {
   state = await App().GetState();
   LANG = state.lang || 'zh';
+  applyTheme(state.theme);
   document.documentElement.lang = LANG === 'en' ? 'en' : 'zh';
-  updateSide();
-  route('home');
+  $('#menu-btn').addEventListener('click', openDrawer);
+  $('#back-btn').addEventListener('click', navHome);
+  $('#drawer-backdrop').addEventListener('click', closeDrawer);
+  $('#sheet-backdrop').addEventListener('click', closeSheet);
+  $('#min-btn').addEventListener('click', () => App().Minimize());
+  $('#close-btn').addEventListener('click', () => App().HideWindow());
+  document.addEventListener('keydown', e => { if (e.key === 'Escape') { closeSheet(); closeDrawer(); } });
+  $('#svc-text').textContent = svcText(state);
+  navHome();
   window.runtime.EventsOn('state', st => {
-    const langChanged = st.lang !== LANG;
+    const langChanged = st.lang !== LANG, hadProfiles = state && state.view.profiles && state.view.profiles.length;
     state = st; LANG = st.lang || 'zh';
-    updateSide();
-    if (langChanged) { renderNav(); route(page); return; }
-    updateHome();
-    if (page === 'about' && $('#about-svc')) $('#about-svc').textContent = st.svcState;
+    applyTheme(st.theme);
+    $('#svc-dot').className = 'dot ' + (st.service ? 'on' : 'err');
+    $('#svc-text').textContent = svcText(st);
+    if (langChanged) { nav(view); return; }
+    const has = st.view.profiles && st.view.profiles.length;
+    if (view === 'onboard' && has) nav('home');
+    else if (view === 'home' && !has && hadProfiles) nav('onboard');
+    updateHome(); updateOnboardSvc();
+    if (view === 'about' && $('#about-svc')) $('#about-svc').textContent = svcText(st);
   });
   window.runtime.EventsOn('traffic', tr => {
     if (!state) return;
-    state.up = tr.up; state.down = tr.down;
-    if (page === 'home' && $('#sp-down')) { $('#sp-down').textContent = fmtSpeed(tr.down); $('#sp-up').textContent = fmtSpeed(tr.up); }
+    const pd = $('#s-down'), pu = $('#s-up');
+    if (view === 'home' && pd) { tween(pd, state.down, tr.down, fmtSpeed, 600); tween(pu, state.up, tr.up, fmtSpeed, 600); }
+    state.down = tr.down; state.up = tr.up;
   });
+  window.runtime.EventsOn('update-progress', p => {
+    const bar = $('#upd-prog'); if (!bar) return;
+    const pct = p.total > 0 ? Math.round(p.done / p.total * 100) : 0;
+    bar.hidden = false; bar.querySelector('i').style.width = pct + '%';
+    $('#upd-text').textContent = t('about.downloading', { p: pct });
+  });
+  window.runtime.EventsOn('import', url => { nav('profiles'); setTimeout(() => { const f = $('#prof-add'); if (f) f.click(); const u = $('#pf-url'); if (u) u.value = url; }, 350); });
 }
 document.addEventListener('DOMContentLoaded', init);

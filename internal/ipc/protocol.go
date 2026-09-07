@@ -30,6 +30,12 @@ const (
 	MDiagnose       = "Diagnose"
 	MPing           = "Ping"
 	MGetClashInfo   = "GetClashInfo" // 内核 Clash API 的端口与密钥,托盘客户端据此读实时速度、连接与节点延迟
+	MExportDiag     = "ExportDiag"   // 生成脱敏的诊断 zip,返回路径
+	MGetProfiles    = "GetProfiles"  // 订阅列表
+	MAddProfile     = "AddProfile"   // 新增订阅(先拉一次验证)
+	MRemoveProfile  = "RemoveProfile"
+	MSelectProfile  = "SelectProfile" // 切换当前订阅
+	MRenameProfile  = "RenameProfile"
 )
 
 type Request struct {

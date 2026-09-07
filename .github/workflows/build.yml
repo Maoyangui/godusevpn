@@ -36,6 +36,16 @@ jobs:
           go vet -tags desktop,production ./cmd/godusevpn
           go test -count=1 -tags "$TAGS" ./...
 
+      - name: Embed icon and version resources
+        shell: bash
+        run: |
+          set -e
+          go install github.com/tc-hib/go-winres@v0.3.3
+          V="${{ steps.ver.outputs.version }}"; NV="${V%%-*}"
+          for n in godusevpn godusevpn-svc godusevpn-cli; do
+            go-winres make --in winres/$n.json --out cmd/$n/rsrc --arch amd64,arm64 --file-version "$NV" --product-version "$V"
+          done
+
       - name: Build binaries (amd64, arm64)
         shell: bash
         run: |

@@ -176,3 +176,32 @@ func TestModeNames(t *testing.T) {
 		t.Fatal("SettingMode")
 	}
 }
+
+func TestBypassAppsRule(t *testing.T) {
+	s := settings.Default()
+	s.BypassApps = []string{"steam.exe", "qbittorrent.exe"}
+	c, raw := build(t, s)
+	var found bool
+	for _, r := range c.Route.Rules {
+		if r["outbound"] == "direct" && r["process_name"] != nil {
+			found = true
+		}
+	}
+	if !found || !strings.Contains(raw, "\"find_process\": true") {
+		t.Fatalf("按进程直连应有 process_name 规则并开 find_process: %s", raw)
+	}
+	s.BypassApps = nil
+	_, raw = build(t, s)
+	if strings.Contains(raw, "process_name") || strings.Contains(raw, "find_process") {
+		t.Fatal("没有进程规则时不该开 find_process")
+	}
+}
+
+func TestProbeInterval(t *testing.T) {
+	s := settings.Default()
+	s.ProbeMinutes = 7
+	_, raw := build(t, s)
+	if !strings.Contains(raw, "\"interval\": \"7m\"") {
+		t.Fatalf("auto 组的测速间隔应跟设置走: %s", raw)
+	}
+}

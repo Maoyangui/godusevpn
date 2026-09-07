@@ -7,25 +7,33 @@
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
-<div class="shell">
-  <aside class="side">
-    <div class="brand">
-      <svg viewBox="-16 -50 400 400" width="30" height="30" aria-hidden="true"><defs><linearGradient id="g" gradientUnits="userSpaceOnUse" x1="70" y1="70" x2="310" y2="270"><stop offset="0" stop-color="#6a44f2"/><stop offset=".55" stop-color="#2f8bff"/><stop offset="1" stop-color="#18e3e8"/></linearGradient></defs><g fill="none" stroke="url(#g)" stroke-width="44" stroke-linecap="round" stroke-linejoin="round"><path d="M86 248V84l146 124v52"/><path d="M332 78l-88 96"/></g><path fill="url(#g)" d="M118 192l52 30-52 30z"/></svg>
-      <span>佛跳墙</span>
+<div class="app" id="app">
+  <header class="topbar">
+    <button class="icon-btn" id="menu-btn" title="菜单"><svg viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16"/></svg></button>
+    <button class="icon-btn" id="back-btn" hidden><svg viewBox="0 0 24 24"><path d="M15 5l-7 7 7 7"/></svg></button>
+    <div class="topbar-title" id="topbar-title">佛跳墙</div>
+    <div class="win">
+      <button class="icon-btn" id="min-btn" title="最小化"><svg viewBox="0 0 24 24"><path d="M6 12h12"/></svg></button>
+      <button class="icon-btn" id="close-btn" title="收到托盘"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
     </div>
-    <nav id="nav"></nav>
-    <div class="side-foot">
-      <span id="svc-dot" class="dot"></span><span id="svc-text"></span>
-      <span class="grow"></span>
-      <span id="ver" class="muted"></span>
+  </header>
+  <main class="stage" id="stage"></main>
+
+  <div class="backdrop" id="drawer-backdrop"></div>
+  <nav class="drawer" id="drawer">
+    <div class="drawer-brand">
+      <svg viewBox="-16 -50 400 400" width="34" height="34" aria-hidden="true"><defs><linearGradient id="g" gradientUnits="userSpaceOnUse" x1="70" y1="70" x2="310" y2="270"><stop offset="0" stop-color="#6a44f2"/><stop offset=".55" stop-color="#2f8bff"/><stop offset="1" stop-color="#18e3e8"/></linearGradient></defs><g fill="none" stroke="url(#g)" stroke-width="44" stroke-linecap="round" stroke-linejoin="round"><path d="M86 248V84l146 124v52"/><path d="M332 78l-88 96"/></g><path fill="url(#g)" d="M118 192l52 30-52 30z"/></svg>
+      <div><b>佛跳墙</b><div class="muted small" id="drawer-ver"></div></div>
     </div>
-  </aside>
-  <main class="main">
-    <div id="banner" class="banner" hidden></div>
-    <section id="page"></section>
-  </main>
+    <div class="drawer-items" id="drawer-items"></div>
+    <div class="drawer-foot"><span class="dot" id="svc-dot"></span><span id="svc-text" class="small muted"></span></div>
+  </nav>
+
+  <div class="backdrop" id="sheet-backdrop"></div>
+  <section class="sheet" id="sheet"><div class="sheet-grip"></div><div class="sheet-head" id="sheet-head"></div><div class="sheet-body" id="sheet-body"></div></section>
+
+  <div class="toast" id="toast"></div>
 </div>
-<div id="toast" class="toast" hidden></div>
 <script src="i18n.js"></script>
 <script src="app.js"></script>
 </body>

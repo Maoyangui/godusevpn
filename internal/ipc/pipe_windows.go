@@ -115,6 +115,17 @@ func (s *Server) serve(conn net.Conn) {
 	}
 }
 
+// Dispatch 在服务内部直接调一个已注册的方法(一个接口复用另一个接口的实现)。
+func (s *Server) Dispatch(method string, params json.RawMessage) (any, error) {
+	s.mu.RLock()
+	h := s.handlers[method]
+	s.mu.RUnlock()
+	if h == nil {
+		return nil, errors.New("没有这个方法: " + method)
+	}
+	return call(h, params)
+}
+
 // call 兜住处理器的 panic,别让一个坏请求把服务带走。
 func call(h Handler, params json.RawMessage) (res any, err error) {
 	defer func() {
