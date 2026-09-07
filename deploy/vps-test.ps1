@@ -28,7 +28,12 @@ function Wait-Status($want, $seconds) {
   return (& $cli status 2>&1 | Out-String)
 }
 function Public-IP4() {
-  try { return (Invoke-RestMethod -Uri "https://api.ipify.org?format=json" -TimeoutSec 15).ip } catch { return "" }
+  ipconfig /flushdns | Out-Null
+  try { return (& curl.exe -s -4 --max-time 15 "https://api.ipify.org") } catch { return "" }
+}
+function Public-IP6() {
+  ipconfig /flushdns | Out-Null
+  try { return (& curl.exe -s --max-time 10 "https://api6.ipify.org") } catch { return "" }
 }
 
 Write-Host "== 0. 环境" -ForegroundColor Cyan
@@ -53,8 +58,11 @@ Check "进入 connected" ($st -match "状态:\s+connected") ($st.Trim())
 Write-Host "== 3. 网络栈" -ForegroundColor Cyan
 $tun = Get-NetAdapter | Where-Object { $_.Name -like "*godusevpn*" -or $_.InterfaceDescription -like "*Wintun*" }
 Check "TUN 网卡存在" ($null -ne $tun) ($(if ($tun) { $tun.Name + " " + $tun.Status } else { "" }))
-$route = Get-NetRoute -AddressFamily IPv4 -DestinationPrefix "0.0.0.0/0" -ErrorAction SilentlyContinue | Sort-Object RouteMetric | Select-Object -First 1
-Check "默认路由指向 TUN" ($tun -and $route -and $route.InterfaceIndex -eq $tun.ifIndex) ($(if ($route) { "ifIndex=" + $route.InterfaceIndex + " metric=" + $route.RouteMetric } else { "no route" }))
+# auto_route 不改 0.0.0.0/0,而是加一组更精确的分段路由,所以要问"到某个公网地址走哪张网卡"
+$rt = Find-NetRoute -RemoteIPAddress 104.26.12.205 -ErrorAction SilentlyContinue | Select-Object -Last 1
+Check "公网地址的路由走 TUN" ($tun -and $rt -and $rt.InterfaceIndex -eq $tun.ifIndex) ($(if ($rt) { "ifIndex=" + $rt.InterfaceIndex + " alias=" + $rt.InterfaceAlias } else { "no route" }))
+$tunRoutes = @(Get-NetRoute -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $tun -and $_.InterfaceIndex -eq $tun.ifIndex })
+Check "TUN 上有分段路由" ($tunRoutes.Count -gt 5) ("count=" + $tunRoutes.Count)
 $dns = Resolve-DnsName -Name "www.google.com" -Type A -ErrorAction SilentlyContinue | Where-Object { $_.Type -eq "A" } | Select-Object -First 1
 Check "代理域名得到 fake-ip(198.18/15)" ($dns -and $dns.IPAddress -like "198.1[89].*") ($(if ($dns) { $dns.IPAddress } else { "no answer" }))
 $cn = Resolve-DnsName -Name "www.baidu.com" -Type A -ErrorAction SilentlyContinue | Where-Object { $_.Type -eq "A" } | Select-Object -First 1
@@ -67,9 +75,8 @@ Check "AAAA 为空(禁 IPv6)" ($null -eq $aaaa) ($(if ($aaaa) { ($aaaa | Select-
 Write-Host "== 4. 出口" -ForegroundColor Cyan
 $ipProxy = Public-IP4
 Check "规则模式出口 IP 变了" ($ipProxy -and $ipProxy -ne $ipBefore) "before=$ipBefore now=$ipProxy"
-$v6 = ""
-try { $v6 = (Invoke-RestMethod -Uri "https://api6.ipify.org?format=json" -TimeoutSec 10).ip } catch { $v6 = "" }
-Check "IPv6 出网被阻断" ([string]::IsNullOrEmpty($v6)) "v6=$v6"
+$v6 = Public-IP6
+Check "IPv6 出网被阻断(含经代理的远端解析)" ([string]::IsNullOrEmpty($v6)) "v6=$v6"
 $lat = & $cli test 2>&1 | Out-String
 Check "延迟测试" ($lat -match "\d+ ms") ($lat.Trim())
 
@@ -98,6 +105,12 @@ if (-not $KeepInstalled) {
   Check "服务已卸载" ((& $svc status) -eq "not-installed") (& $svc status)
 }
 Write-Host ""
-if ($fail -eq 0) { Write-Host "全部通过" -ForegroundColor Green } else { Write-Host "$fail 项失败" -ForegroundColor Red }
+if ($fail -eq 0) { Write-Host "全部通过" -ForegroundColor Green } else {
+  Write-Host "$fail 项失败" -ForegroundColor Red
+  Write-Host "== 内核日志(最近 60 行)" -ForegroundColor Cyan
+  & $cli logs 60 core
+  Write-Host "== 服务日志(最近 30 行)" -ForegroundColor Cyan
+  & $cli logs 30
+}
 Write-Host "日志: $env:ProgramData\godusevpn\logs\"
 exit $fail
