@@ -7,6 +7,10 @@ param(
   [switch]$KeepInstalled
 )
 $ErrorActionPreference = "Continue"
+# Go 程序输出 UTF-8;PowerShell 5.1 默认按本地代码页解码会把中文弄乱,这里统一成 UTF-8
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+$OutputEncoding = [System.Text.Encoding]::UTF8
+chcp 65001 | Out-Null
 $svc = Join-Path $Bin "godusevpn-svc.exe"
 $cli = Join-Path $Bin "godusevpn-cli.exe"
 $fail = 0
