@@ -57,6 +57,7 @@ jobs:
           curl -fsSL -o installer/deps/MicrosoftEdgeWebview2Setup.exe "https://go.microsoft.com/fwlink/p/?LinkId=2124703"
           curl -fsSL -o installer/deps/MicrosoftEdgeWebView2RuntimeInstallerX64.exe "https://go.microsoft.com/fwlink/?linkid=2124701"
           ls -la installer/deps
+          curl -fsSL -o installer/ChineseSimplified.isl "https://raw.githubusercontent.com/jrsoftware/issrc/main/Files/Languages/Unofficial/ChineseSimplified.isl"
 
       - name: Build installers (Inno Setup)
         shell: pwsh
