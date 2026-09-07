@@ -1,4 +1,4 @@
-﻿# 佛跳墙 M0 真机验收脚本(在 Windows VPS 上以管理员 PowerShell 运行)
+﻿# 佛跳墙 真机验收脚本(在 Windows VPS 上以管理员 PowerShell 运行)
 #   .\vps-test.ps1 -Sub "https://面板/sub/用户名" [-Bin "C:\godusevpn"]
 # 步骤:装服务 → 设订阅 → 连接 → 检查 TUN 网卡、默认路由、fake-ip、DNS 劫持、出口 IP、IPv6 阻断、三态模式 → 断开 → 检查清理。
 param(
@@ -41,6 +41,9 @@ $osv = (Get-CimInstance Win32_OperatingSystem)
 Write-Host ("{0} {1} {2}" -f $osv.Caption, $osv.Version, $env:PROCESSOR_ARCHITECTURE)
 $ipBefore = Public-IP4
 Write-Host "连接前公网 IPv4: $ipBefore"
+# 先记下一个境外域名的真实 IP,连上后直接连这个 IP(不经 fake-ip)验证也走代理
+$realIp = (Resolve-DnsName -Name "api.ipify.org" -Type A -ErrorAction SilentlyContinue | Where-Object { $_.Type -eq "A" } | Select-Object -First 1).IPAddress
+Write-Host "api.ipify.org 真实 IP: $realIp"
 
 Write-Host "== 1. 安装服务" -ForegroundColor Cyan
 & $svc uninstall 2>$null | Out-Null
@@ -77,6 +80,9 @@ $ipProxy = Public-IP4
 Check "规则模式出口 IP 变了" ($ipProxy -and $ipProxy -ne $ipBefore) "before=$ipBefore now=$ipProxy"
 $v6 = Public-IP6
 Check "IPv6 出网被阻断(含经代理的远端解析)" ([string]::IsNullOrEmpty($v6)) "v6=$v6"
+$viaReal = ""
+if ($realIp) { try { $viaReal = (& curl.exe -s -4 --max-time 15 --resolve "api.ipify.org:443:$realIp" "https://api.ipify.org") } catch { $viaReal = "" } }
+Check "直连真实 IP(绕过 fake-ip)也走代理" ($viaReal -and $viaReal -ne $ipBefore) "real=$realIp got=$viaReal"
 $lat = & $cli test 2>&1 | Out-String
 Check "延迟测试" ($lat -match "\d+ ms") ($lat.Trim())
 
