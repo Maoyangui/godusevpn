@@ -1,4 +1,4 @@
-# 佛跳墙 M0 真机验收脚本(在 Windows VPS 上以管理员 PowerShell 运行)
+﻿# 佛跳墙 M0 真机验收脚本(在 Windows VPS 上以管理员 PowerShell 运行)
 #   .\vps-test.ps1 -Sub "https://面板/sub/用户名" [-Bin "C:\godusevpn"]
 # 步骤:装服务 → 设订阅 → 连接 → 检查 TUN 网卡、默认路由、fake-ip、DNS 劫持、出口 IP、IPv6 阻断、三态模式 → 断开 → 检查清理。
 param(
