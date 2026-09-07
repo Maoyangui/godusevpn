@@ -158,7 +158,12 @@ func Build(in Input) ([]byte, error) {
 		obj("port", 53, "action", "hijack-dns"), // 不走系统解析、自己发 53 的程序也收进来,不泄漏
 	}
 	if !s.IPv6 {
-		rules = append(rules, obj("ip_version", 6, "action", "reject")) // 直接写 IPv6 字面量的连接也堵住
+		// 先按 ipv4_only 把目标域名解析成 IPv4(fake-ip 只是给客户端的占位,这里查的是真实地址),
+		// 之后不管直连还是经代理,拿到的都是 IPv4;否则代理服务器会自己解析出 AAAA 走 IPv6 出去。
+		// 解析走 DNS 规则:国内域名本地 DoH、其余远程 DoH(经代理),路由器查询不会返回 fake-ip。
+		rules = append(rules,
+			obj("action", "resolve", "strategy", "ipv4_only"),
+			obj("ip_version", 6, "action", "reject")) // 直接写 IPv6 字面量的连接也堵住
 	}
 	rules = append(rules,
 		obj("ip_is_private", true, "outbound", "direct"),
