@@ -81,10 +81,10 @@ class GodVpnService : VpnService() {
             for (r in spec.optJSONArray("inet4Routes").strings()) route(b, r)
             for (r in spec.optJSONArray("inet6Routes").strings()) route(b, r)
         }
-        var appRules = false
-        for (p in spec.optJSONArray("includePackages").strings()) runCatching { b.addAllowedApplication(p); appRules = true }
-        for (p in spec.optJSONArray("excludePackages").strings()) runCatching { b.addDisallowedApplication(p); appRules = true }
-        if (!appRules) runCatching { b.addDisallowedApplication(packageName) } // 自己的流量(订阅刷新直连、更新下载)不进隧道再绕回内核
+        // 注意:不能把自己排除在 VPN 之外。内核的出站套接字都经 protect 绕过隧道;而 TCP 走的系统协议栈要把回包送回 TUN,
+        // 靠的是本应用的套接字用 VPN 的路由表 —— 排除了自己,回包就从 WiFi 漏走,表现为 DNS 通、TCP 全断(真机实测)。
+        for (p in spec.optJSONArray("includePackages").strings()) runCatching { b.addAllowedApplication(p) }
+        for (p in spec.optJSONArray("excludePackages").strings()) runCatching { b.addDisallowedApplication(p) }
         if (spec.optBoolean("httpProxyEnabled") && Build.VERSION.SDK_INT >= 29) {
             runCatching { b.setHttpProxy(android.net.ProxyInfo.buildDirectProxy(spec.optString("httpProxyServer"), spec.optInt("httpProxyServerPort"))) }
         }

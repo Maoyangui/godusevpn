@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"slices"
 	"strings"
 )
 
@@ -283,4 +284,18 @@ func (s Settings) Apply(key, value string) (Settings, error) {
 		return s, err
 	}
 	return out, nil
+}
+
+// Clone 深拷贝:切片字段都换成新的底层数组,拿到副本的人随便改也不会影响原设置。
+func (s Settings) Clone() Settings {
+	c := s
+	c.Profiles = slices.Clone(s.Profiles)
+	c.LANSubnets = slices.Clone(s.LANSubnets)
+	c.Devices = slices.Clone(s.Devices)
+	c.BypassApps = slices.Clone(s.BypassApps)
+	c.RuleGroups = slices.Clone(s.RuleGroups)
+	for i := range c.RuleGroups {
+		c.RuleGroups[i].Rules = slices.Clone(c.RuleGroups[i].Rules)
+	}
+	return c
 }

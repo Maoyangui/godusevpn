@@ -122,3 +122,17 @@ func TestBypassAppsNormalizedAndValidated(t *testing.T) {
 		t.Fatal("带路径的进程名应被拒绝")
 	}
 }
+
+func TestCloneIsDeep(t *testing.T) {
+	s := Default()
+	s.Profiles = []Profile{{ID: "a", Name: "a", URL: "https://x/sub/token"}}
+	s.BypassApps = []string{"steam.exe"}
+	s.RuleGroups = []RuleGroup{{ID: "g", Name: "g", Enabled: true, Outbound: OutDirect, Rules: []Rule{{Type: RuleDomain, Value: "a.com"}}}}
+	c := s.Clone()
+	c.Profiles[0].URL = "https://x/sub/***"
+	c.BypassApps[0] = "x"
+	c.RuleGroups[0].Rules[0].Value = "b.com"
+	if s.Profiles[0].URL != "https://x/sub/token" || s.BypassApps[0] != "steam.exe" || s.RuleGroups[0].Rules[0].Value != "a.com" {
+		t.Fatalf("Clone 改副本不能影响原设置: %+v", s)
+	}
+}

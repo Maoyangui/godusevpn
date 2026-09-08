@@ -30,6 +30,7 @@ const (
 const (
 	CodeProfileMissing = "E_PROFILE_MISSING"
 	CodeProfileNet     = "E_PROFILE_NET"
+	CodeProfileURL     = "E_PROFILE_URL" // 订阅链接本身不完整(比如被脱敏成 /sub/***),要用户重新填
 	CodeProfileAuth    = "E_PROFILE_AUTH"
 	CodeProfileParse   = "E_PROFILE_PARSE"
 	CodeConfig         = "E_CONFIG"

@@ -235,9 +235,18 @@ body.tv .srow { padding: 14px 0; } body.tv .srow input[type=number], body.tv .sr
 body.tv .card h3 { font-size: 13px; } body.tv .page-title { font-size: 24px; }
 body.tv .drawer-items a:focus { background: rgba(47, 139, 255, .12); }
 body.tv .item:focus { outline-offset: -3px; background: rgba(47, 139, 255, .12); } /* 列表 overflow: hidden 会裁掉外描边,描在内侧 */
-/* 没有窗口按钮的壳(浏览器面板 / Android):右侧补一个与左侧按钮等宽的占位,标题才真正居中 */
-.app.web .topbar::after { content: ""; width: 36px; flex: none; }
-body.android .icon-btn { width: 40px; height: 40px; } body.android .icon-btn svg { width: 24px; height: 24px; stroke-width: 2.1; }
-body.android .topbar { padding: 0 10px; } .app.android .topbar::after { width: 40px; }
-body.tv .app .topbar::after { width: 44px; }
+/* 没有窗口按钮的壳(浏览器面板 / Android):标题独立居中,不受左右按钮有无影响(引导页没有菜单键也不会偏) */
+.app.web .topbar-title { position: absolute; left: 0; right: 0; padding: 0 60px; pointer-events: none; }
+body.android .icon-btn { width: 46px; height: 46px; } body.android .icon-btn svg { width: 28px; height: 28px; stroke-width: 2.2; }
+body.android .topbar { height: 58px; padding: 0 8px; }
+body.android .topbar-title { font-size: 16px; }
+/* 抽屉:手机上更宽,条目更高更大,顶部品牌区多留一点余量 */
+body.android .drawer { width: 82%; max-width: 340px; padding: 26px 14px 16px; }
+body.android .drawer-brand { padding: 10px 12px 22px; gap: 14px; }
+body.android .drawer-brand svg { width: 42px; height: 42px; }
+body.android .drawer-brand b { font-size: 18px; }
+body.android .drawer-items a { padding: 15px 14px; font-size: 16px; border-radius: 14px; margin-bottom: 4px; }
+body.android .drawer-items a svg { width: 22px; height: 22px; }
+body.android .drawer-foot { padding: 12px 12px 0; font-size: 13px; }
+
 body.android .icon-btn.xs { width: 36px; height: 36px; border-radius: 10px; } body.android .icon-btn.xs svg { width: 20px; height: 20px; }

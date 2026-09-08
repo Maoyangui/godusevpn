@@ -178,7 +178,7 @@ func Fetch(ctx context.Context, rawURL string, client *http.Client) (*Profile, e
 	}
 	switch {
 	case resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusGone:
-		return nil, &FetchError{Status: resp.StatusCode, Msg: "订阅无效、已用完或已到期"}
+		return nil, &FetchError{Status: resp.StatusCode, Msg: fmt.Sprintf("面板不认识这条订阅链接,或账号已停用 / 用完 / 到期(HTTP %d,%s)", resp.StatusCode, u.Host)}
 	case resp.StatusCode == http.StatusTooManyRequests:
 		return nil, &FetchError{Status: resp.StatusCode, Msg: "请求太频繁,稍后再试"}
 	case resp.StatusCode != http.StatusOK:

@@ -109,10 +109,25 @@ func NewWithOptions(o Options) (*Daemon, error) {
 func (d *Daemon) logf(format string, a ...any) { d.log.Printf("INFO", format, a...) }
 
 // loadProfileCaches 读每条订阅的缓存;schema 1 留下的单文件缓存归到当前订阅名下。
+// 顺带自愈:0.6.0-a2 及以前导出诊断包会把设置里的订阅链接改成脱敏形式(.../sub/***)并可能存进磁盘,
+// 之后刷新一律 404。缓存里存着拉取成功时的原始链接,能对上就把设置改回去。
 func (d *Daemon) loadProfileCaches() {
-	for _, p := range d.settings.Profiles {
-		if c, err := profile.Load(paths.ProfileCache(p.ID)); err == nil {
-			d.profiles[p.ID] = c
+	var healed bool
+	for i, p := range d.settings.Profiles {
+		c, err := profile.Load(paths.ProfileCache(p.ID))
+		if err != nil {
+			continue
+		}
+		d.profiles[p.ID] = c
+		if strings.Contains(p.URL, "***") && c.URL != "" && !strings.Contains(c.URL, "***") {
+			d.settings.Profiles[i].URL = c.URL
+			healed = true
+			d.logf("订阅「%s」的链接曾被脱敏写坏,已按缓存恢复", p.Name)
+		}
+	}
+	if healed {
+		if err := d.settings.Save(paths.Settings()); err != nil {
+			d.logf("恢复订阅链接后写设置失败: %v", err)
 		}
 	}
 	if legacy, err := profile.Load(paths.LegacyProfileCache()); err == nil {
@@ -122,6 +137,15 @@ func (d *Daemon) loadProfileCaches() {
 		}
 		_ = os.Remove(paths.LegacyProfileCache())
 	}
+}
+
+// Close 放掉守护进程占着的文件(两份日志)。Run 结束之后调;进程要退出时不调也行,系统会收。
+func (d *Daemon) Close() error {
+	err := d.log.Close()
+	if err2 := d.coreLog.Close(); err == nil {
+		err = err2
+	}
+	return err
 }
 
 // Run 起控制接口,按上次状态自动连接,定时刷新订阅;ctx 结束时全部停掉。
@@ -183,10 +207,12 @@ func (d *Daemon) Methods() map[string]bool { return d.server.Methods() }
 // Logf 写服务日志(外层组件用)。
 func (d *Daemon) Logf(format string, a ...any) { d.logf(format, a...) }
 
+// getSettings 返回设置的深拷贝:切片字段(订阅、规则组、设备…)不能和运行中的设置共享底层数组,
+// 否则拿到副本的人一改(比如诊断包把订阅链接脱敏成 /sub/***)就把真实设置改坏了。
 func (d *Daemon) getSettings() settings.Settings {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	return d.settings
+	return d.settings.Clone()
 }
 
 func (d *Daemon) setSettings(s settings.Settings) error {
@@ -261,7 +287,8 @@ func (d *Daemon) fetchProfile(ctx context.Context, url string) (*profile.Profile
 			}
 			return p, nil
 		}
-		if state.CodeOf(err) == state.CodeProfileAuth || state.CodeOf(err) == state.CodeProfileParse {
+		// 内容解析不了换路径也没用;"订阅无效"(404)经代理拿到的不算数——中间可能是别的服务器在应答,直连确认过才算真的失效
+		if state.CodeOf(err) == state.CodeProfileParse || (state.CodeOf(err) == state.CodeProfileAuth && tag == "direct") {
 			return nil, err
 		}
 		d.logf("订阅经 %s 拉取失败: %v", tag, err)
@@ -306,6 +333,11 @@ func (d *Daemon) refreshProfile(ctx context.Context, id string) (changed bool, e
 	d.mu.Unlock()
 	if url == "" {
 		return false, state.Errf(state.CodeProfileMissing, "没有这条订阅")
+	}
+	if strings.Contains(url, "***") { // 老版本导出诊断包会把内存里的链接脱敏成 /sub/***,存下来就再也拉不到了
+		err := state.Errf(state.CodeProfileURL, "订阅链接不完整(含 ***),请到订阅管理重新填写这条链接")
+		d.noteFetchErr(id, err)
+		return false, err
 	}
 	np, err := d.fetchProfile(ctx, url)
 	if err != nil {
