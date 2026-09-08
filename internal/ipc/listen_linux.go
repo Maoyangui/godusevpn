@@ -5,6 +5,7 @@ package ipc
 import (
 	"context"
 	"errors"
+	"io/fs"
 	"net"
 	"os"
 	"path/filepath"
@@ -43,3 +44,6 @@ func dial(ctx context.Context) (net.Conn, error) {
 }
 
 func listenerClosed(err error) bool { return errors.Is(err, net.ErrClosed) }
+
+// permissionDenied socket 在但连不上:多半是没用 root 跑命令行。
+func permissionDenied(err error) bool { return errors.Is(err, fs.ErrPermission) }

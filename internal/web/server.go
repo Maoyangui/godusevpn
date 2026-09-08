@@ -1,5 +1,5 @@
 // Package web Linux 守护进程内置的面板:把 web/dist 里的竖版页面从 HTTP 端出去,
-// 页面里的 window.go.main.App.* 由 dist/api.js 映射成 POST /api/<方法>,事件(state / traffic / update-progress)走 SSE。
+// 页面里的 window.go.main.App.* 由 dist/api.js 映射成 POST /api/<方法>,事件走 SSE;方法实现在 internal/uiapi。
 // 面板绑定非回环地址时要密码(设置里的 webPassword),cookie 会话;命令行走 Unix socket 不需要密码。
 package web
 
@@ -10,135 +10,104 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io/fs"
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/Maoyangui/godusevpn/internal/buildinfo"
-	"github.com/Maoyangui/godusevpn/internal/clash"
-	"github.com/Maoyangui/godusevpn/internal/ipc"
 	"github.com/Maoyangui/godusevpn/internal/paths"
-	"github.com/Maoyangui/godusevpn/internal/settings"
-	"github.com/Maoyangui/godusevpn/internal/update"
+	"github.com/Maoyangui/godusevpn/internal/uiapi"
 	"github.com/Maoyangui/godusevpn/web"
 )
 
-// Backend 守护进程给面板的接口:进程内直接调控制口方法。
-type Backend interface {
-	Dispatch(method string, params json.RawMessage) (any, error)
-	Methods() map[string]bool
-	Logf(format string, a ...any)
-}
-
-type event struct {
-	name string
-	data any
-}
-
-type prefs struct {
-	Lang  string `json:"lang"`
-	Theme string `json:"theme"`
-}
-
 type Server struct {
-	b   Backend
-	mu  sync.Mutex
-	ctx context.Context
+	ui   *uiapi.Service
+	logf func(string, ...any)
+	mu   sync.Mutex
 
 	sessions map[string]time.Time   // 会话 → 到期
 	fails    map[string][]time.Time // 登录失败时间(按来源 IP)
-	subs     map[chan event]struct{}
-
-	up, down    int64
-	trafficStop context.CancelFunc
-	clashKey    string
-
-	prefs     prefs
-	update    *update.Release
-	lastCheck time.Time
-	updating  bool
-	lastState string
 }
 
-func New(b Backend) *Server {
-	s := &Server{b: b, sessions: map[string]time.Time{}, fails: map[string][]time.Time{}, subs: map[chan event]struct{}{}}
-	if raw, err := os.ReadFile(paths.UIPrefs()); err == nil {
-		_ = json.Unmarshal(raw, &s.prefs)
+func New(ui *uiapi.Service, logf func(string, ...any)) *Server {
+	if logf == nil {
+		logf = func(string, ...any) {}
 	}
-	if s.prefs.Lang == "" {
-		s.prefs.Lang = "zh" // 页面把"语言变了"当作要整页重绘,空值不能给出去
-	}
-	if s.prefs.Theme == "" {
-		s.prefs.Theme = "system"
-	}
-	return s
+	return &Server{ui: ui, logf: logf, sessions: map[string]time.Time{}, fails: map[string][]time.Time{}}
 }
 
-// Serve 在 listen 上跑到 ctx 结束。同时跑状态推送与速度流。
+// Serve 跑到 ctx 结束;设置里的监听地址改了(比如从只听本机改成 0.0.0.0)就换地址重开,不用重启服务。
 func (s *Server) Serve(ctx context.Context, listen string) error {
-	s.ctx = ctx
+	go s.ui.Run(ctx)
+	for ctx.Err() == nil {
+		if listen == "" {
+			s.logf("面板未启用(设置 webListen 为空)")
+		} else if err := s.serveOnce(ctx, listen); err != nil {
+			s.logf("面板监听 %s 失败: %v(10 秒后重试)", listen, err)
+			select {
+			case <-ctx.Done():
+				return nil
+			case <-time.After(10 * time.Second):
+			}
+		}
+		for ctx.Err() == nil { // 等地址变化
+			cur := strings.TrimSpace(s.ui.Settings().WebListen)
+			if cur != listen {
+				listen = cur
+				break
+			}
+			select {
+			case <-ctx.Done():
+				return nil
+			case <-time.After(3 * time.Second):
+			}
+		}
+	}
+	return nil
+}
+
+// serveOnce 在 listen 上服务,直到 ctx 结束或设置里的地址变了才返回。
+func (s *Server) serveOnce(ctx context.Context, listen string) error {
 	ln, err := net.Listen("tcp", listen)
 	if err != nil {
-		return fmt.Errorf("面板监听 %s: %w", listen, err)
+		return err
 	}
 	srv := &http.Server{Handler: s.Handler(), ReadHeaderTimeout: 10 * time.Second}
-	go s.loop(ctx)
+	stop := make(chan struct{})
 	go func() {
-		<-ctx.Done()
-		sctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		defer cancel()
-		_ = srv.Shutdown(sctx)
+		defer func() {
+			sctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			_ = srv.Shutdown(sctx)
+		}()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-stop:
+				return
+			case <-time.After(3 * time.Second):
+				if strings.TrimSpace(s.ui.Settings().WebListen) != listen {
+					s.logf("面板监听地址已改,重新监听")
+					return
+				}
+			}
+		}
 	}()
-	s.b.Logf("面板监听 http://%s/", listen)
-	if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+	s.logf("面板监听 http://%s/", listen)
+	err = srv.Serve(ln)
+	close(stop)
+	if err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return err
 	}
 	return nil
 }
 
-// loop 每 1.5 秒推一次状态(有人订阅时),并按内核状态开关速度流;连上网后顺手查一次更新。
-func (s *Server) loop(ctx context.Context) {
-	t := time.NewTicker(1500 * time.Millisecond)
-	defer t.Stop()
-	go s.updateLoop(ctx)
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-t.C:
-			st := s.state()
-			s.manageTraffic(ctx, st)
-			s.mu.Lock()
-			justConnected := st.View.State.Status == "connected" && s.lastState != "connected"
-			s.lastState = string(st.View.State.Status)
-			n := len(s.subs)
-			s.mu.Unlock()
-			if n > 0 {
-				s.broadcast("state", st)
-			}
-			if justConnected {
-				go s.pokeUpdate(false)
-			}
-		}
-	}
-}
-
-// ---- 事件 ----
-
-func (s *Server) broadcast(name string, data any) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for ch := range s.subs {
-		select {
-		case ch <- event{name, data}:
-		default: // 慢客户端丢一条
-		}
-	}
-}
+// ---- 事件(SSE) ----
 
 func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	fl, ok := w.(http.Flusher)
@@ -146,32 +115,25 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "no streaming", 500)
 		return
 	}
-	ch := make(chan event, 32)
-	s.mu.Lock()
-	s.subs[ch] = struct{}{}
-	s.mu.Unlock()
-	defer func() {
-		s.mu.Lock()
-		delete(s.subs, ch)
-		s.mu.Unlock()
-	}()
+	ch, cancel := s.ui.Subscribe()
+	defer cancel()
 	h := w.Header()
 	h.Set("Content-Type", "text/event-stream")
 	h.Set("Cache-Control", "no-cache")
 	h.Set("X-Accel-Buffering", "no")
 	w.WriteHeader(200)
-	write := func(e event) bool {
-		b, err := json.Marshal(e.data)
+	write := func(e uiapi.Event) bool {
+		b, err := json.Marshal(e.Data)
 		if err != nil {
 			return true
 		}
-		if _, err := fmt.Fprintf(w, "event: %s\ndata: %s\n\n", e.name, b); err != nil {
+		if _, err := fmt.Fprintf(w, "event: %s\ndata: %s\n\n", e.Name, b); err != nil {
 			return false
 		}
 		fl.Flush()
 		return true
 	}
-	write(event{"state", s.state()}) // 一连上先给一份
+	write(uiapi.Event{Name: "state", Data: s.ui.State()}) // 一连上先给一份
 	hb := time.NewTicker(15 * time.Second)
 	defer hb.Stop()
 	for {
@@ -191,105 +153,9 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// ---- 速度流(同 Windows 客户端的做法) ----
-
-func (s *Server) manageTraffic(ctx context.Context, st uiState) {
-	running := st.View.State.Status == "connected" || st.View.State.Status == "degraded"
-	if !running {
-		s.mu.Lock()
-		stop := s.trafficStop
-		s.trafficStop, s.clashKey, s.up, s.down = nil, "", 0, 0
-		s.mu.Unlock()
-		if stop != nil {
-			stop()
-		}
-		return
-	}
-	info, err := s.clashInfo()
-	if err != nil || !info.Running {
-		return
-	}
-	key := fmt.Sprintf("%d:%s", info.Port, info.Secret)
-	s.mu.Lock()
-	if s.clashKey == key && s.trafficStop != nil {
-		s.mu.Unlock()
-		return
-	}
-	if s.trafficStop != nil {
-		s.trafficStop()
-	}
-	sctx, stop := context.WithCancel(ctx)
-	s.trafficStop, s.clashKey = stop, key
-	s.mu.Unlock()
-	go func() {
-		c := clash.New(info.Port, info.Secret)
-		for sctx.Err() == nil {
-			_ = c.Traffic(sctx, func(up, down int64) {
-				s.mu.Lock()
-				s.up, s.down = up, down
-				n := len(s.subs)
-				s.mu.Unlock()
-				if n > 0 {
-					s.broadcast("traffic", map[string]int64{"up": up, "down": down})
-				}
-			})
-			if sctx.Err() == nil {
-				time.Sleep(2 * time.Second)
-			}
-		}
-	}()
-}
-
-func (s *Server) clashInfo() (ipc.ClashInfo, error) {
-	var info ipc.ClashInfo
-	err := s.dispatch(ipc.MGetClashInfo, nil, &info)
-	return info, err
-}
-
-func (s *Server) clashClient() (*clash.Client, error) {
-	info, err := s.clashInfo()
-	if err != nil {
-		return nil, err
-	}
-	if !info.Running {
-		return nil, errors.New("内核未运行")
-	}
-	return clash.New(info.Port, info.Secret), nil
-}
-
-// dispatch 调守护进程方法并把结果解到 out。
-func (s *Server) dispatch(method string, params any, out any) error {
-	var raw json.RawMessage
-	if params != nil {
-		b, err := json.Marshal(params)
-		if err != nil {
-			return err
-		}
-		raw = b
-	}
-	res, err := s.b.Dispatch(method, raw)
-	if err != nil {
-		return err
-	}
-	if out == nil {
-		return nil
-	}
-	b, err := json.Marshal(res)
-	if err != nil {
-		return err
-	}
-	return json.Unmarshal(b, out)
-}
-
-func (s *Server) settings() settings.Settings {
-	var st settings.Settings
-	_ = s.dispatch(ipc.MGetSettings, nil, &st)
-	return st
-}
-
 // ---- 会话 ----
 
-func (s *Server) needAuth() bool { return s.settings().WebPassword != "" }
+func (s *Server) needAuth() bool { return s.ui.Settings().WebPassword != "" }
 
 func (s *Server) authed(r *http.Request) bool {
 	c, err := r.Cookie("gvsid")
@@ -337,7 +203,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.mu.Unlock()
-	if !s.settings().CheckWebPassword(in.Password) {
+	if !s.ui.Settings().CheckWebPassword(in.Password) {
 		s.mu.Lock()
 		s.fails[ip] = append(s.fails[ip], time.Now())
 		s.mu.Unlock()
@@ -407,10 +273,15 @@ func (s *Server) Handler() http.Handler {
 		case r.Method == http.MethodPost:
 			var args []json.RawMessage
 			_ = json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<20)).Decode(&args)
-			res, err := s.api(name, args)
+			res, err := s.ui.Call(name, args)
 			if err != nil {
 				writeJSON(w, 200, map[string]any{"error": err.Error()})
 				return
+			}
+			if name == "ExportDiag" { // 页面在浏览器里打开这个地址即下载
+				if p, ok := res.(string); ok {
+					res = "/api/diag/" + filepath.Base(p)
+				}
 			}
 			writeJSON(w, 200, map[string]any{"result": res})
 		default:
@@ -436,7 +307,7 @@ func (s *Server) handleDiagDownload(w http.ResponseWriter, r *http.Request, name
 		http.NotFound(w, r)
 		return
 	}
-	p := paths.Diag() + string(os.PathSeparator) + name
+	p := filepath.Join(paths.Diag(), name)
 	if _, err := os.Stat(p); err != nil {
 		http.NotFound(w, r)
 		return
@@ -444,6 +315,3 @@ func (s *Server) handleDiagDownload(w http.ResponseWriter, r *http.Request, name
 	w.Header().Set("Content-Disposition", "attachment; filename="+name)
 	http.ServeFile(w, r, p)
 }
-
-// 静态资源里没有的路径交给 index(单页);目前页面不用路由,留着。
-var _ fs.FS = web.Dist()

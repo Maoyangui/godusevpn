@@ -26,3 +26,6 @@ func dial(ctx context.Context) (net.Conn, error) {
 }
 
 func listenerClosed(err error) bool { return errors.Is(err, winio.ErrPipeListenerClosed) }
+
+// 管道的 ACL 已放开给本机登录用户,连不上就是服务没跑。
+func permissionDenied(error) bool { return false }

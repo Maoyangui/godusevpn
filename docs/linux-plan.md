@@ -25,7 +25,7 @@
 2. **网关-TUN(gateway-tun)**:TUN + auto_route + auto_redirect(sing-box 自己用 nftables 把转发流量导进 TUN),LAN 设备把路由器当网关即被代理。OpenWrt / iStoreOS 默认。
 3. **网关-TProxy(gateway-tproxy)**:tproxy + mixed 入站,iptables / nftables 做 REDIRECT(TCP)+ TPROXY(UDP)+ 策略路由,不建 TUN。梅林默认,也给老内核、没 nftables 的系统兜底。
 
-LAN 侧 DNS:网关模式下把 LAN 发往路由器 53 端口的查询 DNAT 到一个经 TUN 的假地址(如 198.18.0.2:53),由内核的 hijack-dns 接管(TProxy 模式则 REDIRECT 到内核 DNS 端口);dnsmasq 只保留 DHCP。IPv6 沿用 Windows 决策:默认全链路禁用,网关模式下再加 LAN 侧 AAAA 屏蔽与 v6 转发拒绝,避免设备走 v6 绕过。
+LAN 侧 DNS:网关-TUN 模式下 sing-box 的 auto_redirect 自己用 nftables 把 LAN 发往路由器 53 端口的查询 DNAT 到 TUN 地址并接管(实测:我们再自己加 DNAT 反而会抢在它前面把查询改坏,所以不加);TProxy 模式(L2)才需要我们自己 REDIRECT 到内核 DNS 端口;dnsmasq 只保留 DHCP。IPv6 沿用 Windows 决策:默认全链路禁用,网关模式下再加 LAN 侧 AAAA 屏蔽与 v6 转发拒绝,避免设备走 v6 绕过。
 
 ## 3. 架构
 

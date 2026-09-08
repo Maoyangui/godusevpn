@@ -142,14 +142,20 @@ func call(h Handler, params json.RawMessage) (res any, err error) {
 	return h(params)
 }
 
-// Call 客户端:连上控制口、发一条、收一条。服务没起来时返回 ErrNoService。
-var ErrNoService = errors.New("服务未运行")
+// Call 客户端:连上控制口、发一条、收一条。服务没起来时返回 ErrNoService;没权限连(Linux 上非 root)返回 ErrNoPermission。
+var (
+	ErrNoService    = errors.New("服务未运行")
+	ErrNoPermission = errors.New("没有权限连接控制口(需要 root / sudo)")
+)
 
 func Call(ctx context.Context, method string, params any, result any) error {
 	dctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
 	conn, err := dial(dctx)
 	if err != nil {
+		if permissionDenied(err) {
+			return ErrNoPermission
+		}
 		return ErrNoService
 	}
 	defer conn.Close()

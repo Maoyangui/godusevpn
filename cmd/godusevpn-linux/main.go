@@ -17,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Maoyangui/godusevpn/internal/autostart"
 	"github.com/Maoyangui/godusevpn/internal/buildinfo"
 	"github.com/Maoyangui/godusevpn/internal/cli"
 	"github.com/Maoyangui/godusevpn/internal/daemon"
@@ -24,6 +25,7 @@ import (
 	"github.com/Maoyangui/godusevpn/internal/paths"
 	"github.com/Maoyangui/godusevpn/internal/settings"
 	"github.com/Maoyangui/godusevpn/internal/svc"
+	"github.com/Maoyangui/godusevpn/internal/uiapi"
 	"github.com/Maoyangui/godusevpn/internal/web"
 )
 
@@ -118,7 +120,8 @@ func runDaemon(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	ws := web.New(d)
+	ui := uiapi.New(d, uiapi.Options{Platform: "linux", PrefsPath: paths.UIPrefs(), Autostart: autostart.Enabled, SetAutostart: autostart.Set})
+	ws := web.New(ui, d.Logf)
 	go func() {
 		// 等控制口起来再读设置里的监听地址
 		time.Sleep(300 * time.Millisecond)

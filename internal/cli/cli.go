@@ -245,6 +245,8 @@ func Main(args []string) int {
 	if err != nil {
 		if errors.Is(err, ipc.ErrNoService) {
 			fmt.Fprintln(os.Stderr, InstallHint)
+		} else if errors.Is(err, ipc.ErrNoPermission) {
+			fmt.Fprintln(os.Stderr, "没有权限连接服务,请用 sudo 运行")
 		} else {
 			fmt.Fprintln(os.Stderr, "失败:", err)
 		}
