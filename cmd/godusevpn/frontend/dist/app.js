@@ -113,7 +113,7 @@ function nav(name, arg) {
   view = name;
   clearInterval(pageTimer); pageTimer = null;
   const el = document.createElement('div');
-  el.className = 'view ' + (name === 'home' ? 'home' : '');
+  el.className = 'view ' + (name === 'home' ? 'home' : '') + (name === 'settings' || name === 'ruleEdit' ? ' has-bar' : ''); // 带保存栏的页:内容不够高时保存栏也贴底
   stage.appendChild(el);
   PAGES[name](el, arg);
   setTop(name === 'home' || name === 'onboard' ? t('app.name') : t(TITLES[name]), name !== 'home' && name !== 'onboard');
