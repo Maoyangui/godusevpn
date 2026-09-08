@@ -11,7 +11,9 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -175,18 +177,18 @@ func printPanel(s settings.Settings, pw string) {
 		fmt.Println("面板: http://" + s.WebListen + "/")
 		return
 	}
-	var urls []string
-	if host == "" || host == "0.0.0.0" || host == "::" {
-		for _, ip := range localIPv4() {
-			urls = append(urls, "http://"+ip+":"+port+"/")
-		}
-		urls = append(urls, "http://127.0.0.1:"+port+"/")
-	} else {
-		urls = append(urls, "http://"+host+":"+port+"/")
-	}
 	fmt.Println("面板地址:")
-	for _, u := range urls {
-		fmt.Println("  " + u)
+	if host == "" || host == "0.0.0.0" || host == "::" {
+		locals := localIPv4()
+		for _, ip := range locals {
+			fmt.Printf("  http://%s:%s/   (局域网 / 内网)\n", ip, port)
+		}
+		if pub := publicIPv4(); pub != "" && !contains(locals, pub) {
+			fmt.Printf("  http://%s:%s/   (公网;云主机要在安全组 / 防火墙放行 TCP %s)\n", pub, port, port)
+		}
+		fmt.Printf("  http://127.0.0.1:%s/   (本机)\n", port)
+	} else {
+		fmt.Println("  http://" + host + ":" + port + "/")
 	}
 	switch {
 	case pw != "":
@@ -199,6 +201,32 @@ func printPanel(s settings.Settings, pw string) {
 		fmt.Println("  godusevpn passwd            # 先设密码")
 		fmt.Println("  godusevpn settings webListen=0.0.0.0:" + port)
 	}
+}
+
+// publicIPv4 云主机的公网地址(问一下公网回显服务,3 秒内答不上就算了)。
+func publicIPv4() string {
+	c := &http.Client{Timeout: 3 * time.Second}
+	for _, u := range []string{"https://api.ipify.org", "https://api4.ipify.org", "https://ipv4.icanhazip.com"} {
+		resp, err := c.Get(u)
+		if err != nil {
+			continue
+		}
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 64))
+		resp.Body.Close()
+		if ip := net.ParseIP(strings.TrimSpace(string(b))); ip != nil && ip.To4() != nil && ip.IsGlobalUnicast() && !ip.IsPrivate() {
+			return ip.String()
+		}
+	}
+	return ""
+}
+
+func contains(list []string, s string) bool {
+	for _, x := range list {
+		if x == s {
+			return true
+		}
+	}
+	return false
 }
 
 func localIPv4() []string {

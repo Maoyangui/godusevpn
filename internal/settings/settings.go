@@ -67,7 +67,7 @@ func Default() Settings {
 	return Settings{
 		Schema: Schema, Mode: ModeRule, TUN: true, TUNStack: "mixed", StrictRoute: true, LANBypass: true,
 		MixedPort: 2080, RemoteDNS: "1.1.1.1", LocalDNS: "223.5.5.5", FakeIP: true, IPv6: false,
-		UpdateHours: 6, ProbeMinutes: 3, LogLevel: "info", LogDays: 7, ClashPort: 9090, WebListen: "127.0.0.1:9800",
+		UpdateHours: 6, ProbeMinutes: 3, LogLevel: "info", LogDays: 7, ClashPort: 9090, WebListen: defaultWebListen(),
 		NetMode: NetLocal, DNSHijack: true,
 	}
 }

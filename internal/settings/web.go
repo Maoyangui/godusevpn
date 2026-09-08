@@ -8,10 +8,20 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"runtime"
 	"strings"
 )
 
 // Web 面板(Linux):监听地址与密码。密码不明文存,存 salt$sha256(salt+密码)。
+
+// defaultWebListen Linux(软路由 / 云主机)默认就对局域网开放,安装时会生成随机密码并打印;
+// 其它平台面板只给本机看(Windows 有客户端窗口,Android 没有面板)。
+func defaultWebListen() string {
+	if runtime.GOOS == "linux" {
+		return "0.0.0.0:9800"
+	}
+	return "127.0.0.1:9800"
+}
 
 func (s *Settings) validateWeb() error {
 	s.WebListen = strings.TrimSpace(s.WebListen)

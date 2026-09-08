@@ -1,3 +1,5 @@
+//go:build windows || android
+
 package daemon
 
 import (

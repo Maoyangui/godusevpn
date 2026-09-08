@@ -51,7 +51,8 @@ LAN 侧 DNS:网关-TUN 模式下 sing-box 的 auto_redirect 自己用 nftables �
 | `internal/svc` | `service_windows.go` / `init_linux.go`(systemd、procd、Entware 三套模板) |
 | `internal/netmode`(新) | 网关模式的防火墙与策略路由:nft 与 iptables 两套,幂等 apply / clear,开机与防火墙重载后重放 |
 | `internal/builder` | 输入加 `Platform` / `NetMode`,生成对应入站(tun + auto_redirect 或 tproxy + redirect)、LAN 设备策略(source_ip)、DNS 假地址劫持规则 |
-| `internal/web`(新) | HTTP 服务、会话、SSE、embed 前端 |
+| `internal/uiapi`(新) | 页面方法集与事件流的共用实现(与 Windows 客户端的绑定同名同义),Linux 面板与 Android 桥都用它 |
+| `internal/web`(新) | HTTP 服务、会话、SSE、embed 前端;方法转给 uiapi |
 | `internal/daemon` | 去掉 Windows 专有调用;设备发现(DHCP 租约 + ARP / neigh) |
 | `cmd/godusevpn-linux`(新入口) | run / install / cli 一体 |
 | 前端 | 移到仓库根 `web/`,Wails 与 Linux embed 都指向它;新增 `api.js`、设备页、登录页 |

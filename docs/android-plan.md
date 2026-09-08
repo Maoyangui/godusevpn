@@ -6,7 +6,7 @@
 
 | 层 | 复用 | 说明 |
 |---|---|---|
-| Go 引擎 | `settings`(含规则组)、`profile`、`builder`、`state`、`clash`、`update`(查版本 / 校验)、`logx`、`daemon` 里的订阅刷新回退链与测速逻辑 | 抽成一个不依赖 IPC 的 `internal/engine` 包,用 gomobile 编成 AAR 给 Kotlin 调;内核用 sing-box 的 `libbox`(官方 Android 封装,TUN 走 VpnService 的 fd) |
+| Go 引擎 | `daemon`(整个守护进程:设置、订阅与刷新回退链、配置生成、状态机、测速、规则组)+ `internal/uiapi`(页面方法集与事件流,Linux 面板已在用) | 守护进程在 Android 上跑在 VPN 服务进程里,不开 socket 与 HTTP,页面经 WebView 桥直接调 `uiapi.Service.CallJSON`;用 gomobile 编成 AAR;TUN 由 VpnService 建立后把 fd 交给内核(sing-box 的 `platform` 接口) |
 | 数据布局 | `settings.json`、`profiles/<id>.json`、`config.json`、`cache.db`、`logs/` | 与 Windows / Linux 完全一致,将来三端可互相导入 |
 | 界面 | 现有竖版页面(`app.js` / `style.css` / `i18n.js`) | 方案 A(推荐):WebView 承载同一套页面 + JS 桥接引擎,三端一套 UI;方案 B:Kotlin Compose 原生重写,见第 5 节 |
 

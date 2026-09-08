@@ -18,6 +18,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/sagernet/sing-box/adapter"
+
 	"github.com/Maoyangui/godusevpn/internal/builder"
 	"github.com/Maoyangui/godusevpn/internal/buildinfo"
 	"github.com/Maoyangui/godusevpn/internal/core"
@@ -45,18 +47,29 @@ type Daemon struct {
 	secret   string
 	http     *http.Client
 	delays   map[string]int // 最近一次全节点测速结果
+	noListen bool
 }
 
 type persisted struct {
 	Wanted bool `json:"wanted"`
 }
 
+// Options 各平台不同的装配项。
+type Options struct {
+	Platform adapter.PlatformInterface // Android:TUN、网络接口、连接归属由宿主提供
+	NoListen bool                      // 不开本机控制口(Android 只在进程内 Dispatch)
+}
+
 // New 读设置与订阅缓存,装配各部件;不启动任何东西。
-func New() (*Daemon, error) {
+func New() (*Daemon, error) { return NewWithOptions(Options{}) }
+
+// NewWithOptions 带平台选项的装配。
+func NewWithOptions(o Options) (*Daemon, error) {
 	if err := paths.Ensure(); err != nil {
 		return nil, fmt.Errorf("建数据目录: %w", err)
 	}
 	d := &Daemon{
+		noListen: o.NoListen,
 		log:      logx.New(filepath.Join(paths.Logs(), "service.log"), 5<<20, 3),
 		coreLog:  logx.New(filepath.Join(paths.Logs(), "core.log"), 5<<20, 3),
 		http:     &http.Client{Timeout: 30 * time.Second},
@@ -64,6 +77,9 @@ func New() (*Daemon, error) {
 		fetchErr: map[string]string{},
 	}
 	d.core = core.New(core.Writer{Printf: d.coreLog.Printf})
+	if o.Platform != nil {
+		d.core.SetPlatform(o.Platform)
+	}
 	s, err := settings.Load(paths.Settings())
 	if err != nil {
 		d.logf("设置加载失败,用默认值: %v", err)
@@ -111,8 +127,10 @@ func (d *Daemon) loadProfileCaches() {
 // Run 起控制接口,按上次状态自动连接,定时刷新订阅;ctx 结束时全部停掉。
 func (d *Daemon) Run(ctx context.Context) error {
 	d.logf("%s 服务启动 v%s (%s/%s)", DisplayName, buildinfo.Version, runtime.GOOS, runtime.GOARCH)
-	if err := d.server.Listen(); err != nil {
-		return fmt.Errorf("监听控制管道: %w", err)
+	if !d.noListen {
+		if err := d.server.Listen(); err != nil {
+			return fmt.Errorf("监听控制管道: %w", err)
+		}
 	}
 	if d.loadPersisted().Wanted {
 		d.logf("上次是已连接状态,自动连接")

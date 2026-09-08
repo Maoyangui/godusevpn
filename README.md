@@ -1,6 +1,14 @@
 # 佛跳墙(godusevpn)
 
-m-ui 面板的 Windows 客户端:内嵌 sing-box,TUN 模式,规则 / 全局 / 直连三态,DoH + fake-ip,默认禁 IPv6,后台服务开机自启;多订阅切换、定时测速、可视化规则组、按进程直连、应用内升级。
+m-ui 面板的多平台客户端:内嵌 sing-box,TUN 模式,规则 / 全局 / 直连三态,DoH + fake-ip,默认禁 IPv6,开机自启;多订阅(刷新走"当前代理 → 自动选择 → 直连"回退链)、定时测速、可视化规则组、按进程 / 应用 / 设备直连、应用内升级、日志保留、诊断包。三端共用同一个守护进程和同一套界面。
+
+| 平台 | 状态 | 形态 |
+|---|---|---|
+| Windows 10 / 11(x64、ARM64) | 可用 | 后台服务 + 托盘客户端(WebView2 窗口),安装包见 Releases |
+| Linux 桌面 / 服务器(systemd) | 可用 | 单一二进制,自带浏览器面板,一键安装脚本 |
+| OpenWrt / iStoreOS 等软路由 | 可用(网关模式,容器实验室验证) | 同一二进制,procd 自启,ipk 包;局域网设备策略 |
+| 梅林(Asuswrt-Merlin / Entware) | 开发中 | TProxy 模式,无真机待反馈 |
+| Android 手机 / TV | 开发中 | WebView 承载同一套页面 + gomobile 引擎 |
 
 ## 结构
 
@@ -58,7 +66,7 @@ go build -tags desktop,production -trimpath -ldflags "-s -w -H windowsgui" ./cmd
 curl -fsSL https://raw.githubusercontent.com/Maoyangui/godusevpn/master/deploy/install.sh | sh
 ```
 
-装完终端会打印面板地址;默认只监听 `127.0.0.1:9800`,要在局域网其它设备上打开(路由器场景)先设密码再改监听:`godusevpn passwd` → `godusevpn settings webListen=0.0.0.0:9800`。面板与 Windows 客户端是同一套页面,功能一致(订阅、三态、规则组、节点测速、日志、升级)。
+装完终端会打印面板地址(局域网 / 内网地址、云主机的公网地址、本机地址)和随机生成的初始密码。Linux 上面板默认监听 `0.0.0.0:9800`,局域网其它设备直接打开即可;云主机要在安全组 / 防火墙放行 TCP 9800。改密码 `godusevpn passwd`,只给本机看就 `godusevpn settings webListen=127.0.0.1:9800`。面板与 Windows 客户端是同一套页面,功能一致(订阅、三态、规则组、节点测速、日志、升级)。
 
 - 数据布局与 Windows 一致:设置在 `/etc/godusevpn/`,缓存、规则集、日志在 `/var/lib/godusevpn/`(梅林等 Entware 环境在 `/opt/etc` 与 `/opt/var/lib` 下)。
 - 自启按初始化系统落地:systemd 单元、OpenWrt 的 procd 脚本、Entware 的 init.d 脚本;`godusevpn install | uninstall | start | stop | status`。

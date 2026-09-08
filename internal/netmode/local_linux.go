@@ -1,4 +1,4 @@
-//go:build !windows
+//go:build !windows && !android
 
 // Package netmode Linux 上 TUN 之外还要做的路由动作。
 //

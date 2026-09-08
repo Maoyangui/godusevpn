@@ -26,13 +26,14 @@ import (
 
 // Core 数据面。
 type Core struct {
-	mu      sync.Mutex
-	box     *sb.Box
-	ctx     context.Context
-	cancel  context.CancelFunc
-	running bool
-	logw    log.PlatformWriter
-	started time.Time
+	mu       sync.Mutex
+	box      *sb.Box
+	ctx      context.Context
+	cancel   context.CancelFunc
+	running  bool
+	logw     log.PlatformWriter
+	started  time.Time
+	platform adapter.PlatformInterface // Android:TUN 与网络接口由宿主提供
 }
 
 // New logw 收内核日志(nil = 丢弃)。
@@ -41,6 +42,22 @@ func New(logw log.PlatformWriter) *Core {
 		logw = discard{}
 	}
 	return &Core{logw: logw}
+}
+
+// SetPlatform 挂上平台接口(Android 的 VpnService);sing-box 从上下文里取它。
+func (c *Core) SetPlatform(p adapter.PlatformInterface) {
+	c.mu.Lock()
+	c.platform = p
+	c.mu.Unlock()
+}
+
+// newContext 调用方可能已持有 c.mu(Start),这里不加锁;platform 只在启动前设一次。
+func (c *Core) newContext() (context.Context, context.CancelFunc) {
+	ctx, cancel := newContext()
+	if c.platform != nil {
+		ctx = service.ContextWith[adapter.PlatformInterface](ctx, c.platform)
+	}
+	return ctx, cancel
 }
 
 type discard struct{}
@@ -75,7 +92,7 @@ func parse(ctx context.Context, raw []byte) (option.Options, error) {
 
 // Validate 干跑:解析并构造全部对象但不启动,随即关闭。抓解析层抓不到的错误。
 func (c *Core) Validate(raw []byte) error {
-	ctx, cancel := newContext()
+	ctx, cancel := c.newContext()
 	defer cancel()
 	opt, err := parse(ctx, raw)
 	if err != nil {
@@ -95,7 +112,7 @@ func (c *Core) Start(raw []byte) error {
 	if c.running {
 		return errors.New("内核已在运行")
 	}
-	ctx, cancel := newContext()
+	ctx, cancel := c.newContext()
 	opt, err := parse(ctx, raw)
 	if err != nil {
 		cancel()
