@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 页面自己画标题栏与背景,系统这边只留一个跟随日夜间的空壳 -->
+    <style name="Theme.Godusevpn" parent="Theme.AppCompat.DayNight.NoActionBar">
+        <item name="android:windowBackground">#f4f6fa</item>
+        <item name="android:statusBarColor">#f4f6fa</item>
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:navigationBarColor">#f4f6fa</item>
+    </style>
+</resources>

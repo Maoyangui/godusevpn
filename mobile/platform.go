@@ -25,7 +25,7 @@ import (
 // Host 宿主(Android 的 Kotlin 侧)要实现的几个方法。刻意做得很小:开 TUN、保护套接字、查连接归属、网络接口、默认网络变化。
 // 参数与结果尽量用 JSON 字符串,gomobile 绑定简单,两边都好改。
 type Host interface {
-	// OpenTun 按 TunSpec(JSON)建 VpnService 并返回 TUN 的文件描述符;失败返回负数并把原因写日志
+	// OpenTun 按 tunSpec(JSON)建 VpnService 并返回 TUN 的文件描述符;失败返回负数并把原因写日志
 	OpenTun(specJSON string) int32
 	// Protect 让一个套接字绕过 VPN(VpnService.protect)
 	Protect(fd int32) bool
@@ -33,7 +33,7 @@ type Host interface {
 	FindConnectionOwner(ipProtocol int32, sourceAddress string, sourcePort int32, destinationAddress string, destinationPort int32) int32
 	// PackageNamesByUid 逗号分隔的包名列表
 	PackageNamesByUid(uid int32) string
-	// NetworkInterfaces 当前网络接口列表(JSON 数组,见 IfaceSpec)
+	// NetworkInterfaces 当前网络接口列表(JSON 数组,见 ifaceSpec)
 	NetworkInterfaces() string
 	// StartDefaultInterfaceMonitor 开始监听默认网络变化,变化时调 listener.Update
 	StartDefaultInterfaceMonitor(listener InterfaceListener) bool
@@ -47,8 +47,8 @@ type InterfaceListener interface {
 	Update(name string, index int32, expensive bool, constrained bool)
 }
 
-// TunSpec 传给 OpenTun 的参数。
-type TunSpec struct {
+// tunSpec 传给 OpenTun 的参数。
+type tunSpec struct {
 	MTU                 int32    `json:"mtu"`
 	Inet4Address        []string `json:"inet4Address"`
 	Inet6Address        []string `json:"inet6Address"`
@@ -66,8 +66,8 @@ type TunSpec struct {
 	HTTPProxyServerPort int32    `json:"httpProxyServerPort"`
 }
 
-// IfaceSpec 宿主给的网络接口描述。
-type IfaceSpec struct {
+// ifaceSpec 宿主给的网络接口描述。
+type ifaceSpec struct {
 	Index     int32    `json:"index"`
 	MTU       int32    `json:"mtu"`
 	Name      string   `json:"name"`
@@ -122,7 +122,7 @@ func (p *platform) OpenInterface(options *tun.Options, platformOptions option.Tu
 		return nil, err
 	}
 	dns, _ := options.DNSServerAddress()
-	spec := TunSpec{
+	spec := tunSpec{
 		MTU: int32(options.MTU), AutoRoute: options.AutoRoute, StrictRoute: options.StrictRoute,
 		Inet4Address: prefixes(options.Inet4Address), Inet6Address: prefixes(options.Inet6Address),
 		DNS:             addrs(dns),
@@ -188,7 +188,7 @@ func (p *platform) CreateDefaultInterfaceMonitor(logger logger.Logger) tun.Defau
 
 func (p *platform) UsePlatformNetworkInterfaces() bool { return true }
 func (p *platform) NetworkInterfaces() ([]adapter.NetworkInterface, error) {
-	var specs []IfaceSpec
+	var specs []ifaceSpec
 	if err := json.Unmarshal([]byte(p.host.NetworkInterfaces()), &specs); err != nil {
 		return nil, E.Cause(err, "parse interfaces")
 	}

@@ -28,16 +28,15 @@ func (s *Settings) validateWeb() error {
 	if s.WebListen == "" {
 		return nil
 	}
-	host, port, err := net.SplitHostPort(s.WebListen)
+	_, port, err := net.SplitHostPort(s.WebListen)
 	if err != nil {
 		return fmt.Errorf("面板监听地址无效: %q(如 127.0.0.1:9800 或 0.0.0.0:9800)", s.WebListen)
 	}
 	if port == "0" || port == "" {
 		return errors.New("面板端口无效")
 	}
-	if !loopback(host) && s.WebPassword == "" {
-		return errors.New("面板监听非回环地址时必须设置密码")
-	}
+	// 非回环监听而没设密码不算设置无效(默认值就是这样,安装时才生成密码):
+	// 面板自己会拒绝非本机来的访问并提示去设密码,见 internal/web。
 	return nil
 }
 

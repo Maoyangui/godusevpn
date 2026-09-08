@@ -244,6 +244,11 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) {
 		name := strings.TrimPrefix(r.URL.Path, "/api/")
+		if !s.needAuth() && !isLoopback(r) {
+			// 对外监听但还没设密码:外面的人一律挡住,本机(命令行 / 本机浏览器)照常
+			writeJSON(w, 403, map[string]any{"error": "NEED_PASSWORD"})
+			return
+		}
 		switch {
 		case name == "login" && r.Method == http.MethodPost:
 			s.handleLogin(w, r)
@@ -295,6 +300,12 @@ func (s *Server) Handler() http.Handler {
 		static.ServeHTTP(w, r)
 	})
 	return mux
+}
+
+// isLoopback 请求来自本机。
+func isLoopback(r *http.Request) bool {
+	ip := net.ParseIP(clientIP(r))
+	return ip != nil && ip.IsLoopback()
 }
 
 func sameOrigin(origin, host string) bool {

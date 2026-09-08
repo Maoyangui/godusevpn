@@ -628,7 +628,14 @@ function showLogin() {
   $('#login-title').textContent = t('login.title'); $('#login-go').textContent = t('login.go');
   setTimeout(() => $('#login-pw').focus(), 100);
 }
+// 对外监听但还没设密码:外来访问只给一句提示,不给入口
+function showNeedPassword() {
+  const box = $('#login'); box.hidden = false;
+  $('#login-title').textContent = t('login.needPw');
+  $('#login-pw').hidden = true; $('#login-go').hidden = true;
+}
 function initLogin() {
+  window.addEventListener('web-needpw', showNeedPassword);
   const go = async () => {
     const b = $('#login-go'); b.disabled = true; $('#login-err').textContent = '';
     try {
@@ -646,8 +653,14 @@ function initLogin() {
 // ---- 启动 ----
 async function init() {
   if (window.__web) { $('#app').classList.add('web'); document.body.classList.add('web'); initLogin(); }
+  if (window.__android) { $('#app').classList.add('web', 'android'); document.body.classList.add('android'); }
   try { state = await App().GetState(); }
-  catch (e) { if (String(e && e.message) === 'AUTH_REQUIRED') { showLogin(); return; } state = { service: false, svcState: 'down', view: { state: { status: 'disconnected' }, profiles: [], nodes: [] }, lang: 'zh', theme: 'system', version: '' }; }
+  catch (e) {
+    const m = String(e && e.message);
+    if (m === 'AUTH_REQUIRED') { showLogin(); return; }
+    if (m === 'NEED_PASSWORD') { showNeedPassword(); return; }
+    state = { service: false, svcState: 'down', view: { state: { status: 'disconnected' }, profiles: [], nodes: [] }, lang: 'zh', theme: 'system', version: '' };
+  }
   LANG = state.lang || 'zh';
   applyTheme(state.theme);
   document.documentElement.lang = LANG === 'en' ? 'en' : 'zh';

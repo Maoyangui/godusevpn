@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 诊断包在 filesDir/data/diag 下,分享时经 FileProvider 给出去 -->
+<paths>
+    <files-path name="data" path="data/" />
+    <cache-path name="cache" path="/" />
+</paths>

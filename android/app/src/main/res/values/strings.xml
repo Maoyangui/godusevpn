@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">佛跳墙</string>
+    <string name="channel_vpn">连接状态</string>
+    <string name="act_disconnect">断开</string>
+    <string name="st_connected">已连接</string>
+    <string name="st_degraded">已连接 · 节点不稳</string>
+    <string name="st_connecting">连接中…</string>
+    <string name="st_error">出错,自动重试中</string>
+    <string name="st_disconnected">未连接</string>
+    <string name="share_diag">发送诊断包</string>
+</resources>

@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 通知栏小图标:单色版 logo(状态栏要求纯白 alpha 图) -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp" android:height="24dp"
+    android:viewportWidth="400" android:viewportHeight="400">
+    <path android:strokeColor="#FFFFFF" android:strokeWidth="44" android:strokeLineCap="round" android:strokeLineJoin="round"
+        android:pathData="M86,298 V134 L232,258 V310" android:fillColor="#00000000" />
+    <path android:strokeColor="#FFFFFF" android:strokeWidth="44" android:strokeLineCap="round"
+        android:pathData="M332,128 L244,224" android:fillColor="#00000000" />
+    <path android:fillColor="#FFFFFF" android:pathData="M118,242 L170,272 L118,302 Z" />
+</vector>
