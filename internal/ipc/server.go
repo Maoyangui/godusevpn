@@ -8,14 +8,9 @@ import (
 	"net"
 	"sync"
 	"time"
-
-	"github.com/Microsoft/go-winio"
 )
 
-// sddl:SYSTEM 与管理员完全控制,已登录的本机用户可读写(能控制连接、改设置);其他人连不上。
-const sddl = "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;AU)"
-
-// Server 管道服务端。
+// Server 控制口服务端:Windows 上是命名管道,Linux 上是 Unix socket(见 listen_*.go),协议一样。
 type Server struct {
 	mu       sync.RWMutex
 	handlers map[string]Handler
@@ -38,7 +33,7 @@ func (s *Server) Handle(method string, h Handler) {
 
 // Listen 开始监听;返回后在后台接受连接,直到 Close。
 func (s *Server) Listen() error {
-	ln, err := winio.ListenPipe(PipeName, &winio.PipeConfig{SecurityDescriptor: sddl})
+	ln, err := listen()
 	if err != nil {
 		return err
 	}
@@ -47,10 +42,10 @@ func (s *Server) Listen() error {
 		for {
 			conn, err := ln.Accept()
 			if err != nil {
-				if errors.Is(err, winio.ErrPipeListenerClosed) {
+				if listenerClosed(err) {
 					return
 				}
-				s.logf("管道 accept: %v", err)
+				s.logf("控制口 accept: %v", err)
 				continue
 			}
 			go s.serve(conn)
@@ -115,7 +110,7 @@ func (s *Server) serve(conn net.Conn) {
 	}
 }
 
-// Dispatch 在服务内部直接调一个已注册的方法(一个接口复用另一个接口的实现)。
+// Dispatch 在服务内部直接调一个已注册的方法(一个接口复用另一个接口的实现;Web 面板也走这里)。
 func (s *Server) Dispatch(method string, params json.RawMessage) (any, error) {
 	s.mu.RLock()
 	h := s.handlers[method]
@@ -124,6 +119,17 @@ func (s *Server) Dispatch(method string, params json.RawMessage) (any, error) {
 		return nil, errors.New("没有这个方法: " + method)
 	}
 	return call(h, params)
+}
+
+// Methods 已注册的方法名(Web 面板据此判断哪些直接转发)。
+func (s *Server) Methods() map[string]bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	m := make(map[string]bool, len(s.handlers))
+	for k := range s.handlers {
+		m[k] = true
+	}
+	return m
 }
 
 // call 兜住处理器的 panic,别让一个坏请求把服务带走。
@@ -136,13 +142,13 @@ func call(h Handler, params json.RawMessage) (res any, err error) {
 	return h(params)
 }
 
-// Call 客户端:连管道、发一条、收一条。服务没起来时返回 ErrNoService。
+// Call 客户端:连上控制口、发一条、收一条。服务没起来时返回 ErrNoService。
 var ErrNoService = errors.New("服务未运行")
 
 func Call(ctx context.Context, method string, params any, result any) error {
 	dctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
-	conn, err := winio.DialPipeContext(dctx, PipeName)
+	conn, err := dial(dctx)
 	if err != nil {
 		return ErrNoService
 	}

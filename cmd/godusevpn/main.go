@@ -6,7 +6,6 @@
 package main
 
 import (
-	"embed"
 	"os"
 	"strings"
 
@@ -16,10 +15,11 @@ import (
 	"github.com/wailsapp/wails/v2/pkg/options/windows"
 
 	"github.com/Maoyangui/godusevpn/internal/buildinfo"
+	"github.com/Maoyangui/godusevpn/web"
 )
 
-//go:embed all:frontend/dist
-var assets embed.FS
+// 页面在仓库根的 web/dist,三端共用
+var assets = web.Dist()
 
 func parseArgs(args []string) (minimized bool, deepLink string) {
 	for _, a := range args {

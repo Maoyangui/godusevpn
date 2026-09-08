@@ -98,9 +98,7 @@ func (d *Daemon) exportDiag() (string, error) {
 	}
 	add("service.log", strings.Join(logx.Tail(d.log.Path(), 500), "\n"))
 	add("core.log", strings.Join(logx.Tail(d.coreLog.Path(), 500), "\n"))
-	add("route.txt", cmdOut("route.exe", "print"))
-	add("ipconfig.txt", cmdOut("ipconfig.exe", "/all"))
-	add("netsh-interfaces.txt", cmdOut("netsh.exe", "interface", "ipv4", "show", "interfaces"))
+	sysDiag(add)
 	if err := zw.Close(); err != nil {
 		return "", err
 	}

@@ -23,6 +23,7 @@ import (
 	"github.com/Maoyangui/godusevpn/internal/core"
 	"github.com/Maoyangui/godusevpn/internal/ipc"
 	"github.com/Maoyangui/godusevpn/internal/logx"
+	"github.com/Maoyangui/godusevpn/internal/netmode"
 	"github.com/Maoyangui/godusevpn/internal/paths"
 	"github.com/Maoyangui/godusevpn/internal/profile"
 	"github.com/Maoyangui/godusevpn/internal/settings"
@@ -76,7 +77,7 @@ func New() (*Daemon, error) {
 	d.machine = state.New(state.Deps{
 		Prepare: d.prepare,
 		Start:   d.start,
-		Stop:    d.core.Stop,
+		Stop:    d.stop,
 		Alive:   d.core.Running,
 		Health:  d.health,
 		OnChange: func(s state.Snapshot) {
@@ -151,6 +152,17 @@ func (d *Daemon) savePersisted(p persisted) {
 	b, _ := json.Marshal(p)
 	_ = os.WriteFile(paths.State(), b, 0o600)
 }
+
+// Dispatch 进程内直接调控制口方法(Linux 的 Web 面板用,不经 socket)。
+func (d *Daemon) Dispatch(method string, params json.RawMessage) (any, error) {
+	return d.server.Dispatch(method, params)
+}
+
+// Methods 控制口已注册的方法名。
+func (d *Daemon) Methods() map[string]bool { return d.server.Methods() }
+
+// Logf 写服务日志(外层组件用)。
+func (d *Daemon) Logf(format string, a ...any) { d.logf(format, a...) }
 
 func (d *Daemon) getSettings() settings.Settings {
 	d.mu.Lock()
@@ -328,10 +340,24 @@ func (d *Daemon) start(cfg []byte) error {
 		}
 	}
 	_ = os.WriteFile(paths.LastGood(), cfg, 0o600)
-	if s := d.getSettings(); s.Selected != "" {
+	s := d.getSettings()
+	if s.Selected != "" {
 		_ = d.core.Select("proxy", s.Selected) // 内核里的当前节点跟着设置走(cache_file 也会记,双保险)
 	}
+	if s.TUN {
+		// Linux:本机对外服务(SSH 等)的回包不能进 TUN,否则一连上远程管理就断;Windows 上是空操作
+		if err := netmode.Protect(builder.TunName, s.IPv6); err != nil {
+			d.logf("保护本机服务回包的路由规则失败: %v", err)
+		}
+	}
 	return nil
+}
+
+// stop 先停内核(TUN 随之消失),再撤路由规则;顺序反了会有一瞬间 TUN 还在而规则没了,远程会话可能掉。
+func (d *Daemon) stop() error {
+	err := d.core.Stop()
+	netmode.Unprotect()
+	return err
 }
 
 // health 经代理测一次;内核不在了报崩溃码,让状态机重连。

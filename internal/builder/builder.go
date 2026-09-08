@@ -137,7 +137,8 @@ func Build(in Input) ([]byte, error) {
 		tun := obj("type", "tun", "tag", "tun-in", "interface_name", TunName, "address", addr,
 			"auto_route", true, "strict_route", s.StrictRoute, "stack", s.TUNStack)
 		if s.LANBypass {
-			tun["route_exclude_address"] = []string{"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "169.254.0.0/16", "224.0.0.0/4"}
+			// 私网段与链路本地之外,168.63.129.16 是 Azure 平台地址(来宾代理、DNS、健康探测),进了隧道整台云主机就失联,一并排除
+			tun["route_exclude_address"] = []string{"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "169.254.0.0/16", "168.63.129.16/32", "224.0.0.0/4"}
 		}
 		inbounds = append(inbounds, tun)
 	}

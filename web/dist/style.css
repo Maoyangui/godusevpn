@@ -190,3 +190,17 @@ pre.log .warn { color: #fbbf24; } pre.log .err { color: #f87171; } pre.log .dim 
 .spin { animation: spin .8s linear infinite; }
 .icon-btn.muted { color: var(--muted2); } .icon-btn.muted:hover { color: var(--brand2); }
 .icon-btn:disabled { opacity: .6; }
+
+/* 浏览器面板(Linux):宽屏时居中成一张手机卡片;没有窗口按钮 */
+.app.web .win { display: none; }
+.app.web .topbar { --wails-draggable: no-drag; }
+@media (min-width: 640px) {
+  body.web { background: linear-gradient(135deg, #e9edf5, #f6f7fb 55%, #e6f0ff); }
+  body.web .app { width: 420px; height: min(800px, calc(100vh - 40px)); margin: 20px auto; border-radius: 22px; box-shadow: 0 20px 60px rgba(15, 23, 42, .18); border: 1px solid rgba(15, 23, 42, .06); }
+  :root[data-theme="dark"] body.web { background: linear-gradient(135deg, #0b0e14, #121722 55%, #0d1320); }
+  @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) body.web { background: linear-gradient(135deg, #0b0e14, #121722 55%, #0d1320); } }
+}
+.login { position: absolute; inset: 0; z-index: 30; background: var(--bg); display: flex; align-items: center; justify-content: center; padding: 24px; }
+.login-card { width: 100%; max-width: 320px; display: flex; flex-direction: column; align-items: center; gap: 10px; text-align: center; }
+.login-card h1 { font-size: 22px; margin: 4px 0 0; } .login-card p { color: var(--muted); margin: 0 0 8px; }
+.login-card input { width: 100%; }

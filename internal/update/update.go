@@ -77,7 +77,15 @@ func Newer(a, b string) bool {
 	return ys && !xs
 }
 
+// assetName 本平台对应的发布资产名:Windows 是安装包,Linux 是 tar.gz(内含 godusevpn 二进制)。
 func assetName(version string) string {
+	if runtime.GOOS != "windows" {
+		arch := runtime.GOARCH
+		if arch == "arm" {
+			arch = "armv7"
+		}
+		return fmt.Sprintf("godusevpn-%s-%s-%s.tar.gz", version, runtime.GOOS, arch)
+	}
 	arch := "x64"
 	if runtime.GOARCH == "arm64" {
 		arch = "arm64"

@@ -284,3 +284,6 @@ func waitState(s *mgr.Service, want svc.State, timeout time.Duration) bool {
 	}
 	return false
 }
+
+// Kind 初始化系统名字(与 Linux 版接口一致)。
+func Kind() string { return "windows-service" }

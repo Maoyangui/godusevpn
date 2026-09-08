@@ -210,7 +210,7 @@ function updateHome() {
 }
 async function pasteInto(sel) {
   let v = '';
-  try { v = ((await App().ReadClipboard()) || '').trim(); } catch (e) { /* 没有剪贴板权限 */ }
+  try { v = window.__web && navigator.clipboard && navigator.clipboard.readText ? (await navigator.clipboard.readText() || '').trim() : ((await App().ReadClipboard()) || '').trim(); } catch (e) { /* 没有剪贴板权限 */ }
   if (v) { $(sel).value = v; $(sel).focus(); } else toast(t('common.clipEmpty'));
 }
 async function repairService() {
@@ -375,7 +375,7 @@ async function renderSettings(el) {
       ${num('f-logdays', t('set.logDays'), s.logDays ?? 7, t('set.logDaysHelp'))}
     </div>
     <div class="card"><h3>${t('set.g.app')} <span class="tag">${t('set.instant')}</span></h3>
-      ${sw('f-autostart', t('set.autostart'), auto, t('set.autostartHelp'))}
+      ${sw('f-autostart', t(state.platform === 'linux' ? 'set.autostartLinux' : 'set.autostart'), auto, t(state.platform === 'linux' ? 'set.autostartLinuxHelp' : 'set.autostartHelp'))}
       ${sel('f-lang', t('set.lang'), LANG, [['zh', '中文'], ['en', 'English']])}
       ${sel('f-theme', t('set.theme'), state.theme || 'system', [['system', t('theme.system')], ['light', t('theme.light')], ['dark', t('theme.dark')]])}
     </div>
@@ -505,7 +505,7 @@ function renderLogs(el) {
   el.innerHTML = `<div class="row" style="margin-bottom:10px;flex-wrap:wrap">
       <div class="seg" id="logsrc"><span class="pill"></span><button data-core="0" class="active">${t('logs.service')}</button><button data-core="1">${t('logs.core')}</button></div>
       <button class="btn sm" id="pause">${t('logs.pause')}</button><span class="grow"></span>
-      <button class="btn sm" id="open">${t('logs.open')}</button><button class="btn sm" id="diag">${t('logs.diag')}</button>
+      ${window.__web ? '' : `<button class="btn sm" id="open">${t('logs.open')}</button>`}<button class="btn sm" id="diag">${t('logs.diag')}</button>
     </div><pre class="log sel" id="log"></pre>`;
   let core = false, paused = false;
   const colorize = l => { const e = esc(l); if (/ERROR|FATAL|panic/i.test(l)) return `<span class="err">${e}</span>`; if (/WARN/i.test(l)) return `<span class="warn">${e}</span>`; if (/DEBUG/i.test(l)) return `<span class="dim">${e}</span>`; return e; };
@@ -516,7 +516,7 @@ function renderLogs(el) {
   };
   segInit($('#logsrc'), b => { core = b.dataset.core === '1'; load(); });
   $('#pause').addEventListener('click', () => { paused = !paused; $('#pause').textContent = t(paused ? 'logs.resume' : 'logs.pause'); if (!paused) load(); });
-  $('#open').addEventListener('click', () => App().OpenLogs().catch(e => toast(errText(e), 'err')));
+  const op = $('#open'); if (op) op.addEventListener('click', () => App().OpenLogs().catch(e => toast(errText(e), 'err')));
   $('#diag').addEventListener('click', exportDiag);
   load();
   pageTimer = setInterval(load, 3000);
@@ -529,7 +529,10 @@ function segInit(seg, onPick) {
   requestAnimationFrame(() => move(seg.querySelector('button.active')));
 }
 async function exportDiag() {
-  try { await App().ExportDiag(); toast(t('logs.exported'), 'ok'); } catch (e) { toast(errText(e), 'err'); }
+  try {
+    const r = await App().ExportDiag();
+    if (window.__web) { window.open(r, '_blank'); toast(t('logs.downloading'), 'ok'); } else toast(t('logs.exported'), 'ok');
+  } catch (e) { toast(errText(e), 'err'); }
 }
 
 // ---- 关于 ----
@@ -546,9 +549,9 @@ function renderAbout(el) {
       <div id="upd-body"></div>
     </div>
     <div class="card">
-      <div class="srow"><div class="lbl">${t('about.repair')}</div><button class="btn sm" id="repair">${t('about.repair')}</button></div>
+      ${window.__web ? '' : `<div class="srow"><div class="lbl">${t('about.repair')}</div><button class="btn sm" id="repair">${t('about.repair')}</button></div>`}
       <div class="srow"><div class="lbl">${t('about.diag')}</div><button class="btn sm" id="diag">${t('about.diag')}</button></div>
-      <div class="srow"><div class="lbl">${t('about.quit')}<div>${t('about.quitHelp')}</div></div><button class="btn sm danger" id="quit">${t('about.quit')}</button></div>
+      ${window.__web ? `<div class="srow"><div class="lbl">${t('about.web')}<div>${t('about.webHelp')}</div></div><button class="btn sm" id="webpw">${t('about.webPw')}</button></div>` : `<div class="srow"><div class="lbl">${t('about.quit')}<div>${t('about.quitHelp')}</div></div><button class="btn sm danger" id="quit">${t('about.quit')}</button></div>`}
     </div>
     <p class="small muted center"><a id="repo" style="color:var(--brand2)">github.com/Maoyangui/godusevpn</a></p>`;
   const showUpdate = rel => {
@@ -566,15 +569,42 @@ function renderAbout(el) {
     try { showUpdate(await App().CheckUpdate()); } catch (e) { $('#upd-text').textContent = errText(e); }
     b.disabled = false;
   });
-  $('#repair').addEventListener('click', repairService);
+  const rp = $('#repair'); if (rp) rp.addEventListener('click', repairService);
   $('#diag').addEventListener('click', exportDiag);
-  $('#quit').addEventListener('click', () => App().QuitApp());
-  $('#repo').addEventListener('click', () => App().OpenURL('https://github.com/Maoyangui/godusevpn'));
+  const q = $('#quit'); if (q) q.addEventListener('click', () => App().QuitApp());
+  const wp = $('#webpw'); if (wp) wp.addEventListener('click', async () => {
+    const pw = prompt(t('about.webPwPrompt')); if (pw === null) return;
+    try { await App().SetWebPassword(pw); toast(t('set.saved'), 'ok'); if (pw) setTimeout(() => location.reload(), 800); } catch (e) { toast(errText(e), 'err'); }
+  });
+  $('#repo').addEventListener('click', () => { if (window.__web) window.open('https://github.com/Maoyangui/godusevpn', '_blank'); else App().OpenURL('https://github.com/Maoyangui/godusevpn'); });
+}
+
+// ---- 浏览器面板:登录 ----
+function showLogin() {
+  const box = $('#login'); box.hidden = false;
+  $('#login-title').textContent = t('login.title'); $('#login-go').textContent = t('login.go');
+  setTimeout(() => $('#login-pw').focus(), 100);
+}
+function initLogin() {
+  const go = async () => {
+    const b = $('#login-go'); b.disabled = true; $('#login-err').textContent = '';
+    try {
+      const r = await fetch('/api/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ password: $('#login-pw').value }) });
+      const j = await r.json().catch(() => ({}));
+      if (j.error) { $('#login-err').textContent = j.error; b.disabled = false; $('#login-pw').select(); return; }
+      location.reload();
+    } catch (e) { $('#login-err').textContent = errText(e); b.disabled = false; }
+  };
+  $('#login-go').addEventListener('click', go);
+  $('#login-pw').addEventListener('keydown', e => { if (e.key === 'Enter') go(); });
+  window.addEventListener('web-auth', showLogin);
 }
 
 // ---- 启动 ----
 async function init() {
-  state = await App().GetState();
+  if (window.__web) { $('#app').classList.add('web'); document.body.classList.add('web'); initLogin(); }
+  try { state = await App().GetState(); }
+  catch (e) { if (String(e && e.message) === 'AUTH_REQUIRED') { showLogin(); return; } state = { service: false, svcState: 'down', view: { state: { status: 'disconnected' }, profiles: [], nodes: [] }, lang: 'zh', theme: 'system', version: '' }; }
   LANG = state.lang || 'zh';
   applyTheme(state.theme);
   document.documentElement.lang = LANG === 'en' ? 'en' : 'zh';
@@ -590,7 +620,7 @@ async function init() {
   $('#svc-text').textContent = svcText(state);
   navHome();
   window.runtime.EventsOn('state', st => {
-    const langChanged = st.lang !== LANG, hadProfiles = state && state.view.profiles && state.view.profiles.length;
+    const langChanged = (st.lang || 'zh') !== LANG, hadProfiles = state && state.view.profiles && state.view.profiles.length;
     state = st; LANG = st.lang || 'zh';
     applyTheme(st.theme);
     $('#svc-dot').className = 'dot ' + (st.service ? 'on' : 'err');

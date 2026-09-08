@@ -1,6 +1,3 @@
-// Package paths 客户端的文件位置。服务的一切都在 %ProgramData%\godusevpn 下:
-// 订阅缓存、生成的配置、fake-ip 缓存、日志。目录只给管理员与 SYSTEM 读写(安装时设 ACL),
-// 因为配置里有节点凭据。
 package paths
 
 import (
@@ -8,18 +5,7 @@ import (
 	"path/filepath"
 )
 
-const AppName = "godusevpn"
-
-// DataDir 服务数据目录。
-func DataDir() string {
-	base := os.Getenv("ProgramData")
-	if base == "" {
-		base = `C:\ProgramData`
-	}
-	return filepath.Join(base, AppName)
-}
-
-func Settings() string { return filepath.Join(DataDir(), "settings.json") }
+func Settings() string { return filepath.Join(ConfDir(), "settings.json") }
 
 // ProfileCache 某条订阅的节点缓存。
 func ProfileCache(id string) string { return filepath.Join(DataDir(), "profiles", id+".json") }
@@ -33,10 +19,14 @@ func State() string    { return filepath.Join(DataDir(), "state.json") }
 func CacheDB() string  { return filepath.Join(DataDir(), "cache.db") }
 func Logs() string     { return filepath.Join(DataDir(), "logs") }
 func RuleSets() string { return filepath.Join(DataDir(), "rulesets") }
+func Diag() string     { return filepath.Join(DataDir(), "diag") }
 
-// Ensure 建好数据目录与子目录。
+// UIPrefs 面板偏好(语言、外观);Windows 客户端另有每用户的 ui.json,这个给 Linux 的 Web 面板用。
+func UIPrefs() string { return filepath.Join(ConfDir(), "ui.json") }
+
+// Ensure 建好设置目录、数据目录与子目录。
 func Ensure() error {
-	for _, d := range []string{DataDir(), Logs(), RuleSets(), filepath.Join(DataDir(), "profiles")} {
+	for _, d := range []string{ConfDir(), DataDir(), Logs(), RuleSets(), filepath.Join(DataDir(), "profiles")} {
 		if err := os.MkdirAll(d, 0o700); err != nil {
 			return err
 		}

@@ -48,6 +48,8 @@ type Settings struct {
 	ProbeMinutes  int       `json:"probeMinutes"` // 定时测速:auto 组每隔多少分钟测一轮全部节点(1 到 60)
 	LogLevel      string    `json:"logLevel"`     // debug | info | warn | error
 	LogDays       int       `json:"logDays"`      // 日志保留天数,超过自动删除;0 = 一直保留
+	WebListen     string    `json:"webListen"`    // Web 面板监听地址(Linux),如 127.0.0.1:9800 / 0.0.0.0:9800;空 = 不开面板
+	WebPassword   string    `json:"webPassword"`  // 面板密码的加盐哈希(salt$sha256);空 = 无密码,此时只允许监听回环地址
 	ClashPort     int       `json:"clashPort"`    // 内核 Clash API 端口(只监听回环)
 	Selected      string    `json:"selected"`     // proxy 组当前选中的节点;空 = auto
 	// BypassApps 这些进程(如 steam.exe)的流量不走代理,直连出去;按进程名匹配,不分大小写
@@ -61,7 +63,7 @@ func Default() Settings {
 	return Settings{
 		Schema: Schema, Mode: ModeRule, TUN: true, TUNStack: "mixed", StrictRoute: true, LANBypass: true,
 		MixedPort: 2080, RemoteDNS: "1.1.1.1", LocalDNS: "223.5.5.5", FakeIP: true, IPv6: false,
-		UpdateHours: 6, ProbeMinutes: 3, LogLevel: "info", LogDays: 7, ClashPort: 9090,
+		UpdateHours: 6, ProbeMinutes: 3, LogLevel: "info", LogDays: 7, ClashPort: 9090, WebListen: "127.0.0.1:9800",
 	}
 }
 
@@ -180,6 +182,9 @@ func (s *Settings) Validate() error {
 	}
 	if s.LogDays < 0 || s.LogDays > 365 {
 		return errors.New("日志保留天数须在 0 到 365 之间(0 = 一直保留)")
+	}
+	if err := s.validateWeb(); err != nil {
+		return err
 	}
 	seen := map[string]bool{}
 	for i := range s.Profiles {

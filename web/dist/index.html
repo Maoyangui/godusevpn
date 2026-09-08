@@ -33,7 +33,17 @@
   <section class="sheet" id="sheet"><div class="sheet-grip"></div><div class="sheet-head" id="sheet-head"></div><div class="sheet-body" id="sheet-body"></div></section>
 
   <div class="toast" id="toast"></div>
+  <div class="login" id="login" hidden>
+    <div class="login-card">
+      <svg viewBox="-16 -50 400 400" width="56" height="56" aria-hidden="true"><g fill="none" stroke="url(#g)" stroke-width="44" stroke-linecap="round" stroke-linejoin="round"><path d="M86 248V84l146 124v52"/><path d="M332 78l-88 96"/></g><path fill="url(#g)" d="M118 192l52 30-52 30z"/></svg>
+      <h1>佛跳墙</h1><p id="login-title"></p>
+      <input type="password" id="login-pw" autocomplete="current-password">
+      <button class="btn primary block" id="login-go"></button>
+      <div id="login-err" class="small" style="color:var(--danger);min-height:18px"></div>
+    </div>
+  </div>
 </div>
+<script src="api.js"></script>
 <script src="i18n.js"></script>
 <script src="app.js"></script>
 </body>

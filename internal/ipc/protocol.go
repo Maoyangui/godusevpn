@@ -1,14 +1,11 @@
-// Package ipc 托盘客户端 / 命令行 ↔ 服务 的本机控制协议:命名管道上一行一个 JSON。
-// 每次调用一条连接(连、发、收、断),没有长连接状态要维护;事件推送后面用另一条订阅连接做。
+// Package ipc 客户端 / 命令行 / Web 面板 ↔ 服务 的本机控制协议:一行一个 JSON。
+// Windows 走命名管道,Linux 走 Unix socket(listen_*.go);每次调用一条连接(连、发、收、断),没有长连接状态要维护。
 package ipc
 
 import (
 	"encoding/json"
 	"fmt"
 )
-
-// PipeName 管道名。ACL:SYSTEM 与管理员完全控制,本机已登录用户可读写(见 pipe_windows.go)。
-const PipeName = `\\.\pipe\godusevpn`
 
 // Version 协议版本:客户端与服务不一致时提示升级。
 const Version = 1
