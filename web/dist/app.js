@@ -31,6 +31,51 @@ function errText(e) {
   if (code) return t('code.' + code[1]) + (code[2] && code[2] !== t('code.' + code[1]) ? ' · ' + code[2] : '');
   return m;
 }
+// ---- 应用内对话框 ----
+// 不用浏览器自带的 confirm / prompt:Windows 的 WebView2 会画成「wails.localhost 显示」的系统弹窗贴在窗口左上角,
+// 安卓与浏览器面板也各带一行来源地址,样式和位置都跟应用对不上。这里自己画一个,三端一致。
+let dialogClose = null;
+function closeDialog(result) {
+  const f = dialogClose;
+  dialogClose = null;
+  const box = $('#dialog');
+  if (box) box.remove();
+  $('#dialog-backdrop')?.remove();
+  if (f) f(result);
+}
+function askDialog(opts) {
+  return new Promise(resolve => {
+    closeDialog(opts.input !== undefined ? null : false); // 同时只留一个
+    const bd = document.createElement('div');
+    bd.className = 'backdrop show';
+    bd.id = 'dialog-backdrop';
+    const box = document.createElement('div');
+    box.className = 'dialog';
+    box.id = 'dialog';
+    box.innerHTML = `<div class="dialog-card">
+      <div class="dialog-text">${esc(opts.text)}</div>
+      ${opts.input !== undefined ? `<input type="${opts.password ? 'password' : 'text'}" id="dialog-input" value="${esc(opts.input)}">` : ''}
+      <div class="row" style="justify-content:flex-end;margin-top:14px">
+        <button class="btn" id="dialog-no">${esc(opts.cancel || t('common.cancel'))}</button>
+        <button class="btn ${opts.danger ? 'danger' : 'primary'}" id="dialog-yes">${esc(opts.ok || t('common.confirm'))}</button>
+      </div></div>`;
+    $('#app').append(bd, box);
+    const input = $('#dialog-input');
+    dialogClose = resolve;
+    const done = ok => closeDialog(opts.input === undefined ? ok : (ok ? (input ? input.value : '') : null));
+    $('#dialog-yes').addEventListener('click', () => done(true));
+    $('#dialog-no').addEventListener('click', () => done(false));
+    bd.addEventListener('click', () => done(false));
+    box.addEventListener('keydown', e => {
+      if (e.key === 'Enter' && input) { e.preventDefault(); done(true); }
+      if (e.key === 'Escape') { e.preventDefault(); done(false); }
+    });
+    setTimeout(() => { (input || $('#dialog-yes')).focus(); if (input) input.select(); }, 40);
+  });
+}
+const askConfirm = (text, opts = {}) => askDialog({ text, danger: true, ...opts });
+const askInput = (text, value = '', opts = {}) => askDialog({ text, input: value, ...opts });
+
 let toastTimer = null;
 function toast(msg, kind = '') {
   const el = $('#toast');
@@ -363,7 +408,7 @@ function renderProfiles(el, editId) {
         if (b.dataset.act === 'use') { await App().SelectProfile(id); }
         else if (b.dataset.act === 'refresh') { b.disabled = true; b.innerHTML = '<span class="spinner"></span>'; await App().RefreshProfile(id); toast(t('prof.refreshed'), 'ok'); }
         else if (b.dataset.act === 'edit') { showForm(list.find(x => x.id === id)); return; }
-        else if (b.dataset.act === 'del') { if (!confirm(t('prof.delConfirm', { n: b.dataset.name }))) return; await App().RemoveProfile(id); toast(t('prof.deleted'), 'ok'); }
+        else if (b.dataset.act === 'del') { if (!await askConfirm(t('prof.delConfirm', { n: b.dataset.name }), { ok: t('prof.del') })) return; await App().RemoveProfile(id); toast(t('prof.deleted'), 'ok'); }
       } catch (e) { toast(errText(e), 'err'); }
       await load();
     }));
@@ -473,7 +518,7 @@ async function renderRules(el) {
     <div style="height:12px"></div><button class="btn primary block" id="rg-add">${t('rules.add')}</button>`;
   const saveDR = async next => { try { await App().SaveSettings({ ...s, defaultRules: next }); toast(t('set.saved'), 'ok'); } catch (e) { toast(errText(e), 'err'); } nav('rules'); };
   el.querySelectorAll('select[data-dr]').forEach(sel => sel.addEventListener('change', () => saveDR({ ...dr, [sel.dataset.dr]: sel.value })));
-  $('#dr-reset').addEventListener('click', () => { if (confirm(t('rules.restoreConfirm'))) saveDR({ private: 'direct', cn: 'direct', final: 'proxy' }); });
+  $('#dr-reset').addEventListener('click', async () => { if (await askConfirm(t('rules.restoreConfirm'), { danger: false, ok: t('rules.restore') })) saveDR({ private: 'direct', cn: 'direct', final: 'proxy' }); });
   $('#rg-add').addEventListener('click', () => nav('ruleEdit', null));
   el.querySelectorAll('[data-act]').forEach(b => b.addEventListener(b.dataset.act === 'toggle' ? 'change' : 'click', async () => {
     const i = Number(b.dataset.i), next = groups.map(g => ({ ...g }));
@@ -482,7 +527,7 @@ async function renderRules(el) {
       case 'edit': nav('ruleEdit', groups[i].id); return;
       case 'up': [next[i - 1], next[i]] = [next[i], next[i - 1]]; break;
       case 'down': [next[i + 1], next[i]] = [next[i], next[i + 1]]; break;
-      case 'del': if (!confirm(t('rules.delConfirm', { n: groups[i].name }))) return; next.splice(i, 1); break;
+      case 'del': if (!await askConfirm(t('rules.delConfirm', { n: groups[i].name }), { ok: t('prof.del') })) return; next.splice(i, 1); break;
     }
     await save(next);
   }));
@@ -560,7 +605,7 @@ async function renderDevices(el) {
         catch (e) { toast(errText(e), 'err'); }
       });
       it.querySelector('[data-act=rename]').addEventListener('click', async () => {
-        const cur = it.querySelector('.name b').textContent, name = prompt(t('dev.renamePrompt'), cur); if (name === null) return;
+        const cur = it.querySelector('.name b').textContent, name = await askInput(t('dev.renamePrompt'), cur); if (name === null) return;
         const mode = (it.querySelector('.dev-seg button.active') || {}).dataset ? it.querySelector('.dev-seg button.active').dataset.mode : '';
         try { draw(await App().SetDevice(it.dataset.mac, name.trim(), mode, it.dataset.ip)); } catch (e) { toast(errText(e), 'err'); }
       });
@@ -660,7 +705,7 @@ function renderAbout(el) {
   $('#diag').addEventListener('click', exportDiag);
   const q = $('#quit'); if (q) q.addEventListener('click', () => App().QuitApp());
   const wp = $('#webpw'); if (wp) wp.addEventListener('click', async () => {
-    const pw = prompt(t('about.webPwPrompt')); if (pw === null) return;
+    const pw = await askInput(t('about.webPwPrompt'), '', { password: true }); if (pw === null) return;
     try { await App().SetWebPassword(pw); toast(t('set.saved'), 'ok'); if (pw) setTimeout(() => location.reload(), 800); } catch (e) { toast(errText(e), 'err'); }
   });
   $('#repo').addEventListener('click', () => { if (window.__web) window.open('https://github.com/Maoyangui/godusevpn', '_blank'); else App().OpenURL('https://github.com/Maoyangui/godusevpn'); });
@@ -720,7 +765,7 @@ async function init() {
   window.runtime.EventsOn('nav', name => { closeDrawer(); closeSheet(); if (PAGES[name]) nav(name); });
   $('#min-btn').addEventListener('click', () => App().Minimize());
   $('#close-btn').addEventListener('click', () => App().HideWindow());
-  document.addEventListener('keydown', e => { if (e.key === 'Escape') { closeSheet(); closeDrawer(); } });
+  document.addEventListener('keydown', e => { if (e.key === 'Escape') { if ($('#dialog')) closeDialog(false); else { closeSheet(); closeDrawer(); } } });
   $('#svc-text').textContent = svcText(state);
   navHome();
   window.runtime.EventsOn('state', st => {
@@ -766,6 +811,7 @@ async function init() {
 // ---- 遥控器 / 方向键(Android):WebView 不自带空间导航,按元素位置找下一个焦点;Enter 等于点击;返回键交给 __godBack ----
 const FOCUS_SEL = 'button:not([disabled]), input:not([type=hidden]):not([disabled]), select:not([disabled]), textarea:not([disabled]), a, .item';
 function focusLayer() {
+  if ($('#dialog')) return [$('#dialog')];
   if ($('#sheet').classList.contains('show')) return [$('#sheet')];
   if ($('#drawer').classList.contains('show')) return [$('#drawer')];
   const views = [...$('#stage').querySelectorAll('.view:not(.pop)')];
@@ -831,7 +877,8 @@ document.addEventListener('keydown', e => {
 document.addEventListener('focusin', e => { // 电视上焦点落点写进 logcat(chromium 的 CONSOLE 行),排查遥控器导航用
   if (document.body.classList.contains('tv')) console.log('focus ' + e.target.tagName + '#' + (e.target.id || '') + '.' + (e.target.className || '') + ' ' + (e.target.textContent || '').trim().slice(0, 12));
 });
-window.__godBack = () => { // 系统返回键:先收面板与抽屉,再退回上一页;首页返回 false 让壳把应用放后台
+window.__godBack = () => { // 系统返回键:先关对话框与面板抽屉,再退回上一页;首页返回 false 让壳把应用放后台
+  if ($('#dialog')) { closeDialog(false); return true; }
   if ($('#sheet').classList.contains('show')) { closeSheet(); return true; }
   if ($('#drawer').classList.contains('show')) { closeDrawer(); return true; }
   if (view && view !== 'home' && view !== 'onboard') { if (BACK[view]) nav(BACK[view]); else navHome(); return true; }

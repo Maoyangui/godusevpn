@@ -250,3 +250,12 @@ body.android .drawer-items a svg { width: 22px; height: 22px; }
 body.android .drawer-foot { padding: 12px 12px 0; font-size: 13px; }
 
 body.android .icon-btn.xs { width: 36px; height: 36px; border-radius: 10px; } body.android .icon-btn.xs svg { width: 20px; height: 20px; }
+
+/* 应用内对话框:替代浏览器自带的 confirm / prompt(它们在 Windows 上会画成系统弹窗贴在窗口角上) */
+.dialog { position: absolute; inset: 0; z-index: 12; display: flex; align-items: center; justify-content: center; padding: 24px; pointer-events: none; }
+.dialog-card { pointer-events: auto; width: 100%; max-width: 340px; background: var(--sheet); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow); padding: 18px 18px 14px; animation: dlgIn .18s var(--ease); }
+@keyframes dlgIn { from { opacity: 0; transform: translateY(8px) scale(.97); } }
+.dialog-text { font-size: 14px; line-height: 1.55; white-space: pre-wrap; }
+.dialog-card input { margin-top: 12px; }
+#dialog-backdrop { z-index: 11; }
+body.tv .dialog-card { max-width: 520px; padding: 24px; } body.tv .dialog-text { font-size: 17px; }

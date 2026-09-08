@@ -88,6 +88,11 @@ Name: "{autodesktop}\{#AppName}"; Filename: "{app}\godusevpn.exe"
 [Registry]
 ; 登录自启(当前用户):带 --minimized 只到托盘
 Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "godusevpn"; ValueData: """{app}\godusevpn.exe"" --minimized"; Flags: uninsdeletevalue; Tasks: autostart
+; 落地页一键导入的 godusevpn:// 协议。装到 HKA(管理员安装即 HKLM),客户端已在运行时由第二个实例把链接转交过去
+Root: HKA; Subkey: "Software\Classes\godusevpn"; ValueType: string; ValueName: ""; ValueData: "URL:godusevpn Protocol"; Flags: uninsdeletekey
+Root: HKA; Subkey: "Software\Classes\godusevpn"; ValueType: string; ValueName: "URL Protocol"; ValueData: ""
+Root: HKA; Subkey: "Software\Classes\godusevpn\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: """{app}\godusevpn.exe"",0"
+Root: HKA; Subkey: "Software\Classes\godusevpn\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\godusevpn.exe"" ""%1"""
 
 [Run]
 #ifdef OfflineWebView2
