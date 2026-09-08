@@ -361,9 +361,9 @@ async function renderSettings(el) {
       ${sel('f-lang', t('set.lang'), LANG, [['zh', '中文'], ['en', 'English']])}
       ${sel('f-theme', t('set.theme'), state.theme || 'system', [['system', t('theme.system')], ['light', t('theme.light')], ['dark', t('theme.dark')]])}
     </div>
-    <div class="savebar" id="savebar"><div class="small muted grow" id="save-note">${t('set.note')}</div><button class="btn primary" id="save" disabled>${t('set.save')}</button></div>`;
+    <div class="savebar" id="savebar"><div class="note" id="save-note">${t('set.clean')}</div><button class="btn primary" id="save" disabled>${t('set.save')}</button></div>`;
   const watch = ['f-tun', 'f-stack', 'f-strict', 'f-lan', 'f-mixed', 'f-probe', 'f-update', 'f-rdns', 'f-ldns', 'f-fakeip', 'f-ipv6', 'f-ad', 'f-bypass', 'f-log', 'f-logdays'];
-  const dirty = on => { $('#save').disabled = !on; $('#savebar').classList.toggle('dirty', on); $('#save-note').textContent = on ? t('set.unsaved') : t('set.note'); };
+  const dirty = on => { $('#save').disabled = !on; $('#savebar').classList.toggle('dirty', on); $('#save-note').textContent = on ? t('set.unsaved') + ' · ' + t('set.note') : t('set.clean'); $('#save').textContent = t(on ? 'set.saveChanges' : 'set.save'); };
   watch.forEach(id => ['input', 'change'].forEach(ev => $('#' + id).addEventListener(ev, () => dirty(true))));
   $('#save').addEventListener('click', async () => {
     const n = { ...s, tun: $('#f-tun').checked, tunStack: $('#f-stack').value, strictRoute: $('#f-strict').checked, lanBypass: $('#f-lan').checked,
@@ -438,7 +438,7 @@ async function renderRuleEdit(el, id) {
       <p class="small muted" style="margin:0 0 8px">${t('rules.condHelp')}</p>
       <div id="rg-rules"></div>
     </div>
-    <div class="savebar dirty"><div class="small muted grow">${t('set.note')}</div><button class="btn primary" id="rg-save">${t('set.save')}</button></div>`;
+    <div class="savebar dirty"><div class="note">${t('set.note')}</div><button class="btn primary" id="rg-save">${t('rules.saveGroup')}</button></div>`;
   const drawRules = () => {
     $('#rg-rules').innerHTML = g.rules.length ? `<div class="conds">${g.rules.map((r, i) => `<div class="cond"><span class="tag">${esc(t('rt.' + r.type))}</span><span class="val sel">${esc(r.value)}</span><button class="icon-btn xs" data-i="${i}" title="${t('prof.del')}"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg></button></div>`).join('')}</div>` : `<div class="empty" style="padding:14px">${t('rules.noCond')}</div>`;
     $('#rg-rules').querySelectorAll('button[data-i]').forEach(b => b.addEventListener('click', () => { g.rules.splice(Number(b.dataset.i), 1); drawRules(); }));
