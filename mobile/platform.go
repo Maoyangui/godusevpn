@@ -316,6 +316,15 @@ func (m *defaultMonitor) Start() error {
 	if !m.host.StartDefaultInterfaceMonitor(m) {
 		return E.New("start default interface monitor failed")
 	}
+	// 宿主应当在注册时就同步报一次当前网络;万一没报,至少把接口列表拉一遍,内核起步时才有网可用
+	m.mu.Lock()
+	initialized := m.initialized
+	m.mu.Unlock()
+	if !initialized && m.networkManager != nil {
+		if err := m.networkManager.UpdateInterfaces(); err != nil {
+			m.logger.Warn(E.Cause(err, "update interfaces"))
+		}
+	}
 	return nil
 }
 

@@ -88,12 +88,17 @@ jobs:
           Get-ChildItem dist\installer
 
       - name: Collect
-        shell: bash
+        shell: pwsh
         run: |
-          mkdir -p out
-          cp dist/installer/*.exe out/
-          cp dist/amd64/godusevpn-svc.exe dist/amd64/godusevpn-cli.exe dist/amd64/godusevpn.exe out/
-          ls -la out
+          $v = "${{ needs.version.outputs.version }}"
+          New-Item -ItemType Directory -Force out | Out-Null
+          Copy-Item dist\installer\*.exe out\
+          # 裸二进制(服务 / 托盘 / 命令行三个 exe)打成 zip,给手工替换与排障用
+          Compress-Archive -Path dist\amd64\*.exe -DestinationPath "out\godusevpn-$v-windows-x64-bin.zip"
+          Compress-Archive -Path dist\arm64\*.exe -DestinationPath "out\godusevpn-$v-windows-arm64-bin.zip"
+          # 0.5 及以前的客户端按老名字 godusevpn-<版本>-x64-setup.exe 找安装包,再留一份别名让它们能升上来;过几个版本可以去掉
+          Copy-Item "out\godusevpn-$v-windows-x64-setup.exe" "out\godusevpn-$v-x64-setup.exe"
+          Get-ChildItem out
 
       - uses: actions/upload-artifact@v4
         with:
@@ -128,7 +133,7 @@ jobs:
             env CGO_ENABLED=0 GOOS=linux GOARCH=$arch "$@" go build -tags "$TAGS" -trimpath -ldflags "$LD" -o dist/linux/$name/godusevpn ./cmd/godusevpn-linux
             cp deploy/install.sh dist/linux/$name/ 2>/dev/null || true
             tar -C dist/linux/$name -czf out/godusevpn-$V-linux-$name.tar.gz .
-            sh deploy/mkipk.sh "$V" "$name" dist/linux/$name/godusevpn out/godusevpn_${V}_$name.ipk
+            sh deploy/mkipk.sh "$V" "$name" dist/linux/$name/godusevpn out/godusevpn-$V-openwrt-$name.ipk
           }
           build amd64 amd64
           build arm64 arm64
@@ -142,8 +147,66 @@ jobs:
           name: linux-${{ needs.version.outputs.version }}
           path: out/*
 
+  android:
+    needs: version
+    runs-on: ubuntu-latest
+    env:
+      ANDROID_KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.7"
+
+      - name: gomobile bind (AAR:arm64、armv7、x86_64)
+        run: |
+          set -e
+          V="${{ needs.version.outputs.version }}"
+          LD="-s -w -X github.com/Maoyangui/godusevpn/internal/buildinfo.Version=$V"
+          go vet -tags "$TAGS" ./mobile
+          go install golang.org/x/mobile/cmd/gomobile golang.org/x/mobile/cmd/gobind
+          export ANDROID_NDK_HOME="$ANDROID_NDK_LATEST_HOME"
+          gomobile init
+          mkdir -p android/app/libs
+          gomobile bind -target android/arm64,android/arm,android/amd64 -androidapi 26 -javapkg com.maoyangui.godusevpn \
+            -tags "$TAGS" -ldflags "$LD" -trimpath -o android/app/libs/godusevpn.aar ./mobile
+          ls -la android/app/libs
+
+      - name: Signing key (仓库机密里的自建密钥;没有就用 debug 签名)
+        if: env.ANDROID_KEYSTORE_B64 != ''
+        run: echo "$ANDROID_KEYSTORE_B64" | base64 -d > android/keystore.jks
+
+      - name: Gradle (按 ABI 分包 + 通用包)
+        env:
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -e
+          V="${{ needs.version.outputs.version }}"
+          gradle -p android --no-daemon -q assembleRelease "-PappVersion=$V" "-PsplitAbi=true" "-PversionCode=${{ github.run_number }}"
+          mkdir -p out
+          for pair in arm64-v8a:arm64 armeabi-v7a:armv7 x86_64:x86_64 universal:universal; do
+            abi=${pair%%:*}; name=${pair##*:}
+            cp android/app/build/outputs/apk/release/app-$abi-release.apk out/godusevpn-$V-android-$name.apk
+          done
+          ls -la out
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android-${{ needs.version.outputs.version }}
+          path: out/*
+
   release:
-    needs: [version, windows, linux]
+    needs: [version, windows, linux, android]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4

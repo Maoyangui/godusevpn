@@ -77,20 +77,31 @@ func Newer(a, b string) bool {
 	return ys && !xs
 }
 
-// assetName 本平台对应的发布资产名:Windows 是安装包,Linux 是 tar.gz(内含 godusevpn 二进制)。
+// assetName 本平台对应的发布资产名。资产统一叫 godusevpn-<版本>-<系统>-<架构>.<后缀>,发布页按名字排序时同一系统的就挨在一起:
+// Windows 是安装包(x64 / arm64),Android 是按 ABI 分的 APK,Linux 是 tar.gz(内含 godusevpn 二进制)。
 func assetName(version string) string {
-	if runtime.GOOS != "windows" {
-		arch := runtime.GOARCH
-		if arch == "arm" {
-			arch = "armv7"
+	arch := runtime.GOARCH
+	switch runtime.GOOS {
+	case "windows":
+		if arch == "arm64" {
+			return fmt.Sprintf("godusevpn-%s-windows-arm64-setup.exe", version)
 		}
-		return fmt.Sprintf("godusevpn-%s-%s-%s.tar.gz", version, runtime.GOOS, arch)
+		return fmt.Sprintf("godusevpn-%s-windows-x64-setup.exe", version)
+	case "android":
+		switch arch {
+		case "arm":
+			arch = "armv7"
+		case "amd64":
+			arch = "x86_64"
+		case "386":
+			arch = "x86"
+		}
+		return fmt.Sprintf("godusevpn-%s-android-%s.apk", version, arch)
 	}
-	arch := "x64"
-	if runtime.GOARCH == "arm64" {
-		arch = "arm64"
+	if arch == "arm" {
+		arch = "armv7"
 	}
-	return fmt.Sprintf("godusevpn-%s-%s-setup.exe", version, arch)
+	return fmt.Sprintf("godusevpn-%s-%s-%s.tar.gz", version, runtime.GOOS, arch)
 }
 
 // Check 有更新返回它,没有返回 nil。includePre 为真时预发布也算。

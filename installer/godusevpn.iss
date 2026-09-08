@@ -32,14 +32,14 @@ PrivilegesRequired=admin
 #if Arch == "arm64"
 ArchitecturesAllowed=arm64
 ArchitecturesInstallIn64BitMode=arm64
-OutputBaseFilename=godusevpn-{#AppVersion}-arm64-setup
+OutputBaseFilename=godusevpn-{#AppVersion}-windows-arm64-setup
 #else
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 #ifdef OfflineWebView2
-OutputBaseFilename=godusevpn-{#AppVersion}-x64-setup-offline
+OutputBaseFilename=godusevpn-{#AppVersion}-windows-x64-setup-offline
 #else
-OutputBaseFilename=godusevpn-{#AppVersion}-x64-setup
+OutputBaseFilename=godusevpn-{#AppVersion}-windows-x64-setup
 #endif
 #endif
 OutputDir=..\dist\installer

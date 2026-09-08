@@ -5,9 +5,12 @@ import android.net.ConnectivityManager
 import android.net.LinkProperties
 import android.net.Network
 import android.net.NetworkCapabilities
+import android.net.NetworkRequest
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
-import mobile.InterfaceListener
+import com.maoyangui.godusevpn.mobile.InterfaceListener
 import org.json.JSONArray
 import org.json.JSONObject
 import java.net.InetSocketAddress
@@ -63,23 +66,45 @@ object NetInfo {
         return arr.toString()
     }
 
+    /**
+     * 盯着"隧道下面"的默认网络。不用 registerDefaultNetworkCallback:自己在隧道里时(按应用分流把自己包进去了)它报的是 tun,
+     * 会绕成环;带 NOT_VPN 的请求拿到的才是真实的物理网络。回调是异步来的,注册完先同步报一次当前网络,免得内核起来时还没网。
+     */
     fun startMonitor(ctx: Context, listener: InterfaceListener): Boolean {
         stopMonitor(ctx)
         val cm = ctx.getSystemService(ConnectivityManager::class.java)
+        fun report(n: Network?) {
+            if (n == null) { listener.update("", -1, false, false); return }
+            val lp = cm.getLinkProperties(n); val caps = cm.getNetworkCapabilities(n)
+            val name = lp?.interfaceName ?: run { listener.update("", -1, false, false); return }
+            val idx = runCatching { NetworkInterface.getByName(name)?.index ?: -1 }.getOrDefault(-1)
+            val metered = caps != null && !caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED)
+            listener.update(name, idx, metered, false)
+        }
         val cb = object : ConnectivityManager.NetworkCallback() {
-            private fun report(n: Network?) {
-                if (n == null) { listener.update("", -1, false, false); return }
-                val lp = cm.getLinkProperties(n); val caps = cm.getNetworkCapabilities(n)
-                val name = lp?.interfaceName ?: run { listener.update("", -1, false, false); return }
-                val idx = runCatching { NetworkInterface.getByName(name)?.index ?: -1 }.getOrDefault(-1)
-                val metered = caps != null && !caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED)
-                listener.update(name, idx, metered, false)
-            }
             override fun onAvailable(network: Network) = report(network)
             override fun onLinkPropertiesChanged(network: Network, lp: LinkProperties) = report(network)
             override fun onLost(network: Network) = report(null)
         }
-        return try { cm.registerDefaultNetworkCallback(cb); callback = cb; true } catch (e: Exception) { Log.w(App.TAG, "monitor", e); false }
+        val req = NetworkRequest.Builder().addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET).build() // Builder 默认就带 NOT_VPN
+        return try {
+            if (Build.VERSION.SDK_INT >= 31) cm.registerBestMatchingNetworkCallback(req, cb, Handler(Looper.getMainLooper()))
+            else cm.requestNetwork(req, cb)
+            callback = cb
+            report(underlyingNetwork(cm))
+            true
+        } catch (e: Exception) { Log.w(App.TAG, "monitor", e); false }
+    }
+
+    /** 当前的物理网络:活动网络不是 VPN 就用它,否则挑一个有互联网、不是 VPN 的。 */
+    private fun underlyingNetwork(cm: ConnectivityManager): Network? {
+        val active = cm.activeNetwork
+        val caps = active?.let { cm.getNetworkCapabilities(it) }
+        if (active != null && caps != null && !caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) return active
+        @Suppress("DEPRECATION")
+        return cm.allNetworks.firstOrNull { n ->
+            cm.getNetworkCapabilities(n)?.let { it.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) && !it.hasTransport(NetworkCapabilities.TRANSPORT_VPN) } == true
+        }
     }
 
     fun stopMonitor(ctx: Context) {

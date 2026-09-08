@@ -2,6 +2,7 @@ package com.maoyangui.godusevpn
 
 import android.app.Notification
 import android.app.PendingIntent
+import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.net.VpnService
@@ -20,6 +21,23 @@ class GodVpnService : VpnService() {
         @Volatile var instance: GodVpnService? = null
         const val ACTION_DISCONNECT = "com.maoyangui.godusevpn.DISCONNECT"
         private const val NOTIFY_ID = 1
+
+        /**
+         * 把服务拉起来(前台通知从"连接中"开始),最多等 waitMs 毫秒拿到实例。
+         * 连接一开始就起,而不是等到开 TUN:进程在后台也不会被收掉,开机自启也要在广播的窗口期内起前台服务。
+         */
+        fun start(ctx: Context, waitMs: Long = 0): GodVpnService? {
+            instance?.let { return it }
+            try {
+                val intent = Intent(ctx, GodVpnService::class.java)
+                if (Build.VERSION.SDK_INT >= 26) ctx.startForegroundService(intent) else ctx.startService(intent)
+            } catch (e: Exception) {
+                Log.e(App.TAG, "start vpn service", e); return null
+            }
+            val deadline = System.currentTimeMillis() + waitMs
+            while (instance == null && System.currentTimeMillis() < deadline) Thread.sleep(50)
+            return instance
+        }
     }
 
     private var tun: ParcelFileDescriptor? = null

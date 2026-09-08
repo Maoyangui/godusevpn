@@ -8,7 +8,7 @@ m-ui 面板的多平台客户端:内嵌 sing-box,TUN 模式,规则 / 全局 / �
 | Linux 桌面 / 服务器(systemd) | 可用 | 单一二进制,自带浏览器面板,一键安装脚本 |
 | OpenWrt / iStoreOS 等软路由 | 可用(网关模式,容器实验室验证) | 同一二进制,procd 自启,ipk 包;局域网设备策略 |
 | 梅林(Asuswrt-Merlin / Entware) | 开发中 | TProxy 模式,无真机待反馈 |
-| Android 手机 / TV | 开发中 | WebView 承载同一套页面 + gomobile 引擎 |
+| Android 手机 / TV | 测试版(模拟器验证,无真机) | WebView 承载同一套页面 + gomobile 引擎,VpnService 建隧道,按 ABI 分包的 APK |
 
 ## 结构
 
@@ -37,13 +37,19 @@ go build -tags desktop,production -trimpath -ldflags "-s -w -H windowsgui" ./cmd
 
 ## 安装与使用
 
-从 [Releases](https://github.com/Maoyangui/godusevpn/releases) 下载安装包运行即可:
+从 [Releases](https://github.com/Maoyangui/godusevpn/releases) 下载。资产统一叫 `godusevpn-<版本>-<系统>-<架构>.<后缀>`,发布页里同一系统的包挨在一起,`SHA256SUMS` 是全部包的校验和:
 
-| 包 | 说明 |
-|---|---|
-| `godusevpn-<版本>-x64-setup.exe` | 标准版,缺 WebView2 时联网安装运行时 |
-| `godusevpn-<版本>-x64-setup-offline.exe` | 离线完整版,内嵌 WebView2 运行时,给精简系统与内网机器 |
-| `godusevpn-<版本>-arm64-setup.exe` | ARM64 设备 |
+| 系统 | 包 | 说明 |
+|---|---|---|
+| Windows x64 | `godusevpn-<版本>-windows-x64-setup.exe` | 标准版,缺 WebView2 时联网安装运行时 |
+| Windows x64 | `godusevpn-<版本>-windows-x64-setup-offline.exe` | 离线完整版,内嵌 WebView2 运行时,给精简系统与内网机器 |
+| Windows ARM64 | `godusevpn-<版本>-windows-arm64-setup.exe` | ARM64 设备 |
+| Windows | `godusevpn-<版本>-windows-<架构>-bin.zip` | 三个裸 exe,手工替换与排障用 |
+| Linux | `godusevpn-<版本>-linux-<架构>.tar.gz` | amd64 / arm64 / armv7 / mipsle / mips,内含二进制与 `install.sh` |
+| OpenWrt / iStoreOS | `godusevpn-<版本>-openwrt-<架构>.ipk` | `opkg install` 装完自动起服务并打印面板地址 |
+| Android | `godusevpn-<版本>-android-<ABI>.apk` | arm64(绝大多数手机 / 电视)、armv7(老设备)、x86_64(模拟器 / 少数盒子)、universal(全架构合一) |
+
+### Windows
 
 安装包会注册后台服务(自动启动)、装托盘客户端与命令行,可勾选"登录时自动启动",并注册 `godusevpn://` 协议供落地页一键导入。程序未签名,SmartScreen 提示时点"更多信息 → 仍要运行"。
 
@@ -73,6 +79,21 @@ curl -fsSL https://raw.githubusercontent.com/Maoyangui/godusevpn/master/deploy/i
 - 本机模式(默认):TUN 只代理本机流量,与 Windows 相同;连上后会给每个物理网卡地址加一条"回包走主表"的策略路由,远程 SSH 不会被切断。
 - 网关模式(OpenWrt / iStoreOS 等软路由):设置 → 网络 → 网络模式选"网关"(或 `godusevpn settings netMode=gateway`),局域网设备把网关和 DNS 指向这台机器即被代理,设备的 DNS 查询由内核接管(fake-ip、防泄漏)。菜单里多出"设备"页:自动发现在线设备(DHCP 租约 + 邻居表),每台可设跟随规则 / 强制代理 / 直连 / 拒绝上网,按 MAC 记住;命令行 `godusevpn devices`、`godusevpn device <MAC> <follow|proxy|direct|reject> [名字]`。需要内核带 nftables(OpenWrt 22.03 起的 fw4 都有)。
 - 验收脚本 `deploy/linux-test.sh`,与 Windows 的检查项相同;网关模式在 Docker 里的 OpenWrt 23.05 + 一台 LAN 容器上验证过(设备被代理、fake-ip、IPv6 屏蔽、三种设备策略)。
+
+## Android(手机 / 电视)
+
+测试版:引擎、隧道、页面与升级链路都在模拟器上跑通,还没有真机验收;欢迎反馈。
+
+- **安装**:侧载 `godusevpn-<版本>-android-<ABI>.apk`(手机与电视基本都是 arm64;不确定就装 universal),首次安装要允许"未知来源"。最低 Android 8.0。
+- **同一套界面与功能**:守护进程(设置、多订阅与刷新回退链、规则组、状态机、定时测速)和页面与 Windows / Linux 是同一份代码,数据布局也一样(`settings.json`、`profiles/`、`config.json`、`logs/`),只是放在应用私有目录。
+- **隧道**:第一次点"连接"会弹系统的 VPN 授权;之后 VpnService 按引擎给的参数建隧道(地址、路由、DNS、按应用直连),通知栏常驻状态并带"断开"。应用自身默认绕过隧道(订阅刷新直连、升级下载不绕回内核)。
+- **按应用直连**:Windows 的"按进程直连"在 Android 上就是应用包名(设置 → 分流),这些应用整个绕过 VPN。
+- **开机自启**:引擎按上次状态自动连;Android 12 起后台起前台服务受限,开机与升级完成的广播窗口里会先把服务拉起来。系统设置里也可以把它设为"始终开启的 VPN"。
+- **升级**:关于 → 检查更新 → 下载对应 ABI 的 APK、校验 SHA256 后拉起系统安装器;装完引擎按上次状态重新连接。每一版都用同一把签名密钥,否则系统不让覆盖安装。
+- **电视**:同一个包在 Android TV / 盒子上以横屏显示,遥控器方向键移动焦点;订阅链接建议用剪贴板粘贴。
+- **诊断**:日志 → 导出诊断包,经系统分享发出去。
+
+构建:`deploy\android-build.ps1`(gomobile bind 出 AAR → Gradle 出 APK,需要 JDK 17 与 Android SDK / NDK);模拟器冒烟 `deploy/android-emu-test.sh <订阅地址>`。
 
 ## 命令行(排障)
 

@@ -81,7 +81,7 @@ LAN 侧 DNS:网关-TUN 模式下 sing-box 的 auto_redirect 自己用 nftables �
 
 ## 6. 构建、打包、发布
 
-- CI 矩阵:linux/amd64、arm64、arm(v7)、mipsle(softfloat)、mips(softfloat);产物 `godusevpn-<ver>-linux-<arch>.tar.gz`(二进制 + install.sh)、`godusevpn_<ver>_<arch>.ipk`、`godusevpn_<ver>_<arch>.deb`(amd64 / arm64),附 SHA256SUMS。
+- CI 矩阵:linux/amd64、arm64、arm(v7)、mipsle(softfloat)、mips(softfloat);产物 `godusevpn-<ver>-linux-<arch>.tar.gz`(二进制 + install.sh)、`godusevpn-<ver>-openwrt-<arch>.ipk`、`godusevpn_<ver>_<arch>.deb`(amd64 / arm64),附 SHA256SUMS。
 - `install.sh` 一键:探测 OpenWrt / 梅林(Entware)/ systemd,下载对应包,装 init,首启生成面板密码并打印访问地址。
 - 应用内升级:按上述资产名下载,校验后替换二进制,经 init 重启。
 

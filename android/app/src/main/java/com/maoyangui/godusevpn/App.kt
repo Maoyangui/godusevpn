@@ -3,12 +3,16 @@ package com.maoyangui.godusevpn
 import android.app.Application
 import android.app.NotificationChannel
 import android.app.NotificationManager
+import android.content.Intent
 import android.os.Build
 import android.util.Log
-import mobile.Engine
-import mobile.EventListener
-import mobile.Mobile
+import androidx.core.content.FileProvider
+import com.maoyangui.godusevpn.mobile.Engine
+import com.maoyangui.godusevpn.mobile.EventListener
+import com.maoyangui.godusevpn.mobile.Mobile
 import org.json.JSONObject
+import org.json.JSONTokener
+import java.io.File
 import java.util.concurrent.CopyOnWriteArrayList
 
 /**
@@ -25,13 +29,23 @@ class App : Application() {
         @Volatile var lastState: JSONObject? = null
 
         fun engine(): Engine = engine ?: synchronized(App::class.java) {
-            engine ?: Mobile.newEngine(instance.filesDir.absolutePath, HostProxy, object : EventListener {
+            engine ?: Mobile.newEngine(instance.filesDir.absolutePath, instance.cacheDir.absolutePath, HostProxy, object : EventListener {
                 override fun onEvent(name: String, dataJSON: String) {
-                    if (name == "state") runCatching { lastState = JSONObject(dataJSON) }
+                    when (name) {
+                        "state" -> runCatching { lastState = JSONObject(dataJSON) }
+                        "install-update" -> runCatching { instance.installApk(JSONTokener(dataJSON).nextValue() as String) }.onFailure { Log.w(TAG, "install", it) }
+                    }
                     for (l in listeners) runCatching { l(name, dataJSON) }.onFailure { Log.w(TAG, "listener", it) }
                 }
             }).also { engine = it }
         }
+    }
+
+    /** 引擎把新版 APK 下好(校验过 SHA256)后交给系统安装器;装完系统会杀掉本进程,开机接收器按 MY_PACKAGE_REPLACED 再把 VPN 拉起来。 */
+    fun installApk(path: String) {
+        val uri = FileProvider.getUriForFile(this, "$packageName.files", File(path))
+        startActivity(Intent(Intent.ACTION_VIEW).setDataAndType(uri, "application/vnd.android.package-archive")
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_GRANT_READ_URI_PERMISSION))
     }
 
     override fun onCreate() {

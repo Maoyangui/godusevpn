@@ -1,9 +1,9 @@
 package com.maoyangui.godusevpn
 
-import android.content.Intent
+import android.net.VpnService
 import android.util.Log
-import mobile.Host
-import mobile.InterfaceListener
+import com.maoyangui.godusevpn.mobile.Host
+import com.maoyangui.godusevpn.mobile.InterfaceListener
 
 /**
  * Go 引擎看到的宿主。TUN 只能由正在运行的 VpnService 建,所以开 TUN 时先把服务拉起来再转交;
@@ -12,16 +12,11 @@ import mobile.InterfaceListener
 object HostProxy : Host {
     private fun svc(): GodVpnService? = GodVpnService.instance
 
+    /** protect 只看这个 uid 有没有拿到 VPN 授权,不依赖服务是否在跑;服务还没起来(内核启动时先下规则集)就用一个空实例调。 */
+    private val protector by lazy { object : VpnService() {} }
+
     override fun openTun(specJSON: String): Int {
-        var s = svc()
-        if (s == null) {
-            val ctx = App.instance
-            val intent = Intent(ctx, GodVpnService::class.java)
-            if (android.os.Build.VERSION.SDK_INT >= 26) ctx.startForegroundService(intent) else ctx.startService(intent)
-            val deadline = System.currentTimeMillis() + 8000
-            while (svc() == null && System.currentTimeMillis() < deadline) Thread.sleep(100)
-            s = svc()
-        }
+        val s = svc() ?: GodVpnService.start(App.instance, 8000)
         if (s == null) {
             Log.e(App.TAG, "VPN 服务没起来,开不了 TUN")
             return -1
@@ -29,7 +24,7 @@ object HostProxy : Host {
         return s.openTun(specJSON)
     }
 
-    override fun protect(fd: Int): Boolean = svc()?.protect(fd) ?: false
+    override fun protect(fd: Int): Boolean = runCatching { (svc() ?: protector).protect(fd) }.getOrDefault(false)
 
     override fun findConnectionOwner(ipProtocol: Int, sourceAddress: String, sourcePort: Int, destinationAddress: String, destinationPort: Int): Int =
         NetInfo.findConnectionOwner(App.instance, ipProtocol, sourceAddress, sourcePort, destinationAddress, destinationPort)

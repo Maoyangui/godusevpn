@@ -30,8 +30,14 @@ class MainActivity : AppCompatActivity() {
         runOnUiThread { web.evaluateJavascript("window.__godEvent && window.__godEvent(${JSONObject.quote(name)}, ${JSONObject.quote(data)})", null) }
     }
     private val vpnPermission = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { r ->
-        if (r.resultCode == Activity.RESULT_OK && pendingConnect) Thread { runCatching { App.engine().call("Connect", "[]") } }.start()
+        if (r.resultCode == Activity.RESULT_OK && pendingConnect) Thread { runCatching { startConnect() } }.start()
         pendingConnect = false
+    }
+
+    /** 服务先起(通知栏显示"连接中",进程转前台),再让引擎连。 */
+    private fun startConnect(): String {
+        GodVpnService.start(this)
+        return App.engine().call("Connect", "[]")
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -42,7 +48,8 @@ class MainActivity : AppCompatActivity() {
             javaScriptEnabled = true; domStorageEnabled = true; allowFileAccess = false
             mediaPlaybackRequiresUserGesture = false
         }
-        val loader = WebViewAssetLoader.Builder().addPathHandler("/web/", WebViewAssetLoader.AssetsPathHandler(this)).build()
+        // 路径前缀去掉后剩下的部分相对 assets 根目录:注册 "/" 才能让 /web/index.html 落到 assets/web/index.html
+        val loader = WebViewAssetLoader.Builder().addPathHandler("/", WebViewAssetLoader.AssetsPathHandler(this)).build()
         web.webViewClient = object : WebViewClient() {
             override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest) = loader.shouldInterceptRequest(request.url)
             override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
@@ -82,7 +89,7 @@ class MainActivity : AppCompatActivity() {
             runOnUiThread { vpnPermission.launch(prep) }
             return App.engine().call("GetState", "[]")
         }
-        return App.engine().call("Connect", "[]")
+        return startConnect()
     }
 
     inner class Bridge {
@@ -94,7 +101,7 @@ class MainActivity : AppCompatActivity() {
                     "ReadClipboard" -> JSONObject.quote((getSystemService(ClipboardManager::class.java).primaryClip?.getItemAt(0)?.coerceToText(this@MainActivity) ?: "").toString())
                     "OpenURL" -> { runOnUiThread { startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(JSONArray(argsJSON).optString(0)))) }; "null" }
                     "ExportDiag" -> {
-                        val path = App.engine().call("ExportDiag", "[]").trim('"')
+                        val path: String = App.engine().call("ExportDiag", "[]").trim('"')
                         share(File(path)); JSONObject.quote(path)
                     }
                     "HideWindow", "Minimize" -> { runOnUiThread { moveTaskToBack(true) }; "null" }

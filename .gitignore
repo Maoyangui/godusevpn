@@ -4,3 +4,9 @@
 *.db
 installer/deps/
 installer/ChineseSimplified.isl
+# Android 构建产物与本机密钥
+android/.gradle/
+android/app/build/
+android/app/libs/
+android/keystore.jks
+android/local.properties

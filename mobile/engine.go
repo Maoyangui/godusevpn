@@ -34,10 +34,14 @@ type Engine struct {
 	done   chan struct{}
 }
 
-// NewEngine dataDir 是应用私有目录(设置、缓存、日志都放这里),host 是宿主实现,listener 收事件(可为 nil)。
-func NewEngine(dataDir string, host Host, listener EventListener) (*Engine, error) {
+// NewEngine dataDir 是应用私有目录(设置、缓存、日志都放这里),cacheDir 是应用缓存目录(升级包下载到这里,由 FileProvider 交给系统安装器),
+// host 是宿主实现,listener 收事件(可为 nil)。
+func NewEngine(dataDir, cacheDir string, host Host, listener EventListener) (*Engine, error) {
 	_ = os.Setenv("GODUSEVPN_CONF", filepath.Join(dataDir, "conf"))
 	_ = os.Setenv("GODUSEVPN_DATA", filepath.Join(dataDir, "data"))
+	if cacheDir != "" {
+		_ = os.Setenv("TMPDIR", cacheDir) // Android 上 os.TempDir() 默认是 /data/local/tmp,应用写不了
+	}
 	d, err := daemon.NewWithOptions(daemon.Options{Platform: newPlatform(host), NoListen: true})
 	if err != nil {
 		return nil, err
