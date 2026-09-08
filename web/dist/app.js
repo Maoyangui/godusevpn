@@ -69,13 +69,15 @@ const ICON = {
   logs: '<path d="M6 3h9l5 5v13H6z"/><path d="M14 3v6h6M9 13h6M9 17h6"/>',
   about: '<circle cx="12" cy="12" r="9"/><path d="M12 8h.01M11 12h1v4h1"/>',
   rules: '<path d="M4 6h3l8 12h5M4 18h3l2.5-3.7M13.5 9.7L15 7.5h5"/><path d="M17 4l3 3-3 3M17 14l3 4-3 3"/>',
+  devices: '<rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/>',
 };
-const MENU = ['settings', 'profiles', 'rules', 'conns', 'logs', 'about'];
-const PAGES = { onboard: renderOnboard, home: renderHome, settings: renderSettings, profiles: renderProfiles, rules: renderRules, ruleEdit: renderRuleEdit, conns: renderConns, logs: renderLogs, about: renderAbout };
-const TITLES = { settings: 'set.title', profiles: 'prof.title', rules: 'rules.title', ruleEdit: 'rules.edit', conns: 'conns.title', logs: 'logs.title', about: 'about.title' };
+const MENU = ['settings', 'profiles', 'rules', 'devices', 'conns', 'logs', 'about'];
+const menuItems = () => MENU.filter(m => m !== 'devices' || (state && state.platform === 'linux')); // 设备页只有 Linux 软路由有
+const PAGES = { onboard: renderOnboard, home: renderHome, settings: renderSettings, profiles: renderProfiles, rules: renderRules, ruleEdit: renderRuleEdit, devices: renderDevices, conns: renderConns, logs: renderLogs, about: renderAbout };
+const TITLES = { settings: 'set.title', profiles: 'prof.title', rules: 'rules.title', ruleEdit: 'rules.edit', devices: 'dev.title', conns: 'conns.title', logs: 'logs.title', about: 'about.title' };
 const BACK = { ruleEdit: 'rules' }; // 返回键去哪(默认回首页)
 function renderDrawer() {
-  $('#drawer-items').innerHTML = MENU.map(m => `<a data-page="${m}"><svg viewBox="0 0 24 24">${ICON[m]}</svg><span>${t('menu.' + m)}</span>${m === 'about' && state && state.update ? '<span class="grow"></span><span class="pill-badge">NEW</span>' : ''}</a>`).join('');
+  $('#drawer-items').innerHTML = menuItems().map(m => `<a data-page="${m}"><svg viewBox="0 0 24 24">${ICON[m]}</svg><span>${t('menu.' + m)}</span>${m === 'about' && state && state.update ? '<span class="grow"></span><span class="pill-badge">NEW</span>' : ''}</a>`).join('');
   $('#drawer-items').querySelectorAll('a').forEach(a => a.addEventListener('click', () => { closeDrawer(); nav(a.dataset.page); }));
   $('#drawer-ver').textContent = 'v' + (state ? state.version : '');
   const u = $('#drawer-upd');
@@ -370,6 +372,11 @@ async function renderSettings(el) {
       <div class="srow"><div class="lbl">${t('set.rules')}<div>${t('set.rulesHelp', { n: (s.ruleGroups || []).length })}</div></div><button class="btn sm" id="f-rules">${t('set.rulesManage')}</button></div>
       <div class="field" style="margin-top:8px"><label>${t('set.bypass')}</label><textarea id="f-bypass" placeholder="steam.exe">${esc((s.bypassApps || []).join('\n'))}</textarea><span class="help">${t('set.bypassHelp')}</span></div>
     </div>
+    ${state.platform === 'linux' ? `<div class="card"><h3>${t('set.g.net')}</h3>
+      ${sel('f-netmode', t('set.netMode'), s.netMode || 'local', [['local', t('set.netLocal')], ['gateway', t('set.netGateway')]], t('set.netModeHelp'))}
+      ${txt('f-lansub', t('set.lanSubnets'), (s.lanSubnets || []).join(', '), t('set.lanSubnetsHelp'))}
+      ${txt('f-weblisten', t('set.webListen'), s.webListen || '', t('set.webListenHelp'))}
+    </div>` : ''}
     <div class="card"><h3>${t('set.g.logs')}</h3>
       ${sel('f-log', t('set.logLevel'), s.logLevel, [['debug', 'debug'], ['info', 'info'], ['warn', 'warn'], ['error', 'error']])}
       ${num('f-logdays', t('set.logDays'), s.logDays ?? 7, t('set.logDaysHelp'))}
@@ -380,7 +387,7 @@ async function renderSettings(el) {
       ${sel('f-theme', t('set.theme'), state.theme || 'system', [['system', t('theme.system')], ['light', t('theme.light')], ['dark', t('theme.dark')]])}
     </div>
     <div class="savebar" id="savebar"><div class="note" id="save-note">${t('set.clean')}</div><button class="btn primary" id="save" disabled>${t('set.save')}</button></div>`;
-  const watch = ['f-tun', 'f-stack', 'f-strict', 'f-lan', 'f-mixed', 'f-probe', 'f-update', 'f-rdns', 'f-ldns', 'f-fakeip', 'f-ipv6', 'f-ad', 'f-bypass', 'f-log', 'f-logdays'];
+  const watch = ['f-tun', 'f-stack', 'f-strict', 'f-lan', 'f-mixed', 'f-probe', 'f-update', 'f-rdns', 'f-ldns', 'f-fakeip', 'f-ipv6', 'f-ad', 'f-bypass', 'f-log', 'f-logdays', 'f-netmode', 'f-lansub', 'f-weblisten'].filter(id => $('#' + id));
   const dirty = on => { $('#save').disabled = !on; $('#savebar').classList.toggle('dirty', on); $('#save-note').textContent = on ? t('set.unsaved') + ' · ' + t('set.note') : t('set.clean'); $('#save').textContent = t(on ? 'set.saveChanges' : 'set.save'); };
   watch.forEach(id => ['input', 'change'].forEach(ev => $('#' + id).addEventListener(ev, () => dirty(true))));
   $('#save').addEventListener('click', async () => {
@@ -388,6 +395,7 @@ async function renderSettings(el) {
       mixedPort: Number($('#f-mixed').value), probeMinutes: Number($('#f-probe').value), updateHours: Number($('#f-update').value),
       remoteDns: $('#f-rdns').value.trim(), localDns: $('#f-ldns').value.trim(), fakeIp: $('#f-fakeip').checked, ipv6: $('#f-ipv6').checked, adBlock: $('#f-ad').checked,
       bypassApps: $('#f-bypass').value.split(/\r?\n/).map(x => x.trim()).filter(Boolean), logLevel: $('#f-log').value, logDays: Number($('#f-logdays').value) };
+    if ($('#f-netmode')) { n.netMode = $('#f-netmode').value; n.lanSubnets = $('#f-lansub').value.split(/[,，\s]+/).map(x => x.trim()).filter(Boolean); n.webListen = $('#f-weblisten').value.trim(); }
     try { s = await App().SaveSettings(n); dirty(false); toast(t('set.saved'), 'ok'); } catch (e) { toast(errText(e), 'err'); }
   });
   $('#f-autostart').addEventListener('change', async e => { try { await App().SetAutostart(e.target.checked); toast(t('set.saved'), 'ok'); } catch (err) { toast(errText(err), 'err'); e.target.checked = !e.target.checked; } });
@@ -482,6 +490,41 @@ async function renderRuleEdit(el, id) {
   });
   drawRules();
   setTimeout(() => $(orig ? '#rg-val' : '#rg-name').focus(), 120);
+}
+
+
+// ---- 局域网设备(Linux 网关模式) ----
+const DEV_MODES = ['', 'proxy', 'direct', 'reject'];
+async function renderDevices(el) {
+  el.innerHTML = `<p class="small muted" style="margin:2px 0 10px">${t('dev.intro')}</p><div id="dev-list"><div class="empty"><span class="spinner"></span></div></div>`;
+  const draw = list => {
+    const box = $('#dev-list'); if (!box) return;
+    if (!list.length) { box.innerHTML = `<div class="empty">${t('dev.empty')}</div>`; return; }
+    list.sort((a, b) => (b.online - a.online) || (b.saved - a.saved) || a.ip.localeCompare(b.ip, undefined, { numeric: true }));
+    box.innerHTML = `<div class="list">${list.map((d, i) => `<div class="item dev" style="flex-wrap:wrap;animation-delay:${i * 20}ms" data-mac="${esc(d.mac)}" data-ip="${esc(d.ip)}">
+      <div class="row" style="flex-basis:100%">
+        <span class="dot ${d.online ? 'on' : ''}" title="${t(d.online ? 'dev.online' : 'dev.offline')}"></span>
+        <div class="name"><b class="sel">${esc(d.name || d.ip)}</b><span>${esc(d.ip)} · ${esc(d.mac)}</span></div>
+        <button class="icon-btn xs muted" data-act="rename" title="${t('dev.rename')}"><svg viewBox="0 0 24 24"><path d="M4 20h4l10-10-4-4L4 16z"/><path d="M12 6l4 4"/></svg></button>
+      </div>
+      <div class="seg dev-seg" style="flex-basis:100%;display:flex"><span class="pill"></span>${DEV_MODES.map(m => `<button data-mode="${m}" class="${(d.mode || '') === m ? 'active' : ''}" style="flex:1">${t('dev.m.' + (m || 'follow'))}</button>`).join('')}</div>
+    </div>`).join('')}</div>`;
+    box.querySelectorAll('.item.dev').forEach(it => {
+      const seg = it.querySelector('.dev-seg');
+      segInit(seg, async b => {
+        try { draw(await App().SetDevice(it.dataset.mac, it.querySelector('.name b').textContent, b.dataset.mode, it.dataset.ip)); toast(t('set.saved'), 'ok'); }
+        catch (e) { toast(errText(e), 'err'); }
+      });
+      it.querySelector('[data-act=rename]').addEventListener('click', async () => {
+        const cur = it.querySelector('.name b').textContent, name = prompt(t('dev.renamePrompt'), cur); if (name === null) return;
+        const mode = (it.querySelector('.dev-seg button.active') || {}).dataset ? it.querySelector('.dev-seg button.active').dataset.mode : '';
+        try { draw(await App().SetDevice(it.dataset.mac, name.trim(), mode, it.dataset.ip)); } catch (e) { toast(errText(e), 'err'); }
+      });
+    });
+  };
+  const load = async () => { try { draw(await App().GetDevices() || []); } catch (e) { const b = $('#dev-list'); if (b) b.innerHTML = `<div class="empty">${esc(errText(e))}</div>`; } };
+  load();
+  pageTimer = setInterval(load, 10000);
 }
 
 // ---- 连接 ----

@@ -62,8 +62,9 @@ curl -fsSL https://raw.githubusercontent.com/Maoyangui/godusevpn/master/deploy/i
 
 - 数据布局与 Windows 一致:设置在 `/etc/godusevpn/`,缓存、规则集、日志在 `/var/lib/godusevpn/`(梅林等 Entware 环境在 `/opt/etc` 与 `/opt/var/lib` 下)。
 - 自启按初始化系统落地:systemd 单元、OpenWrt 的 procd 脚本、Entware 的 init.d 脚本;`godusevpn install | uninstall | start | stop | status`。
-- 本机模式(当前实现):TUN 只代理本机流量,与 Windows 相同;连上后会给每个物理网卡地址加一条"回包走主表"的策略路由,远程 SSH 不会被切断。网关模式(OpenWrt / 梅林给整个局域网代理)在后续版本。
-- 验收脚本 `deploy/linux-test.sh`,与 Windows 的检查项相同。
+- 本机模式(默认):TUN 只代理本机流量,与 Windows 相同;连上后会给每个物理网卡地址加一条"回包走主表"的策略路由,远程 SSH 不会被切断。
+- 网关模式(OpenWrt / iStoreOS 等软路由):设置 → 网络 → 网络模式选"网关"(或 `godusevpn settings netMode=gateway`),局域网设备把网关和 DNS 指向这台机器即被代理,设备的 DNS 查询由内核接管(fake-ip、防泄漏)。菜单里多出"设备"页:自动发现在线设备(DHCP 租约 + 邻居表),每台可设跟随规则 / 强制代理 / 直连 / 拒绝上网,按 MAC 记住;命令行 `godusevpn devices`、`godusevpn device <MAC> <follow|proxy|direct|reject> [名字]`。需要内核带 nftables(OpenWrt 22.03 起的 fw4 都有)。
+- 验收脚本 `deploy/linux-test.sh`,与 Windows 的检查项相同;网关模式在 Docker 里的 OpenWrt 23.05 + 一台 LAN 容器上验证过(设备被代理、fake-ip、IPv6 屏蔽、三种设备策略)。
 
 ## 命令行(排障)
 

@@ -144,6 +144,21 @@ func (s *Server) api(name string, args []json.RawMessage) (any, error) {
 		return view(ipc.MSelectProfile, map[string]string{"id": arg[string](args, 0)})
 	case "UpdateProfile":
 		return profiles(ipc.MRenameProfile, map[string]string{"id": arg[string](args, 0), "name": arg[string](args, 1), "url": strings.TrimSpace(arg[string](args, 2))})
+	case "GetDevices":
+		var out []ipc.DeviceView
+		err := s.dispatch(ipc.MGetDevices, nil, &out)
+		if out == nil {
+			out = []ipc.DeviceView{}
+		}
+		return out, err
+	case "SetDevice": // (mac, name, mode, ip)
+		var out []ipc.DeviceView
+		err := s.dispatch(ipc.MSetDevice, map[string]string{"mac": arg[string](args, 0), "name": arg[string](args, 1), "mode": arg[string](args, 2), "ip": arg[string](args, 3)}, &out)
+		return out, err
+	case "RemoveDevice":
+		var out []ipc.DeviceView
+		err := s.dispatch(ipc.MRemoveDevice, map[string]string{"mac": arg[string](args, 0)}, &out)
+		return out, err
 	case "GetSettings":
 		st := s.settings()
 		st.WebPassword = "" // 不把哈希给页面

@@ -22,6 +22,17 @@ type ProfileView struct {
 	Error     string        `json:"error,omitempty"` // 最近一次拉取失败的原因
 }
 
+// DeviceView 局域网设备(网关模式):设置里记过的带 Saved 与策略,只在网上看到的 Saved 为假。
+type DeviceView struct {
+	ID     string `json:"id,omitempty"`
+	Name   string `json:"name"`
+	MAC    string `json:"mac"`
+	IP     string `json:"ip"`
+	Online bool   `json:"online"`
+	Mode   string `json:"mode"` // "" 跟随规则 | proxy | direct | reject
+	Saved  bool   `json:"saved"`
+}
+
 // ClashInfo 内核 Clash API 的连接信息;Running 为假时端口未监听。
 type ClashInfo struct {
 	Port    int    `json:"port"`

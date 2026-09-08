@@ -179,6 +179,42 @@ func Main(args []string) int {
 				fmt.Printf("     %-15s %s\n", r.Type, r.Value)
 			}
 		}
+	case "devices":
+		var list []ipc.DeviceView
+		if err = call(ctx, ipc.MGetDevices, nil, &list); err != nil {
+			break
+		}
+		if len(list) == 0 {
+			fmt.Println("没有发现局域网设备(网关模式下把设备的网关指向本机)")
+		}
+		for _, d := range list {
+			on := "离线"
+			if d.Online {
+				on = "在线"
+			}
+			mode := d.Mode
+			if mode == "" {
+				mode = "跟随规则"
+			}
+			fmt.Printf("%-16s %-16s %s  %s  %s\n", d.MAC, d.IP, on, mode, d.Name)
+		}
+	case "device":
+		if len(args) < 2 {
+			err = errors.New("用法: device <MAC> <follow|proxy|direct|reject> [名字]")
+			break
+		}
+		mode := args[1]
+		if mode == "follow" {
+			mode = ""
+		}
+		name := ""
+		if len(args) > 2 {
+			name = strings.Join(args[2:], " ")
+		}
+		var list []ipc.DeviceView
+		if err = call(ctx, ipc.MSetDevice, map[string]string{"mac": args[0], "mode": mode, "name": name}, &list); err == nil {
+			fmt.Println("已保存")
+		}
 	case "logs":
 		n, core := 100, false
 		for _, a := range args {
@@ -269,5 +305,5 @@ func printProfile(p *ipc.ProfileView) {
 // Usage 打印用法。
 func Usage() {
 	fmt.Println(buildinfo.DisplayName, buildinfo.Version)
-	fmt.Println("用法: " + Name + " status | connect | disconnect | mode <rule|global|direct> | nodes | select <节点> | test [节点|all] | profile [地址] | refresh | settings [k=v …] | rules | logs [n] [core] | diag")
+	fmt.Println("用法: " + Name + " status | connect | disconnect | mode <rule|global|direct> | nodes | select <节点> | test [节点|all] | profile [地址] | refresh | settings [k=v …] | rules | devices | device <MAC> <follow|proxy|direct|reject> [名字] | logs [n] [core] | diag")
 }

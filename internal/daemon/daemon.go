@@ -132,6 +132,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 			return nil
 		case <-t.C:
 			d.maybeRefresh(ctx)
+			d.deviceRescan()
 			if time.Since(lastPrune) > 6*time.Hour {
 				lastPrune = time.Now()
 				d.applyLogRetention()
@@ -315,6 +316,9 @@ func (d *Daemon) prepare(ctx context.Context) ([]byte, error) {
 			d.logf("订阅「%s」已更新:%d 个节点", a.Name, len(p.Outbounds))
 		}
 	}
+	if s.NetMode == settings.NetGateway {
+		d.resolveDeviceIPs(&s) // 设备策略按当前 IP 生效
+	}
 	cfg, err := builder.Build(builder.Input{Profile: p, Settings: s, DataDir: paths.DataDir(), ClashSecret: d.secret, RuleSetDir: paths.RuleSets()})
 	if err != nil {
 		return nil, state.Errf(state.CodeConfig, "生成配置: %v", err)
@@ -349,14 +353,22 @@ func (d *Daemon) start(cfg []byte) error {
 		if err := netmode.Protect(builder.TunName, s.IPv6); err != nil {
 			d.logf("保护本机服务回包的路由规则失败: %v", err)
 		}
+		if s.NetMode == settings.NetGateway {
+			if err := netmode.ApplyGateway(builder.TunName, lanInterfaces(), s.DNSHijack); err != nil {
+				d.logf("网关模式的 DNS 劫持规则失败(局域网设备的 DNS 不会被接管): %v", err)
+			}
+		}
 	}
 	return nil
 }
+
+func tunName() string { return builder.TunName }
 
 // stop 先停内核(TUN 随之消失),再撤路由规则;顺序反了会有一瞬间 TUN 还在而规则没了,远程会话可能掉。
 func (d *Daemon) stop() error {
 	err := d.core.Stop()
 	netmode.Unprotect()
+	netmode.ClearGateway()
 	return err
 }
 
@@ -759,6 +771,71 @@ func (d *Daemon) registerHandlers() {
 		}
 		_, a := d.profileViews()
 		return a, nil
+	})
+
+	// ---- 局域网设备(网关模式) ----
+	h(ipc.MGetDevices, func(json.RawMessage) (any, error) { return d.deviceViews(), nil })
+	h(ipc.MSetDevice, func(p json.RawMessage) (any, error) {
+		in, err := ipc.Decode[struct {
+			MAC  string `json:"mac"`
+			IP   string `json:"ip"`
+			Name string `json:"name"`
+			Mode string `json:"mode"`
+		}](p)
+		if err != nil {
+			return nil, err
+		}
+		mac := settings.NormalizeMAC(in.MAC)
+		if mac == "" {
+			return nil, errors.New("MAC 地址无效")
+		}
+		s := d.getSettings()
+		found := false
+		for i := range s.Devices {
+			if s.Devices[i].MAC == mac {
+				s.Devices[i].Name, s.Devices[i].Mode, found = in.Name, in.Mode, true
+				if in.IP != "" {
+					s.Devices[i].IP = in.IP
+				}
+			}
+		}
+		if !found {
+			s.Devices = append(s.Devices, settings.Device{MAC: mac, IP: in.IP, Name: in.Name, Mode: in.Mode})
+		}
+		if err := d.setSettings(s); err != nil {
+			return nil, err
+		}
+		if d.core.Running() && s.NetMode == settings.NetGateway {
+			d.machine.Restart()
+		}
+		return d.deviceViews(), nil
+	})
+	h(ipc.MRemoveDevice, func(p json.RawMessage) (any, error) {
+		in, err := ipc.Decode[struct {
+			MAC string `json:"mac"`
+		}](p)
+		if err != nil {
+			return nil, err
+		}
+		mac := settings.NormalizeMAC(in.MAC)
+		s := d.getSettings()
+		kept := s.Devices[:0]
+		removedPolicy := false
+		for _, dev := range s.Devices {
+			if dev.MAC == mac {
+				removedPolicy = dev.Mode != ""
+				continue
+			}
+			kept = append(kept, dev)
+		}
+		s.Devices = kept
+		if err := d.setSettings(s); err != nil {
+			return nil, err
+		}
+		if removedPolicy && d.core.Running() && s.NetMode == settings.NetGateway {
+			d.machine.Restart()
+		}
+		return d.deviceViews(), nil
 	})
 
 	// ---- 设置 ----

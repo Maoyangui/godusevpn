@@ -2,7 +2,11 @@
 const I18N = {
   zh: {
     'app.name': '佛跳墙',
-    'menu.settings': '设置', 'menu.profiles': '订阅管理', 'menu.rules': '路由规则', 'menu.conns': '连接', 'menu.logs': '日志', 'menu.about': '关于',
+    'menu.settings': '设置', 'menu.profiles': '订阅管理', 'menu.rules': '路由规则', 'menu.devices': '设备',
+    'dev.title': '局域网设备', 'dev.intro': '网关模式下经本机上网的设备。每台可设:跟随规则、强制代理、直连、拒绝上网;按 MAC 记住,换 IP 也跟着。', 'dev.empty': '还没发现设备(网关模式下把设备的网关指向本机)', 'dev.online': '在线', 'dev.offline': '离线', 'dev.rename': '改名', 'dev.renamePrompt': '设备名称',
+    'dev.m.follow': '跟随', 'dev.m.proxy': '代理', 'dev.m.direct': '直连', 'dev.m.reject': '拒绝',
+    'set.g.net': '网络', 'set.netMode': '网络模式', 'set.netModeHelp': '本机:只代理这台机器;网关:还代理经它转发的局域网设备(软路由),设备的 DNS 也会被接管', 'set.netLocal': '本机', 'set.netGateway': '网关',
+    'set.dnsHijack': '劫持局域网 DNS', 'set.dnsHijackHelp': '网关模式下把设备发给本机 53 端口的查询接进内核(fake-ip、防泄漏)', 'set.lanSubnets': '局域网网段', 'set.lanSubnetsHelp': '逗号分隔;留空自动', 'set.webListen': '面板监听', 'set.webListenHelp': '如 0.0.0.0:9800;非本机地址必须先设密码;改后重启服务生效', 'menu.conns': '连接', 'menu.logs': '日志', 'menu.about': '关于',
     'rules.title': '路由规则', 'rules.edit': '编辑规则组', 'rules.intro': '自上而下依次匹配,排在默认规则之前;只在"规则"模式下生效。', 'rules.count': '{n} 条', 'rules.editBtn': '编辑', 'rules.add': '新增规则组',
     'rules.default': '默认规则', 'rules.builtin': '内置', 'rules.defaultDesc': '局域网与私网直连 · 国内域名与 IP 直连 · 其余走代理。广告拦截与按进程直连在"设置 → 分流"里开。', 'rules.delConfirm': '删除规则组「{n}」?',
     'rules.name': '名称', 'rules.namePh': '如:流媒体', 'rules.out': '出口', 'rules.outHelp': '命中后走哪里;选了具体节点而它不在当前订阅里时走代理', 'rules.enabled': '启用', 'rules.conds': '匹配条件', 'rules.addCond': '添加',
@@ -44,7 +48,11 @@ const I18N = {
   },
   en: {
     'app.name': 'Fotiaoqiang',
-    'menu.settings': 'Settings', 'menu.profiles': 'Subscriptions', 'menu.rules': 'Routing rules', 'menu.conns': 'Connections', 'menu.logs': 'Logs', 'menu.about': 'About',
+    'menu.settings': 'Settings', 'menu.profiles': 'Subscriptions', 'menu.rules': 'Routing rules', 'menu.devices': 'Devices',
+    'dev.title': 'LAN devices', 'dev.intro': 'Devices going online through this box in gateway mode. Each can follow the rules, or be forced to proxy, direct or blocked; remembered by MAC.', 'dev.empty': 'No devices seen yet (point their gateway at this box)', 'dev.online': 'online', 'dev.offline': 'offline', 'dev.rename': 'Rename', 'dev.renamePrompt': 'Device name',
+    'dev.m.follow': 'Follow', 'dev.m.proxy': 'Proxy', 'dev.m.direct': 'Direct', 'dev.m.reject': 'Block',
+    'set.g.net': 'Network', 'set.netMode': 'Network mode', 'set.netModeHelp': 'Local: only this machine; Gateway: also LAN devices routed through it (router); their DNS is taken over too', 'set.netLocal': 'Local', 'set.netGateway': 'Gateway',
+    'set.dnsHijack': 'Hijack LAN DNS', 'set.dnsHijackHelp': 'Gateway mode: queries sent to this box on port 53 are answered by the core (fake-ip, no leaks)', 'set.lanSubnets': 'LAN subnets', 'set.lanSubnetsHelp': 'Comma separated; empty = auto', 'set.webListen': 'Panel listen', 'set.webListenHelp': 'e.g. 0.0.0.0:9800; non-loopback needs a password; restart the service after changing', 'menu.conns': 'Connections', 'menu.logs': 'Logs', 'menu.about': 'About',
     'rules.title': 'Routing rules', 'rules.edit': 'Edit rule group', 'rules.intro': 'Matched top to bottom, before the built-in defaults; active in Rule mode only.', 'rules.count': '{n} rules', 'rules.editBtn': 'Edit', 'rules.add': 'New rule group',
     'rules.default': 'Default rules', 'rules.builtin': 'built-in', 'rules.defaultDesc': 'LAN and private ranges direct · China domains and IPs direct · everything else via proxy. Ad blocking and per-process bypass live in Settings → Routing.', 'rules.delConfirm': 'Delete rule group "{n}"?',
     'rules.name': 'Name', 'rules.namePh': 'e.g. Streaming', 'rules.out': 'Outbound', 'rules.outHelp': 'Where matches go; a chosen node missing from the current subscription falls back to proxy', 'rules.enabled': 'Enabled', 'rules.conds': 'Conditions', 'rules.addCond': 'Add',

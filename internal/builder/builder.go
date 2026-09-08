@@ -140,6 +140,10 @@ func Build(in Input) ([]byte, error) {
 			// 私网段与链路本地之外,168.63.129.16 是 Azure 平台地址(来宾代理、DNS、健康探测),进了隧道整台云主机就失联,一并排除
 			tun["route_exclude_address"] = []string{"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "169.254.0.0/16", "168.63.129.16/32", "224.0.0.0/4"}
 		}
+		if s.NetMode == settings.NetGateway {
+			// 网关模式(Linux 软路由):经本机转发的局域网流量由 sing-box 用 nftables 直接导入(比策略路由快),需要内核带 nftables
+			tun["auto_redirect"] = true
+		}
 		inbounds = append(inbounds, tun)
 	}
 	if s.MixedPort > 0 {
@@ -161,6 +165,25 @@ func Build(in Input) ([]byte, error) {
 	}
 	if len(s.BypassApps) > 0 {
 		rules = append(rules, obj("process_name", s.BypassApps, "outbound", "direct")) // 指定进程直连,放在最前
+	}
+	// 局域网设备策略(网关模式):按来源 IP 强制直连 / 拒绝 / 代理,放在模式分支之前,任何模式下都成立
+	if s.NetMode == settings.NetGateway {
+		byMode := map[string][]string{}
+		for _, d := range s.Devices {
+			if d.Mode == "" || d.IP == "" {
+				continue
+			}
+			byMode[d.Mode] = append(byMode[d.Mode], d.IP+cidrSuffix(d.IP))
+		}
+		for _, mode := range []string{"reject", "direct", "proxy"} {
+			if ips := byMode[mode]; len(ips) > 0 {
+				if mode == "reject" {
+					rules = append(rules, obj("source_ip_cidr", ips, "action", "reject"))
+				} else {
+					rules = append(rules, obj("source_ip_cidr", ips, "outbound", mode))
+				}
+			}
+		}
 	}
 	if !s.IPv6 {
 		// 先按 ipv4_only 把目标域名解析成 IPv4(fake-ip 只是给客户端的占位,这里查的是真实地址),
@@ -301,4 +324,12 @@ func obj(kv ...any) map[string]any {
 func itoa(n int) string {
 	b, _ := json.Marshal(n)
 	return string(b)
+}
+
+// cidrSuffix 单个地址补成 /32 或 /128。
+func cidrSuffix(ip string) string {
+	if strings.Contains(ip, ":") {
+		return "/128"
+	}
+	return "/32"
 }

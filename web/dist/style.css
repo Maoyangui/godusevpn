@@ -204,3 +204,7 @@ pre.log .warn { color: #fbbf24; } pre.log .err { color: #f87171; } pre.log .dim 
 .login-card { width: 100%; max-width: 320px; display: flex; flex-direction: column; align-items: center; gap: 10px; text-align: center; }
 .login-card h1 { font-size: 22px; margin: 4px 0 0; } .login-card p { color: var(--muted); margin: 0 0 8px; }
 .login-card input { width: 100%; }
+
+/* 设备页 */
+.item.dev .dot { flex: none; }
+.dev-seg button.active { color: #fff; }

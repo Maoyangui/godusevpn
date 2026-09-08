@@ -19,6 +19,7 @@ case "$(uname -m)" in
 esac
 
 BIN_DIR=/usr/local/bin
+if [ -f /etc/openwrt_release ]; then BIN_DIR=/usr/bin; fi   # OpenWrt 的 PATH 里没有 /usr/local/bin
 if [ -f /opt/etc/entware_release ] || { [ -x /opt/bin/opkg ] && [ ! -f /etc/openwrt_release ]; }; then BIN_DIR=/opt/bin; fi
 mkdir -p "$BIN_DIR"
 

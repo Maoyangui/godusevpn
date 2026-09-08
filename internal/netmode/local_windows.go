@@ -5,7 +5,5 @@ func Protect(string, bool) error { return nil }
 func Unprotect()                 {}
 
 // 网关模式只在 Linux 软路由上有。
-const DNSHijackAddr = "192.0.2.53"
-
 func ApplyGateway(string, []string, bool) error { return nil }
 func ClearGateway()                             {}
