@@ -35,6 +35,7 @@ func parseArgs(args []string) (minimized bool, deepLink string) {
 
 func main() {
 	minimized, link := parseArgs(os.Args[1:])
+	ensureURLProtocol() // 落地页一键导入的 godusevpn:// 协议:老安装包漏注册过,每次启动补一遍
 	app := newApp(minimized, link)
 	err := wails.Run(&options.App{
 		Title:             buildinfo.DisplayName,
