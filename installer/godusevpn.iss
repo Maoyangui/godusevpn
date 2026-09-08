@@ -115,7 +115,7 @@ procedure CurStepChanged(CurStep: TSetupStep);
 var rc: Integer;
 begin
   if (CurStep = ssDone) and WantRelaunch then
-    Exec('explorer.exe', ExpandConstant('"{app}godusevpn.exe"'), '', SW_SHOW, ewNoWait, rc);
+    Exec('explorer.exe', ExpandConstant('"{app}\godusevpn.exe"'), '', SW_SHOW, ewNoWait, rc);
 end;
 
 // WebView2 运行时是否已装:Evergreen 在这两个键之一
