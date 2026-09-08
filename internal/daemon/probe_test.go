@@ -65,7 +65,7 @@ func TestPingLoopbackOrUnavailable(t *testing.T) {
 		}
 		t.Skip("本机没有 ICMP 权限:", err)
 	}
-	if d <= 0 || d > time.Second {
+	if d < 0 || d > time.Second { // 计时器粒度粗的机器上回环 ping 会量出 0
 		t.Fatalf("回环 ping 时间不合理: %v", d)
 	}
 }

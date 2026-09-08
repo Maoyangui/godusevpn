@@ -82,11 +82,15 @@ func probeDirect(ctx context.Context, p *profile.Profile) map[string]int {
 			} else {
 				d, err = tcping(tctx, net.JoinHostPort(e.Server, strconv.Itoa(e.Port)))
 			}
+			ms := int(d / time.Millisecond)
+			if ms < 1 {
+				ms = 1 // 计时器粒度粗时会量出 0,而 0 在界面上表示"没测过"
+			}
 			mu.Lock()
 			if err != nil {
 				res[e.Tag] = -1
 			} else {
-				res[e.Tag] = int(d / time.Millisecond)
+				res[e.Tag] = ms
 			}
 			mu.Unlock()
 		}(e)
