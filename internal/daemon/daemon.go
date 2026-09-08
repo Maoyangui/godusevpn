@@ -509,9 +509,9 @@ func (d *Daemon) registerHandlers() {
 		defer cancel()
 		var res map[string]int
 		if d.core.Running() {
-			res = d.core.ProbeRunning(ctx, p.Tags, builder.TestURL)
+			res = d.core.ProbeRunning(ctx, p.Tags, builder.TestURL) // 已连接:经每个出站做 URL 测试
 		} else {
-			res = core.Probe(ctx, p.Outbounds, p.Tags, builder.TestURL)
+			res = probeDirect(ctx, p) // 未连接:直连量到节点服务器的往返
 		}
 		d.mu.Lock()
 		d.delays = res
