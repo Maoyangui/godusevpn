@@ -372,12 +372,20 @@ func (a *App) ApplyUpdate() error {
 	if err != nil {
 		return err
 	}
-	if err := runElevated(path, "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /RELAUNCH=1"); err != nil {
+	// 以普通身份启动安装包,让它自己弹 UAC:Inno 会留一个未提权的进程当"原始用户",装完才能以该用户重新拉起客户端
+	// (若在这里用 runas 直接提权,Inno 就不知道原始用户是谁,装完拉不起来)。安装包会先杀掉本进程再覆盖文件。
+	if err := runOpen(path, "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /RELAUNCH=1"); err != nil {
 		return err
 	}
-	// 安装包会杀掉本进程再重新拉起;这里主动退出,别让它等
-	go func() { time.Sleep(2 * time.Second); runtime.Quit(a.ctx) }()
 	return nil
+}
+
+func runOpen(exe, args string) error {
+	verb, _ := syscall.UTF16PtrFromString("open")
+	file, _ := syscall.UTF16PtrFromString(exe)
+	arg, _ := syscall.UTF16PtrFromString(args)
+	dir, _ := syscall.UTF16PtrFromString(filepath.Dir(exe))
+	return windows.ShellExecute(0, verb, file, arg, dir, windows.SW_SHOWNORMAL)
 }
 
 // ---- 窗口 ----

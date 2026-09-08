@@ -410,6 +410,9 @@ func (d *Daemon) stateView() ipc.StateView {
 		if now, all, err := d.core.Group("proxy"); err == nil {
 			v.Node, v.Nodes = now, all
 		}
+		if now, _, err := d.core.Group("auto"); err == nil {
+			v.AutoNow = now
+		}
 	} else if active != nil && len(active.Tags) > 0 {
 		v.Nodes = append([]string{"auto"}, active.Tags...)
 	}

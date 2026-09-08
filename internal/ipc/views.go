@@ -33,8 +33,9 @@ type StateView struct {
 	Version  string            `json:"version"`
 	Protocol int               `json:"protocol"`
 	State    state.Snapshot    `json:"state"`
-	Mode     string            `json:"mode"` // rule / global / direct
-	Node     string            `json:"node"` // proxy 组当前项
+	Mode     string            `json:"mode"`              // rule / global / direct
+	Node     string            `json:"node"`              // proxy 组当前项
+	AutoNow  string            `json:"autoNow,omitempty"` // 自动选择组当前落在哪个节点(内核在跑时才有)
 	Nodes    []string          `json:"nodes"`
 	Delays   map[string]int    `json:"delays,omitempty"` // 最近一次全节点测速(节点 → 毫秒,-1 不通);内核没跑时界面靠它显示
 	Uptime   int64             `json:"uptime"`

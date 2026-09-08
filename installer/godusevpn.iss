@@ -97,25 +97,19 @@ Filename: "{tmp}\MicrosoftEdgeWebview2Setup.exe"; Parameters: "/silent /install"
 #endif
 Filename: "{app}\godusevpn-svc.exe"; Parameters: "install"; StatusMsg: "{cm:InstallingService}"; Flags: runhidden waituntilterminated
 Filename: "{app}\godusevpn.exe"; Description: "{cm:Launch}"; Flags: nowait postinstall skipifsilent runasoriginaluser
+; 应用内升级(/VERYSILENT /RELAUNCH=1):装完以原始用户身份重新拉起客户端。客户端以普通身份启动安装包,由安装包自己弹 UAC,
+; 这样 Inno 才有未提权的"原始用户"进程来执行这一条
+Filename: "{app}\godusevpn.exe"; Flags: nowait runasoriginaluser; Check: WantRelaunch
 
 [UninstallRun]
 Filename: "{app}\godusevpn-svc.exe"; Parameters: "uninstall"; RunOnceId: "svc-uninstall"; Flags: runhidden waituntilterminated
 Filename: "taskkill.exe"; Parameters: "/F /IM godusevpn.exe"; RunOnceId: "kill-ui"; Flags: runhidden waituntilterminated
 
 [Code]
-// 应用内升级:安装包带 /RELAUNCH=1,静默装完后重新拉起客户端。
-// 安装包是客户端用 runas 直接提权启动的,Inno 不知道"原始用户"是谁,runasoriginaluser 不起作用;
-// 借 explorer.exe 启动目标,拿到的就是桌面(未提权)的令牌。
+// 应用内升级:安装包带 /RELAUNCH=1,静默装完后由 [Run] 里的 runasoriginaluser 条目重新拉起客户端
 function WantRelaunch: Boolean;
 begin
   Result := ExpandConstant('{param:RELAUNCH|0}') = '1';
-end;
-
-procedure CurStepChanged(CurStep: TSetupStep);
-var rc: Integer;
-begin
-  if (CurStep = ssDone) and WantRelaunch then
-    Exec('explorer.exe', ExpandConstant('"{app}\godusevpn.exe"'), '', SW_SHOW, ewNoWait, rc);
 end;
 
 // WebView2 运行时是否已装:Evergreen 在这两个键之一

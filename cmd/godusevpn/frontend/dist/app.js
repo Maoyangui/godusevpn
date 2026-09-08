@@ -195,7 +195,7 @@ function updateHome() {
   $('#status').textContent = state.service ? t('st.' + st) : t('svc.down');
   let sub = '';
   if (v.state.error) sub = (t('code.' + v.state.code) !== 'code.' + v.state.code ? t('code.' + v.state.code) : v.state.error);
-  else if (on) sub = (v.node === 'auto' ? t('pick.auto') : v.node) + ' · ' + t('mode.' + v.mode);
+  else if (on) sub = (v.node === 'auto' ? (v.autoNow || t('pick.auto')) : v.node) + ' · ' + t('mode.' + v.mode);
   $('#status-sub').textContent = sub;
   $('#s-time').textContent = on && v.uptime ? fmtDuration(v.uptime) : '–';
   $('#s-ping').textContent = on && lastPing ? lastPing + ' ' + t('common.ms') : '–';
