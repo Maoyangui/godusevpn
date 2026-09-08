@@ -2,15 +2,33 @@
 // Windows 客户端由 Wails 注入真正的桥,这里检测到就什么都不做。
 (() => {
   if (window.go && window.go.main && window.go.main.App) return;
-  // Android:Kotlin 注入的同步桥,事件由宿主经 window.__godEvent 推进来
+  // Android:Kotlin 注入的桥,事件由宿主经 window.__godEvent 推进来
   if (window.GodusevpnBridge) {
     window.__android = true;
     const listeners = {};
     window.__godEvent = (name, dataJSON) => { let d; try { d = JSON.parse(dataJSON); } catch (x) { d = dataJSON; } (listeners[name] || []).forEach(f => f(d)); };
-    const call = (name, args) => new Promise((resolve, reject) => {
+    // 异步桥:同步桥会把页面线程堵住(测全部节点要好几秒,面板就卡着弹不出来),
+    // 所以交给宿主在后台线程跑完再回调 __godResolve;老外壳没有 callAsync 时退回同步。
+    const pending = new Map();
+    let seq = 0;
+    window.__godResolve = (id, payloadJSON) => {
+      const p = pending.get(id);
+      if (!p) return;
+      pending.delete(id);
+      let j;
+      try { j = JSON.parse(payloadJSON); } catch (e) { p.reject(new Error(String(payloadJSON))); return; }
+      if (j && j.error) p.reject(new Error(j.error)); else p.resolve(j ? j.result : null);
+    };
+    const callSync = (name, args) => new Promise((resolve, reject) => {
       let j;
       try { j = JSON.parse(window.GodusevpnBridge.call(String(name), JSON.stringify(args || []))); } catch (e) { reject(new Error(String(e && e.message || e))); return; }
       if (j.error) reject(new Error(j.error)); else resolve(j.result);
+    });
+    const call = typeof window.GodusevpnBridge.callAsync !== 'function' ? callSync : (name, args) => new Promise((resolve, reject) => {
+      const id = 'r' + (++seq);
+      pending.set(id, { resolve, reject });
+      try { window.GodusevpnBridge.callAsync(id, String(name), JSON.stringify(args || [])); }
+      catch (e) { pending.delete(id); reject(new Error(String(e && e.message || e))); }
     });
     window.go = { main: { App: new Proxy({}, { get: (_, name) => (...args) => call(name, args) }) } };
     window.runtime = { EventsOn: (n, f) => { (listeners[n] = listeners[n] || []).push(f); } };

@@ -61,6 +61,8 @@ type Settings struct {
 	BypassApps []string `json:"bypassApps"`
 	// RuleGroups 用户自定义规则组,按顺序匹配,排在内置默认规则之前(见 rules.go)
 	RuleGroups []RuleGroup `json:"ruleGroups"`
+	// DefaultRules 内置默认规则里可改的几项(私网 / 国内 / 其余),可一键还原出厂
+	DefaultRules DefaultRules `json:"defaultRules"`
 }
 
 // Default 出厂默认:TUN + 规则模式 + DoH + fake-ip + 禁 IPv6。
@@ -69,7 +71,7 @@ func Default() Settings {
 		Schema: Schema, Mode: ModeRule, TUN: true, TUNStack: "mixed", StrictRoute: true, LANBypass: true,
 		MixedPort: 2080, RemoteDNS: "1.1.1.1", LocalDNS: "223.5.5.5", FakeIP: true, IPv6: false,
 		UpdateHours: 6, ProbeMinutes: 3, LogLevel: "info", LogDays: 7, ClashPort: 9090, WebListen: defaultWebListen(),
-		NetMode: NetLocal, DNSHijack: true,
+		NetMode: NetLocal, DNSHijack: true, DefaultRules: FactoryDefaultRules(),
 	}
 }
 
@@ -114,6 +116,7 @@ func (s *Settings) migrate() {
 	if s.ProbeMinutes == 0 {
 		s.ProbeMinutes = 3
 	}
+	s.DefaultRules.normalize() // 老设置文件里没有这一段
 	s.Schema = Schema
 }
 
@@ -226,6 +229,9 @@ func (s *Settings) Validate() error {
 	}
 	s.BypassApps = apps
 	if err := s.validateGateway(); err != nil {
+		return err
+	}
+	if err := s.DefaultRules.validate(); err != nil {
 		return err
 	}
 	return s.validateRules()

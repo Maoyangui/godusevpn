@@ -160,3 +160,55 @@ func normalizeRule(typ, v string) (Rule, error) {
 	}
 	return Rule{Type: typ, Value: v}, nil
 }
+
+// DefaultRules 内置默认规则里可以调的几项。出厂就是"私网直连、国内直连、其余走代理",
+// 用户可以逐项改,也可以一键还原(Restore)。这三条永远排在自定义规则组之后。
+type DefaultRules struct {
+	Private string `json:"private"` // 局域网与私网地址:direct / proxy / reject
+	CN      string `json:"cn"`      // 国内域名与 IP(geosite-cn、geoip-cn):direct / proxy / reject
+	Final   string `json:"final"`   // 其余流量:proxy / direct
+}
+
+// FactoryDefaultRules 出厂值,还原按钮用它。
+func FactoryDefaultRules() DefaultRules {
+	return DefaultRules{Private: OutDirect, CN: OutDirect, Final: OutProxy}
+}
+
+// IsFactory 是否还是出厂状态(界面据此决定要不要显示"已修改")。
+func (d DefaultRules) IsFactory() bool { return d == FactoryDefaultRules() }
+
+// normalize 空值补成出厂值:老版本的设置文件里没有这一段。
+func (d *DefaultRules) normalize() {
+	f := FactoryDefaultRules()
+	if d.Private == "" {
+		d.Private = f.Private
+	}
+	if d.CN == "" {
+		d.CN = f.CN
+	}
+	if d.Final == "" {
+		d.Final = f.Final
+	}
+}
+
+func (d DefaultRules) validate() error {
+	for _, x := range []struct {
+		name, val string
+		allow     []string
+	}{
+		{"私网", d.Private, []string{OutDirect, OutProxy, OutReject}},
+		{"国内", d.CN, []string{OutDirect, OutProxy, OutReject}},
+		{"其余流量", d.Final, []string{OutProxy, OutDirect}},
+	} {
+		ok := false
+		for _, a := range x.allow {
+			if x.val == a {
+				ok = true
+			}
+		}
+		if !ok {
+			return fmt.Errorf("默认规则「%s」的出口无效: %q(可选 %s)", x.name, x.val, strings.Join(x.allow, " / "))
+		}
+	}
+	return nil
+}

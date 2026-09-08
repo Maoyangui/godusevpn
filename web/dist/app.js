@@ -444,6 +444,10 @@ async function renderRules(el) {
   try { s = await App().GetSettings(); } catch (e) { el.innerHTML = `<div class="empty">${esc(errText(e))}</div>`; return; }
   const groups = s.ruleGroups || [];
   const save = async next => { try { await App().SaveSettings({ ...s, ruleGroups: next }); toast(t('set.saved'), 'ok'); } catch (e) { toast(errText(e), 'err'); } nav('rules'); };
+  const dr = Object.assign({ private: 'direct', cn: 'direct', final: 'proxy' }, s.defaultRules || {});
+  // 默认规则的一行:标题 + 出口下拉。出口取值与规则组一致(直连 / 代理 / 拒绝)
+  const drRow = (id, key, val, opts) => `<div class="cond" style="padding:8px 10px"><span class="val" style="font-family:inherit">${t(key)}</span>
+    <select id="${id}" data-dr="${id.slice(3)}" style="width:auto;flex:none;max-width:52%">${opts.map(o => `<option value="${o}" ${o === val ? 'selected' : ''}>${t('out.' + o)}</option>`).join('')}</select></div>`;
   const summary = g => { const r = g.rules || []; return outLabel(g.outbound) + ' · ' + t('rules.count', { n: r.length }) + (r.length ? ' · ' + r.slice(0, 3).map(x => x.value).join(', ') + (r.length > 3 ? '…' : '') : ''); };
   el.innerHTML = `<p class="small muted" style="margin:2px 0 10px">${t('rules.intro')}</p>
     <div class="list">${groups.map((g, i) => `<div class="item rg ${g.enabled ? '' : 'off'}" style="flex-wrap:wrap;animation-delay:${i * 30}ms">
@@ -457,9 +461,19 @@ async function renderRules(el) {
         <button class="btn sm" data-act="down" data-i="${i}" ${i === groups.length - 1 ? 'disabled' : ''}>↓</button>
         <span class="grow"></span><button class="btn sm danger ghost" data-act="del" data-i="${i}">${t('prof.del')}</button>
       </div></div>`).join('')}
-      <div class="item rg builtin"><div class="name"><b>${t('rules.default')} <span class="tag">${t('rules.builtin')}</span></b><span>${t('rules.defaultDesc')}</span></div></div>
+      <div class="item rg builtin" style="flex-wrap:wrap"><div class="name" style="flex-basis:100%"><b>${t('rules.default')} <span class="tag">${dr.private === 'direct' && dr.cn === 'direct' && dr.final === 'proxy' ? t('rules.builtin') : t('rules.changed')}</span></b><span>${t('rules.defaultHint')}</span></div>
+        <div class="conds" style="flex-basis:100%;margin-top:8px">
+          ${drRow('dr-private', 'rules.dPrivate', dr.private, ['direct', 'proxy', 'reject'])}
+          ${drRow('dr-cn', 'rules.dCN', dr.cn, ['direct', 'proxy', 'reject'])}
+          ${drRow('dr-final', 'rules.dFinal', dr.final, ['proxy', 'direct'])}
+        </div>
+        <div class="row" style="flex-basis:100%;margin-top:8px"><span class="grow"></span><button class="btn sm" id="dr-reset">${t('rules.restore')}</button></div>
+      </div>
     </div>
     <div style="height:12px"></div><button class="btn primary block" id="rg-add">${t('rules.add')}</button>`;
+  const saveDR = async next => { try { await App().SaveSettings({ ...s, defaultRules: next }); toast(t('set.saved'), 'ok'); } catch (e) { toast(errText(e), 'err'); } nav('rules'); };
+  el.querySelectorAll('select[data-dr]').forEach(sel => sel.addEventListener('change', () => saveDR({ ...dr, [sel.dataset.dr]: sel.value })));
+  $('#dr-reset').addEventListener('click', () => { if (confirm(t('rules.restoreConfirm'))) saveDR({ private: 'direct', cn: 'direct', final: 'proxy' }); });
   $('#rg-add').addEventListener('click', () => nav('ruleEdit', null));
   el.querySelectorAll('[data-act]').forEach(b => b.addEventListener(b.dataset.act === 'toggle' ? 'change' : 'click', async () => {
     const i = Number(b.dataset.i), next = groups.map(g => ({ ...g }));

@@ -131,9 +131,15 @@ func Main(args []string) int {
 			printProfile(p)
 		}
 	case "refresh":
-		var p *ipc.ProfileView
-		if err = call(ctx, ipc.MRefreshProfile, nil, &p); err == nil {
-			printProfile(p)
+		var list []ipc.ProfileView // 服务返回的是全部订阅,打印当前这条
+		if err = call(ctx, ipc.MRefreshProfile, nil, &list); err == nil {
+			var cur *ipc.ProfileView
+			for i := range list {
+				if list[i].Active {
+					cur = &list[i]
+				}
+			}
+			printProfile(cur)
 		}
 	case "settings":
 		var s settings.Settings

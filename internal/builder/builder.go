@@ -9,8 +9,8 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"strconv"
 	"runtime"
+	"strconv"
 	"strings"
 
 	"github.com/Maoyangui/godusevpn/internal/profile"
@@ -137,15 +137,16 @@ func Build(in Input) ([]byte, error) {
 	// ---- 入站 ----
 	var inbounds []any
 	if s.TUN {
-		addr := []string{tunAddr4}
-		if s.IPv6 {
-			addr = append(addr, tunAddr6)
-		}
+		// v6 地址一直加:关掉 IPv6 时也要把 v6 流量接进隧道,否则它绕过隧道从物理网卡直接出网(泄露),
+		// 进来之后由下面的 ip_version=6 拒绝规则丢掉,应用会立刻回退到 IPv4。
+		addr := []string{tunAddr4, tunAddr6}
 		tun := obj("type", "tun", "tag", "tun-in", "interface_name", TunName, "address", addr,
 			"auto_route", true, "strict_route", s.StrictRoute, "stack", s.TUNStack)
 		if s.LANBypass {
 			// 私网段与链路本地之外,168.63.129.16 是 Azure 平台地址(来宾代理、DNS、健康探测),进了隧道整台云主机就失联,一并排除
-			tun["route_exclude_address"] = []string{"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "169.254.0.0/16", "168.63.129.16/32", "224.0.0.0/4"}
+			ex := []string{"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "169.254.0.0/16", "168.63.129.16/32", "224.0.0.0/4"}
+			ex = append(ex, "fc00::/7", "fe80::/10", "ff00::/8") // v6 的私网 / 链路本地 / 组播,同样留给局域网
+			tun["route_exclude_address"] = ex
 		}
 		if s.NetMode == settings.NetGateway {
 			// 网关模式(Linux 软路由):经本机转发的局域网流量由 sing-box 用 nftables 直接导入(比策略路由快),需要内核带 nftables
@@ -205,8 +206,9 @@ func Build(in Input) ([]byte, error) {
 	} else {
 		rules = append(rules, obj("action", "resolve")) // 开 IPv6 也要先解析,否则 IP 类规则(geoip、IP 段)对域名连接不生效
 	}
+	dr := s.DefaultRules
+	rules = append(rules, withOutbound(obj("ip_is_private", true), dr.Private))
 	rules = append(rules,
-		obj("ip_is_private", true, "outbound", "direct"),
 		obj("clash_mode", "Direct", "outbound", "direct"),
 		obj("clash_mode", "Global", "outbound", "proxy"),
 	)
@@ -225,8 +227,8 @@ func Build(in Input) ([]byte, error) {
 	if s.AdBlock {
 		rules = append(rules, obj("rule_set", []string{"geosite-category-ads-all"}, "action", "reject"))
 	}
-	rules = append(rules, obj("rule_set", []string{"geosite-cn", "geoip-cn"}, "outbound", "direct"))
-	route := obj("rules", rules, "rule_set", ruleSets, "final", "proxy", "auto_detect_interface", true, "default_domain_resolver", "local")
+	rules = append(rules, withOutbound(obj("rule_set", []string{"geosite-cn", "geoip-cn"}), dr.CN))
+	route := obj("rules", rules, "rule_set", ruleSets, "final", dr.Final, "auto_detect_interface", true, "default_domain_resolver", "local")
 	if findProcess {
 		route["find_process"] = true
 	}
@@ -346,4 +348,14 @@ func cidrSuffix(ip string) string {
 		return "/128"
 	}
 	return "/32"
+}
+
+// withOutbound 给一条规则填出口:reject 是动作,其余是出站标签。默认规则的三项可配置,统一走这里。
+func withOutbound(rule map[string]any, out string) map[string]any {
+	if out == settings.OutReject {
+		rule["action"] = "reject"
+	} else {
+		rule["outbound"] = out
+	}
+	return rule
 }

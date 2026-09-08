@@ -32,6 +32,8 @@ import java.io.File
 class MainActivity : AppCompatActivity() {
     private lateinit var web: WebView
     private var pendingConnect = false
+    // 页面的调用在这里跑;几个线程足够,测速那种慢活也不会互相挡住
+    private val bridgePool = java.util.concurrent.Executors.newFixedThreadPool(4)
     private val listener: (String, String) -> Unit = { name, data ->
         runOnUiThread { web.evaluateJavascript("window.__godEvent && window.__godEvent(${JSONObject.quote(name)}, ${JSONObject.quote(data)})", null) }
     }
@@ -96,6 +98,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         App.listeners.remove(listener)
+        bridgePool.shutdownNow()
         super.onDestroy()
     }
 
@@ -113,6 +116,22 @@ class MainActivity : AppCompatActivity() {
     inner class Bridge {
         @JavascriptInterface
         fun isTV(): Boolean = this@MainActivity.isTV()
+
+        /**
+         * 异步调用:立刻返回,活干完了再把结果回调给页面。
+         * 同步调用会占着页面线程(测全部节点这类要好几秒),面板就"卡一下才弹出来"。
+         */
+        @JavascriptInterface
+        fun callAsync(reqId: String, name: String, argsJSON: String) {
+            bridgePool.execute {
+                val payload = call(name, argsJSON)
+                runOnUiThread {
+                    if (!isFinishing && !isDestroyed) {
+                        web.evaluateJavascript("window.__godResolve && window.__godResolve(${JSONObject.quote(reqId)}, ${JSONObject.quote(payload)})", null)
+                    }
+                }
+            }
+        }
 
         @JavascriptInterface
         fun call(name: String, argsJSON: String): String {

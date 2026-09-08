@@ -2,6 +2,7 @@ package builder
 
 import (
 	"encoding/json"
+	"fmt"
 	"runtime"
 	"strings"
 	"testing"
@@ -57,8 +58,12 @@ func TestDefaultsNoIPv6FakeIPTun(t *testing.T) {
 	if c.DNS.Strategy != "ipv4_only" {
 		t.Fatalf("默认禁 IPv6:DNS 策略应为 ipv4_only,实际 %s", c.DNS.Strategy)
 	}
-	if strings.Contains(raw, "fdfe:") || strings.Contains(raw, "inet6_range") {
-		t.Fatal("默认不该出现任何 IPv6 地址段")
+	// 默认禁 IPv6:不给 fake-ip 分配 v6 段;但 TUN 仍要有 v6 地址,把 v6 接进来再拒绝,免得它绕过隧道直接出网
+	if strings.Contains(raw, "inet6_range") {
+		t.Fatal("默认不该给 fake-ip 分配 IPv6 段")
+	}
+	if !strings.Contains(raw, "fdfe:") {
+		t.Fatal("TUN 应带 IPv6 地址以便捕获并拒绝 v6,否则会泄露")
 	}
 	var v6reject, hijack53, fake bool
 	for _, r := range c.Route.Rules {
@@ -230,5 +235,61 @@ func TestAndroidPackageRules(t *testing.T) {
 	}
 	if runtime.GOOS != "android" && (strings.Contains(string(raw), "package_name") || strings.Contains(string(raw), "exclude_package")) {
 		t.Fatal("桌面配置不该出现 package_name / exclude_package")
+	}
+}
+
+// 关掉 IPv6 时,v6 也必须被接进隧道再拒绝;否则 v6 流量从物理网卡直接出网,等于绕过代理。
+func TestIPv6CapturedEvenWhenDisabled(t *testing.T) {
+	s := settings.Default()
+	s.IPv6 = false
+	c, raw := build(t, s)
+	var tun map[string]any
+	for _, in := range c.Inbounds {
+		if in["type"] == "tun" {
+			tun = in
+		}
+	}
+	if tun == nil {
+		t.Fatal("没有 TUN 入站")
+	}
+	addrs, _ := json.Marshal(tun["address"])
+	if !strings.Contains(string(addrs), ":") {
+		t.Fatalf("关闭 IPv6 时也要给 TUN 配 v6 地址,现在是 %s", addrs)
+	}
+	var rejected bool
+	for _, r := range c.Route.Rules {
+		if r["action"] == "reject" && fmt.Sprint(r["ip_version"]) == "6" {
+			rejected = true
+		}
+	}
+	if !rejected {
+		t.Fatalf("缺少 IPv6 拒绝规则: %s", raw)
+	}
+}
+
+// 默认规则可改:改成"国内也走代理、其余直连"后配置要跟着变;还原后回到出厂。
+func TestDefaultRulesConfigurable(t *testing.T) {
+	s := settings.Default()
+	s.DefaultRules = settings.DefaultRules{Private: settings.OutReject, CN: settings.OutProxy, Final: settings.OutDirect}
+	c, raw := build(t, s)
+	if c.Route.Final != "direct" {
+		t.Fatalf("其余流量应走 direct,实际 %q", c.Route.Final)
+	}
+	var privReject, cnProxy bool
+	for _, r := range c.Route.Rules {
+		if r["ip_is_private"] == true && r["action"] == "reject" {
+			privReject = true
+		}
+		if fmt.Sprint(r["rule_set"]) == "[geosite-cn geoip-cn]" && r["outbound"] == "proxy" {
+			cnProxy = true
+		}
+	}
+	if !privReject || !cnProxy {
+		t.Fatalf("默认规则没按设置生成: priv=%v cn=%v %s", privReject, cnProxy, raw)
+	}
+	s.DefaultRules = settings.FactoryDefaultRules()
+	c2, _ := build(t, s)
+	if c2.Route.Final != "proxy" {
+		t.Fatalf("还原后其余流量应走 proxy,实际 %q", c2.Route.Final)
 	}
 }
