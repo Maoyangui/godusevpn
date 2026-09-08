@@ -38,6 +38,9 @@ const I18N = {
     'set.lan': '局域网直通', 'set.lanHelp': '10 / 172.16 / 192.168 网段不进 TUN', 'set.mixed': '混合端口', 'set.mixedHelp': '0 = 关;HTTP 与 SOCKS5 同端口,只监听 127.0.0.1',
     'set.remoteDns': '远程 DNS', 'set.remoteDnsHelp': 'DoH,经代理解析', 'set.localDns': '本地 DNS', 'set.localDnsHelp': 'DoH,直连;填 system 用系统 DNS', 'set.fakeip': 'fake-ip', 'set.ipv6': '允许 IPv6', 'set.ipv6Help': '关闭时代理链路全程禁用 IPv6',
     'set.adblock': '拦截广告域名', 'set.bypass': '按进程直连', 'set.bypassHelp': '一行一个进程名(如 steam.exe),这些程序的流量不走代理',
+    'node.fetching': '正在拉取订阅…', 'node.notFetched': '订阅还没拉取到节点,请刷新订阅',
+    'set.bypassApp': '按应用直连', 'set.bypassAppHelp': '一行一个应用包名(如 com.tencent.mm),这些应用整个绕过 VPN', 'rt.package_name': '应用包名', 'rt.package_name.ph': 'com.tencent.mm',
+    'rules.defaultDescApp': '局域网与私网直连 · 国内域名与 IP 直连 · 其余走代理。广告拦截与按应用直连在"设置 → 分流"里开。',
     'set.update': '订阅自动刷新(小时)', 'set.probe': '定时测速(分钟)', 'set.probeHelp': '每隔多少分钟测一轮全部节点,"自动选择"据此换到最快的', 'set.logLevel': '日志级别',
     'set.autostart': '登录时自动启动', 'set.autostartHelp': '开机后按上次状态自动连接', 'set.lang': '语言', 'set.theme': '外观', 'theme.system': '跟随系统', 'theme.light': '浅色', 'theme.dark': '深色',
     'conns.title': '连接', 'conns.empty': '没有活动连接', 'conns.needCore': '连接后才能查看', 'conns.close': '断开',
@@ -84,6 +87,9 @@ const I18N = {
     'set.lan': 'LAN bypass', 'set.lanHelp': '10 / 172.16 / 192.168 ranges skip the TUN', 'set.mixed': 'Mixed port', 'set.mixedHelp': '0 = off; HTTP and SOCKS5 on one port, 127.0.0.1 only',
     'set.remoteDns': 'Remote DNS', 'set.remoteDnsHelp': 'DoH, resolved via proxy', 'set.localDns': 'Local DNS', 'set.localDnsHelp': 'DoH, direct; "system" uses the OS resolver', 'set.fakeip': 'fake-ip', 'set.ipv6': 'Allow IPv6', 'set.ipv6Help': 'Off = IPv6 disabled end to end on the proxy path',
     'set.adblock': 'Block ad domains', 'set.bypass': 'Direct by process', 'set.bypassHelp': 'One process name per line (e.g. steam.exe); their traffic skips the proxy',
+    'node.fetching': 'Fetching the subscription…', 'node.notFetched': 'No nodes fetched yet, refresh the subscription',
+    'set.bypassApp': 'Bypass by app', 'set.bypassAppHelp': 'One package name per line (e.g. com.tencent.mm); these apps skip the VPN entirely', 'rt.package_name': 'App package', 'rt.package_name.ph': 'com.tencent.mm',
+    'rules.defaultDescApp': 'LAN and private ranges direct · China domains and IPs direct · everything else via proxy. Ad blocking and per-app bypass live in Settings → Routing.',
     'set.update': 'Subscription refresh (hours)', 'set.probe': 'Latency probe (minutes)', 'set.probeHelp': 'All nodes are tested on this schedule; Auto switches to the fastest', 'set.logLevel': 'Log level',
     'set.autostart': 'Start at login', 'set.autostartHelp': 'Reconnects to the last state after boot', 'set.lang': 'Language', 'set.theme': 'Appearance', 'theme.system': 'System', 'theme.light': 'Light', 'theme.dark': 'Dark',
     'conns.title': 'Connections', 'conns.empty': 'No active connections', 'conns.needCore': 'Connect first', 'conns.close': 'Close',
@@ -94,7 +100,11 @@ const I18N = {
   },
 };
 let LANG = 'zh';
+let PLATFORM = ''; // android 时"进程"类文案换成"应用包名"
+const PLATFORM_ALIAS = { android: { 'set.bypass': 'set.bypassApp', 'set.bypassHelp': 'set.bypassAppHelp', 'rt.process_name': 'rt.package_name', 'rt.process_name.ph': 'rt.package_name.ph', 'rules.defaultDesc': 'rules.defaultDescApp' } };
 function t(key, vars) {
+  const alias = PLATFORM_ALIAS[PLATFORM];
+  if (alias && alias[key]) key = alias[key];
   let s = (I18N[LANG] && I18N[LANG][key]) || I18N.zh[key] || key;
   if (vars) for (const k in vars) s = s.replace('{' + k + '}', vars[k]);
   return s;

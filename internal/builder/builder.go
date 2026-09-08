@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"runtime"
 	"strings"
 
 	"github.com/Maoyangui/godusevpn/internal/profile"
@@ -22,6 +23,7 @@ type Input struct {
 	DataDir     string // cache.db 放这里
 	ClashSecret string // Clash API 密钥,服务每次启动随机生成
 	RuleSetDir  string // 内置离线规则集目录:有 <tag>.srs 就用本地文件,没有走远程
+	Android     bool   // 按 Android 生成:"进程名"是应用包名(package_name),按应用直连的应用整个绕过 VPN(exclude_package);不传时看运行平台
 }
 
 const (
@@ -61,6 +63,11 @@ func SettingMode(clash string) string {
 
 // Build 渲染配置(带缩进的 JSON,便于放进诊断包看)。
 func Build(in Input) ([]byte, error) {
+	android := in.Android || runtime.GOOS == "android"
+	procKey := "process_name" // 桌面按进程名分流;Android 没有进程名,按应用包名
+	if android {
+		procKey = "package_name"
+	}
 	if in.Profile == nil || len(in.Profile.Outbounds) == 0 {
 		return nil, errors.New("没有节点")
 	}
@@ -144,6 +151,9 @@ func Build(in Input) ([]byte, error) {
 			// 网关模式(Linux 软路由):经本机转发的局域网流量由 sing-box 用 nftables 直接导入(比策略路由快),需要内核带 nftables
 			tun["auto_redirect"] = true
 		}
+		if android && len(s.BypassApps) > 0 {
+			tun["exclude_package"] = s.BypassApps // 这些应用整个不进 VPN(VpnService.addDisallowedApplication)
+		}
 		inbounds = append(inbounds, tun)
 	}
 	if s.MixedPort > 0 {
@@ -164,7 +174,7 @@ func Build(in Input) ([]byte, error) {
 		obj("port", 53, "action", "hijack-dns"), // 不走系统解析、自己发 53 的程序也收进来,不泄漏
 	}
 	if len(s.BypassApps) > 0 {
-		rules = append(rules, obj("process_name", s.BypassApps, "outbound", "direct")) // 指定进程直连,放在最前
+		rules = append(rules, obj(procKey, s.BypassApps, "outbound", "direct")) // 指定进程 / 应用直连,放在最前
 	}
 	// 局域网设备策略(网关模式):按来源 IP 强制直连 / 拒绝 / 代理,放在模式分支之前,任何模式下都成立
 	if s.NetMode == settings.NetGateway {
@@ -207,7 +217,7 @@ func Build(in Input) ([]byte, error) {
 		if !g.Enabled || len(g.Rules) == 0 {
 			continue
 		}
-		r, sets, proc := groupRule(g, tags, in.RuleSetDir, haveSet)
+		r, sets, proc := groupRule(g, tags, in.RuleSetDir, haveSet, procKey)
 		ruleSets = append(ruleSets, sets...)
 		findProcess = findProcess || proc
 		rules = append(rules, r)
@@ -237,7 +247,7 @@ func Build(in Input) ([]byte, error) {
 
 // groupRule 把一个规则组渲染成一条路由规则:同类型的值合成一个列表,多种类型用 logical/or 组起来(单条规则里不同字段是"且")。
 // 返回规则、需要新增的规则集、是否用到了进程名。
-func groupRule(g settings.RuleGroup, tags []string, dir string, haveSet map[string]bool) (map[string]any, []any, bool) {
+func groupRule(g settings.RuleGroup, tags []string, dir string, haveSet map[string]bool, procKey string) (map[string]any, []any, bool) {
 	lists := map[string][]string{}
 	var ports []int
 	var portRanges, sets []string
@@ -268,7 +278,11 @@ func groupRule(g settings.RuleGroup, tags []string, dir string, haveSet map[stri
 	var parts []any
 	for _, typ := range []string{settings.RuleDomain, settings.RuleDomainSuffix, settings.RuleDomainKeyword, settings.RuleDomainRegex, settings.RuleIPCIDR, settings.RuleProcess} {
 		if v := lists[typ]; len(v) > 0 {
-			parts = append(parts, obj(typ, v))
+			key := typ
+			if typ == settings.RuleProcess {
+				key = procKey // Android 上"进程名"条件填的是应用包名
+			}
+			parts = append(parts, obj(key, v))
 		}
 	}
 	if len(ports) > 0 {

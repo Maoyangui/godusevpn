@@ -1,3 +1,5 @@
+import javax.inject.Inject
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
@@ -52,13 +54,26 @@ android {
     packaging { jniLibs.useLegacyPackaging = true }
 }
 
-// 页面就是仓库根 web/dist 那一套,打包前拷进 assets/web
-val copyWeb by tasks.registering(Copy::class) {
-    from(rootProject.file("../web/dist"))
-    into(layout.buildDirectory.dir("generated/web/assets/web"))
+// 页面就是仓库根 web/dist 那一套,打包前拷进 assets/web。
+// 用 AGP 的"任务生成的资源目录"接口挂进去:mergeAssets、release 的 lintVital 这些读 assets 的任务都会正确依赖它;
+// 手工 srcDir + dependsOn 的写法要么漏了 lint(CI 报 implicit dependency),要么改了页面不重新合并(打出旧页面)
+abstract class CopyWebTask : DefaultTask() {
+    @get:InputDirectory abstract val src: DirectoryProperty
+    @get:OutputDirectory abstract val out: DirectoryProperty
+    @get:Inject abstract val fs: FileSystemOperations
+    @TaskAction fun run() {
+        val dst = out.get().asFile
+        dst.deleteRecursively()
+        fs.copy { from(src); into(File(dst, "web")) }
+    }
 }
-android.sourceSets["main"].assets.srcDir(layout.buildDirectory.dir("generated/web/assets"))
-tasks.matching { it.name.startsWith("merge") && it.name.endsWith("Assets") }.configureEach { dependsOn(copyWeb) }
+val copyWeb = tasks.register<CopyWebTask>("copyWeb") {
+    src.set(rootProject.file("../web/dist"))
+    out.set(layout.buildDirectory.dir("generated/web/assets"))
+}
+androidComponents {
+    onVariants { variant -> variant.sources.assets?.addGeneratedSourceDirectory(copyWeb, CopyWebTask::out) }
+}
 
 dependencies {
     implementation(files("libs/godusevpn.aar")) // gomobile bind ./mobile 的产物

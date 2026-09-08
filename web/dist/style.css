@@ -208,3 +208,30 @@ pre.log .warn { color: #fbbf24; } pre.log .err { color: #f87171; } pre.log .dim 
 /* 设备页 */
 .item.dev .dot { flex: none; }
 .dev-seg button.active { color: #fff; }
+
+/* Android:全屏没有窗口按钮;电视(body.tv)横版放大,遥控器焦点要看得见 */
+.app.android .win { display: none; }
+body.android .topbar { --wails-draggable: no-drag; }
+body.tv { font-size: 17px; }
+body.tv :is(button, a, .item, input, select, textarea):focus { outline: 3px solid var(--brand2); outline-offset: 3px; box-shadow: 0 0 0 7px rgba(47, 139, 255, .16); }
+body.tv .power:focus { outline-offset: 6px; box-shadow: var(--shadow), 0 0 0 10px rgba(47, 139, 255, .16); }
+body.tv .topbar { height: 64px; padding: 0 18px; } body.tv .topbar-title { font-size: 18px; }
+body.tv .icon-btn { width: 44px; height: 44px; } body.tv .icon-btn svg { width: 22px; height: 22px; }
+body.tv .view { padding: 12px 40px 28px; }
+body.tv .view:not(.home) { max-width: 860px; margin: 0 auto; }
+body.tv .home { display: grid; grid-template-columns: 1.1fr 1fr; grid-template-rows: auto 1fr auto; column-gap: 48px; align-items: center; }
+body.tv .home #home-banner { grid-column: 1 / -1; }
+body.tv .home .hero { grid-column: 1; grid-row: 2 / 4; min-height: 0; }
+body.tv .home .stats { grid-column: 2; grid-row: 2; align-self: end; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+body.tv .home .pickers { grid-column: 2; grid-row: 3; align-self: start; grid-template-columns: 1fr; gap: 12px; margin-top: 12px; }
+body.tv .power-wrap { width: 300px; height: 300px; } body.tv .power svg { width: 64px; height: 64px; } body.tv .power b { font-size: 16px; }
+body.tv .status-text { font-size: 24px; } body.tv .status-sub { font-size: 14px; max-width: 440px; }
+body.tv .stat { padding: 12px 6px; } body.tv .stat b { font-size: 18px; } body.tv .stat span { font-size: 12px; }
+body.tv .picker { padding: 12px 18px 11px; display: flex; align-items: baseline; gap: 14px; } body.tv .picker b { font-size: 17px; margin-top: 0; flex: 1; } body.tv .picker span { font-size: 13px; min-width: 3em; } body.tv .picker em { font-size: 13px; }
+body.tv .drawer { max-width: 380px; padding: 24px 16px 18px; } body.tv .drawer-items a { padding: 14px 16px; font-size: 17px; }
+body.tv .sheet { left: 50%; right: auto; width: 680px; max-width: 92%; transform: translate(-50%, 105%); } body.tv .sheet.show { transform: translate(-50%, 0); }
+body.tv .item { padding: 14px 18px; } body.tv .btn { padding: 11px 20px; font-size: 15px; }
+body.tv .srow { padding: 14px 0; } body.tv .srow input[type=number], body.tv .srow input[type=text], body.tv .srow select { width: 170px; }
+body.tv .card h3 { font-size: 13px; } body.tv .page-title { font-size: 24px; }
+body.tv .drawer-items a:focus { background: rgba(47, 139, 255, .12); }
+body.tv .item:focus { outline-offset: -3px; background: rgba(47, 139, 255, .12); } /* 列表 overflow: hidden 会裁掉外描边,描在内侧 */

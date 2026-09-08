@@ -96,3 +96,6 @@ TV:同一套视觉语言换成横版布局:左栏是连接按钮与状态,右栏
   - 未完成:开发机的流量整体走本机的 Clash Verge 隧道,模拟器里的 hysteria2(QUIC / UDP)出不去,"内核连通并出口"这一步要在没有本机隧道的环境或真机上再验。
 - A3 提前做了:CI 的 android 作业(gomobile bind + Gradle,按 ABI 分包 + universal,自建密钥签名,资产 `godusevpn-<版本>-android-<abi>.apk`),应用内升级下载后交给系统安装器,升级 / 开机广播里先起前台服务。
 - 剩下:A1 手机端逐页核验(桥的每个方法、按应用直连的包名选择器)、A2 电视横版与遥控器焦点、真机验收。
+- A2 已做(2026-09-08,tv33 模拟器验证):电视横版布局(body.tv:左连接按钮、右四项状态 + 三张面板卡,面板与页面居中放大)、遥控器空间导航(app.js 自己按元素位置找焦点,Enter = 点击,返回键经 `__godBack` 先收面板 / 抽屉再退页,首页返回把应用放后台)、电视 banner、leanback 入口。
+  - 坑:页面资源要用 AGP 的 `addGeneratedSourceDirectory` 挂进 assets,手工 srcDir 改了页面不会重新合并(打出旧页面),release 的 lintVital 还会报隐式依赖;WebView 关掉 HTTP 缓存(升级后才不会用旧 JS / CSS);没有 href 的 `a` 的 tabIndex 属性读出 0 但并不可聚焦,要显式 setAttribute;抽屉 / 面板按状态事件重绘会把焦点元素换掉,重绘前后按 data-* 键把焦点落回去;`:focus` 别改 position(连接按钮是 absolute 定位);列表 overflow hidden 会裁外描边,描在内侧。
+  - Android 上"进程名"= 应用包名:builder 按平台出 `package_name` 规则,按应用直连的应用写进 TUN 的 `exclude_package`(整个绕过 VPN);页面文案按平台切换。

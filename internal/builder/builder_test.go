@@ -2,6 +2,7 @@ package builder
 
 import (
 	"encoding/json"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -203,5 +204,31 @@ func TestProbeInterval(t *testing.T) {
 	_, raw := build(t, s)
 	if !strings.Contains(raw, "\"interval\": \"7m\"") {
 		t.Fatalf("auto 组的测速间隔应跟设置走: %s", raw)
+	}
+}
+
+func TestAndroidPackageRules(t *testing.T) {
+	s := settings.Default()
+	s.BypassApps = []string{"com.tencent.mm"}
+	s.RuleGroups = []settings.RuleGroup{{ID: "g1", Name: "游戏", Enabled: true, Outbound: settings.OutDirect, Rules: []settings.Rule{{Type: settings.RuleProcess, Value: "com.example.game"}}}}
+	raw, err := Build(Input{Profile: sampleProfile(), Settings: s, DataDir: t.TempDir(), ClashSecret: "sec", Android: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := string(raw)
+	if strings.Contains(out, "process_name") {
+		t.Fatalf("Android 上不该出现 process_name: %s", out)
+	}
+	for _, want := range []string{`"package_name": [`, `"com.example.game"`, `"exclude_package": [`, `"com.tencent.mm"`} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("Android 配置应含 %s: %s", want, out)
+		}
+	}
+	raw, err = Build(Input{Profile: sampleProfile(), Settings: s, DataDir: t.TempDir(), ClashSecret: "sec"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runtime.GOOS != "android" && (strings.Contains(string(raw), "package_name") || strings.Contains(string(raw), "exclude_package")) {
+		t.Fatal("桌面配置不该出现 package_name / exclude_package")
 	}
 }

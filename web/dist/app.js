@@ -76,9 +76,21 @@ const menuItems = () => MENU.filter(m => m !== 'devices' || (state && state.plat
 const PAGES = { onboard: renderOnboard, home: renderHome, settings: renderSettings, profiles: renderProfiles, rules: renderRules, ruleEdit: renderRuleEdit, devices: renderDevices, conns: renderConns, logs: renderLogs, about: renderAbout };
 const TITLES = { settings: 'set.title', profiles: 'prof.title', rules: 'rules.title', ruleEdit: 'rules.edit', devices: 'dev.title', conns: 'conns.title', logs: 'logs.title', about: 'about.title' };
 const BACK = { ruleEdit: 'rules' }; // 返回键去哪(默认回首页)
+// 重绘会把焦点所在的元素换掉(遥控器上焦点就没了):画之前记下 data-* 键,画完再落回同一项
+function focusKey(container, attr) {
+  const c = document.activeElement, el = c && container && container.contains(c) ? c.closest('[' + attr + ']') : null;
+  return el ? el.getAttribute(attr) : null;
+}
+function refocus(container, attr, key) {
+  if (key == null || !container) return;
+  const el = [...container.querySelectorAll('[' + attr + ']')].find(x => x.getAttribute(attr) === key);
+  if (el) focusEl(el);
+}
 function renderDrawer() {
-  $('#drawer-items').innerHTML = menuItems().map(m => `<a data-page="${m}"><svg viewBox="0 0 24 24">${ICON[m]}</svg><span>${t('menu.' + m)}</span>${m === 'about' && state && state.update ? '<span class="grow"></span><span class="pill-badge">NEW</span>' : ''}</a>`).join('');
+  const keep = focusKey($('#drawer-items'), 'data-page');
+  $('#drawer-items').innerHTML =menuItems().map(m => `<a data-page="${m}"><svg viewBox="0 0 24 24">${ICON[m]}</svg><span>${t('menu.' + m)}</span>${m === 'about' && state && state.update ? '<span class="grow"></span><span class="pill-badge">NEW</span>' : ''}</a>`).join('');
   $('#drawer-items').querySelectorAll('a').forEach(a => a.addEventListener('click', () => { closeDrawer(); nav(a.dataset.page); }));
+  refocus($('#drawer-items'), 'data-page', keep);
   $('#drawer-ver').textContent = 'v' + (state ? state.version : '');
   const u = $('#drawer-upd');
   u.hidden = !(state && state.update);
@@ -87,6 +99,7 @@ function renderDrawer() {
 function openDrawer() {
   renderDrawer(); $('#drawer').classList.add('show'); $('#drawer-backdrop').classList.add('show');
   try { App().PokeUpdate(); } catch (e) { /* 旧服务没有这个方法 */ }
+  tvFocus();
 }
 function closeDrawer() { $('#drawer').classList.remove('show'); $('#drawer-backdrop').classList.remove('show'); }
 let sheetOnClose = null;
@@ -96,6 +109,7 @@ function openSheet(title, html, opts = {}) {
   $('#sheet').classList.add('show'); $('#sheet-backdrop').classList.add('show');
   sheetOnClose = opts.onClose || null;
   if (opts.action && opts.onAction) $('#sheet-action').addEventListener('click', opts.onAction);
+  tvFocus();
 }
 function closeSheet() {
   $('#sheet').classList.remove('show'); $('#sheet-backdrop').classList.remove('show');
@@ -119,6 +133,7 @@ function nav(name, arg) {
   stage.appendChild(el);
   PAGES[name](el, arg);
   setTop(name === 'home' || name === 'onboard' ? t('app.name') : t(TITLES[name]), name !== 'home' && name !== 'onboard');
+  tvFocus();
 }
 function navHome() { nav(state && state.view.profiles && state.view.profiles.length ? 'home' : 'onboard'); }
 
@@ -242,6 +257,7 @@ function sheetProfiles() {
 // 订阅面板的列表:点整行切换,右侧小图标刷新这一条(不换当前订阅)
 function drawProfiles(list) {
   const body = $('#sheet-body');
+  const keep = focusKey(body, 'data-id');
   body.innerHTML = list.length ? `<div class="list">${list.map(p => `<div class="item ${p.active ? 'current' : ''}" data-id="${esc(p.id)}"><span class="check"></span>
     <div class="name"><b>${esc(p.name)}</b><span>${esc(profileLine(p))}${p.fetchedAt ? ' · ' + esc(t('prof.updated', { t: fmtTime(p.fetchedAt) })) : ''}${p.error ? ' · <span style="color:var(--danger)">' + esc(p.error) + '</span>' : ''}</span></div>
     <button class="icon-btn xs muted" data-refresh="${esc(p.id)}" title="${t('prof.refresh')}">${ICON_REFRESH}</button></div>`).join('')}</div>` : `<div class="empty">${t('prof.empty')}</div>`;
@@ -257,10 +273,11 @@ function drawProfiles(list) {
     try { l = await App().GetProfiles() || []; } catch (err) { l = state.view.profiles || []; }
     drawProfiles(l);
   }));
+  refocus(body, 'data-id', keep);
 }
 function msClass(d) { return d < 0 ? 'bad' : !d ? 'none' : d < 150 ? 'good' : d < 400 ? 'mid' : 'bad'; }
 function msText(d, testing) { if (testing) return '<span class="spinner"></span>'; if (d < 0) return t('node.fail'); return d ? d + ' ms' : '–'; }
-let nodeTesting = false, nodeFilter = '';
+let nodeTesting = false, nodeFilter = '', nodeFetchTried = false;
 async function sheetNodes() {
   nodeFilter = '';
   openSheet(t('sheet.nodes'), `<div class="empty"><span class="spinner"></span></div>`, { action: t('sheet.retest'), onAction: () => testNodes(true) });
@@ -270,17 +287,28 @@ async function sheetNodes() {
 async function drawNodes(testing) {
   let nodes = [];
   try { nodes = await App().GetNodes() || []; } catch (e) { $('#sheet-body').innerHTML = `<div class="empty">${esc(errText(e))}</div>`; return; }
-  if (!nodes.length) { $('#sheet-body').innerHTML = `<div class="empty">${t('prof.empty')}</div>`; return; }
+  if (!nodes.length) {
+    const p = state && state.view.profile;
+    if (p && !nodeFetchTried) { // 有订阅却没有节点 = 还没拉取过(比如刚导入设置),拉一次再画
+      nodeFetchTried = true;
+      $('#sheet-body').innerHTML = `<div class="empty"><span class="spinner"></span> ${t('node.fetching')}</div>`;
+      try { await App().RefreshProfile(p.id); } catch (e) { $('#sheet-body').innerHTML = `<div class="empty">${esc(errText(e))}</div>`; return; }
+      return drawNodes(testing);
+    }
+    $('#sheet-body').innerHTML = `<div class="empty">${p ? t('node.notFetched') : t('prof.empty')}</div>`; return;
+  }
   const max = Math.max(1, ...nodes.filter(n => n.delay > 0).map(n => n.delay));
   const st = state && state.view.state.status, online = st === 'connected' || st === 'degraded';
   const hint = online ? '' : `<div class="small muted" style="padding:0 4px 8px">${t('node.offlineHint')}</div>`;
-  $('#sheet-body').innerHTML = hint + (nodes.length > 8 ? `<div class="sheet-filter"><input type="text" id="node-filter" placeholder="${t('node.filter')}" value="${esc(nodeFilter)}"></div>` : '') + `<div class="list">${nodes.map((n, i) => `<div class="item ${n.current ? 'current' : ''}" data-name="${esc(n.name)}" style="animation-delay:${i * 25}ms"><span class="check"></span>
+  const keep = focusKey($('#sheet-body'), 'data-name');
+  $('#sheet-body').innerHTML = hint + (nodes.length > 8? `<div class="sheet-filter"><input type="text" id="node-filter" placeholder="${t('node.filter')}" value="${esc(nodeFilter)}"></div>` : '') + `<div class="list">${nodes.map((n, i) => `<div class="item ${n.current ? 'current' : ''}" data-name="${esc(n.name)}" style="animation-delay:${i * 25}ms"><span class="check"></span>
     <div class="name"><b>${esc(n.name === 'auto' ? t('node.auto') : n.name)}</b><span>${n.name === 'auto' ? (n.autoNow ? t('node.now', { n: n.autoNow }) : t('node.autoDesc')) : esc(n.type || '')}</span>${n.name !== 'auto' && n.delay > 0 ? `<div class="bar"><i style="width:${Math.max(6, 100 - n.delay / max * 80)}%"></i></div>` : ''}</div>
     <span class="ms ${msClass(n.delay)}">${n.name === 'auto' ? '' : msText(n.delay, testing)}</span></div>`).join('')}</div>`;
   $('#sheet-body').querySelectorAll('.item').forEach(it => it.addEventListener('click', async () => {
     try { await App().SelectNode(it.dataset.name); closeSheet(); } catch (e) { toast(errText(e), 'err'); }
   }));
   const applyFilter = () => { const q = nodeFilter.toLowerCase(); $('#sheet-body').querySelectorAll('.item').forEach(it => { it.hidden = !!q && it.dataset.name !== 'auto' && !it.dataset.name.toLowerCase().includes(q); }); };
+  refocus($('#sheet-body'), 'data-name', keep);
   const f = $('#node-filter');
   if (f) { f.addEventListener('input', () => { nodeFilter = f.value.trim(); applyFilter(); }); applyFilter(); }
 }
@@ -370,7 +398,7 @@ async function renderSettings(el) {
     <div class="card"><h3>${t('set.g.route')}</h3>
       ${sw('f-ad', t('set.adblock'), s.adBlock)}
       <div class="srow"><div class="lbl">${t('set.rules')}<div>${t('set.rulesHelp', { n: (s.ruleGroups || []).length })}</div></div><button class="btn sm" id="f-rules">${t('set.rulesManage')}</button></div>
-      <div class="field" style="margin-top:8px"><label>${t('set.bypass')}</label><textarea id="f-bypass" placeholder="steam.exe">${esc((s.bypassApps || []).join('\n'))}</textarea><span class="help">${t('set.bypassHelp')}</span></div>
+      <div class="field" style="margin-top:8px"><label>${t('set.bypass')}</label><textarea id="f-bypass" placeholder="${t('rt.process_name.ph')}">${esc((s.bypassApps || []).join('\n'))}</textarea><span class="help">${t('set.bypassHelp')}</span></div>
     </div>
     ${state.platform === 'linux' ? `<div class="card"><h3>${t('set.g.net')}</h3>
       ${sel('f-netmode', t('set.netMode'), s.netMode || 'local', [['local', t('set.netLocal')], ['gateway', t('set.netGateway')]], t('set.netModeHelp'))}
@@ -653,7 +681,11 @@ function initLogin() {
 // ---- 启动 ----
 async function init() {
   if (window.__web) { $('#app').classList.add('web'); document.body.classList.add('web'); initLogin(); }
-  if (window.__android) { $('#app').classList.add('web', 'android'); document.body.classList.add('android'); }
+  if (window.__android) {
+    PLATFORM = 'android';
+    $('#app').classList.add('web', 'android'); document.body.classList.add('android');
+    try { if (window.GodusevpnBridge.isTV()) document.body.classList.add('tv'); } catch (e) { /* 旧壳没有这个方法 */ }
+  }
   try { state = await App().GetState(); }
   catch (e) {
     const m = String(e && e.message);
@@ -705,4 +737,79 @@ async function init() {
   });
   window.runtime.EventsOn('import', url => { nav('profiles'); setTimeout(() => { const f = $('#prof-add'); if (f) f.click(); const u = $('#pf-url'); if (u) u.value = url; }, 350); });
 }
+// ---- 遥控器 / 方向键(Android):WebView 不自带空间导航,按元素位置找下一个焦点;Enter 等于点击;返回键交给 __godBack ----
+const FOCUS_SEL = 'button:not([disabled]), input:not([type=hidden]):not([disabled]), select:not([disabled]), textarea:not([disabled]), a, .item';
+function focusLayer() {
+  if ($('#sheet').classList.contains('show')) return [$('#sheet')];
+  if ($('#drawer').classList.contains('show')) return [$('#drawer')];
+  const views = [...$('#stage').querySelectorAll('.view:not(.pop)')];
+  return [$('.topbar'), views[views.length - 1]].filter(Boolean);
+}
+function focusables(layers) {
+  const out = [];
+  for (const layer of layers) for (const el of layer.querySelectorAll(FOCUS_SEL)) {
+    if (el.closest('[hidden]')) continue;
+    const r = el.getBoundingClientRect();
+    if (r.width > 0 && r.height > 0) out.push(el);
+  }
+  return out;
+}
+function focusEl(el) {
+  // 没有 href 的 a、div 行本来不可聚焦(a 的 tabIndex 属性却读出 0),显式给个 tabindex 才能 focus
+  if (!el.hasAttribute('tabindex')) el.setAttribute('tabindex', '0');
+  el.focus({ preventScroll: true });
+  el.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+}
+function spatialMove(dir) {
+  const layers = focusLayer(), list = focusables(layers);
+  if (!list.length) return;
+  const cur = document.activeElement;
+  if (!cur || cur === document.body || !layers.some(l => l.contains(cur))) { focusEl(list[0]); return; }
+  const a = cur.getBoundingClientRect(), ax = (a.left + a.right) / 2, ay = (a.top + a.bottom) / 2;
+  let best = null, bestScore = Infinity;
+  for (const el of list) {
+    if (el === cur || cur.contains(el)) continue;
+    const b = el.getBoundingClientRect(), bx = (b.left + b.right) / 2, by = (b.top + b.bottom) / 2;
+    let primary, ortho;
+    if (dir === 'down') { if (by <= ay) continue; primary = b.top - a.bottom; ortho = Math.abs(bx - ax); }
+    else if (dir === 'up') { if (by >= ay) continue; primary = a.top - b.bottom; ortho = Math.abs(bx - ax); }
+    else if (dir === 'right') { if (bx <= ax) continue; primary = b.left - a.right; ortho = Math.abs(by - ay); }
+    else { if (bx >= ax) continue; primary = a.left - b.right; ortho = Math.abs(by - ay); }
+    const score = Math.max(primary, 0) + ortho * 1.6;
+    if (score < bestScore) { bestScore = score; best = el; }
+  }
+  if (best) focusEl(best);
+}
+function tvFocus() { // 电视上换页 / 开面板后把焦点放到第一个可选项,遥控器才有落点
+  if (!document.body.classList.contains('tv')) return;
+  setTimeout(() => {
+    const layers = focusLayer(), cur = document.activeElement;
+    if (cur && cur !== document.body && layers.some(l => l.contains(cur))) return;
+    const power = $('#power'); // 首页先落在连接按钮上,其余页面落在第一个可选项
+    if (power && layers.some(l => l.contains(power))) focusEl(power); else spatialMove('down');
+  }, 120);
+}
+document.addEventListener('keydown', e => {
+  if (!document.body.classList.contains('android')) return;
+  const el = document.activeElement, tag = el ? el.tagName : '';
+  const editing = (tag === 'INPUT' && el.type !== 'checkbox') || tag === 'TEXTAREA' || tag === 'SELECT';
+  const dir = { ArrowUp: 'up', ArrowDown: 'down', ArrowLeft: 'left', ArrowRight: 'right' }[e.key];
+  if (dir) {
+    if (editing && (dir === 'left' || dir === 'right' || tag !== 'INPUT')) return; // 输入框里左右移光标;多行框与下拉框上下也归它们
+    e.preventDefault(); spatialMove(dir);
+  } else if (e.key === 'Enter' && el && el !== document.body) {
+    const native = tag === 'BUTTON' || (tag === 'A' && el.href) || editing;
+    if (!native) { e.preventDefault(); el.click(); }
+  }
+});
+document.addEventListener('focusin', e => { // 电视上焦点落点写进 logcat(chromium 的 CONSOLE 行),排查遥控器导航用
+  if (document.body.classList.contains('tv')) console.log('focus ' + e.target.tagName + '#' + (e.target.id || '') + '.' + (e.target.className || '') + ' ' + (e.target.textContent || '').trim().slice(0, 12));
+});
+window.__godBack = () => { // 系统返回键:先收面板与抽屉,再退回上一页;首页返回 false 让壳把应用放后台
+  if ($('#sheet').classList.contains('show')) { closeSheet(); return true; }
+  if ($('#drawer').classList.contains('show')) { closeDrawer(); return true; }
+  if (view && view !== 'home' && view !== 'onboard') { if (BACK[view]) nav(BACK[view]); else navHome(); return true; }
+  return false;
+};
+
 document.addEventListener('DOMContentLoaded', init);

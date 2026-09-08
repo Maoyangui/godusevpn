@@ -1,16 +1,21 @@
 package com.maoyangui.godusevpn
 
 import android.app.Activity
+import android.app.UiModeManager
 import android.content.ClipboardManager
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.content.res.Configuration
 import android.net.Uri
 import android.net.VpnService
 import android.os.Bundle
 import android.util.Log
 import android.webkit.JavascriptInterface
 import android.webkit.WebResourceRequest
+import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import androidx.activity.addCallback
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.FileProvider
@@ -47,6 +52,7 @@ class MainActivity : AppCompatActivity() {
         with(web.settings) {
             javaScriptEnabled = true; domStorageEnabled = true; allowFileAccess = false
             mediaPlaybackRequiresUserGesture = false
+            cacheMode = WebSettings.LOAD_NO_CACHE // 页面全在 assets 里,不走 HTTP 缓存;否则升级后 WebView 还会用旧版 JS / CSS
         }
         // 路径前缀去掉后剩下的部分相对 assets 根目录:注册 "/" 才能让 /web/index.html 落到 assets/web/index.html
         val loader = WebViewAssetLoader.Builder().addPathHandler("/", WebViewAssetLoader.AssetsPathHandler(this)).build()
@@ -63,6 +69,16 @@ class MainActivity : AppCompatActivity() {
         web.loadUrl("https://appassets.androidplatform.net/web/index.html")
         App.listeners.add(listener)
         handleDeepLink(intent)
+        // 返回键:先让页面收面板 / 退回上一页,页面说没什么可退的(首页)就把应用放到后台,连接不受影响
+        onBackPressedDispatcher.addCallback(this) {
+            web.evaluateJavascript("window.__godBack ? window.__godBack() : false") { if (it != "true") moveTaskToBack(true) }
+        }
+    }
+
+    /** 电视 / 盒子:页面据此切横版布局并开遥控器焦点导航。 */
+    private fun isTV(): Boolean {
+        val ui = getSystemService(UiModeManager::class.java)
+        return ui?.currentModeType == Configuration.UI_MODE_TYPE_TELEVISION || packageManager.hasSystemFeature(PackageManager.FEATURE_LEANBACK)
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -94,6 +110,9 @@ class MainActivity : AppCompatActivity() {
 
     inner class Bridge {
         @JavascriptInterface
+        fun isTV(): Boolean = this@MainActivity.isTV()
+
+        @JavascriptInterface
         fun call(name: String, argsJSON: String): String {
             return try {
                 val result = when (name) {
@@ -109,7 +128,7 @@ class MainActivity : AppCompatActivity() {
                 }
                 "{\"result\":$result}"
             } catch (e: Exception) {
-                Log.w(App.TAG, "bridge $name", e)
+                Log.w(App.TAG, "bridge $name: ${e.message ?: e}") // 业务错误(内核未运行之类)页面会提示,这里不必打堆栈
                 JSONObject().put("error", e.message ?: e.toString()).toString()
             }
         }
