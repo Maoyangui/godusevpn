@@ -103,6 +103,21 @@ Filename: "{app}\godusevpn-svc.exe"; Parameters: "uninstall"; RunOnceId: "svc-un
 Filename: "taskkill.exe"; Parameters: "/F /IM godusevpn.exe"; RunOnceId: "kill-ui"; Flags: runhidden waituntilterminated
 
 [Code]
+// 应用内升级:安装包带 /RELAUNCH=1,静默装完后重新拉起客户端。
+// 安装包是客户端用 runas 直接提权启动的,Inno 不知道"原始用户"是谁,runasoriginaluser 不起作用;
+// 借 explorer.exe 启动目标,拿到的就是桌面(未提权)的令牌。
+function WantRelaunch: Boolean;
+begin
+  Result := ExpandConstant('{param:RELAUNCH|0}') = '1';
+end;
+
+procedure CurStepChanged(CurStep: TSetupStep);
+var rc: Integer;
+begin
+  if (CurStep = ssDone) and WantRelaunch then
+    Exec('explorer.exe', ExpandConstant('"{app}godusevpn.exe"'), '', SW_SHOW, ewNoWait, rc);
+end;
+
 // WebView2 运行时是否已装:Evergreen 在这两个键之一
 function WebView2Installed: Boolean;
 var v: string;

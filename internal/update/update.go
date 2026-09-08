@@ -1,4 +1,7 @@
 // Package update 自更新:查 GitHub Releases,下载对应架构的安装包,校验 SHA256SUMS,交给调用方以管理员身份静默安装。
+//
+// 查版本先走 REST 接口;接口对未登录调用按出口 IP 限流(经代理时出口是共享 IP,常见 403 / 429),
+// 不通就改读发布页的 Atom 订阅(普通网页,不受接口限流),下载地址按 tag 拼出来。
 package update
 
 import (
@@ -7,19 +10,27 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/xml"
 	"errors"
 	"fmt"
+	"html"
 	"io"
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
 	"time"
 )
 
-const releasesAPI = "https://api.github.com/repos/Maoyangui/godusevpn/releases?per_page=10"
+// 测试时可改
+var (
+	releasesAPI  = "https://api.github.com/repos/Maoyangui/godusevpn/releases?per_page=10"
+	releasesAtom = "https://github.com/Maoyangui/godusevpn/releases.atom"
+	downloadBase = "https://github.com/Maoyangui/godusevpn/releases/download/"
+)
 
 type Release struct {
 	Version      string `json:"version"`
@@ -79,20 +90,48 @@ func Check(ctx context.Context, current string, includePre bool, client *http.Cl
 	if client == nil {
 		client = &http.Client{Timeout: 20 * time.Second}
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, releasesAPI, nil)
+	rel, apiErr := checkAPI(ctx, current, includePre, client)
+	if apiErr == nil {
+		return rel, nil
+	}
+	rel, atomErr := checkAtom(ctx, current, includePre, client)
+	if atomErr == nil {
+		return rel, nil
+	}
+	return nil, fmt.Errorf("%v;备用通道也失败: %v", apiErr, atomErr)
+}
+
+func get(ctx context.Context, client *http.Client, url, accept string) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Accept", "application/vnd.github+json")
+	if accept != "" {
+		req.Header.Set("Accept", accept)
+	}
 	req.Header.Set("User-Agent", "godusevpn-updater")
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("GitHub 返回 HTTP %d", resp.StatusCode)
+		resp.Body.Close()
+		switch resp.StatusCode {
+		case http.StatusForbidden, http.StatusTooManyRequests:
+			return nil, fmt.Errorf("GitHub 接口限流(HTTP %d,经代理时出口 IP 是共享的)", resp.StatusCode)
+		default:
+			return nil, fmt.Errorf("GitHub 返回 HTTP %d", resp.StatusCode)
+		}
 	}
+	return resp, nil
+}
+
+func checkAPI(ctx context.Context, current string, includePre bool, client *http.Client) (*Release, error) {
+	resp, err := get(ctx, client, releasesAPI, "application/vnd.github+json")
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
 	var list []struct {
 		TagName    string `json:"tag_name"`
 		Draft      bool   `json:"draft"`
@@ -131,6 +170,69 @@ func Check(ctx context.Context, current string, includePre bool, client *http.Cl
 		return rel, nil
 	}
 	return nil, nil
+}
+
+var tagRe = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
+var htmlTag = regexp.MustCompile(`<[^>]*>`)
+
+// checkAtom 读发布页 Atom:条目按时间倒序,link 末段就是 tag。Atom 里没有"预发布"标记,按 tag 带不带 "-" 后缀判断。
+// 下载地址按约定拼出来,再 HEAD 一下确认本机架构的安装包真的存在(顺便拿大小)。
+func checkAtom(ctx context.Context, current string, includePre bool, client *http.Client) (*Release, error) {
+	resp, err := get(ctx, client, releasesAtom, "application/atom+xml")
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	var feed struct {
+		Entries []struct {
+			Title string `xml:"title"`
+			Link  struct {
+				Href string `xml:"href,attr"`
+			} `xml:"link"`
+			Content string `xml:"content"`
+		} `xml:"entry"`
+	}
+	if err := xml.NewDecoder(io.LimitReader(resp.Body, 4<<20)).Decode(&feed); err != nil {
+		return nil, fmt.Errorf("解析发布列表: %w", err)
+	}
+	for _, e := range feed.Entries {
+		tag := e.Link.Href[strings.LastIndex(e.Link.Href, "/")+1:]
+		if !tagRe.MatchString(tag) {
+			continue
+		}
+		ver := strings.TrimPrefix(tag, "v")
+		pre := strings.Contains(ver, "-")
+		if (pre && !includePre) || !Newer(ver, current) {
+			continue
+		}
+		rel := &Release{
+			Version: ver, Tag: tag, Prerelease: pre,
+			Notes:        strings.TrimSpace(html.UnescapeString(htmlTag.ReplaceAllString(e.Content, ""))),
+			InstallerURL: downloadBase + tag + "/" + assetName(ver),
+			SumsURL:      downloadBase + tag + "/SHA256SUMS",
+		}
+		if size, ok := head(ctx, client, rel.InstallerURL); !ok {
+			continue // 没有本机架构的安装包,看下一个
+		} else {
+			rel.Size = size
+		}
+		return rel, nil
+	}
+	return nil, nil
+}
+
+func head(ctx context.Context, client *http.Client, url string) (int64, bool) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodHead, url, nil)
+	if err != nil {
+		return 0, false
+	}
+	req.Header.Set("User-Agent", "godusevpn-updater")
+	resp, err := client.Do(req)
+	if err != nil {
+		return 0, true // 网络抖动不算"没有",让下载阶段自己报错
+	}
+	resp.Body.Close()
+	return resp.ContentLength, resp.StatusCode == http.StatusOK
 }
 
 // Download 下载安装包到 dir,按 SHA256SUMS 校验;progress 每读一块回调一次。
