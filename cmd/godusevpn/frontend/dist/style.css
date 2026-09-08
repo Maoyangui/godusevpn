@@ -187,3 +187,6 @@ pre.log .warn { color: #fbbf24; } pre.log .err { color: #f87171; } pre.log .dim 
 .view.has-bar { display: flex; flex-direction: column; }
 .view.has-bar > * { flex: none; }
 .view.has-bar .savebar { margin-top: auto; }
+.spin { animation: spin .8s linear infinite; }
+.icon-btn.muted { color: var(--muted2); } .icon-btn.muted:hover { color: var(--brand2); }
+.icon-btn:disabled { opacity: .6; }

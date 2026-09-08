@@ -232,12 +232,28 @@ function profileLine(p) {
   if (u.expire) parts.push(t('prof.expire', { d: fmtDay(u.expire) }));
   return parts.join(' · ');
 }
+const ICON_REFRESH = '<svg viewBox="0 0 24 24"><path d="M20 12a8 8 0 1 1-2.3-5.7"/><path d="M20 4v5h-5"/></svg>';
 function sheetProfiles() {
-  const list = state.view.profiles || [];
-  openSheet(t('sheet.profile'), list.length ? `<div class="list">${list.map(p => `<div class="item ${p.active ? 'current' : ''}" data-id="${esc(p.id)}"><span class="check"></span><div class="name"><b>${esc(p.name)}</b><span>${esc(profileLine(p))}${p.error ? ' · <span style="color:var(--danger)">' + esc(p.error) + '</span>' : ''}</span></div></div>`).join('')}</div>` : `<div class="empty">${t('prof.empty')}</div>`,
-    { action: t('sheet.manage'), onAction: () => { closeSheet(); nav('profiles'); } });
-  $('#sheet-body').querySelectorAll('.item').forEach(it => it.addEventListener('click', async () => {
+  openSheet(t('sheet.profile'), '', { action: t('sheet.manage'), onAction: () => { closeSheet(); nav('profiles'); } });
+  drawProfiles(state.view.profiles || []);
+}
+// 订阅面板的列表:点整行切换,右侧小图标刷新这一条(不换当前订阅)
+function drawProfiles(list) {
+  const body = $('#sheet-body');
+  body.innerHTML = list.length ? `<div class="list">${list.map(p => `<div class="item ${p.active ? 'current' : ''}" data-id="${esc(p.id)}"><span class="check"></span>
+    <div class="name"><b>${esc(p.name)}</b><span>${esc(profileLine(p))}${p.fetchedAt ? ' · ' + esc(t('prof.updated', { t: fmtTime(p.fetchedAt) })) : ''}${p.error ? ' · <span style="color:var(--danger)">' + esc(p.error) + '</span>' : ''}</span></div>
+    <button class="icon-btn xs muted" data-refresh="${esc(p.id)}" title="${t('prof.refresh')}">${ICON_REFRESH}</button></div>`).join('')}</div>` : `<div class="empty">${t('prof.empty')}</div>`;
+  body.querySelectorAll('.item').forEach(it => it.addEventListener('click', async () => {
     try { await App().SelectProfile(it.dataset.id); closeSheet(); } catch (e) { toast(errText(e), 'err'); }
+  }));
+  body.querySelectorAll('button[data-refresh]').forEach(b => b.addEventListener('click', async e => {
+    e.stopPropagation();
+    b.disabled = true; b.querySelector('svg').classList.add('spin');
+    try { await App().RefreshProfile(b.dataset.refresh); toast(t('prof.refreshed'), 'ok'); } catch (err) { toast(errText(err), 'err'); }
+    if (!$('#sheet').classList.contains('show')) return;
+    let l = [];
+    try { l = await App().GetProfiles() || []; } catch (err) { l = state.view.profiles || []; }
+    drawProfiles(l);
   }));
 }
 function msClass(d) { return d < 0 ? 'bad' : !d ? 'none' : d < 150 ? 'good' : d < 400 ? 'mid' : 'bad'; }
