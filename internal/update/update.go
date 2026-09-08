@@ -43,26 +43,81 @@ type Release struct {
 }
 
 // parse "1.2.3" / "1.2.3-m1" → 数字三段 + 是否带后缀
-func parse(v string) ([3]int, bool, bool) {
+// parse 拆成三段数字 + 预发布后缀(a3 / m3 / l1 / rc.2 这类,没有就是空串)。
+func parse(v string) ([3]int, string, bool) {
 	v = strings.TrimPrefix(strings.TrimSpace(v), "v")
-	main, suffix, hasSuffix := strings.Cut(v, "-")
-	_ = suffix
+	main, suffix, _ := strings.Cut(v, "-")
 	parts := strings.Split(main, ".")
 	var out [3]int
 	if len(parts) != 3 {
-		return out, false, false
+		return out, "", false
 	}
 	for i, p := range parts {
 		n, err := strconv.Atoi(p)
 		if err != nil {
-			return out, false, false
+			return out, "", false
 		}
 		out[i] = n
 	}
-	return out, hasSuffix, true
+	return out, suffix, true
 }
 
-// Newer a 是否比 b 新:数字大的新;数字相同时不带后缀的(正式版)比带后缀的新。
+// cmpSuffix 比预发布后缀:空的(正式版)最大;其余按"字母段 + 数字段"切开比,
+// 字母段按字典序,数字段按数值,这样 a3 < a4、a9 < a10 都对(纯字典序会把 a10 排在 a9 前面)。
+func cmpSuffix(a, b string) int {
+	if a == b {
+		return 0
+	}
+	if a == "" {
+		return 1
+	}
+	if b == "" {
+		return -1
+	}
+	ax, bx := splitRuns(a), splitRuns(b)
+	for i := 0; i < len(ax) && i < len(bx); i++ {
+		p, q := ax[i], bx[i]
+		pn, perr := strconv.Atoi(p)
+		qn, qerr := strconv.Atoi(q)
+		if perr == nil && qerr == nil {
+			if pn != qn {
+				return sign(pn - qn)
+			}
+			continue
+		}
+		if p != q {
+			return strings.Compare(p, q)
+		}
+	}
+	return sign(len(ax) - len(bx))
+}
+
+// splitRuns 把 "a10.2" 切成 ["a", "10", ".", "2"] 这样的字母段与数字段。
+func splitRuns(s string) []string {
+	var out []string
+	for i := 0; i < len(s); {
+		j := i
+		digit := s[i] >= '0' && s[i] <= '9'
+		for j < len(s) && ((s[j] >= '0' && s[j] <= '9') == digit) {
+			j++
+		}
+		out = append(out, s[i:j])
+		i = j
+	}
+	return out
+}
+
+func sign(n int) int {
+	switch {
+	case n > 0:
+		return 1
+	case n < 0:
+		return -1
+	}
+	return 0
+}
+
+// Newer a 是否比 b 新:先比三段数字;数字相同再比预发布后缀(正式版比带后缀的新,a4 比 a3 新)。
 func Newer(a, b string) bool {
 	x, xs, okx := parse(a)
 	y, ys, oky := parse(b)
@@ -74,7 +129,7 @@ func Newer(a, b string) bool {
 			return x[i] > y[i]
 		}
 	}
-	return ys && !xs
+	return cmpSuffix(xs, ys) > 0
 }
 
 // assetName 本平台对应的发布资产名。资产统一叫 godusevpn-<版本>-<系统>-<架构>.<后缀>,发布页按名字排序时同一系统的就挨在一起:
