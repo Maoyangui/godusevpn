@@ -78,8 +78,14 @@ function renderDrawer() {
   $('#drawer-items').innerHTML = MENU.map(m => `<a data-page="${m}"><svg viewBox="0 0 24 24">${ICON[m]}</svg><span>${t('menu.' + m)}</span>${m === 'about' && state && state.update ? '<span class="grow"></span><span class="pill-badge">NEW</span>' : ''}</a>`).join('');
   $('#drawer-items').querySelectorAll('a').forEach(a => a.addEventListener('click', () => { closeDrawer(); nav(a.dataset.page); }));
   $('#drawer-ver').textContent = 'v' + (state ? state.version : '');
+  const u = $('#drawer-upd');
+  u.hidden = !(state && state.update);
+  if (state && state.update) u.textContent = t('drawer.update', { v: state.update.version });
 }
-function openDrawer() { renderDrawer(); $('#drawer').classList.add('show'); $('#drawer-backdrop').classList.add('show'); }
+function openDrawer() {
+  renderDrawer(); $('#drawer').classList.add('show'); $('#drawer-backdrop').classList.add('show');
+  try { App().PokeUpdate(); } catch (e) { /* 旧服务没有这个方法 */ }
+}
 function closeDrawer() { $('#drawer').classList.remove('show'); $('#drawer-backdrop').classList.remove('show'); }
 let sheetOnClose = null;
 function openSheet(title, html, opts = {}) {
@@ -557,7 +563,9 @@ async function init() {
   $('#menu-btn').addEventListener('click', openDrawer);
   $('#back-btn').addEventListener('click', () => BACK[view] ? nav(BACK[view]) : navHome());
   $('#drawer-backdrop').addEventListener('click', closeDrawer);
+  $('#drawer-upd').addEventListener('click', () => { closeDrawer(); nav('about'); });
   $('#sheet-backdrop').addEventListener('click', closeSheet);
+  window.runtime.EventsOn('nav', name => { closeDrawer(); closeSheet(); if (PAGES[name]) nav(name); });
   $('#min-btn').addEventListener('click', () => App().Minimize());
   $('#close-btn').addEventListener('click', () => App().HideWindow());
   document.addEventListener('keydown', e => { if (e.key === 'Escape') { closeSheet(); closeDrawer(); } });
@@ -569,6 +577,7 @@ async function init() {
     applyTheme(st.theme);
     $('#svc-dot').className = 'dot ' + (st.service ? 'on' : 'err');
     $('#svc-text').textContent = svcText(st);
+    if ($('#drawer').classList.contains('show')) renderDrawer();
     if (langChanged) { nav(view); return; }
     const has = st.view.profiles && st.view.profiles.length;
     if (view === 'onboard' && has) nav('home');

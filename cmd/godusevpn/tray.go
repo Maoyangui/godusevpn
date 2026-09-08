@@ -25,14 +25,14 @@ type trayUI struct {
 	ready bool
 	last  string // 上次设置的图标状态,避免每 1.5 秒重设一次
 
-	show, conn, rule, global, direct, quitItem *systray.MenuItem
+	show, conn, upgrade, rule, global, direct, quitItem *systray.MenuItem
 }
 
 func newTray(a *App) *trayUI { return &trayUI{app: a} }
 
 var trayText = map[string]map[string]string{
-	"zh": {"show": "显示主窗口", "connect": "连接", "disconnect": "断开", "mode": "模式", "rule": "规则", "global": "全局", "direct": "直连", "quit": "退出", "svcdown": "服务未运行"},
-	"en": {"show": "Show window", "connect": "Connect", "disconnect": "Disconnect", "mode": "Mode", "rule": "Rule", "global": "Global", "direct": "Direct", "quit": "Quit", "svcdown": "Service not running"},
+	"zh": {"show": "显示主窗口", "connect": "连接", "disconnect": "断开", "mode": "模式", "rule": "规则", "global": "全局", "direct": "直连", "quit": "退出", "svcdown": "服务未运行", "upgrade": "升级到"},
+	"en": {"show": "Show window", "connect": "Connect", "disconnect": "Disconnect", "mode": "Mode", "rule": "Rule", "global": "Global", "direct": "Direct", "quit": "Quit", "svcdown": "Service not running", "upgrade": "Update to"},
 }
 
 func (t *trayUI) tr(key string) string {
@@ -53,6 +53,8 @@ func (t *trayUI) onReady() {
 	systray.SetOnClick(func(systray.IMenu) { t.app.toggleWindow() })
 	t.show = systray.AddMenuItem(t.tr("show"), "")
 	t.conn = systray.AddMenuItem(t.tr("connect"), "")
+	t.upgrade = systray.AddMenuItem("", "")
+	t.upgrade.Hide()
 	systray.AddSeparator()
 	mode := systray.AddMenuItem(t.tr("mode"), "")
 	t.rule = mode.AddSubMenuItemCheckbox(t.tr("rule"), "", true)
@@ -74,6 +76,7 @@ func (t *trayUI) onReady() {
 	t.global.Click(func() { _, _ = t.app.SetMode("global") })
 	t.direct.Click(func() { _, _ = t.app.SetMode("direct") })
 	t.quitItem.Click(func() { t.app.QuitApp() })
+	t.upgrade.Click(func() { t.app.showAbout() })
 	t.mu.Lock()
 	t.ready = true
 	t.mu.Unlock()
@@ -127,6 +130,12 @@ func (t *trayUI) update(st UIState) {
 		t.conn.Enable()
 	} else {
 		t.conn.Disable()
+	}
+	if st.Update != nil {
+		t.upgrade.SetTitle(t.tr("upgrade") + " v" + st.Update.Version)
+		t.upgrade.Show()
+	} else {
+		t.upgrade.Hide()
 	}
 	set := func(item *systray.MenuItem, on bool) {
 		if on {

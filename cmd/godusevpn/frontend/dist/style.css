@@ -177,3 +177,5 @@ pre.log .warn { color: #fbbf24; } pre.log .err { color: #f87171; } pre.log .dim 
 .icon-btn.xs { width: 24px; height: 24px; border-radius: 8px; } .icon-btn.xs svg { width: 14px; height: 14px; }
 .sheet-filter { padding: 0 0 8px; } .sheet-filter input { padding: 8px 12px; }
 .with-btn { position: relative; } .with-btn input { padding-right: 64px; } .with-btn > button { position: absolute; right: 6px; bottom: 5px; }
+.upd-hint { font-size: 11px; color: var(--brand2); margin-top: 3px; cursor: pointer; }
+.upd-hint::before { content: ""; display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: var(--danger); margin-right: 5px; vertical-align: 1px; }

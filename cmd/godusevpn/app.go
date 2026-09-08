@@ -6,10 +6,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -51,6 +53,8 @@ type uiPrefs struct {
 
 type App struct {
 	ctx         context.Context
+	lastCheck   time.Time // 最近一次检查更新
+	lastStatus  string    // 上次看到的连接状态,连上那一刻顺手查一次更新
 	mu          sync.Mutex
 	minimized   bool
 	pendingLink string
@@ -193,9 +197,14 @@ func (a *App) refresh() {
 	a.state.SvcState = svc.QueryStatus()
 	a.state.Lang, a.state.Theme = a.prefs.Lang, a.prefs.Theme
 	st := a.state
+	justConnected := st.View.State.Status == "connected" && a.lastStatus != "connected"
+	a.lastStatus = string(st.View.State.Status)
 	a.mu.Unlock()
 	a.manageTraffic(st)
 	a.tray.update(st)
+	if justConnected {
+		go a.pokeUpdate(false)
+	}
 	runtime.EventsEmit(a.ctx, "state", st)
 }
 
@@ -275,29 +284,72 @@ func (a *App) call(method string, params, result any) error {
 func (a *App) updateLoop() {
 	time.Sleep(20 * time.Second)
 	for {
-		if rel, err := update.Check(a.ctx, buildinfo.Version, true, nil); err == nil {
-			a.mu.Lock()
-			a.state.Update = rel
-			a.mu.Unlock()
-		}
+		a.pokeUpdate(true)
 		select {
 		case <-a.ctx.Done():
 			return
-		case <-time.After(6 * time.Hour):
+		case <-time.After(time.Hour):
 		}
 	}
+}
+
+// pokeUpdate 查一次更新;force 为假时 15 分钟内只查一次(抽屉打开、连上网都会来戳)。结果有变就推一次状态。
+func (a *App) pokeUpdate(force bool) {
+	a.mu.Lock()
+	if !force && time.Since(a.lastCheck) < 15*time.Minute {
+		a.mu.Unlock()
+		return
+	}
+	a.lastCheck = time.Now()
+	a.mu.Unlock()
+	ctx, cancel := context.WithTimeout(a.ctx, 30*time.Second)
+	defer cancel()
+	rel, err := a.checkUpdate(ctx)
+	if err != nil {
+		return
+	}
+	a.mu.Lock()
+	old := a.state.Update
+	changed := (rel == nil) != (old == nil) || (rel != nil && old != nil && rel.Version != old.Version)
+	a.state.Update = rel
+	a.mu.Unlock()
+	if changed {
+		a.refresh()
+	}
+}
+
+// PokeUpdate 页面打开抽屉时戳一下(有节流)。
+func (a *App) PokeUpdate() { go a.pokeUpdate(false) }
+
+// checkUpdate 先直连 GitHub;不通而内核在跑时改走本机混合端口再试一次(TUN 关着的场合)。
+func (a *App) checkUpdate(ctx context.Context) (*update.Release, error) {
+	rel, err := update.Check(ctx, buildinfo.Version, true, nil)
+	if err == nil {
+		return rel, nil
+	}
+	st := a.GetState()
+	port := st.View.Settings.MixedPort
+	if st.Service && port > 0 && (st.View.State.Status == "connected" || st.View.State.Status == "degraded") {
+		pu, _ := url.Parse("http://127.0.0.1:" + strconv.Itoa(port))
+		c := &http.Client{Timeout: 30 * time.Second, Transport: &http.Transport{Proxy: http.ProxyURL(pu)}}
+		if rel2, err2 := update.Check(ctx, buildinfo.Version, true, c); err2 == nil {
+			return rel2, nil
+		}
+	}
+	return nil, err
 }
 
 // CheckUpdate 手动检查,有就返回。
 func (a *App) CheckUpdate() (*update.Release, error) {
 	ctx, cancel := context.WithTimeout(a.ctx, 30*time.Second)
 	defer cancel()
-	rel, err := update.Check(ctx, buildinfo.Version, true, nil)
+	rel, err := a.checkUpdate(ctx)
 	if err != nil {
 		return nil, err
 	}
 	a.mu.Lock()
 	a.state.Update = rel
+	a.lastCheck = time.Now()
 	a.mu.Unlock()
 	return rel, nil
 }
@@ -336,6 +388,14 @@ func (a *App) showWindow() {
 	}
 	runtime.WindowUnminimise(a.ctx)
 	runtime.WindowShow(a.ctx)
+}
+
+// showAbout 托盘"升级到 vX"点进来:显示窗口并跳到关于页。
+func (a *App) showAbout() {
+	a.showWindow()
+	if a.ctx != nil {
+		runtime.EventsEmit(a.ctx, "nav", "about")
+	}
 }
 
 func (a *App) toggleWindow() { a.showWindow() }
