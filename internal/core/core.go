@@ -4,6 +4,7 @@ package core
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -270,4 +271,76 @@ func (c *Core) URLTest(ctx context.Context, tag, link string) (int, error) {
 		return 0, err
 	}
 	return int(ms), nil
+}
+
+// ProbeRunning 内核在跑时给一批出站各测一次延迟(并发 8 路),返回 节点 → 毫秒,-1 = 不通。
+func (c *Core) ProbeRunning(ctx context.Context, tags []string, link string) map[string]int {
+	box, _, ok := c.snapshot()
+	if !ok {
+		return map[string]int{}
+	}
+	return probeBox(ctx, box, tags, link)
+}
+
+// Probe 内核没跑时测速:只用订阅里的出站起一个临时实例(没有入站,不碰路由、DNS 与 TUN),测完即关。
+func Probe(ctx context.Context, outbounds []json.RawMessage, tags []string, link string) map[string]int {
+	list := make([]any, 0, len(outbounds)+1)
+	for _, o := range outbounds {
+		list = append(list, o)
+	}
+	list = append(list, map[string]any{"type": "direct", "tag": "direct"})
+	raw, err := json.Marshal(map[string]any{"log": map[string]any{"level": "warn"}, "outbounds": list})
+	if err != nil {
+		return map[string]int{}
+	}
+	bctx, cancel := newContext()
+	defer cancel()
+	opt, err := parse(bctx, raw)
+	if err != nil {
+		return map[string]int{}
+	}
+	box, err := sb.New(sb.Options{Context: bctx, Options: opt, PlatformLogWriter: discard{}})
+	if err != nil {
+		return map[string]int{}
+	}
+	if err := box.Start(); err != nil {
+		_ = box.Close()
+		return map[string]int{}
+	}
+	defer box.Close()
+	return probeBox(ctx, box, tags, link)
+}
+
+func probeBox(ctx context.Context, box *sb.Box, tags []string, link string) map[string]int {
+	if link == "" {
+		link = "http://www.gstatic.com/generate_204"
+	}
+	res := make(map[string]int, len(tags))
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, 8)
+	for _, tag := range tags {
+		ob, found := box.Outbound().Outbound(tag)
+		if !found {
+			continue
+		}
+		wg.Add(1)
+		go func(tag string, ob adapter.Outbound) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			tctx, cancel := context.WithTimeout(ctx, 8*time.Second)
+			defer cancel()
+			ms, err := urltest.URLTest(tctx, link, ob)
+			mu.Lock()
+			if err != nil {
+				res[tag] = -1
+			} else {
+				res[tag] = int(ms)
+			}
+			mu.Unlock()
+		}(tag, ob)
+	}
+	wg.Wait()
+	return res
 }

@@ -36,6 +36,7 @@ type StateView struct {
 	Mode     string            `json:"mode"` // rule / global / direct
 	Node     string            `json:"node"` // proxy 组当前项
 	Nodes    []string          `json:"nodes"`
+	Delays   map[string]int    `json:"delays,omitempty"` // 最近一次全节点测速(节点 → 毫秒,-1 不通);内核没跑时界面靠它显示
 	Uptime   int64             `json:"uptime"`
 	Profile  *ProfileView      `json:"profile,omitempty"` // 当前订阅
 	Profiles []ProfileView     `json:"profiles"`          // 全部订阅

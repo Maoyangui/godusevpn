@@ -470,7 +470,7 @@ func (a *App) GetNodes() ([]NodeInfo, error) {
 	if err != nil {
 		out := []NodeInfo{}
 		for _, n := range st.View.Nodes {
-			out = append(out, NodeInfo{Name: n, Current: n == st.View.Node})
+			out = append(out, NodeInfo{Name: n, Delay: st.View.Delays[n], Current: n == st.View.Node})
 		}
 		return out, nil
 	}
@@ -498,13 +498,18 @@ func (a *App) GetNodes() ([]NodeInfo, error) {
 
 // TestAll 给全部节点测一次延迟,返回 节点 → 毫秒。
 func (a *App) TestAll() (map[string]int, error) {
-	c, err := a.clashClient()
-	if err != nil {
-		return nil, err
+	if c, err := a.clashClient(); err == nil {
+		ctx, cancel := context.WithTimeout(a.ctx, 40*time.Second)
+		defer cancel()
+		return c.GroupDelay(ctx, "proxy", testURL, 8*time.Second)
 	}
-	ctx, cancel := context.WithTimeout(a.ctx, 40*time.Second)
+	// 内核没跑:让服务用订阅里的出站起临时实例测,结果进状态里,GetNodes 就能显示
+	ctx, cancel := context.WithTimeout(a.ctx, 60*time.Second)
 	defer cancel()
-	return c.GroupDelay(ctx, "proxy", testURL, 8*time.Second)
+	var res map[string]int
+	err := ipc.Call(ctx, ipc.MProbeNodes, nil, &res)
+	go a.refresh()
+	return res, err
 }
 
 func (a *App) TestLatency(tag string) (int, error) {

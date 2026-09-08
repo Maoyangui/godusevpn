@@ -21,6 +21,7 @@ const (
 	MSetMode        = "SetMode"
 	MSelectNode     = "SelectNode"
 	MTestLatency    = "TestLatency"
+	MProbeNodes     = "ProbeNodes" // 全部节点各测一次延迟;内核没跑时起临时实例测,结果缓存在状态里
 	MGetProfile     = "GetProfile"
 	MSetProfileURL  = "SetProfileURL"
 	MRefreshProfile = "RefreshProfile"

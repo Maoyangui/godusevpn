@@ -43,6 +43,7 @@ type Daemon struct {
 	server   *ipc.Server
 	secret   string
 	http     *http.Client
+	delays   map[string]int // 最近一次全节点测速结果
 }
 
 type persisted struct {
@@ -415,6 +416,14 @@ func (d *Daemon) stateView() ipc.StateView {
 	if v.Nodes == nil {
 		v.Nodes = []string{}
 	}
+	d.mu.Lock()
+	if len(d.delays) > 0 {
+		v.Delays = make(map[string]int, len(d.delays))
+		for k, ms := range d.delays {
+			v.Delays[k] = ms
+		}
+	}
+	d.mu.Unlock()
 	return v
 }
 
@@ -490,6 +499,24 @@ func (d *Daemon) registerHandlers() {
 			return nil, err
 		}
 		return d.stateView(), nil
+	})
+	h(ipc.MProbeNodes, func(json.RawMessage) (any, error) {
+		_, p := d.activeProfile()
+		if p == nil || len(p.Tags) == 0 {
+			return nil, errors.New("还没有订阅")
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
+		defer cancel()
+		var res map[string]int
+		if d.core.Running() {
+			res = d.core.ProbeRunning(ctx, p.Tags, builder.TestURL)
+		} else {
+			res = core.Probe(ctx, p.Outbounds, p.Tags, builder.TestURL)
+		}
+		d.mu.Lock()
+		d.delays = res
+		d.mu.Unlock()
+		return res, nil
 	})
 	h(ipc.MTestLatency, func(p json.RawMessage) (any, error) {
 		in, err := ipc.Decode[struct {
