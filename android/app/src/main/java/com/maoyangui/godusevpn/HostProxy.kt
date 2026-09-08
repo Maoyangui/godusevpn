@@ -26,6 +26,8 @@ object HostProxy : Host {
 
     override fun protect(fd: Int): Boolean = runCatching { (svc() ?: protector).protect(fd) }.getOrDefault(false)
 
+    override fun closeTun() { svc()?.closeTun() }
+
     override fun findConnectionOwner(ipProtocol: Int, sourceAddress: String, sourcePort: Int, destinationAddress: String, destinationPort: Int): Int =
         NetInfo.findConnectionOwner(App.instance, ipProtocol, sourceAddress, sourcePort, destinationAddress, destinationPort)
 

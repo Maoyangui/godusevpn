@@ -235,3 +235,9 @@ body.tv .srow { padding: 14px 0; } body.tv .srow input[type=number], body.tv .sr
 body.tv .card h3 { font-size: 13px; } body.tv .page-title { font-size: 24px; }
 body.tv .drawer-items a:focus { background: rgba(47, 139, 255, .12); }
 body.tv .item:focus { outline-offset: -3px; background: rgba(47, 139, 255, .12); } /* 列表 overflow: hidden 会裁掉外描边,描在内侧 */
+/* 没有窗口按钮的壳(浏览器面板 / Android):右侧补一个与左侧按钮等宽的占位,标题才真正居中 */
+.app.web .topbar::after { content: ""; width: 36px; flex: none; }
+body.android .icon-btn { width: 40px; height: 40px; } body.android .icon-btn svg { width: 24px; height: 24px; stroke-width: 2.1; }
+body.android .topbar { padding: 0 10px; } .app.android .topbar::after { width: 40px; }
+body.tv .app .topbar::after { width: 44px; }
+body.android .icon-btn.xs { width: 36px; height: 36px; border-radius: 10px; } body.android .icon-btn.xs svg { width: 20px; height: 20px; }

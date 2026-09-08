@@ -124,8 +124,10 @@ function setTop(title, back) {
 // ---- 页面切换 ----
 function nav(name, arg) {
   const stage = $('#stage');
-  const old = stage.querySelector('.view');
-  if (old && name === 'home' && view !== 'home') { old.classList.add('pop'); setTimeout(() => old.remove(), 240); } else if (old) old.remove();
+  // 把已有的页面全部清掉(可能不止一个:引导页加订阅后自己 nav 一次,状态事件又 nav 一次,叠在一起就是两个首页)
+  for (const old of stage.querySelectorAll('.view')) {
+    if (name === 'home' && view !== 'home' && !old.classList.contains('pop')) { old.classList.add('pop'); setTimeout(() => old.remove(), 240); } else old.remove();
+  }
   view = name;
   clearInterval(pageTimer); pageTimer = null;
   const el = document.createElement('div');
@@ -153,7 +155,7 @@ function renderOnboard(el) {
     const url = $('#ob-url').value.trim();
     if (!url) { $('#ob-url').focus(); return; }
     const b = $('#ob-go'); b.disabled = true; b.textContent = t('onboard.adding'); $('#ob-err').textContent = '';
-    try { await App().AddProfile($('#ob-name').value, url); toast(t('prof.added'), 'ok'); state = await App().GetState(); nav('home'); }
+    try { await App().AddProfile($('#ob-name').value, url); toast(t('prof.added'), 'ok'); state = await App().GetState(); if (view === 'onboard') nav('home'); }
     catch (e) { $('#ob-err').textContent = errText(e); b.disabled = false; b.textContent = t('onboard.go'); }
   };
   $('#ob-go').addEventListener('click', submit);
@@ -410,7 +412,7 @@ async function renderSettings(el) {
       ${num('f-logdays', t('set.logDays'), s.logDays ?? 7, t('set.logDaysHelp'))}
     </div>
     <div class="card"><h3>${t('set.g.app')} <span class="tag">${t('set.instant')}</span></h3>
-      ${sw('f-autostart', t(state.platform === 'linux' ? 'set.autostartLinux' : 'set.autostart'), auto, t(state.platform === 'linux' ? 'set.autostartLinuxHelp' : 'set.autostartHelp'))}
+      ${state.platform === 'android' ? `<div class="srow"><div class="lbl">${t('set.autostart')}<div>${t('set.autostartAndroidHelp')}</div></div></div>` : sw('f-autostart', t(state.platform === 'linux' ? 'set.autostartLinux' : 'set.autostart'), auto, t(state.platform === 'linux' ? 'set.autostartLinuxHelp' : 'set.autostartHelp'))}
       ${sel('f-lang', t('set.lang'), LANG, [['zh', '中文'], ['en', 'English']])}
       ${sel('f-theme', t('set.theme'), state.theme || 'system', [['system', t('theme.system')], ['light', t('theme.light')], ['dark', t('theme.dark')]])}
     </div>
@@ -426,7 +428,7 @@ async function renderSettings(el) {
     if ($('#f-netmode')) { n.netMode = $('#f-netmode').value; n.lanSubnets = $('#f-lansub').value.split(/[,，\s]+/).map(x => x.trim()).filter(Boolean); n.webListen = $('#f-weblisten').value.trim(); }
     try { s = await App().SaveSettings(n); dirty(false); toast(t('set.saved'), 'ok'); } catch (e) { toast(errText(e), 'err'); }
   });
-  $('#f-autostart').addEventListener('change', async e => { try { await App().SetAutostart(e.target.checked); toast(t('set.saved'), 'ok'); } catch (err) { toast(errText(err), 'err'); e.target.checked = !e.target.checked; } });
+  const fa = $('#f-autostart'); if (fa) fa.addEventListener('change', async e => { try { await App().SetAutostart(e.target.checked); toast(t('set.saved'), 'ok'); } catch (err) { toast(errText(err), 'err'); e.target.checked = !e.target.checked; } });
   $('#f-lang').addEventListener('change', async e => { LANG = e.target.value; await App().SetLang(LANG); nav('settings'); });
   $('#f-theme').addEventListener('change', async e => { applyTheme(e.target.value); await App().SetTheme(e.target.value); });
   $('#f-rules').addEventListener('click', () => nav('rules'));
@@ -576,7 +578,7 @@ function renderLogs(el) {
   el.innerHTML = `<div class="row" style="margin-bottom:10px;flex-wrap:wrap">
       <div class="seg" id="logsrc"><span class="pill"></span><button data-core="0" class="active">${t('logs.service')}</button><button data-core="1">${t('logs.core')}</button></div>
       <button class="btn sm" id="pause">${t('logs.pause')}</button><span class="grow"></span>
-      ${window.__web ? '' : `<button class="btn sm" id="open">${t('logs.open')}</button>`}<button class="btn sm" id="diag">${t('logs.diag')}</button>
+      ${window.__web || window.__android ? '' : `<button class="btn sm" id="open">${t('logs.open')}</button>`}<button class="btn sm" id="diag">${t('logs.diag')}</button>
     </div><pre class="log sel" id="log"></pre>`;
   let core = false, paused = false;
   const colorize = l => { const e = esc(l); if (/ERROR|FATAL|panic/i.test(l)) return `<span class="err">${e}</span>`; if (/WARN/i.test(l)) return `<span class="warn">${e}</span>`; if (/DEBUG/i.test(l)) return `<span class="dim">${e}</span>`; return e; };
@@ -620,7 +622,7 @@ function renderAbout(el) {
       <div id="upd-body"></div>
     </div>
     <div class="card">
-      ${window.__web ? '' : `<div class="srow"><div class="lbl">${t('about.repair')}</div><button class="btn sm" id="repair">${t('about.repair')}</button></div>`}
+      ${window.__web || window.__android ? '' : `<div class="srow"><div class="lbl">${t('about.repair')}</div><button class="btn sm" id="repair">${t('about.repair')}</button></div>`}
       <div class="srow"><div class="lbl">${t('about.diag')}</div><button class="btn sm" id="diag">${t('about.diag')}</button></div>
       ${window.__web ? `<div class="srow"><div class="lbl">${t('about.web')}<div>${t('about.webHelp')}</div></div><button class="btn sm" id="webpw">${t('about.webPw')}</button></div>` : `<div class="srow"><div class="lbl">${t('about.quit')}<div>${t('about.quitHelp')}</div></div><button class="btn sm danger" id="quit">${t('about.quit')}</button></div>`}
     </div>

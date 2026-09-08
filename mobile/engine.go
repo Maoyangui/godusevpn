@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"time"
 
 	"github.com/Maoyangui/godusevpn/internal/buildinfo"
@@ -41,6 +42,13 @@ func NewEngine(dataDir, cacheDir string, host Host, listener EventListener) (*En
 	_ = os.Setenv("GODUSEVPN_DATA", filepath.Join(dataDir, "data"))
 	if cacheDir != "" {
 		_ = os.Setenv("TMPDIR", cacheDir) // Android 上 os.TempDir() 默认是 /data/local/tmp,应用写不了
+	}
+	// Go 侧崩溃(panic / fatal)默认只进 logcat,真机拿不到;另写一份到 logs/crash.log,诊断包会带上
+	logDir := filepath.Join(dataDir, "data", "logs")
+	if err := os.MkdirAll(logDir, 0o700); err == nil {
+		if f, err := os.OpenFile(filepath.Join(logDir, "crash.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600); err == nil {
+			_ = debug.SetCrashOutput(f, debug.CrashOptions{})
+		}
 	}
 	d, err := daemon.NewWithOptions(daemon.Options{Platform: newPlatform(host), NoListen: true})
 	if err != nil {

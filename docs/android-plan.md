@@ -99,3 +99,6 @@ TV:同一套视觉语言换成横版布局:左栏是连接按钮与状态,右栏
 - A2 已做(2026-09-08,tv33 模拟器验证):电视横版布局(body.tv:左连接按钮、右四项状态 + 三张面板卡,面板与页面居中放大)、遥控器空间导航(app.js 自己按元素位置找焦点,Enter = 点击,返回键经 `__godBack` 先收面板 / 抽屉再退页,首页返回把应用放后台)、电视 banner、leanback 入口。
   - 坑:页面资源要用 AGP 的 `addGeneratedSourceDirectory` 挂进 assets,手工 srcDir 改了页面不会重新合并(打出旧页面),release 的 lintVital 还会报隐式依赖;WebView 关掉 HTTP 缓存(升级后才不会用旧 JS / CSS);没有 href 的 `a` 的 tabIndex 属性读出 0 但并不可聚焦,要显式 setAttribute;抽屉 / 面板按状态事件重绘会把焦点元素换掉,重绘前后按 data-* 键把焦点落回去;`:focus` 别改 position(连接按钮是 absolute 定位);列表 overflow hidden 会裁外描边,描在内侧。
   - Android 上"进程名"= 应用包名:builder 按平台出 `package_name` 规则,按应用直连的应用写进 TUN 的 `exclude_package`(整个绕过 VPN);页面文案按平台切换。
+- 真机反馈修正(2026-09-08,v0.6.0-a2):引导页加订阅后首页叠了两层(nav 只清第一个旧页面)→ nav 清掉全部旧页面;删除订阅 / 规则组没反应 → WebView 没设 WebChromeClient 时 confirm() 直接当取消,已补;标题偏右 → 没有窗口按钮的壳右侧补等宽占位;三条杠与刷新小图标放大;断开后 VPN 标记还在、连接后断网 → 服务留着的 TUN fd 没关,现在内核关 TUN 时经宿主接口关掉(嵌 *tun.NativeTun 的包装,LinuxTUN 断言不受影响),状态变断开 / 出错时再兜底;关于页"退出"在 Android 真正断开并结束进程,"打开目录"/"修复服务"/开机自启开关不再显示;Go 崩溃经 debug.SetCrashOutput、Kotlin 崩溃经默认异常处理器写 logs/crash.log,诊断包带上;桌面图标改成自适应图标(白色圆角底 + logo)。
+  - 模拟器连通已验(EMU_FULL=1 + 假订阅指向宿主机代理端口经 adb reverse + 本地规则集):拉订阅 → 内核起 → tun0 → Chrome 流量按包名分流、fake-ip DNS → 断开后 tun0 与通知消失。
+  - 订阅报"订阅无效、已用完或已到期"= 面板对这条链接回了 404:m-ui 在令牌对不上、用户停用、流量用完、到期、代理池停用 / 耗尽时都回 404;有缓存时客户端会继续用缓存连,没缓存(新导入)就只能等面板恢复。

@@ -11,6 +11,7 @@ import android.net.VpnService
 import android.os.Bundle
 import android.util.Log
 import android.webkit.JavascriptInterface
+import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
 import android.webkit.WebSettings
 import android.webkit.WebView
@@ -64,6 +65,7 @@ class MainActivity : AppCompatActivity() {
                 startActivity(Intent(Intent.ACTION_VIEW, u)); return true // 外链交给浏览器
             }
         }
+        web.webChromeClient = WebChromeClient() // 不设的话页面里的 confirm() / prompt() 会被直接当作"取消",删除订阅 / 规则组等确认就没反应
         web.addJavascriptInterface(Bridge(), "GodusevpnBridge")
         WebView.setWebContentsDebuggingEnabled(BuildConfig.DEBUG)
         web.loadUrl("https://appassets.androidplatform.net/web/index.html")
@@ -124,6 +126,8 @@ class MainActivity : AppCompatActivity() {
                         share(File(path)); JSONObject.quote(path)
                     }
                     "HideWindow", "Minimize" -> { runOnUiThread { moveTaskToBack(true) }; "null" }
+                    "OpenLogs" -> "null" // 没有文件管理器可开;页面在 Android 上不显示这个按钮
+                    "QuitApp" -> { quit(); "null" }
                     else -> App.engine().call(name, argsJSON)
                 }
                 "{\"result\":$result}"
@@ -132,6 +136,17 @@ class MainActivity : AppCompatActivity() {
                 JSONObject().put("error", e.message ?: e.toString()).toString()
             }
         }
+    }
+
+    /** 关于 → 退出:断开连接、停掉前台服务、关掉界面并结束进程(引擎随进程一起结束)。 */
+    private fun quit() {
+        Thread {
+            runCatching { App.engine().call("Disconnect", "[]") }
+            runCatching { stopService(Intent(this, GodVpnService::class.java)) }
+            runOnUiThread { finishAndRemoveTask() }
+            Thread.sleep(400)
+            android.os.Process.killProcess(android.os.Process.myPid())
+        }.start()
     }
 
     private fun share(f: File) {

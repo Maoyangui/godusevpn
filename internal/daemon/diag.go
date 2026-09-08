@@ -98,6 +98,9 @@ func (d *Daemon) exportDiag() (string, error) {
 	}
 	add("service.log", strings.Join(logx.Tail(d.log.Path(), 500), "\n"))
 	add("core.log", strings.Join(logx.Tail(d.coreLog.Path(), 500), "\n"))
+	if crash := filepath.Join(paths.Logs(), "crash.log"); func() bool { st, err := os.Stat(crash); return err == nil && st.Size() > 0 }() { // Android 上 Go / Kotlin 侧的崩溃记录
+		add("crash.log", strings.Join(logx.Tail(crash, 300), "\n"))
+	}
 	sysDiag(add)
 	if err := zw.Close(); err != nil {
 		return "", err

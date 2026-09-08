@@ -29,6 +29,8 @@ type Host interface {
 	OpenTun(specJSON string) int32
 	// Protect 让一个套接字绕过 VPN(VpnService.protect)
 	Protect(fd int32) bool
+	// CloseTun 内核已经关掉 TUN:宿主把自己留着的那份文件描述符也关掉,系统的 VPN 才会真正消失(否则流量还往一个没人读的接口里灌,手机就断网)
+	CloseTun()
 	// FindConnectionOwner 查一条连接属于哪个 uid(ConnectivityManager.getConnectionOwnerUid);找不到返回 -1
 	FindConnectionOwner(ipProtocol int32, sourceAddress string, sourcePort int32, destinationAddress string, destinationPort int32) int32
 	// PackageNamesByUid 逗号分隔的包名列表
@@ -170,7 +172,29 @@ func (p *platform) OpenInterface(options *tun.Options, platformOptions option.Tu
 		p.myTunAddress = append(p.myTunAddress, pre.Addr())
 	}
 	p.mu.Unlock()
-	return tun.New(*options)
+	t, err := tun.New(*options)
+	if err != nil {
+		p.host.CloseTun()
+		return nil, err
+	}
+	nt, ok := t.(*tun.NativeTun)
+	if !ok {
+		return t, nil
+	}
+	return &hostTun{NativeTun: nt, host: p.host}, nil
+}
+
+// hostTun 内核关 TUN 时顺带通知宿主。嵌的是具体类型 *tun.NativeTun,协议栈按 LinuxTUN 接口断言(批量读写、校验和卸载)照样成立。
+type hostTun struct {
+	*tun.NativeTun
+	host Host
+	once sync.Once
+}
+
+func (t *hostTun) Close() error {
+	err := t.NativeTun.Close()
+	t.once.Do(t.host.CloseTun)
+	return err
 }
 
 func (p *platform) ProcessPlatformOptions(option.TunPlatformOptions) error { return nil }

@@ -51,6 +51,15 @@ class App : Application() {
     override fun onCreate() {
         super.onCreate()
         instance = this
+        // Kotlin 侧崩溃也记到 logs/crash.log(Go 侧的由引擎自己写),诊断包会带上;记完交给系统默认处理
+        val previous = Thread.getDefaultUncaughtExceptionHandler()
+        Thread.setDefaultUncaughtExceptionHandler { th, e ->
+            runCatching {
+                val dir = File(filesDir, "data/logs").apply { mkdirs() }
+                File(dir, "crash.log").appendText("${java.util.Date()} 线程 ${th.name}: ${android.util.Log.getStackTraceString(e)}\n")
+            }
+            previous?.uncaughtException(th, e)
+        }
         if (Build.VERSION.SDK_INT >= 26) {
             val nm = getSystemService(NotificationManager::class.java)
             nm.createNotificationChannel(NotificationChannel(CHANNEL, getString(R.string.channel_vpn), NotificationManager.IMPORTANCE_LOW).apply {

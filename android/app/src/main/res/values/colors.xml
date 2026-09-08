@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 桌面图标的底色:白色圆角方块(启动器按自己的形状裁) -->
+    <color name="ic_launcher_bg">#FFFFFFFF</color>
+</resources>

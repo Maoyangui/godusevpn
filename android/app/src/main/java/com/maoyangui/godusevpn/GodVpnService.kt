@@ -105,9 +105,12 @@ class GodVpnService : VpnService() {
         runCatching { b.addRoute(ip, len) }.onFailure { Log.w(App.TAG, "addRoute $cidr: $it") }
     }
 
-    private fun closeTun() {
-        runCatching { tun?.close() }
+    /** 关掉自己留着的那份 fd,系统的 VPN 随之消失。内核关 TUN 时经宿主接口调;状态变成断开 / 出错时再兜一次底。 */
+    fun closeTun() {
+        val t = tun ?: return
         tun = null
+        runCatching { t.close() }
+        Log.i(App.TAG, "TUN 已关闭")
     }
 
     private fun buildNotification(text: String, sub: String?): Notification {
@@ -135,6 +138,7 @@ class GodVpnService : VpnService() {
             else -> getString(R.string.st_disconnected)
         }
         val node = view.optString("autoNow").ifEmpty { view.optString("node") }
+        if (status == "disconnected" || status == "error" || status == "stopping") closeTun() // 内核不在跑就别让 VPN 接口留着吞流量
         val n = buildNotification(text, if (status == "connected") node else null)
         if (Build.VERSION.SDK_INT >= 29) startForeground(NOTIFY_ID, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE) else startForeground(NOTIFY_ID, n)
         if (status == "disconnected" && !view.optJSONObject("state")!!.optBoolean("wanted")) {
