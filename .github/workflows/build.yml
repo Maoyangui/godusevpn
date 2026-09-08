@@ -128,6 +128,7 @@ jobs:
             env CGO_ENABLED=0 GOOS=linux GOARCH=$arch "$@" go build -tags "$TAGS" -trimpath -ldflags "$LD" -o dist/linux/$name/godusevpn ./cmd/godusevpn-linux
             cp deploy/install.sh dist/linux/$name/ 2>/dev/null || true
             tar -C dist/linux/$name -czf out/godusevpn-$V-linux-$name.tar.gz .
+            sh deploy/mkipk.sh "$V" "$name" dist/linux/$name/godusevpn out/godusevpn_${V}_$name.ipk
           }
           build amd64 amd64
           build arm64 arm64

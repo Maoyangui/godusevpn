@@ -104,8 +104,8 @@ LAN 侧 DNS:网关模式下把 LAN 发往路由器 53 端口的查询 DNAT 到�
 
 | 阶段 | 内容 | 验收 |
 |---|---|---|
-| L0 | 平台层抽象、Unix socket、HTTP + SSE 面板复用前端、登录、systemd、本机模式、CLI、CI 出 amd64 / arm64 tar.gz | JP 宿主机 |
-| L1 | procd、nftables auto_redirect 网关模式、LAN DNS 劫持、设备列表与每设备策略、ipk、install.sh | Docker 里的 openwrt + lan 容器 |
+| L0(已完成,v0.5.0-l0) | 平台层抽象、Unix socket、HTTP + SSE 面板复用前端、登录、systemd、本机模式、CLI、CI 出 amd64 / arm64 / armv7 / mipsle / mips tar.gz | 测试机真机 20 项全过 |
+| L1(已完成,v0.5.2-l1) | procd、auto_redirect 网关模式(LAN DNS 由 sing-box 自己接管)、设备列表与每设备策略、ipk(opkg 装过)、install.sh | Docker 里的 openwrt + lan 容器 |
 | L2 | iptables TProxy 模式、Entware init 与 firewall-start 钩子、dnsmasq 共存、自检脚本 | debian-iptables 容器;梅林标待反馈 |
 | L3 | Linux 自更新、诊断包、deb、mips / armv7 构建与 qemu 冒烟、文档;kill switch 仍缓 | 全部 |
 
