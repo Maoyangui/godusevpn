@@ -13,7 +13,19 @@ env:
   TAGS: with_quic,with_utls,with_clash_api,with_gvisor
 
 jobs:
-  build:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
+    steps:
+      - id: ver
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then v="${GITHUB_REF#refs/tags/v}"; else v="0.0.0-ci-${GITHUB_SHA::7}"; fi
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+
+  windows:
+    needs: version
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -21,13 +33,6 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
-
-      - name: Version
-        id: ver
-        shell: bash
-        run: |
-          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then v="${GITHUB_REF#refs/tags/v}"; else v="0.0.0-ci-${GITHUB_SHA::7}"; fi
-          echo "version=$v" >> "$GITHUB_OUTPUT"
 
       - name: Test
         shell: bash
@@ -41,7 +46,7 @@ jobs:
         run: |
           set -e
           go install github.com/tc-hib/go-winres@v0.3.3
-          V="${{ steps.ver.outputs.version }}"; NV="${V%%-*}"
+          V="${{ needs.version.outputs.version }}"; NV="${V%%-*}"
           for n in godusevpn godusevpn-svc godusevpn-cli; do
             go-winres make --in winres/$n.json --out cmd/$n/rsrc --arch amd64,arm64 --file-version "$NV" --product-version "$V"
           done
@@ -50,7 +55,7 @@ jobs:
         shell: bash
         run: |
           set -e
-          V="${{ steps.ver.outputs.version }}"
+          V="${{ needs.version.outputs.version }}"
           LD="-s -w -X github.com/Maoyangui/godusevpn/internal/buildinfo.Version=$V"
           for arch in amd64 arm64; do
             mkdir -p dist/$arch
@@ -72,7 +77,7 @@ jobs:
       - name: Build installers (Inno Setup)
         shell: pwsh
         run: |
-          $v = "${{ steps.ver.outputs.version }}"
+          $v = "${{ needs.version.outputs.version }}"
           $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
           & $iscc /DAppVersion=$v /DArch=amd64 installer\godusevpn.iss
           if ($LASTEXITCODE -ne 0) { exit 1 }
@@ -82,29 +87,80 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit 1 }
           Get-ChildItem dist\installer
 
-      - name: Checksums
+      - name: Collect
         shell: bash
         run: |
-          cd dist/installer && sha256sum *.exe > SHA256SUMS && cat SHA256SUMS
+          mkdir -p out
+          cp dist/installer/*.exe out/
+          cp dist/amd64/godusevpn-svc.exe dist/amd64/godusevpn-cli.exe dist/amd64/godusevpn.exe out/
+          ls -la out
 
       - uses: actions/upload-artifact@v4
         with:
-          name: godusevpn-${{ steps.ver.outputs.version }}
-          path: |
-            dist/installer/*
-            dist/amd64/*.exe
-            dist/arm64/*.exe
+          name: windows-${{ needs.version.outputs.version }}
+          path: out/*
 
+  linux:
+    needs: version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Test
+        run: |
+          go vet -tags "$TAGS" ./internal/... ./cmd/godusevpn-linux
+          go test -count=1 -tags "$TAGS" ./...
+
+      - name: Build (amd64, arm64, armv7, mipsle, mips)
+        run: |
+          set -e
+          V="${{ needs.version.outputs.version }}"
+          LD="-s -w -X github.com/Maoyangui/godusevpn/internal/buildinfo.Version=$V"
+          mkdir -p out
+          build() { # 名字 GOARCH [额外环境]
+            name=$1; arch=$2; shift 2
+            mkdir -p dist/linux/$name
+            env CGO_ENABLED=0 GOOS=linux GOARCH=$arch "$@" go build -tags "$TAGS" -trimpath -ldflags "$LD" -o dist/linux/$name/godusevpn ./cmd/godusevpn-linux
+            cp deploy/install.sh dist/linux/$name/ 2>/dev/null || true
+            tar -C dist/linux/$name -czf out/godusevpn-$V-linux-$name.tar.gz .
+          }
+          build amd64 amd64
+          build arm64 arm64
+          build armv7 arm GOARM=7
+          build mipsle mipsle GOMIPS=softfloat
+          build mips mips GOMIPS=softfloat
+          ls -la out
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-${{ needs.version.outputs.version }}
+          path: out/*
+
+  release:
+    needs: [version, windows, linux]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: art
+      - name: Checksums
+        run: |
+          mkdir -p out
+          find art -type f -exec cp {} out/ \;
+          cd out && sha256sum * > SHA256SUMS && cat SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: godusevpn-${{ needs.version.outputs.version }}
+          path: out/*
       - name: Release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          name: "佛跳墙 v${{ steps.ver.outputs.version }}"
+          name: "佛跳墙 v${{ needs.version.outputs.version }}"
           prerelease: ${{ contains(github.ref, '-') }}
           generate_release_notes: true
-          files: |
-            dist/installer/*.exe
-            dist/installer/SHA256SUMS
-            dist/amd64/godusevpn-svc.exe
-            dist/amd64/godusevpn-cli.exe
-            dist/amd64/godusevpn.exe
+          files: out/*
