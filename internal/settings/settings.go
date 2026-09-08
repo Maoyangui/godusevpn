@@ -50,6 +50,10 @@ type Settings struct {
 	LogDays       int       `json:"logDays"`      // 日志保留天数,超过自动删除;0 = 一直保留
 	WebListen     string    `json:"webListen"`    // Web 面板监听地址(Linux),如 127.0.0.1:9800 / 0.0.0.0:9800;空 = 不开面板
 	WebPassword   string    `json:"webPassword"`  // 面板密码的加盐哈希(salt$sha256);空 = 无密码,此时只允许监听回环地址
+	NetMode       string    `json:"netMode"`      // local | gateway(Linux 软路由:代理经本机转发的局域网流量),见 gateway.go
+	LANSubnets    []string  `json:"lanSubnets"`   // 网关模式下的局域网网段;空 = 自动
+	DNSHijack     bool      `json:"dnsHijack"`    // 网关模式下劫持局域网设备的 DNS
+	Devices       []Device  `json:"devices"`      // 局域网设备策略
 	ClashPort     int       `json:"clashPort"`    // 内核 Clash API 端口(只监听回环)
 	Selected      string    `json:"selected"`     // proxy 组当前选中的节点;空 = auto
 	// BypassApps 这些进程(如 steam.exe)的流量不走代理,直连出去;按进程名匹配,不分大小写
@@ -64,6 +68,7 @@ func Default() Settings {
 		Schema: Schema, Mode: ModeRule, TUN: true, TUNStack: "mixed", StrictRoute: true, LANBypass: true,
 		MixedPort: 2080, RemoteDNS: "1.1.1.1", LocalDNS: "223.5.5.5", FakeIP: true, IPv6: false,
 		UpdateHours: 6, ProbeMinutes: 3, LogLevel: "info", LogDays: 7, ClashPort: 9090, WebListen: "127.0.0.1:9800",
+		NetMode: NetLocal, DNSHijack: true,
 	}
 }
 
@@ -213,12 +218,15 @@ func (s *Settings) Validate() error {
 		if a == "" {
 			continue
 		}
-		if strings.ContainsAny(a, "/*?<>|\"") || strings.Contains(a, string(os.PathSeparator)) {
+		if strings.ContainsAny(a, "/\\*?<>|\"") || strings.Contains(a, string(os.PathSeparator)) {
 			return fmt.Errorf("进程名无效: %q(只写文件名,如 steam.exe)", a)
 		}
 		apps = append(apps, a)
 	}
 	s.BypassApps = apps
+	if err := s.validateGateway(); err != nil {
+		return err
+	}
 	return s.validateRules()
 }
 

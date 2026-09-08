@@ -112,8 +112,9 @@ jobs:
 
       - name: Test
         run: |
-          go vet -tags "$TAGS" ./internal/... ./cmd/godusevpn-linux
-          go test -count=1 -tags "$TAGS" ./...
+          # cmd/godusevpn 是 Wails 窗口程序,Linux 上没有它要的 GTK/WebKit 头文件,不在这里编
+          go vet -tags "$TAGS" ./internal/... ./cmd/godusevpn-linux ./cmd/godusevpn-cli
+          go test -count=1 -tags "$TAGS" ./internal/... ./cmd/godusevpn-linux ./cmd/godusevpn-cli
 
       - name: Build (amd64, arm64, armv7, mipsle, mips)
         run: |

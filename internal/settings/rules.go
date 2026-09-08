@@ -147,7 +147,7 @@ func normalizeRule(typ, v string) (Rule, error) {
 			v = strconv.Itoa(lo)
 		}
 	case RuleProcess:
-		if strings.ContainsAny(v, "/*?<>|\"") || strings.Contains(v, string(os.PathSeparator)) {
+		if strings.ContainsAny(v, "/\\*?<>|\"") || strings.Contains(v, string(os.PathSeparator)) {
 			return Rule{}, fmt.Errorf("进程名无效: %q(只写文件名,如 steam.exe)", v)
 		}
 	case RuleGeosite, RuleGeoIP:

@@ -4,7 +4,6 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
-	"runtime"
 	"strings"
 	"testing"
 )
@@ -24,10 +23,7 @@ func TestNewer(t *testing.T) {
 
 // 接口 403(经代理出口限流)时要能从 Atom 订阅拿到版本,下载地址按 tag 拼,并 HEAD 确认安装包存在。
 func TestCheckFallsBackToAtomOn403(t *testing.T) {
-	arch := "x64"
-	if runtime.GOARCH == "arm64" {
-		arch = "arm64"
-	}
+	want := assetName("0.4.4-m3") // 本平台的资产名(Windows 是安装包,Linux 是 tar.gz)
 	var apiHits, atomHits int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
@@ -44,7 +40,7 @@ func TestCheckFallsBackToAtomOn403(t *testing.T) {
   <entry><id>tag:github.com,2008:Repository/1/v0.4.4-m3</id><title>v0.4.4-m3</title><link rel="alternate" type="text/html" href="https://github.com/Maoyangui/godusevpn/releases/tag/v0.4.4-m3"/><content type="html">&lt;p&gt;修了 &lt;b&gt;403&lt;/b&gt;&lt;/p&gt;</content></entry>
   <entry><id>tag:github.com,2008:Repository/1/v0.3.0-m2</id><title>v0.3.0-m2</title><link rel="alternate" type="text/html" href="https://github.com/Maoyangui/godusevpn/releases/tag/v0.3.0-m2"/><content type="html">old</content></entry>
 </feed>`))
-		case r.Method == http.MethodHead && r.URL.Path == "/download/v0.4.4-m3/godusevpn-0.4.4-m3-"+arch+"-setup.exe":
+		case r.Method == http.MethodHead && r.URL.Path == "/download/v0.4.4-m3/"+want:
 			w.Header().Set("Content-Length", "12345")
 			w.WriteHeader(http.StatusOK)
 		case r.Method == http.MethodHead:
@@ -63,7 +59,7 @@ func TestCheckFallsBackToAtomOn403(t *testing.T) {
 	if rel == nil || rel.Version != "0.4.4-m3" || !rel.Prerelease {
 		t.Fatalf("应从 Atom 拿到 0.4.4-m3(跳过没有安装包的 9.9.9): %+v", rel)
 	}
-	if rel.InstallerURL != srv.URL+"/download/v0.4.4-m3/godusevpn-0.4.4-m3-"+arch+"-setup.exe" || rel.SumsURL != srv.URL+"/download/v0.4.4-m3/SHA256SUMS" || rel.Size != 12345 {
+	if rel.InstallerURL != srv.URL+"/download/v0.4.4-m3/"+want || rel.SumsURL != srv.URL+"/download/v0.4.4-m3/SHA256SUMS" || rel.Size != 12345 {
 		t.Fatalf("下载地址 / 大小不对: %+v", rel)
 	}
 	if rel.Notes != "修了 403" {
