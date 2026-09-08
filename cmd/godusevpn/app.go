@@ -151,7 +151,7 @@ func (a *App) secondInstance(link string) {
 	}
 }
 
-// handleDeepLink godusevpn://import?url=<订阅地址>
+// handleDeepLink godusevpn://import?url=<订阅地址>[&name=<订阅名>]
 func (a *App) handleDeepLink(link string) {
 	u, err := url.Parse(link)
 	if err != nil || !strings.EqualFold(u.Host, "import") {
@@ -163,7 +163,7 @@ func (a *App) handleDeepLink(link string) {
 	}
 	<-a.domReadyCh
 	a.showWindow()
-	runtime.EventsEmit(a.ctx, "import", sub)
+	runtime.EventsEmit(a.ctx, "import", map[string]string{"url": sub, "name": u.Query().Get("name")})
 }
 
 // ---- 轮询服务、维护速度流 ----

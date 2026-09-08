@@ -751,7 +751,17 @@ async function init() {
     bar.hidden = false; bar.querySelector('i').style.width = pct + '%';
     $('#upd-text').textContent = t('about.downloading', { p: pct });
   });
-  window.runtime.EventsOn('import', url => { nav('profiles'); setTimeout(() => { const f = $('#prof-add'); if (f) f.click(); const u = $('#pf-url'); if (u) u.value = url; }, 350); });
+  // 落地页一键导入:老版本外壳传的是一个地址字符串,新版本传 {url, name}
+  window.runtime.EventsOn('import', p => {
+    const url = typeof p === 'string' ? p : (p && p.url) || '', name = typeof p === 'string' ? '' : (p && p.name) || '';
+    if (!url) return;
+    nav('profiles');
+    setTimeout(() => {
+      const f = $('#prof-add'); if (f) f.click();
+      const u = $('#pf-url'); if (u) u.value = url;
+      const n = $('#pf-name'); if (n && name) n.value = name;
+    }, 350);
+  });
 }
 // ---- 遥控器 / 方向键(Android):WebView 不自带空间导航,按元素位置找下一个焦点;Enter 等于点击;返回键交给 __godBack ----
 const FOCUS_SEL = 'button:not([disabled]), input:not([type=hidden]):not([disabled]), select:not([disabled]), textarea:not([disabled]), a, .item';

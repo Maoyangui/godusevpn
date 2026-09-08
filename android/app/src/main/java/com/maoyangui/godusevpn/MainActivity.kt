@@ -90,10 +90,12 @@ class MainActivity : AppCompatActivity() {
         handleDeepLink(intent)
     }
 
+    /** godusevpn://import?url=<订阅地址>[&name=<订阅名>],落地页的一键导入。 */
     private fun handleDeepLink(intent: Intent?) {
         val u = intent?.data ?: return
         val url = u.getQueryParameter("url") ?: return
-        web.post { web.evaluateJavascript("window.__godEvent && window.__godEvent('import', ${JSONObject.quote(JSONObject.quote(url))})", null) }
+        val payload = JSONObject().put("url", url).put("name", u.getQueryParameter("name") ?: "").toString()
+        web.post { web.evaluateJavascript("window.__godEvent && window.__godEvent('import', ${JSONObject.quote(payload)})", null) }
     }
 
     override fun onDestroy() {
