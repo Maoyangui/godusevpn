@@ -68,8 +68,12 @@ const ICON = {
   conns: '<path d="M4 7h16M4 12h16M4 17h10"/>',
   logs: '<path d="M6 3h9l5 5v13H6z"/><path d="M14 3v6h6M9 13h6M9 17h6"/>',
   about: '<circle cx="12" cy="12" r="9"/><path d="M12 8h.01M11 12h1v4h1"/>',
+  rules: '<path d="M4 6h3l8 12h5M4 18h3l2.5-3.7M13.5 9.7L15 7.5h5"/><path d="M17 4l3 3-3 3M17 14l3 4-3 3"/>',
 };
-const MENU = ['settings', 'profiles', 'conns', 'logs', 'about'];
+const MENU = ['settings', 'profiles', 'rules', 'conns', 'logs', 'about'];
+const PAGES = { onboard: renderOnboard, home: renderHome, settings: renderSettings, profiles: renderProfiles, rules: renderRules, ruleEdit: renderRuleEdit, conns: renderConns, logs: renderLogs, about: renderAbout };
+const TITLES = { settings: 'set.title', profiles: 'prof.title', rules: 'rules.title', ruleEdit: 'rules.edit', conns: 'conns.title', logs: 'logs.title', about: 'about.title' };
+const BACK = { ruleEdit: 'rules' }; // 返回键去哪(默认回首页)
 function renderDrawer() {
   $('#drawer-items').innerHTML = MENU.map(m => `<a data-page="${m}"><svg viewBox="0 0 24 24">${ICON[m]}</svg><span>${t('menu.' + m)}</span>${m === 'about' && state && state.update ? '<span class="grow"></span><span class="pill-badge">NEW</span>' : ''}</a>`).join('');
   $('#drawer-items').querySelectorAll('a').forEach(a => a.addEventListener('click', () => { closeDrawer(); nav(a.dataset.page); }));
@@ -96,7 +100,7 @@ function setTop(title, back) {
 }
 
 // ---- 页面切换 ----
-function nav(name) {
+function nav(name, arg) {
   const stage = $('#stage');
   const old = stage.querySelector('.view');
   if (old && name === 'home' && view !== 'home') { old.classList.add('pop'); setTimeout(() => old.remove(), 240); } else if (old) old.remove();
@@ -105,8 +109,8 @@ function nav(name) {
   const el = document.createElement('div');
   el.className = 'view ' + (name === 'home' ? 'home' : '');
   stage.appendChild(el);
-  ({ onboard: renderOnboard, home: renderHome, settings: renderSettings, profiles: renderProfiles, conns: renderConns, logs: renderLogs, about: renderAbout })[name](el);
-  setTop(name === 'home' || name === 'onboard' ? t('app.name') : t({ settings: 'set.title', profiles: 'prof.title', conns: 'conns.title', logs: 'logs.title', about: 'about.title' }[name]), name !== 'home' && name !== 'onboard');
+  PAGES[name](el, arg);
+  setTop(name === 'home' || name === 'onboard' ? t('app.name') : t(TITLES[name]), name !== 'home' && name !== 'onboard');
 }
 function navHome() { nav(state && state.view.profiles && state.view.profiles.length ? 'home' : 'onboard'); }
 
@@ -115,7 +119,7 @@ function renderOnboard(el) {
   el.innerHTML = `<div class="onboard">
     <svg class="logo" viewBox="-16 -50 400 400"><defs><linearGradient id="g2" gradientUnits="userSpaceOnUse" x1="70" y1="70" x2="310" y2="270"><stop offset="0" stop-color="#6a44f2"/><stop offset=".55" stop-color="#2f8bff"/><stop offset="1" stop-color="#18e3e8"/></linearGradient></defs><g fill="none" stroke="url(#g2)" stroke-width="44" stroke-linecap="round" stroke-linejoin="round"><path d="M86 248V84l146 124v52"/><path d="M332 78l-88 96"/></g><path fill="url(#g2)" d="M118 192l52 30-52 30z"/></svg>
     <h1>${t('onboard.title')}</h1><p>${t('onboard.desc')}</p>
-    <div class="field"><input type="url" id="ob-url" placeholder="${t('onboard.url')}" autofocus></div>
+    <div class="field with-btn"><input type="url" id="ob-url" placeholder="${t('onboard.url')}" autofocus><button class="btn sm ghost" id="ob-paste">${t('common.paste')}</button></div>
     <div class="field"><input type="text" id="ob-name" placeholder="${t('onboard.name')}"></div>
     <button class="btn primary block" id="ob-go">${t('onboard.go')}</button>
     <div id="ob-err" class="small" style="color:var(--danger);min-height:18px"></div>
@@ -130,6 +134,7 @@ function renderOnboard(el) {
     catch (e) { $('#ob-err').textContent = errText(e); b.disabled = false; b.textContent = t('onboard.go'); }
   };
   $('#ob-go').addEventListener('click', submit);
+  $('#ob-paste').addEventListener('click', () => pasteInto('#ob-url'));
   $('#ob-url').addEventListener('keydown', e => { if (e.key === 'Enter') submit(); });
   setTimeout(() => $('#ob-url').focus(), 120);
 }
@@ -143,6 +148,7 @@ function updateOnboardSvc() {
 function renderHome(el) {
   el.innerHTML = `
     <div id="home-banner"></div>
+    <div class="hero">
     <div class="power-wrap" id="power-wrap">
       <svg viewBox="0 0 208 208"><defs><linearGradient id="ringGrad" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#6a44f2"/><stop offset=".55" stop-color="#2f8bff"/><stop offset="1" stop-color="#18e3e8"/></linearGradient></defs>
         <circle class="ring-bg" cx="104" cy="104" r="99"/><circle class="ring" cx="104" cy="104" r="99"/></svg>
@@ -150,6 +156,7 @@ function renderHome(el) {
     </div>
     <div class="status-text" id="status"></div>
     <div class="status-sub" id="status-sub"></div>
+    </div>
     <div class="stats">
       <div class="stat"><b id="s-down">0 B/s</b><span>↓ ${t('stat.down')}</span></div>
       <div class="stat"><b id="s-up">0 B/s</b><span>↑ ${t('stat.up')}</span></div>
@@ -195,6 +202,11 @@ function updateHome() {
   b.innerHTML = state.service ? '' : `<div class="banner"><span class="grow">${t('banner.svcDown')}</span><button class="btn sm" id="repair">${t('banner.repair')}</button></div>`;
   if (!state.service) $('#repair').addEventListener('click', repairService);
 }
+async function pasteInto(sel) {
+  let v = '';
+  try { v = ((await App().ReadClipboard()) || '').trim(); } catch (e) { /* 没有剪贴板权限 */ }
+  if (v) { $(sel).value = v; $(sel).focus(); } else toast(t('common.clipEmpty'));
+}
 async function repairService() {
   try { await App().RepairService(); toast(t('about.repairDone'), 'ok'); } catch (e) { toast(errText(e), 'err'); }
 }
@@ -224,8 +236,9 @@ function sheetProfiles() {
 }
 function msClass(d) { return d < 0 ? 'bad' : !d ? 'none' : d < 150 ? 'good' : d < 400 ? 'mid' : 'bad'; }
 function msText(d, testing) { if (testing) return '<span class="spinner"></span>'; if (d < 0) return t('node.fail'); return d ? d + ' ms' : '–'; }
-let nodeTesting = false;
+let nodeTesting = false, nodeFilter = '';
 async function sheetNodes() {
+  nodeFilter = '';
   openSheet(t('sheet.nodes'), `<div class="empty"><span class="spinner"></span></div>`, { action: t('sheet.retest'), onAction: () => testNodes(true) });
   await drawNodes(false);
   testNodes(false);
@@ -235,12 +248,15 @@ async function drawNodes(testing) {
   try { nodes = await App().GetNodes() || []; } catch (e) { $('#sheet-body').innerHTML = `<div class="empty">${esc(errText(e))}</div>`; return; }
   if (!nodes.length) { $('#sheet-body').innerHTML = `<div class="empty">${t('prof.empty')}</div>`; return; }
   const max = Math.max(1, ...nodes.filter(n => n.delay > 0).map(n => n.delay));
-  $('#sheet-body').innerHTML = `<div class="list">${nodes.map((n, i) => `<div class="item ${n.current ? 'current' : ''}" data-name="${esc(n.name)}" style="animation-delay:${i * 25}ms"><span class="check"></span>
+  $('#sheet-body').innerHTML = (nodes.length > 8 ? `<div class="sheet-filter"><input type="text" id="node-filter" placeholder="${t('node.filter')}" value="${esc(nodeFilter)}"></div>` : '') + `<div class="list">${nodes.map((n, i) => `<div class="item ${n.current ? 'current' : ''}" data-name="${esc(n.name)}" style="animation-delay:${i * 25}ms"><span class="check"></span>
     <div class="name"><b>${esc(n.name === 'auto' ? t('node.auto') : n.name)}</b><span>${n.name === 'auto' ? (n.autoNow ? t('node.now', { n: n.autoNow }) : t('node.autoDesc')) : esc(n.type || '')}</span>${n.name !== 'auto' && n.delay > 0 ? `<div class="bar"><i style="width:${Math.max(6, 100 - n.delay / max * 80)}%"></i></div>` : ''}</div>
     <span class="ms ${msClass(n.delay)}">${n.name === 'auto' ? '' : msText(n.delay, testing)}</span></div>`).join('')}</div>`;
   $('#sheet-body').querySelectorAll('.item').forEach(it => it.addEventListener('click', async () => {
     try { await App().SelectNode(it.dataset.name); closeSheet(); } catch (e) { toast(errText(e), 'err'); }
   }));
+  const applyFilter = () => { const q = nodeFilter.toLowerCase(); $('#sheet-body').querySelectorAll('.item').forEach(it => { it.hidden = !!q && it.dataset.name !== 'auto' && !it.dataset.name.toLowerCase().includes(q); }); };
+  const f = $('#node-filter');
+  if (f) { f.addEventListener('input', () => { nodeFilter = f.value.trim(); applyFilter(); }); applyFilter(); }
 }
 async function testNodes(force) {
   if (nodeTesting && !force) return;
@@ -258,9 +274,10 @@ function renderProfiles(el, editId) {
   el.innerHTML = `<div id="prof-form"></div><div class="list" id="prof-list"></div><div style="height:12px"></div><button class="btn primary block" id="prof-add">${t('prof.add')}</button>`;
   const showForm = (p) => {
     $('#prof-form').innerHTML = `<div class="card"><div class="field"><label>${t('prof.name')}</label><input type="text" id="pf-name" value="${esc(p ? p.name : '')}"></div>
-      <div class="field"><label>${t('prof.url')}</label><input type="url" id="pf-url" value="${esc(p ? p.url : '')}"></div>
+      <div class="field with-btn"><label>${t('prof.url')}</label><input type="url" id="pf-url" value="${esc(p ? p.url : '')}"><button class="btn sm ghost" id="pf-paste">${t('common.paste')}</button></div>
       <div class="row"><button class="btn primary" id="pf-save">${t('prof.save')}</button><button class="btn" id="pf-cancel">${t('prof.cancel')}</button><span id="pf-busy"></span></div></div>`;
     $('#pf-cancel').addEventListener('click', () => { $('#prof-form').innerHTML = ''; });
+    $('#pf-paste').addEventListener('click', () => pasteInto('#pf-url'));
     $('#pf-save').addEventListener('click', async () => {
       const b = $('#pf-save'); b.disabled = true; $('#pf-busy').innerHTML = '<span class="spinner"></span>';
       try {
@@ -326,8 +343,12 @@ async function renderSettings(el) {
     </div>
     <div class="card"><h3>${t('set.g.route')}</h3>
       ${sw('f-ad', t('set.adblock'), s.adBlock)}
+      <div class="srow"><div class="lbl">${t('set.rules')}<div>${t('set.rulesHelp', { n: (s.ruleGroups || []).length })}</div></div><button class="btn sm" id="f-rules">${t('set.rulesManage')}</button></div>
       <div class="field" style="margin-top:8px"><label>${t('set.bypass')}</label><textarea id="f-bypass" placeholder="steam.exe">${esc((s.bypassApps || []).join('\n'))}</textarea><span class="help">${t('set.bypassHelp')}</span></div>
+    </div>
+    <div class="card"><h3>${t('set.g.logs')}</h3>
       ${sel('f-log', t('set.logLevel'), s.logLevel, [['debug', 'debug'], ['info', 'info'], ['warn', 'warn'], ['error', 'error']])}
+      ${num('f-logdays', t('set.logDays'), s.logDays ?? 7, t('set.logDaysHelp'))}
     </div>
     <div class="card"><h3>${t('set.g.app')} <span class="tag">${t('set.instant')}</span></h3>
       ${sw('f-autostart', t('set.autostart'), auto, t('set.autostartHelp'))}
@@ -335,28 +356,118 @@ async function renderSettings(el) {
       ${sel('f-theme', t('set.theme'), state.theme || 'system', [['system', t('theme.system')], ['light', t('theme.light')], ['dark', t('theme.dark')]])}
     </div>
     <div class="savebar" id="savebar"><div class="small muted grow" id="save-note">${t('set.note')}</div><button class="btn primary" id="save" disabled>${t('set.save')}</button></div>`;
-  const watch = ['f-tun', 'f-stack', 'f-strict', 'f-lan', 'f-mixed', 'f-probe', 'f-update', 'f-rdns', 'f-ldns', 'f-fakeip', 'f-ipv6', 'f-ad', 'f-bypass', 'f-log'];
+  const watch = ['f-tun', 'f-stack', 'f-strict', 'f-lan', 'f-mixed', 'f-probe', 'f-update', 'f-rdns', 'f-ldns', 'f-fakeip', 'f-ipv6', 'f-ad', 'f-bypass', 'f-log', 'f-logdays'];
   const dirty = on => { $('#save').disabled = !on; $('#savebar').classList.toggle('dirty', on); $('#save-note').textContent = on ? t('set.unsaved') : t('set.note'); };
   watch.forEach(id => ['input', 'change'].forEach(ev => $('#' + id).addEventListener(ev, () => dirty(true))));
   $('#save').addEventListener('click', async () => {
     const n = { ...s, tun: $('#f-tun').checked, tunStack: $('#f-stack').value, strictRoute: $('#f-strict').checked, lanBypass: $('#f-lan').checked,
       mixedPort: Number($('#f-mixed').value), probeMinutes: Number($('#f-probe').value), updateHours: Number($('#f-update').value),
       remoteDns: $('#f-rdns').value.trim(), localDns: $('#f-ldns').value.trim(), fakeIp: $('#f-fakeip').checked, ipv6: $('#f-ipv6').checked, adBlock: $('#f-ad').checked,
-      bypassApps: $('#f-bypass').value.split(/\r?\n/).map(x => x.trim()).filter(Boolean), logLevel: $('#f-log').value };
+      bypassApps: $('#f-bypass').value.split(/\r?\n/).map(x => x.trim()).filter(Boolean), logLevel: $('#f-log').value, logDays: Number($('#f-logdays').value) };
     try { s = await App().SaveSettings(n); dirty(false); toast(t('set.saved'), 'ok'); } catch (e) { toast(errText(e), 'err'); }
   });
   $('#f-autostart').addEventListener('change', async e => { try { await App().SetAutostart(e.target.checked); toast(t('set.saved'), 'ok'); } catch (err) { toast(errText(err), 'err'); e.target.checked = !e.target.checked; } });
   $('#f-lang').addEventListener('change', async e => { LANG = e.target.value; await App().SetLang(LANG); nav('settings'); });
   $('#f-theme').addEventListener('change', async e => { applyTheme(e.target.value); await App().SetTheme(e.target.value); });
+  $('#f-rules').addEventListener('click', () => nav('rules'));
+}
+
+
+// ---- 路由规则 ----
+const OUT_FIXED = ['proxy', 'direct', 'reject', 'auto'];
+const RULE_TYPES = ['domain_suffix', 'domain', 'domain_keyword', 'domain_regex', 'ip_cidr', 'port', 'process_name', 'geosite', 'geoip'];
+const outLabel = o => OUT_FIXED.includes(o) ? t('out.' + o) : o;
+async function renderRules(el) {
+  let s;
+  try { s = await App().GetSettings(); } catch (e) { el.innerHTML = `<div class="empty">${esc(errText(e))}</div>`; return; }
+  const groups = s.ruleGroups || [];
+  const save = async next => { try { await App().SaveSettings({ ...s, ruleGroups: next }); toast(t('set.saved'), 'ok'); } catch (e) { toast(errText(e), 'err'); } nav('rules'); };
+  const summary = g => { const r = g.rules || []; return outLabel(g.outbound) + ' · ' + t('rules.count', { n: r.length }) + (r.length ? ' · ' + r.slice(0, 3).map(x => x.value).join(', ') + (r.length > 3 ? '…' : '') : ''); };
+  el.innerHTML = `<p class="small muted" style="margin:2px 0 10px">${t('rules.intro')}</p>
+    <div class="list">${groups.map((g, i) => `<div class="item rg ${g.enabled ? '' : 'off'}" style="flex-wrap:wrap;animation-delay:${i * 30}ms">
+      <div class="row" style="flex-basis:100%">
+        <div class="name"><b>${esc(g.name)}</b><span>${esc(summary(g))}</span></div>
+        <label class="switch"><input type="checkbox" data-act="toggle" data-i="${i}" ${g.enabled ? 'checked' : ''}></label>
+      </div>
+      <div class="row" style="flex-basis:100%;gap:6px">
+        <button class="btn sm" data-act="edit" data-i="${i}">${t('rules.editBtn')}</button>
+        <button class="btn sm" data-act="up" data-i="${i}" ${i === 0 ? 'disabled' : ''}>↑</button>
+        <button class="btn sm" data-act="down" data-i="${i}" ${i === groups.length - 1 ? 'disabled' : ''}>↓</button>
+        <span class="grow"></span><button class="btn sm danger ghost" data-act="del" data-i="${i}">${t('prof.del')}</button>
+      </div></div>`).join('')}
+      <div class="item rg builtin"><div class="name"><b>${t('rules.default')} <span class="tag">${t('rules.builtin')}</span></b><span>${t('rules.defaultDesc')}</span></div></div>
+    </div>
+    <div style="height:12px"></div><button class="btn primary block" id="rg-add">${t('rules.add')}</button>`;
+  $('#rg-add').addEventListener('click', () => nav('ruleEdit', null));
+  el.querySelectorAll('[data-act]').forEach(b => b.addEventListener(b.dataset.act === 'toggle' ? 'change' : 'click', async () => {
+    const i = Number(b.dataset.i), next = groups.map(g => ({ ...g }));
+    switch (b.dataset.act) {
+      case 'toggle': next[i].enabled = b.checked; break;
+      case 'edit': nav('ruleEdit', groups[i].id); return;
+      case 'up': [next[i - 1], next[i]] = [next[i], next[i - 1]]; break;
+      case 'down': [next[i + 1], next[i]] = [next[i], next[i + 1]]; break;
+      case 'del': if (!confirm(t('rules.delConfirm', { n: groups[i].name }))) return; next.splice(i, 1); break;
+    }
+    await save(next);
+  }));
+}
+async function renderRuleEdit(el, id) {
+  let s, nodes = [];
+  try { s = await App().GetSettings(); } catch (e) { el.innerHTML = `<div class="empty">${esc(errText(e))}</div>`; return; }
+  try { nodes = (await App().GetNodes() || []).map(n => n.name).filter(n => n !== 'auto'); } catch (e) { /* 内核没跑时只有固定出口 */ }
+  const groups = s.ruleGroups || [];
+  const orig = groups.find(g => g.id === id);
+  const g = orig ? JSON.parse(JSON.stringify(orig)) : { id: '', name: '', enabled: true, outbound: 'proxy', rules: [] };
+  g.rules = g.rules || [];
+  if (g.outbound && !OUT_FIXED.includes(g.outbound) && !nodes.includes(g.outbound)) nodes.push(g.outbound);
+  const outs = [...OUT_FIXED.map(o => [o, t('out.' + o)]), ...nodes.map(n => [n, n])];
+  el.innerHTML = `
+    <div class="card">
+      <div class="field"><label>${t('rules.name')}</label><input type="text" id="rg-name" value="${esc(g.name)}" placeholder="${t('rules.namePh')}"></div>
+      <div class="srow"><div class="lbl">${t('rules.out')}<div>${t('rules.outHelp')}</div></div><select id="rg-out" style="width:150px">${outs.map(o => `<option value="${esc(o[0])}" ${o[0] === g.outbound ? 'selected' : ''}>${esc(o[1])}</option>`).join('')}</select></div>
+      <div class="srow"><div class="lbl">${t('rules.enabled')}</div><label class="switch"><input type="checkbox" id="rg-on" ${g.enabled ? 'checked' : ''}></label></div>
+    </div>
+    <div class="card"><h3>${t('rules.conds')}</h3>
+      <div class="row" style="gap:6px;margin-bottom:6px"><select id="rg-type" style="width:auto;flex:none;max-width:42%">${RULE_TYPES.map(ty => `<option value="${ty}">${t('rt.' + ty)}</option>`).join('')}</select><input type="text" id="rg-val" placeholder="${t('rt.' + RULE_TYPES[0] + '.ph')}"><button class="btn sm" id="rg-addc">${t('rules.addCond')}</button></div>
+      <p class="small muted" style="margin:0 0 8px">${t('rules.condHelp')}</p>
+      <div id="rg-rules"></div>
+    </div>
+    <div class="savebar dirty"><div class="small muted grow">${t('set.note')}</div><button class="btn primary" id="rg-save">${t('set.save')}</button></div>`;
+  const drawRules = () => {
+    $('#rg-rules').innerHTML = g.rules.length ? `<div class="conds">${g.rules.map((r, i) => `<div class="cond"><span class="tag">${esc(t('rt.' + r.type))}</span><span class="val sel">${esc(r.value)}</span><button class="icon-btn xs" data-i="${i}" title="${t('prof.del')}"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg></button></div>`).join('')}</div>` : `<div class="empty" style="padding:14px">${t('rules.noCond')}</div>`;
+    $('#rg-rules').querySelectorAll('button[data-i]').forEach(b => b.addEventListener('click', () => { g.rules.splice(Number(b.dataset.i), 1); drawRules(); }));
+  };
+  const addCond = () => {
+    const ty = $('#rg-type').value, vals = $('#rg-val').value.split(/[,，;；\s]+/).map(x => x.trim()).filter(Boolean);
+    if (!vals.length) { $('#rg-val').focus(); return; }
+    vals.forEach(v => { if (!g.rules.some(r => r.type === ty && r.value === v)) g.rules.push({ type: ty, value: v }); });
+    $('#rg-val').value = ''; drawRules(); $('#rg-val').focus();
+  };
+  $('#rg-type').addEventListener('change', () => { $('#rg-val').placeholder = t('rt.' + $('#rg-type').value + '.ph'); });
+  $('#rg-addc').addEventListener('click', addCond);
+  $('#rg-val').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); addCond(); } });
+  $('#rg-save').addEventListener('click', async () => {
+    if ($('#rg-val').value.trim()) addCond(); // 输入框里还没点添加的也带上
+    const out = { ...g, name: $('#rg-name').value.trim(), outbound: $('#rg-out').value, enabled: $('#rg-on').checked, rules: g.rules };
+    if (!out.rules.length) { toast(t('rules.noCond'), 'err'); $('#rg-val').focus(); return; }
+    const next = groups.map(x => ({ ...x })), i = next.findIndex(x => x.id === out.id);
+    if (i >= 0) next[i] = out; else next.push(out);
+    const b = $('#rg-save'); b.disabled = true;
+    try { await App().SaveSettings({ ...s, ruleGroups: next }); toast(t('set.saved'), 'ok'); nav('rules'); }
+    catch (e) { toast(errText(e), 'err'); b.disabled = false; }
+  });
+  drawRules();
+  setTimeout(() => $(orig ? '#rg-val' : '#rg-name').focus(), 120);
 }
 
 // ---- 连接 ----
 function renderConns(el) {
-  el.innerHTML = `<div id="conns"></div>`;
+  el.innerHTML = `<div class="small muted" id="conns-n" style="margin:2px 0 8px"></div><div id="conns"></div>`;
   const load = async () => {
     const box = $('#conns'); if (!box) return;
     let list;
     try { list = await App().GetConnections() || []; } catch (e) { box.innerHTML = `<div class="empty">${esc(state && (state.view.state.status === 'connected') ? errText(e) : t('conns.needCore'))}</div>`; return; }
+    const cn = $('#conns-n'); if (cn) cn.textContent = t('conns.count', { n: list.length });
     if (!list.length) { box.innerHTML = `<div class="empty">${t('conns.empty')}</div>`; return; }
     box.innerHTML = `<div class="list">${list.map(c => `<div class="item"><div class="name"><b class="sel">${esc(c.host)}</b><span>${esc(c.app || '')} ${c.app ? '·' : ''} ${esc(c.chain)} · ${esc(c.net)} · ↓${fmtBytes(c.down)} ↑${fmtBytes(c.up)}</span></div><button class="btn sm ghost" data-id="${esc(c.id)}">${t('conns.close')}</button></div>`).join('')}</div>`;
     box.querySelectorAll('button[data-id]').forEach(b => b.addEventListener('click', async () => { try { await App().CloseConnection(b.dataset.id); load(); } catch (e) { toast(errText(e), 'err'); } }));
@@ -407,9 +518,8 @@ function renderAbout(el) {
       <div class="srow"><div class="lbl">sing-box</div><span class="muted small">${t('about.license')}</span></div>
     </div>
     <div class="card" id="upd-card">
-      <div class="row"><div class="grow" id="upd-text">${state && state.update ? t('about.found', { v: state.update.version }) : ''}</div><button class="btn sm" id="upd-check">${t('about.check')}</button></div>
-      <div id="upd-body" style="margin-top:10px"></div>
-      <p class="small muted" style="margin:8px 0 0">${t('about.updateNote')}</p>
+      <div class="srow"><div class="lbl"><span id="upd-text">${state && state.update ? t('about.found', { v: state.update.version }) : t('about.updateTitle')}</span><div>${t('about.updateNote')}</div></div><button class="btn sm" id="upd-check">${t('about.check')}</button></div>
+      <div id="upd-body"></div>
     </div>
     <div class="card">
       <div class="srow"><div class="lbl">${t('about.repair')}</div><button class="btn sm" id="repair">${t('about.repair')}</button></div>
@@ -419,7 +529,7 @@ function renderAbout(el) {
     <p class="small muted center"><a id="repo" style="color:var(--brand2)">github.com/Maoyangui/godusevpn</a></p>`;
   const showUpdate = rel => {
     $('#upd-text').textContent = rel ? t('about.found', { v: rel.version }) : t('about.latest');
-    $('#upd-body').innerHTML = rel ? `<button class="btn primary block" id="upd-go">${t('about.update')}</button><div class="progress" id="upd-prog" style="margin-top:10px" hidden><i></i></div>` : '';
+    $('#upd-body').innerHTML = rel ? `<div style="margin-top:10px"><button class="btn primary block" id="upd-go">${t('about.update')}</button><div class="progress" id="upd-prog" style="margin-top:10px" hidden><i></i></div></div>` : '';
     if (rel) $('#upd-go').addEventListener('click', async () => {
       const b = $('#upd-go'); b.disabled = true; $('#upd-prog').hidden = false;
       try { await App().ApplyUpdate(); $('#upd-text').textContent = t('about.installing'); }
@@ -445,7 +555,7 @@ async function init() {
   applyTheme(state.theme);
   document.documentElement.lang = LANG === 'en' ? 'en' : 'zh';
   $('#menu-btn').addEventListener('click', openDrawer);
-  $('#back-btn').addEventListener('click', navHome);
+  $('#back-btn').addEventListener('click', () => BACK[view] ? nav(BACK[view]) : navHome());
   $('#drawer-backdrop').addEventListener('click', closeDrawer);
   $('#sheet-backdrop').addEventListener('click', closeSheet);
   $('#min-btn').addEventListener('click', () => App().Minimize());
@@ -468,6 +578,8 @@ async function init() {
   });
   window.runtime.EventsOn('traffic', tr => {
     if (!state) return;
+    const st = state.view.state.status, on = st === 'connected' || st === 'degraded';
+    if (!on) { state.down = 0; state.up = 0; return; }
     const pd = $('#s-down'), pu = $('#s-up');
     if (view === 'home' && pd) { tween(pd, state.down, tr.down, fmtSpeed, 600); tween(pu, state.up, tr.up, fmtSpeed, 600); }
     state.down = tr.down; state.up = tr.up;

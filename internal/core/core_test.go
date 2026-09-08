@@ -27,6 +27,15 @@ func TestBuiltConfigPassesDryRun(t *testing.T) {
 		s := settings.Default()
 		s.TUN, s.FakeIP = false, false
 		return s
+	}(), func() settings.Settings {
+		s := settings.Default()
+		s.RuleGroups = []settings.RuleGroup{
+			{Name: "流媒体", Enabled: true, Outbound: "tw", Rules: []settings.Rule{{Type: settings.RuleDomainSuffix, Value: "netflix.com"}, {Type: settings.RuleGeosite, Value: "netflix"}, {Type: settings.RuleGeoIP, Value: "us"}, {Type: settings.RulePort, Value: "8000-9000"}, {Type: settings.RulePort, Value: "443"}, {Type: settings.RuleDomainRegex, Value: "^cdn[0-9]+\\."}}},
+			{Name: "广告", Enabled: true, Outbound: settings.OutReject, Rules: []settings.Rule{{Type: settings.RuleDomainKeyword, Value: "adservice"}}},
+			{Name: "游戏", Enabled: true, Outbound: settings.OutDirect, Rules: []settings.Rule{{Type: settings.RuleProcess, Value: "game.exe"}, {Type: settings.RuleIPCIDR, Value: "1.2.3.0/24"}}},
+			{Name: "单条", Enabled: true, Outbound: "auto", Rules: []settings.Rule{{Type: settings.RuleDomain, Value: "one.example"}}},
+		}
+		return s
 	}()} {
 		raw, err := builder.Build(builder.Input{Profile: p, Settings: s, DataDir: t.TempDir(), ClashSecret: "x"})
 		if err != nil {

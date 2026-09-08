@@ -9,6 +9,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/Maoyangui/godusevpn/internal/profile"
@@ -167,18 +168,32 @@ func Build(in Input) ([]byte, error) {
 		rules = append(rules,
 			obj("action", "resolve", "strategy", "ipv4_only"),
 			obj("ip_version", 6, "action", "reject")) // 直接写 IPv6 字面量的连接也堵住
+	} else {
+		rules = append(rules, obj("action", "resolve")) // 开 IPv6 也要先解析,否则 IP 类规则(geoip、IP 段)对域名连接不生效
 	}
 	rules = append(rules,
 		obj("ip_is_private", true, "outbound", "direct"),
 		obj("clash_mode", "Direct", "outbound", "direct"),
 		obj("clash_mode", "Global", "outbound", "proxy"),
 	)
+	// 用户规则组:只在规则模式下走到这里(上面两条 clash_mode 已把全局 / 直连截走)
+	findProcess := len(s.BypassApps) > 0
+	haveSet := map[string]bool{"geosite-cn": true, "geoip-cn": true, "geosite-category-ads-all": s.AdBlock}
+	for _, g := range s.RuleGroups {
+		if !g.Enabled || len(g.Rules) == 0 {
+			continue
+		}
+		r, sets, proc := groupRule(g, tags, in.RuleSetDir, haveSet)
+		ruleSets = append(ruleSets, sets...)
+		findProcess = findProcess || proc
+		rules = append(rules, r)
+	}
 	if s.AdBlock {
 		rules = append(rules, obj("rule_set", []string{"geosite-category-ads-all"}, "action", "reject"))
 	}
 	rules = append(rules, obj("rule_set", []string{"geosite-cn", "geoip-cn"}, "outbound", "direct"))
 	route := obj("rules", rules, "rule_set", ruleSets, "final", "proxy", "auto_detect_interface", true, "default_domain_resolver", "local")
-	if len(s.BypassApps) > 0 {
+	if findProcess {
 		route["find_process"] = true
 	}
 
@@ -194,6 +209,73 @@ func Build(in Input) ([]byte, error) {
 		),
 	)
 	return json.MarshalIndent(cfg, "", "  ")
+}
+
+// groupRule 把一个规则组渲染成一条路由规则:同类型的值合成一个列表,多种类型用 logical/or 组起来(单条规则里不同字段是"且")。
+// 返回规则、需要新增的规则集、是否用到了进程名。
+func groupRule(g settings.RuleGroup, tags []string, dir string, haveSet map[string]bool) (map[string]any, []any, bool) {
+	lists := map[string][]string{}
+	var ports []int
+	var portRanges, sets []string
+	var newSets []any
+	for _, r := range g.Rules {
+		switch r.Type {
+		case settings.RulePort:
+			if a, b, ok := strings.Cut(r.Value, "-"); ok {
+				portRanges = append(portRanges, a+":"+b)
+			} else {
+				n, _ := strconv.Atoi(r.Value)
+				ports = append(ports, n)
+			}
+		case settings.RuleGeosite, settings.RuleGeoIP:
+			tag, url := "geosite-"+r.Value, ruleSetBase+"geosite-"+r.Value+".srs"
+			if r.Type == settings.RuleGeoIP {
+				tag, url = "geoip-"+r.Value, ruleSetIPBase+"geoip-"+r.Value+".srs"
+			}
+			if !haveSet[tag] {
+				haveSet[tag] = true
+				newSets = append(newSets, ruleSet(tag, url, dir))
+			}
+			sets = append(sets, tag)
+		default:
+			lists[r.Type] = append(lists[r.Type], r.Value)
+		}
+	}
+	var parts []any
+	for _, typ := range []string{settings.RuleDomain, settings.RuleDomainSuffix, settings.RuleDomainKeyword, settings.RuleDomainRegex, settings.RuleIPCIDR, settings.RuleProcess} {
+		if v := lists[typ]; len(v) > 0 {
+			parts = append(parts, obj(typ, v))
+		}
+	}
+	if len(ports) > 0 {
+		parts = append(parts, obj("port", ports))
+	}
+	if len(portRanges) > 0 {
+		parts = append(parts, obj("port_range", portRanges))
+	}
+	if len(sets) > 0 {
+		parts = append(parts, obj("rule_set", sets))
+	}
+	var rule map[string]any
+	if len(parts) == 1 {
+		rule = parts[0].(map[string]any)
+	} else {
+		rule = obj("type", "logical", "mode", "or", "rules", parts)
+	}
+	switch out := g.Outbound; out {
+	case settings.OutReject:
+		rule["action"] = "reject"
+	case settings.OutDirect, settings.OutProxy, "auto":
+		rule["outbound"] = out
+	default:
+		rule["outbound"] = settings.OutProxy // 节点不在当前订阅里就走当前选择
+		for _, t := range tags {
+			if t == out {
+				rule["outbound"] = out
+			}
+		}
+	}
+	return rule, newSets, len(lists[settings.RuleProcess]) > 0
 }
 
 // ruleSet 本地有离线副本就用本地(安装包内置),否则经代理从官方仓库拉,一周更新一次。

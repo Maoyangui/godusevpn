@@ -67,6 +67,7 @@ func New() (*Daemon, error) {
 		d.logf("设置加载失败,用默认值: %v", err)
 	}
 	d.settings = s
+	d.applyLogRetention()
 	d.loadProfileCaches()
 	b := make([]byte, 16)
 	_, _ = rand.Read(b)
@@ -117,6 +118,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 	}
 	t := time.NewTicker(10 * time.Minute)
 	defer t.Stop()
+	lastPrune := time.Now()
 	for {
 		select {
 		case <-ctx.Done():
@@ -128,6 +130,10 @@ func (d *Daemon) Run(ctx context.Context) error {
 			return nil
 		case <-t.C:
 			d.maybeRefresh(ctx)
+			if time.Since(lastPrune) > 6*time.Hour {
+				lastPrune = time.Now()
+				d.applyLogRetention()
+			}
 		}
 	}
 }
@@ -161,7 +167,18 @@ func (d *Daemon) setSettings(s settings.Settings) error {
 	d.mu.Lock()
 	d.settings = s
 	d.mu.Unlock()
+	d.applyLogRetention()
 	return nil
+}
+
+// applyLogRetention 把"日志保留天数"套到两份日志上,并顺手清一次旧文件(滚动出去的日志与诊断包)。
+func (d *Daemon) applyLogRetention() {
+	age := time.Duration(d.getSettings().LogDays) * 24 * time.Hour
+	d.log.SetMaxAge(age)
+	d.coreLog.SetMaxAge(age)
+	if n := logx.Prune(paths.Logs(), age) + logx.Prune(filepath.Join(paths.DataDir(), "diag"), age); n > 0 {
+		d.logf("清理了 %d 个过期日志 / 诊断文件", n)
+	}
 }
 
 // activeProfile 当前订阅的设置项与缓存(任一为空返回 nil)。

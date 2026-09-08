@@ -131,6 +131,24 @@ func main() {
 			b, _ := json.MarshalIndent(s, "", "  ")
 			fmt.Println(string(b))
 		}
+	case "rules":
+		var s settings.Settings
+		if err = call(ctx, ipc.MGetSettings, nil, &s); err != nil {
+			break
+		}
+		if len(s.RuleGroups) == 0 {
+			fmt.Println("没有自定义规则组(内置默认:私网直连、国内直连、其余走代理)")
+		}
+		for i, g := range s.RuleGroups {
+			on := "开"
+			if !g.Enabled {
+				on = "关"
+			}
+			fmt.Printf("%d. %s [%s] → %s(%d 条)\n", i+1, g.Name, on, g.Outbound, len(g.Rules))
+			for _, r := range g.Rules {
+				fmt.Printf("     %-15s %s\n", r.Type, r.Value)
+			}
+		}
 	case "logs":
 		n, core := 100, false
 		for _, a := range args {
@@ -216,5 +234,5 @@ func printProfile(p *ipc.ProfileView) {
 
 func usage() {
 	fmt.Println(buildinfo.DisplayName, "cli", buildinfo.Version)
-	fmt.Println("用法: godusevpn-cli status | connect | disconnect | mode <rule|global|direct> | nodes | select <节点> | test [节点] | profile [地址] | refresh | settings [k=v …] | logs [n] [core] | diag")
+	fmt.Println("用法: godusevpn-cli status | connect | disconnect | mode <rule|global|direct> | nodes | select <节点> | test [节点] | profile [地址] | refresh | settings [k=v …] | rules | logs [n] [core] | diag")
 }

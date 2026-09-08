@@ -679,6 +679,15 @@ func (a *App) OpenLogs() error {
 	return exec.Command("explorer.exe", paths.Logs()).Start()
 }
 
+// ReadClipboard 读系统剪贴板文本,给"粘贴"按钮用;失败返回空串。
+func (a *App) ReadClipboard() string {
+	s, err := runtime.ClipboardGetText(a.ctx)
+	if err != nil {
+		return ""
+	}
+	return s
+}
+
 func (a *App) OpenURL(url string) {
 	if strings.HasPrefix(url, "http://") || strings.HasPrefix(url, "https://") {
 		runtime.BrowserOpenURL(a.ctx, url)
