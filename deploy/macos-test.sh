@@ -113,7 +113,9 @@ fi
 lat=$("$BIN" test 2>&1); check "延迟测试" "$(echo "$lat" | grep -c ' ms')" "$lat"
 
 echo "== 6. 模式切换"
-"$BIN" mode direct >/dev/null; sleep 3; d=$(pub4); check "直连模式出口回到本机" "$([ "$d" = "$before" ] && echo 1 || echo 0)" "direct=$d"
+# 出口 IP 比的是"还是不是节点的",不是"等不等于连接前":云主机的出网地址来自一个地址池,
+# 前后两次拿到的末段可能不同(跑机上实测 .161 变 .160),拿它当相等条件会无谓地红。
+"$BIN" mode direct >/dev/null; sleep 3; d=$(pub4); check "直连模式不再走节点" "$([ -n "$d" ] && [ "$d" != "$now" ] && echo 1 || echo 0)" "direct=$d 节点出口=$now 连接前=$before"
 "$BIN" mode global >/dev/null; sleep 3; gl=$(pub4); check "全局模式出口是节点" "$([ -n "$gl" ] && [ "$gl" != "$before" ] && echo 1 || echo 0)" "global=$gl"
 "$BIN" mode rule >/dev/null
 check "节点列表" "$("$BIN" nodes | grep -c '^\*')" "$("$BIN" nodes | tr '\n' ' ' | cut -c1-80)"
@@ -133,7 +135,7 @@ logs_tail=$(dumplogs 2>&1)   # 卸载前先留一份,卸载后就问不到守护
 "$BIN" disconnect >/dev/null; sleep 4
 check "断开后隧道网卡消失" "$([ -z "$(tun4)" ] && echo 1 || echo 0)" "$(tun4)"
 check "断开后默认路由回到物理网卡" "$([ "$(ifaceFor 1.1.1.1)" = "$defif" ] && echo 1 || echo 0)" "1.1.1.1 -> $(ifaceFor 1.1.1.1)(原 $defif)"
-after=$(pub4); check "断开后出口恢复" "$([ "$after" = "$before" ] && echo 1 || echo 0)" "after=$after"
+after=$(pub4); check "断开后出口不再是节点" "$([ -n "$after" ] && [ "$after" != "$now" ] && echo 1 || echo 0)" "after=$after 节点出口=$now 连接前=$before"
 "$BIN" uninstall >/dev/null 2>&1
 check "卸载后 launchd 里没有了" "$(launchctl print system/com.maoyangui.godusevpn >/dev/null 2>&1 && echo 0 || echo 1)" ""
 check "卸载后 plist 删掉了" "$([ ! -f /Library/LaunchDaemons/com.maoyangui.godusevpn.plist ] && echo 1 || echo 0)" ""
