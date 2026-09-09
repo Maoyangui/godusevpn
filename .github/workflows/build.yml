@@ -183,10 +183,12 @@ jobs:
           for arch in arm64 amd64; do
             mkdir -p dist/macos/$arch
             CGO_ENABLED=0 GOOS=darwin GOARCH=$arch go build -tags "$TAGS" -trimpath -ldflags "$LD" -o dist/macos/$arch/godusevpn ./cmd/godusevpn-daemon
-            # 图形界面要连 WebKit,必须开 CGO;跑机是苹果芯片,编英特尔版时让 clang 换个目标架构
+            # 图形界面要连 WebKit,必须开 CGO;跑机是苹果芯片,编英特尔版时只换目标架构。
+            # 不要再压低 -mmacosx-version-min:Go 1.27 生成的目标文件本身就是 macOS 13 起步,
+            # 压低了 UniformTypeIdentifiers 里的 UTType 会链接不到(实测 ld: symbol(s) not found)。
             APP="dist/macos/$arch/godusevpn.app"
             mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-            if [ "$arch" = amd64 ]; then export CC="clang -arch x86_64 -mmacosx-version-min=11.0"; else export CC="clang -arch arm64 -mmacosx-version-min=11.0"; fi
+            if [ "$arch" = amd64 ]; then export CC="clang -arch x86_64"; fi
             CGO_ENABLED=1 GOOS=darwin GOARCH=$arch go build -tags desktop,production -trimpath -ldflags "$LD" -o "$APP/Contents/MacOS/godusevpn" ./cmd/godusevpn
             unset CC
             sed "s/__VERSION__/$V/g" cmd/godusevpn/build/darwin/Info.plist > "$APP/Contents/Info.plist"
