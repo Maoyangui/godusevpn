@@ -23,6 +23,7 @@ type Input struct {
 	DataDir     string // cache.db 放这里
 	ClashSecret string // Clash API 密钥,服务每次启动随机生成
 	RuleSetDir  string // 内置离线规则集目录:有 <tag>.srs 就用本地文件,没有走远程
+	Darwin      bool   // 按 macOS 生成:隧道网卡名由内核分配(utunN),不能写死;不传时看运行平台
 	Android     bool   // 按 Android 生成:"进程名"是应用包名(package_name),按应用直连的应用整个绕过 VPN(exclude_package);不传时看运行平台
 }
 
@@ -64,6 +65,7 @@ func SettingMode(clash string) string {
 // Build 渲染配置(带缩进的 JSON,便于放进诊断包看)。
 func Build(in Input) ([]byte, error) {
 	android := in.Android || runtime.GOOS == "android"
+	darwin := in.Darwin || runtime.GOOS == "darwin"
 	procKey := "process_name" // 桌面按进程名分流;Android 没有进程名,按应用包名
 	if android {
 		procKey = "package_name"
@@ -140,8 +142,12 @@ func Build(in Input) ([]byte, error) {
 		// v6 地址一直加:关掉 IPv6 时也要把 v6 流量接进隧道,否则它绕过隧道从物理网卡直接出网(泄露),
 		// 进来之后由下面的 ip_version=6 拒绝规则丢掉,应用会立刻回退到 IPv4。
 		addr := []string{tunAddr4, tunAddr6}
-		tun := obj("type", "tun", "tag", "tun-in", "interface_name", TunName, "address", addr,
+		tun := obj("type", "tun", "tag", "tun-in", "address", addr,
 			"auto_route", true, "strict_route", s.StrictRoute, "stack", s.TUNStack)
+		if !darwin {
+			// macOS 的隧道网卡只能叫 utunN(内核分配),写死名字内核直接拒绝、内核起不来;留空让 sing-box 自己算
+			tun["interface_name"] = TunName
+		}
 		if s.LANBypass {
 			// 私网段与链路本地之外,168.63.129.16 是 Azure 平台地址(来宾代理、DNS、健康探测),进了隧道整台云主机就失联,一并排除
 			ex := []string{"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "169.254.0.0/16", "168.63.129.16/32", "224.0.0.0/4"}

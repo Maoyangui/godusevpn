@@ -293,3 +293,35 @@ func TestDefaultRulesConfigurable(t *testing.T) {
 		t.Fatalf("还原后其余流量应走 proxy,实际 %q", c2.Route.Final)
 	}
 }
+
+// macOS 上隧道网卡名只能是内核分配的 utunN:配置里写死 interface_name 会让内核直接起不来
+// (sing-tun 的 darwin 实现按 "utun%d" 解析名字,对不上就报 bad tun name)。
+// 其它平台仍要写死名字,Linux 的策略路由、局域网扫描都按这个名字找网卡。
+func TestTunInterfaceNameOnlyOffDarwin(t *testing.T) {
+	for _, darwin := range []bool{true, false} {
+		raw, err := Build(Input{Profile: sampleProfile(), Settings: settings.Default(), DataDir: t.TempDir(), ClashSecret: "sec", Darwin: darwin})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var c cfg
+		if err := json.Unmarshal(raw, &c); err != nil {
+			t.Fatal(err)
+		}
+		var tun map[string]any
+		for _, in := range c.Inbounds {
+			if in["type"] == "tun" {
+				tun = in
+			}
+		}
+		if tun == nil {
+			t.Fatal("没有 TUN 入站")
+		}
+		name, ok := tun["interface_name"]
+		if darwin && ok {
+			t.Fatalf("macOS 上不能写死网卡名,现在是 %v", name)
+		}
+		if !darwin && name != TunName {
+			t.Fatalf("非 macOS 要写死网卡名 %s,现在是 %v", TunName, name)
+		}
+	}
+}

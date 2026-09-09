@@ -3,7 +3,7 @@
 #   sudo sh macos-test.sh "https://面板/sub/用户名" [/usr/local/bin/godusevpn]
 # 步骤:装服务(launchd)→ 设订阅 → 连接 → 查 utun、路由、fake-ip、出口、IPv6 是否真被拦住 → 三态 → 页面接口 → 断开清理。
 # macOS 与 Linux 的差别:隧道网卡是内核分配的 utunN(不是配置里的名字),命令换成 ifconfig / netstat / route / dscacheutil。
-# 跑之前先布一个"死人开关":180 秒内没跑完就自动停服务,免得改坏路由后连不上机器。
+# 跑之前先布一个"死人开关":300 秒内没跑完就自动停服务,免得改坏路由后连不上机器。
 SUB="$1"
 BIN="${2:-/usr/local/bin/godusevpn}"
 [ -z "$SUB" ] && { echo "用法: $0 <订阅地址> [二进制路径]"; exit 2; }
@@ -32,6 +32,7 @@ before=$(pub4); echo "连接前公网 IPv4: $before"
 before6=$(pub6); echo "连接前公网 IPv6: ${before6:-(本机没有 IPv6 出口)}"
 real=$(resolve4 api.ipify.org); echo "api.ipify.org 真实 IP: $real"
 defif=$(ifaceFor 1.1.1.1); echo "连接前默认出口网卡: $defif"
+dns0=$(scutil --dns 2>/dev/null | awk '/nameserver/{print $3}' | sort -u | xargs echo); echo "连接前系统 DNS: $dns0"
 
 echo "== 1. 安装(launchd)"
 "$BIN" install >/dev/null
@@ -47,10 +48,18 @@ if ! echo "$p" | grep -q '个节点'; then echo "订阅没拿到节点,后面的
 ( sleep 300; "$BIN" disconnect >/dev/null 2>&1; launchctl bootout system/com.maoyangui.godusevpn >/dev/null 2>&1 ) >/dev/null 2>&1 &
 deadman=$!
 "$BIN" connect >/dev/null
-if wait_status connected 90; then check "进入 connected" 1 "$("$BIN" status | sed -n 2p)"; else check "进入 connected" 0 "$("$BIN" status | sed -n 2p)"; fi
+# 连不上就地把日志抓出来:等跑到第 8 段卸载完,守护进程没了就再也问不到日志了
+dumplogs() { echo "---- 内核日志"; "$BIN" logs 60 core 2>&1 | tail -40; echo "---- 服务日志"; "$BIN" logs 40 2>&1 | tail -25; }
+if wait_status connected 90; then
+  check "进入 connected" 1 "$("$BIN" status | sed -n 2p)"
+else
+  check "进入 connected" 0 "$("$BIN" status | sed -n 2p)"
+  dumplogs
+fi
 
 echo "== 3. 网络栈"
 TUN=$(tun4)
+echo "  (诊断) utun: $(ifconfig -l | xargs -n1 echo | grep '^utun' | xargs echo) / 连接后系统 DNS: $(scutil --dns 2>/dev/null | awk '/nameserver/{print $3}' | sort -u | xargs echo)"
 check "隧道网卡存在(utun)" "$([ -n "$TUN" ] && echo 1 || echo 0)" "${TUN:-没找到 172.19.0.1 的 utun}"
 check "公网地址的路由走隧道" "$([ -n "$TUN" ] && [ "$(ifaceFor 104.26.12.205)" = "$TUN" ] && echo 1 || echo 0)" "104.26.12.205 -> $(ifaceFor 104.26.12.205)(隧道 $TUN)"
 check "默认路由已切到隧道" "$([ -n "$TUN" ] && [ "$(ifaceFor 1.1.1.1)" = "$TUN" ] && echo 1 || echo 0)" "1.1.1.1 -> $(ifaceFor 1.1.1.1)"
@@ -96,6 +105,7 @@ r=$(api SetMode '["rule"]'); check "页面接口 SetMode" "$(echo "$r" | grep -c
 
 echo "== 8. 断开与清理"
 kill $deadman 2>/dev/null
+logs_tail=$(dumplogs 2>&1)   # 卸载前先留一份,卸载后就问不到守护进程了
 "$BIN" disconnect >/dev/null; sleep 4
 check "断开后隧道网卡消失" "$([ -z "$(tun4)" ] && echo 1 || echo 0)" "$(tun4)"
 check "断开后默认路由回到物理网卡" "$([ "$(ifaceFor 1.1.1.1)" = "$defif" ] && echo 1 || echo 0)" "1.1.1.1 -> $(ifaceFor 1.1.1.1)(原 $defif)"
@@ -105,5 +115,5 @@ check "卸载后 launchd 里没有了" "$(launchctl print system/com.maoyangui.g
 check "卸载后 plist 删掉了" "$([ ! -f /Library/LaunchDaemons/com.maoyangui.godusevpn.plist ] && echo 1 || echo 0)" ""
 
 echo
-if [ $fail = 0 ]; then echo "全部通过"; else echo "$fail 项失败"; echo "== 内核日志"; "$BIN" logs 40 core 2>/dev/null; echo "== 服务日志"; "$BIN" logs 25 2>/dev/null; fi
+if [ $fail = 0 ]; then echo "全部通过"; else echo "$fail 项失败"; echo "== 断开前留的日志"; echo "$logs_tail"; fi
 exit $fail
