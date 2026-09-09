@@ -33,8 +33,12 @@ func listen() (net.Listener, error) {
 	if err != nil {
 		return nil, err
 	}
-	// 只让 root(及同组)控制:socket 能连上就能改设置、开关连接
+	// 只让 root 与同组的人控制:socket 能连上就能改设置、开关连接。
+	// 属组按平台定(macOS 要放行 admin 组,否则用户身份的图形界面连不上守护进程)。
 	_ = os.Chmod(SocketPath, 0o660)
+	if gid := sockGroup(); gid >= 0 {
+		_ = os.Chown(SocketPath, -1, gid)
+	}
 	return ln, nil
 }
 

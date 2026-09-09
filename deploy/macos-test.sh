@@ -40,6 +40,11 @@ check "服务运行" "$("$BIN" status | head -1 | grep -c running)" "$("$BIN" st
 check "launchd 里能查到" "$(launchctl print system/com.maoyangui.godusevpn >/dev/null 2>&1 && echo 1 || echo 0)" "$(launchctl print system/com.maoyangui.godusevpn 2>/dev/null | awk '/state = /{print $3; exit}')"
 i=0; while [ $i -lt 15 ] && ! curl -s --max-time 2 http://127.0.0.1:9800/api/ping | grep -q version; do sleep 1; i=$((i+1)); done
 check "面板可达" "$(curl -s --max-time 5 http://127.0.0.1:9800/api/ping | grep -c version)" "$(curl -s --max-time 5 http://127.0.0.1:9800/api/ping)"
+# 图形界面是当前用户跑的,守护进程是 root 的 launchd:控制口必须让 admin 组连得上,
+# 否则界面打开只有一句"服务未运行"。这里就用普通用户身份问一次状态来验。
+U="${SUDO_USER:-$(stat -f %Su /dev/console 2>/dev/null)}"
+echo "  控制口: $(ls -l /var/run/godusevpn.sock 2>&1 | head -1)  (以 ${U:-未知} 的身份试连)"
+check "普通用户也能连上控制口" "$([ -n "$U" ] && sudo -u "$U" "$BIN" status 2>&1 | grep -c '^状态:' || echo 0)" "$([ -n "$U" ] && sudo -u "$U" "$BIN" status 2>&1 | head -1)"
 
 echo "== 2. 订阅与连接"
 p=$("$BIN" profile "$SUB" 2>&1); check "订阅拉取" "$(echo "$p" | grep -c '个节点')" "$(echo "$p" | head -1)"
