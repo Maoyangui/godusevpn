@@ -299,6 +299,9 @@ func TestDefaultRulesConfigurable(t *testing.T) {
 // 其它平台仍要写死名字,Linux 的策略路由、局域网扫描都按这个名字找网卡。
 func TestTunInterfaceNameOnlyOffDarwin(t *testing.T) {
 	for _, darwin := range []bool{true, false} {
+		if !darwin && runtime.GOOS == "darwin" {
+			continue // 就在 Mac 上跑时,平台自动判定会把它又变回 darwin,这一半测不了
+		}
 		raw, err := Build(Input{Profile: sampleProfile(), Settings: settings.Default(), DataDir: t.TempDir(), ClashSecret: "sec", Darwin: darwin})
 		if err != nil {
 			t.Fatal(err)
