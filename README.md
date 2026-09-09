@@ -1,10 +1,11 @@
 # 佛跳墙(godusevpn)
 
-m-ui 面板的多平台客户端:内嵌 sing-box,TUN 模式,规则 / 全局 / 直连三态,DoH + fake-ip,默认禁 IPv6(v6 也接进隧道再拒绝,不让它绕过代理),开机自启;多订阅(刷新走"当前代理 → 自动选择 → 直连"回退链)、定时测速、可视化规则组、按进程 / 应用 / 设备直连、应用内升级、日志保留、诊断包。三端共用同一个守护进程和同一套界面。
+m-ui 面板的多平台客户端:内嵌 sing-box,TUN 模式,规则 / 全局 / 直连三态,DoH + fake-ip,默认禁 IPv6(v6 也接进隧道再拒绝,不让它绕过代理),开机自启;多订阅(刷新走"当前代理 → 自动选择 → 直连"回退链)、定时测速、可视化规则组、按进程 / 应用 / 设备直连、应用内升级、日志保留、诊断包。四端共用同一个守护进程和同一套界面。
 
 | 平台 | 状态 | 形态 |
 |---|---|---|
 | Windows 10 1809 及以上 / 11(x64、ARM64) | 可用 | 后台服务 + 托盘客户端(WebView2 窗口),安装包见 Releases |
+| macOS 13 及以上(苹果芯片、英特尔芯片) | 可用 | launchd 服务 + .app 窗口,curl 一行装,免开发者证书 |
 | Linux 桌面 / 服务器(systemd) | 可用 | 单一二进制,自带浏览器面板,一键安装脚本 |
 | OpenWrt / iStoreOS 等软路由 | 可用(网关模式,容器实验室验证) | 同一二进制,procd 自启,ipk 包;局域网设备策略 |
 | 梅林(Asuswrt-Merlin / Entware) | 开发中 | TProxy 模式,无真机待反馈 |
@@ -31,6 +32,12 @@ go build -trimpath -ldflags "-s -w" ./cmd/godusevpn-cli
 go build -tags desktop,production -trimpath -ldflags "-s -w -H windowsgui" ./cmd/godusevpn
 ```
 
+macOS 的图形界面要连 WebKit,得开 CGO,还得自己补上 Wails 没声明的 UniformTypeIdentifiers 框架;编好的二进制放进手工拼的 `.app`(模板在 `cmd/godusevpn/build/darwin/Info.plist`,图标用 `sips` + `iconutil` 现生成 icns):
+
+```bash
+CGO_ENABLED=1 CGO_LDFLAGS="-framework UniformTypeIdentifiers" go build -tags desktop,production -o godusevpn.app/Contents/MacOS/godusevpn ./cmd/godusevpn
+```
+
 或直接 `powershell -File build.ps1`,产物在 `dist\`(amd64 与 arm64)。图标、清单与版本信息由 `winres\*.json` 经 go-winres 生成到各 `cmd\*\rsrc_windows_*.syso`,CI 按 tag 重新生成。
 
 测试:`go test -tags with_quic,with_utls,with_clash_api,with_gvisor ./...`(含内嵌 sing-box 对生成配置的干跑校验、管道往返、状态机全路径、设置迁移)。
@@ -45,6 +52,7 @@ go build -tags desktop,production -trimpath -ldflags "-s -w -H windowsgui" ./cmd
 | Windows x64 | `godusevpn-<版本>-windows-x64-setup-offline.exe` | 离线完整版,内嵌 WebView2 运行时,给精简系统与内网机器 |
 | Windows ARM64 | `godusevpn-<版本>-windows-arm64-setup.exe` | ARM64 设备 |
 | Windows | `godusevpn-<版本>-windows-<架构>-bin.zip` | 三个裸 exe,手工替换与排障用 |
+| macOS | `godusevpn-<版本>-macos-<架构>.tar.gz` | arm64(苹果芯片)/ amd64(英特尔),内含守护进程、`godusevpn.app` 与 `install.sh` |
 | Linux | `godusevpn-<版本>-linux-<架构>.tar.gz` | amd64 / arm64 / armv7 / mipsle / mips,内含二进制与 `install.sh` |
 | OpenWrt / iStoreOS | `godusevpn-<版本>-openwrt-<架构>.ipk` | `opkg install` 装完自动起服务并打印面板地址 |
 | Android | `godusevpn-<版本>-android-<ABI>.apk` | arm64(绝大多数手机 / 电视)、armv7(老设备)、x86_64(模拟器 / 少数盒子)、universal(全架构合一) |
@@ -65,6 +73,29 @@ go build -tags desktop,production -trimpath -ldflags "-s -w -H windowsgui" ./cmd
 - **按进程直连**:设置 → 分流,每行一个 exe 名(如 `steam.exe`),这些程序的流量不走代理。
 - **升级**:关于 → 检查更新 → 升级并重启;只替换程序,设置与订阅都保留。
 - **日志保留**:默认 7 天,超过的滚动日志与诊断包自动删除;设置 → 日志里可改,0 = 一直保留。
+
+## macOS
+
+**系统要求:macOS 13(Ventura)或更高**,苹果芯片与英特尔芯片各有一个包(Go 1.27 编出来的程序就是 13 起步)。要管理员密码:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Maoyangui/godusevpn/master/deploy/macos-install.sh | sudo sh
+```
+
+也可以自己下 `godusevpn-<版本>-macos-<架构>.tar.gz`,解开后 `sudo sh install.sh`。
+
+**为什么用 curl 装**:Gatekeeper 的"来自互联网"隔离标记是浏览器下载时打上的,curl 拿到的文件没有这个标记,所以不用买苹果开发者证书,也不用你去"系统设置 → 隐私与安全性"里点允许。要是已经用浏览器下过包,`install.sh` 会顺手把标记清掉。
+
+装完是两样东西:`/usr/local/bin/godusevpn` 是守护进程兼命令行,注册成 launchd 服务(`/Library/LaunchDaemons/com.maoyangui.godusevpn.plist`)开机自启;`/Applications/godusevpn.app` 是图形界面,启动台里叫「佛跳墙」,页面与 Windows / Linux 是同一套。
+
+- 数据在 `/Library/Application Support/godusevpn/`(设置、订阅缓存、`config.json`、日志、诊断包),界面偏好在 `~/Library/Application Support/godusevpn/ui.json`。
+- 隧道网卡是系统分配的 `utunN`(macOS 只认这个名字),**协议栈固定 gvisor** —— 系统协议栈在 macOS 上握不了手(内核收不到入站 TCP),设置页因此只给 gvisor 一个选项。
+- **DNS 会被接管**:连上时把各网络服务的 DNS 改成一个走隧道的地址,断开时按连接前的原值还原(守护进程启动时也无条件还原一次,崩溃过也不会留下打不开网页的机器)。不这么做的话 macOS 一直问路由器(192.168.x.1),而私网段按"局域网直通"在隧道之外,解析记录就泄漏给本地网络了,fake-ip 与 AAAA 屏蔽也一并失效。
+- 这一版**没有菜单栏图标**:Wails 与 systray 都要占着 Cocoa 主线程,凑一起要走外部事件循环,没有真机盯着调不准。所以关掉窗口只是关界面,隧道在后台服务里照常跑,从启动台再打开就回来了。
+- 一键导入:落地页的 `godusevpn://` 由 `.app` 的 Info.plist 向系统登记,点一下直接把订阅交给客户端。
+- 升级:关于 → 检查更新 → 升级并重启,弹一次系统的管理员密码框,守护进程与 `.app` 一起换掉。
+- 卸载:`sudo godusevpn uninstall` 撤掉服务,再删 `/Applications/godusevpn.app` 与 `/usr/local/bin/godusevpn`。
+- 验收:`sudo sh deploy/macos-test.sh <订阅地址>` 共 31 项;CI 每次提交都在 GitHub 的苹果芯片跑机上真跑一遍(装服务、拉订阅、建隧道、按规则跑流量、查 IPv6 是不是真被拦住且没绕过隧道、逐个调各功能页面的接口),另加一步把 `.app` 装进 `/Applications` 打开看它能不能活下来。
 
 ## Linux(桌面发行版 / 软路由)
 
@@ -117,8 +148,8 @@ godusevpn-svc uninstall
 
 ## 默认策略
 
-- TUN:`auto_route` + `strict_route`,协议栈 mixed,私网段直通;另开 127.0.0.1:2080 混合端口。
-- DNS:远程 DoH 1.1.1.1 经代理,本地 DoH 223.5.5.5 直连,国内域名与节点域名走本地;fake-ip 只分配 IPv4 段;53 端口与 DNS 协议一律劫持进内核。
+- TUN:`auto_route` + `strict_route`,协议栈 mixed(macOS 上固定 gvisor,系统协议栈在那儿握不了手),私网段直通;另开 127.0.0.1:2080 混合端口。
+- DNS:远程 DoH 1.1.1.1 经代理,本地 DoH 223.5.5.5 直连,国内域名与节点域名走本地;fake-ip 只分配 IPv4 段;53 端口与 DNS 协议一律劫持进内核。macOS 上还会在连接期间接管系统 DNS,否则解析绕过隧道直接问路由器。
 - IPv6:默认关闭,四层同时堵:DNS `ipv4_only`、无 IPv6 fake-ip 段、IPv6 目标一律拒绝;并且 TUN 照样声明 IPv6 地址,把 v6 流量接进隧道再丢掉 —— 不接进来的话它会绕过隧道从物理网卡直接出网,等于泄露(局域网的 `fc00::/7`、`fe80::/10`、`ff00::/8` 仍留在隧道外)。
 - 模式:路由规则内置三套分支,内核 Clash API 切换,毫秒级不重启。
 - 规则集:sing-box 官方 geosite-cn / geoip-cn(以及规则组里引用的其它 geosite / geoip 类别),经代理更新;`%ProgramData%\godusevpn\rulesets\` 下有同名 `.srs` 就用本地文件。
