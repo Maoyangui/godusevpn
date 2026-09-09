@@ -188,8 +188,11 @@ jobs:
             # 压低了 UniformTypeIdentifiers 里的 UTType 会链接不到(实测 ld: symbol(s) not found)。
             APP="dist/macos/$arch/godusevpn.app"
             mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+            # Wails 的文件对话框用了 UTType,但它自己没声明 UniformTypeIdentifiers 这个框架,
+            # 这台跑机的 SDK 又不会顺带带进来,所以在这儿补上(不补就 ld: _OBJC_CLASS_$_UTType not found)。
             if [ "$arch" = amd64 ]; then export CC="clang -arch x86_64"; fi
-            CGO_ENABLED=1 GOOS=darwin GOARCH=$arch go build -tags desktop,production -trimpath -ldflags "$LD" -o "$APP/Contents/MacOS/godusevpn" ./cmd/godusevpn
+            CGO_ENABLED=1 CGO_LDFLAGS="-framework UniformTypeIdentifiers" GOOS=darwin GOARCH=$arch \
+              go build -tags desktop,production -trimpath -ldflags "$LD" -o "$APP/Contents/MacOS/godusevpn" ./cmd/godusevpn
             unset CC
             sed "s/__VERSION__/$V/g" cmd/godusevpn/build/darwin/Info.plist > "$APP/Contents/Info.plist"
             cp /tmp/icon.icns "$APP/Contents/Resources/icon.icns"
