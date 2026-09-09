@@ -194,6 +194,8 @@ pre.log .warn { color: #fbbf24; } pre.log .err { color: #f87171; } pre.log .dim 
 /* 浏览器面板(Linux):宽屏时居中成一张手机卡片;没有窗口按钮 */
 .app.web .win { display: none; }
 .app.web .topbar { --wails-draggable: no-drag; }
+/* macOS 原生窗口:红绿灯按钮浮在左上角,顶栏左边留出它们的位置 */
+body.mac .topbar { padding-left: 78px; }
 @media (min-width: 640px) {
   body.web { background: linear-gradient(135deg, #e9edf5, #f6f7fb 55%, #e6f0ff); }
   body.web .app { width: 420px; height: min(800px, calc(100vh - 40px)); margin: 20px auto; border-radius: 22px; box-shadow: 0 20px 60px rgba(15, 23, 42, .18); border: 1px solid rgba(15, 23, 42, .06); }

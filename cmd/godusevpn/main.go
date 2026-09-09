@@ -12,7 +12,6 @@ import (
 	"github.com/wailsapp/wails/v2"
 	"github.com/wailsapp/wails/v2/pkg/options"
 	"github.com/wailsapp/wails/v2/pkg/options/assetserver"
-	"github.com/wailsapp/wails/v2/pkg/options/windows"
 
 	"github.com/Maoyangui/godusevpn/internal/buildinfo"
 	"github.com/Maoyangui/godusevpn/web"
@@ -37,7 +36,7 @@ func main() {
 	minimized, link := parseArgs(os.Args[1:])
 	ensureURLProtocol() // 落地页一键导入的 godusevpn:// 协议:老安装包漏注册过,每次启动补一遍
 	app := newApp(minimized, link)
-	err := wails.Run(&options.App{
+	opts := options.App{
 		Title:             buildinfo.DisplayName,
 		Width:             420, // 竖向小窗口
 		Height:            760,
@@ -61,12 +60,9 @@ func main() {
 				app.secondInstance(l)
 			},
 		},
-		Windows: &windows.Options{
-			Theme:                             windows.SystemDefault,
-			DisableFramelessWindowDecorations: false, // 保留系统阴影与圆角
-		},
-	})
-	if err != nil {
+	}
+	tuneOptions(&opts, app) // 各平台独有的窗口选项,见 platform_windows.go / platform_darwin.go
+	if err := wails.Run(&opts); err != nil {
 		os.Exit(1)
 	}
 }

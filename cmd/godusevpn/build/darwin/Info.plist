@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleName</key>
+	<string>godusevpn</string>
+	<key>CFBundleDisplayName</key>
+	<string>佛跳墙</string>
+	<key>CFBundleExecutable</key>
+	<string>godusevpn</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.maoyangui.godusevpn</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleSignature</key>
+	<string>????</string>
+	<key>CFBundleIconFile</key>
+	<string>icon</string>
+	<key>CFBundleShortVersionString</key>
+	<string>__VERSION__</string>
+	<key>CFBundleVersion</key>
+	<string>__VERSION__</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>11.0</string>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>NSHumanReadableCopyright</key>
+	<string>GPL-3.0</string>
+	<!-- 落地页的一键导入:点 godusevpn://import?url=… 时由系统交给本程序 -->
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>com.maoyangui.godusevpn</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>godusevpn</string>
+			</array>
+		</dict>
+	</array>
+</dict>
+</plist>

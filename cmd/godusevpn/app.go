@@ -9,16 +9,13 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/wailsapp/wails/v2/pkg/runtime"
-	"golang.org/x/sys/windows"
 
 	"github.com/Maoyangui/godusevpn/internal/autostart"
 	"github.com/Maoyangui/godusevpn/internal/buildinfo"
@@ -74,13 +71,8 @@ func newApp(minimized bool, link string) *App {
 	return a
 }
 
-func prefsPath() string {
-	base := os.Getenv("APPDATA")
-	if base == "" {
-		base = filepath.Join(os.Getenv("USERPROFILE"), "AppData", "Roaming")
-	}
-	return filepath.Join(base, paths.AppName, "ui.json")
-}
+// prefsPath 界面偏好(语言、主题)放当前用户目录下,不需要管理员权限;各平台的位置见 platform_*.go。
+func prefsPath() string { return filepath.Join(userConfigDir(), paths.AppName, "ui.json") }
 
 func loadPrefs() uiPrefs {
 	p := uiPrefs{Lang: "zh", Theme: "system"}
@@ -372,20 +364,8 @@ func (a *App) ApplyUpdate() error {
 	if err != nil {
 		return err
 	}
-	// 以普通身份启动安装包,让它自己弹 UAC:Inno 会留一个未提权的进程当"原始用户",装完才能以该用户重新拉起客户端
-	// (若在这里用 runas 直接提权,Inno 就不知道原始用户是谁,装完拉不起来)。安装包会先杀掉本进程再覆盖文件。
-	if err := runOpen(path, "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /RELAUNCH=1"); err != nil {
-		return err
-	}
-	return nil
-}
-
-func runOpen(exe, args string) error {
-	verb, _ := syscall.UTF16PtrFromString("open")
-	file, _ := syscall.UTF16PtrFromString(exe)
-	arg, _ := syscall.UTF16PtrFromString(args)
-	dir, _ := syscall.UTF16PtrFromString(filepath.Dir(exe))
-	return windows.ShellExecute(0, verb, file, arg, dir, windows.SW_SHOWNORMAL)
+	// 装法各平台不一样(Windows 静默跑安装包,macOS 解压覆盖再重启服务),见 platform_windows.go / platform_darwin.go
+	return applyUpdatePackage(path)
 }
 
 // ---- 窗口 ----
@@ -619,12 +599,12 @@ func (a *App) ExportDiag() (string, error) {
 	if err := a.call(ipc.MExportDiag, nil, &r); err != nil {
 		return "", err
 	}
-	desktop := filepath.Join(os.Getenv("USERPROFILE"), "Desktop")
+	desktop := desktopDir()
 	dst := filepath.Join(desktop, filepath.Base(r.Path))
 	if err := copyFile(r.Path, dst); err != nil {
 		return r.Path, nil // 复制不了就给原路径
 	}
-	_ = exec.Command("explorer.exe", "/select,", dst).Start()
+	revealFile(dst)
 	return dst, nil
 }
 
@@ -722,9 +702,9 @@ func (a *App) RepairService() error {
 	if err != nil {
 		return err
 	}
-	svcExe := filepath.Join(filepath.Dir(exe), "godusevpn-svc.exe")
-	if _, err := os.Stat(svcExe); err != nil {
-		return errors.New("找不到 godusevpn-svc.exe,请重新安装")
+	svcExe, err := serviceBinary(filepath.Dir(exe))
+	if err != nil {
+		return err
 	}
 	if st := svc.QueryStatus(); st == "stopped" {
 		if err := svc.StartUser(); err == nil {
@@ -738,18 +718,6 @@ func (a *App) RepairService() error {
 		time.Sleep(time.Second)
 	}
 	return runElevated(svcExe, "install")
-}
-
-func runElevated(exe, args string) error {
-	verb, _ := syscall.UTF16PtrFromString("runas")
-	file, _ := syscall.UTF16PtrFromString(exe)
-	arg, _ := syscall.UTF16PtrFromString(args)
-	dir, _ := syscall.UTF16PtrFromString(filepath.Dir(exe))
-	return windows.ShellExecute(0, verb, file, arg, dir, windows.SW_HIDE)
-}
-
-func (a *App) OpenLogs() error {
-	return exec.Command("explorer.exe", paths.Logs()).Start()
 }
 
 // ReadClipboard 读系统剪贴板文本,给"粘贴"按钮用;失败返回空串。

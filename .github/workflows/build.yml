@@ -162,19 +162,40 @@ jobs:
       - name: Test
         run: |
           go vet -tags "$TAGS" ./internal/... ./cmd/godusevpn-daemon ./cmd/godusevpn-cli
+          go vet -tags desktop,production ./cmd/godusevpn
           go test -count=1 -tags "$TAGS" ./internal/... ./cmd/godusevpn-daemon ./cmd/godusevpn-cli
 
+      # 一个包里两样东西:godusevpn 是守护进程 + 命令行(装到 /usr/local/bin),
+      # godusevpn.app 是图形界面(装到 /Applications)。install.sh 一起装好并注册 launchd。
       - name: Build (arm64, amd64)
         run: |
           set -e
           V="${{ needs.version.outputs.version }}"
           LD="-s -w -X github.com/Maoyangui/godusevpn/internal/buildinfo.Version=$V"
           mkdir -p out
+          # 图标:从项目图标生成 .icns(苹果只认这一种)
+          rm -rf /tmp/icon.iconset && mkdir -p /tmp/icon.iconset
+          for s in 16 32 128 256 512; do
+            sips -z $s $s cmd/godusevpn/build/appicon.png --out /tmp/icon.iconset/icon_${s}x${s}.png >/dev/null
+            sips -z $((s*2)) $((s*2)) cmd/godusevpn/build/appicon.png --out /tmp/icon.iconset/icon_${s}x${s}@2x.png >/dev/null
+          done
+          iconutil -c icns /tmp/icon.iconset -o /tmp/icon.icns
           for arch in arm64 amd64; do
             mkdir -p dist/macos/$arch
             CGO_ENABLED=0 GOOS=darwin GOARCH=$arch go build -tags "$TAGS" -trimpath -ldflags "$LD" -o dist/macos/$arch/godusevpn ./cmd/godusevpn-daemon
+            # 图形界面要连 WebKit,必须开 CGO;跑机是苹果芯片,编英特尔版时让 clang 换个目标架构
+            APP="dist/macos/$arch/godusevpn.app"
+            mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+            if [ "$arch" = amd64 ]; then export CC="clang -arch x86_64 -mmacosx-version-min=11.0"; else export CC="clang -arch arm64 -mmacosx-version-min=11.0"; fi
+            CGO_ENABLED=1 GOOS=darwin GOARCH=$arch go build -tags desktop,production -trimpath -ldflags "$LD" -o "$APP/Contents/MacOS/godusevpn" ./cmd/godusevpn
+            unset CC
+            sed "s/__VERSION__/$V/g" cmd/godusevpn/build/darwin/Info.plist > "$APP/Contents/Info.plist"
+            cp /tmp/icon.icns "$APP/Contents/Resources/icon.icns"
+            cp deploy/macos-install.sh dist/macos/$arch/install.sh
+            chmod +x dist/macos/$arch/install.sh
             tar -C dist/macos/$arch -czf out/godusevpn-$V-macos-$arch.tar.gz .
           done
+          file dist/macos/*/godusevpn dist/macos/*/godusevpn.app/Contents/MacOS/godusevpn
           ls -la out
 
       # 在这台真 Mac 上把服务装起来、真的建隧道跑流量:流量是否按规则进隧道、IPv6 是否真被拦住、各页面接口是否正常。
@@ -186,6 +207,25 @@ jobs:
           A=arm64; [ "$(uname -m)" = "x86_64" ] && A=amd64
           sudo install -m755 "dist/macos/$A/godusevpn" /usr/local/bin/godusevpn
           sudo sh deploy/macos-test.sh "$TEST_SUB_URL" /usr/local/bin/godusevpn
+
+      # 图形界面没法在没人看的跑机上点,但至少要证明它能起来:装进 /Applications、打开、
+      # 看进程还在不在、有没有留下崩溃报告。起不来的话这一步就红,不会把坏包发出去。
+      - name: 图形界面冒烟(能不能打开)
+        run: |
+          set -e
+          A=arm64; [ "$(uname -m)" = "x86_64" ] && A=amd64
+          sudo cp -R "dist/macos/$A/godusevpn.app" /Applications/godusevpn.app
+          /usr/bin/plutil -lint /Applications/godusevpn.app/Contents/Info.plist
+          open -a /Applications/godusevpn.app || { echo "打不开"; exit 1; }
+          sleep 12
+          if ! pgrep -f "/Applications/godusevpn.app/Contents/MacOS/godusevpn" >/dev/null; then
+            echo "进程没活下来"
+            ls -la ~/Library/Logs/DiagnosticReports/ 2>/dev/null || true
+            for f in ~/Library/Logs/DiagnosticReports/godusevpn*; do [ -f "$f" ] && head -40 "$f"; done
+            exit 1
+          fi
+          echo "图形界面起来了,进程 $(pgrep -f '/Applications/godusevpn.app/Contents/MacOS/godusevpn' | tr '\n' ' ')"
+          osascript -e 'quit app "godusevpn"' 2>/dev/null || pkill -f "/Applications/godusevpn.app/Contents/MacOS/godusevpn" || true
 
       - uses: actions/upload-artifact@v4
         with:

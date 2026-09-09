@@ -755,6 +755,8 @@ async function init() {
     if (m === 'NEED_PASSWORD') { showNeedPassword(); return; }
     state = { service: false, svcState: 'down', view: { state: { status: 'disconnected' }, profiles: [], nodes: [] }, lang: 'zh', theme: 'system', version: '' };
   }
+  // macOS 的原生窗口没有标题栏,红绿灯按钮浮在左上角,给顶栏左边让出位置(网页面板和安卓壳里没有这回事)
+  if (!window.__web && !window.__android && state.platform === 'darwin') document.body.classList.add('mac');
   LANG = state.lang || 'zh';
   applyTheme(state.theme);
   document.documentElement.lang = LANG === 'en' ? 'en' : 'zh';
