@@ -82,7 +82,11 @@ func TestDefaultsNoIPv6FakeIPTun(t *testing.T) {
 	if !v6reject || !hijack53 || !fake {
 		t.Fatalf("缺规则:v6reject=%v hijack53=%v fakeip=%v", v6reject, hijack53, fake)
 	}
-	if c.Inbounds[0]["type"] != "tun" || c.Inbounds[0]["strict_route"] != true || c.Inbounds[0]["stack"] != "mixed" {
+	wantStack := "mixed" // macOS 上会被强制改成 gvisor(系统协议栈在那儿握不了手)
+	if runtime.GOOS == "darwin" {
+		wantStack = "gvisor"
+	}
+	if c.Inbounds[0]["type"] != "tun" || c.Inbounds[0]["strict_route"] != true || c.Inbounds[0]["stack"] != wantStack {
 		t.Fatalf("TUN 入站不对: %v", c.Inbounds[0])
 	}
 	if len(c.Inbounds) != 2 || c.Inbounds[1]["listen_port"] != float64(2080) {
