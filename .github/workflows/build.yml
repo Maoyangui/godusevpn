@@ -118,8 +118,8 @@ jobs:
       - name: Test
         run: |
           # cmd/godusevpn 是 Wails 窗口程序,Linux 上没有它要的 GTK/WebKit 头文件,不在这里编
-          go vet -tags "$TAGS" ./internal/... ./cmd/godusevpn-linux ./cmd/godusevpn-cli
-          go test -count=1 -tags "$TAGS" ./internal/... ./cmd/godusevpn-linux ./cmd/godusevpn-cli
+          go vet -tags "$TAGS" ./internal/... ./cmd/godusevpn-daemon ./cmd/godusevpn-cli
+          go test -count=1 -tags "$TAGS" ./internal/... ./cmd/godusevpn-daemon ./cmd/godusevpn-cli
 
       - name: Build (amd64, arm64, armv7, mipsle, mips)
         run: |
@@ -130,7 +130,7 @@ jobs:
           build() { # 名字 GOARCH [额外环境]
             name=$1; arch=$2; shift 2
             mkdir -p dist/linux/$name
-            env CGO_ENABLED=0 GOOS=linux GOARCH=$arch "$@" go build -tags "$TAGS" -trimpath -ldflags "$LD" -o dist/linux/$name/godusevpn ./cmd/godusevpn-linux
+            env CGO_ENABLED=0 GOOS=linux GOARCH=$arch "$@" go build -tags "$TAGS" -trimpath -ldflags "$LD" -o dist/linux/$name/godusevpn ./cmd/godusevpn-daemon
             cp deploy/install.sh dist/linux/$name/ 2>/dev/null || true
             tar -C dist/linux/$name -czf out/godusevpn-$V-linux-$name.tar.gz .
             sh deploy/mkipk.sh "$V" "$name" dist/linux/$name/godusevpn out/godusevpn-$V-openwrt-$name.ipk

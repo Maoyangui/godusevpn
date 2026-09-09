@@ -12,8 +12,6 @@ import (
 	"path/filepath"
 )
 
-const AppName = "godusevpn"
-
 // entware 梅林 / 部分 padavan 固件的软件环境:根文件系统只读,一切装在 /opt。
 func entware() bool {
 	if _, err := os.Stat("/opt/etc/entware_release"); err == nil {

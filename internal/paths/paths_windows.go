@@ -9,8 +9,6 @@ import (
 	"path/filepath"
 )
 
-const AppName = "godusevpn"
-
 // DataDir 服务数据目录。
 func DataDir() string {
 	if p := os.Getenv("GODUSEVPN_DATA"); p != "" {

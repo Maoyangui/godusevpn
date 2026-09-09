@@ -5,6 +5,9 @@ import (
 	"path/filepath"
 )
 
+// AppName 目录名与服务名,三端一致。
+const AppName = "godusevpn"
+
 func Settings() string { return filepath.Join(ConfDir(), "settings.json") }
 
 // ProfileCache 某条订阅的节点缓存。

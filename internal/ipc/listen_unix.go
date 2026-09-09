@@ -18,7 +18,7 @@ func defaultSocketPath() string {
 	if p := os.Getenv("GODUSEVPN_SOCK"); p != "" {
 		return p
 	}
-	return "/run/godusevpn.sock"
+	return filepath.Join(runDir, "godusevpn.sock")
 }
 
 // Address 控制口地址(诊断信息里显示用)。

@@ -54,7 +54,7 @@ LAN 侧 DNS:网关-TUN 模式下 sing-box 的 auto_redirect 自己用 nftables �
 | `internal/uiapi`(新) | 页面方法集与事件流的共用实现(与 Windows 客户端的绑定同名同义),Linux 面板与 Android 桥都用它 |
 | `internal/web`(新) | HTTP 服务、会话、SSE、embed 前端;方法转给 uiapi |
 | `internal/daemon` | 去掉 Windows 专有调用;设备发现(DHCP 租约 + ARP / neigh) |
-| `cmd/godusevpn-linux`(新入口) | run / install / cli 一体 |
+| `cmd/godusevpn-daemon`(新入口,Linux 与 macOS 共用) | run / install / cli 一体 |
 | 前端 | 移到仓库根 `web/`,Wails 与 Linux embed 都指向它;新增 `api.js`、设备页、登录页 |
 
 ## 4. 功能对照

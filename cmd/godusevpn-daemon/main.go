@@ -1,7 +1,7 @@
-// godusevpn 佛跳墙 的 Linux 客户端:一个静态二进制,既是守护进程(内核、订阅、控制口、Web 面板),也是命令行。
+// godusevpn 佛跳墙 的 Linux / macOS 客户端:一个静态二进制,既是守护进程(内核、订阅、控制口、Web 面板),也是命令行。
 //
 //	godusevpn run                       前台运行守护进程(初始化系统就是这样拉起它的)
-//	godusevpn install | uninstall       注册 / 删除开机自启(systemd / procd / Entware),install 后随即启动
+//	godusevpn install | uninstall       注册 / 删除开机自启(Linux 的 systemd / procd / Entware,macOS 的 launchd),install 后随即启动
 //	godusevpn start | stop | status
 //	godusevpn passwd [新密码]            设置面板密码(不给参数就随机生成并打印)
 //	godusevpn version
@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -122,7 +123,7 @@ func runDaemon(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	ui := uiapi.New(d, uiapi.Options{Platform: "linux", PrefsPath: paths.UIPrefs(), Autostart: autostart.Enabled, SetAutostart: autostart.Set})
+	ui := uiapi.New(d, uiapi.Options{Platform: runtime.GOOS, PrefsPath: paths.UIPrefs(), Autostart: autostart.Enabled, SetAutostart: autostart.Set})
 	ws := web.New(ui, d.Logf)
 	go func() {
 		// 等控制口起来再读设置里的监听地址
