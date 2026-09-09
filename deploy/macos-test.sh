@@ -66,6 +66,17 @@ check "默认路由已切到隧道" "$([ -n "$TUN" ] && [ "$(ifaceFor 1.1.1.1)" 
 g=$(resolve4 www.google.com); check "代理域名得到 fake-ip(198.18/15)" "$(echo "$g" | grep -c '^198\.1[89]\.')" "$g"
 b=$(resolve4 www.baidu.com); check "国内域名是真实 IP" "$([ -n "$b" ] && echo "$b" | grep -vc '^198\.1[89]\.' || echo 0)" "$b"
 
+echo "== 3.5 数据面自检(包进得去,回得来吗)"
+dnsq() { if command -v dig >/dev/null 2>&1; then dig +time=4 +tries=1 "@$1" example.com +short 2>&1 | head -2 | xargs echo; else nslookup -timeout=4 example.com "$1" 2>&1 | tail -3 | xargs echo; fi; }
+echo "  隧道网卡: $(ifconfig "$TUN" 2>/dev/null | xargs echo | cut -c1-200)"
+echo "  路由 172.19.0.2: $(route -n get 172.19.0.2 2>&1 | xargs echo | cut -c1-140)"
+echo "  v4 路由表(前 10 条):"; netstat -rn -f inet 2>/dev/null | head -12 | sed 's/^/    /'
+echo "  TCP 握手 104.26.13.205:443: $( (nc -v -G 8 -w 8 -z 104.26.13.205 443 && echo 通) 2>&1 | xargs echo)"
+echo "  UDP DNS 经隧道(@223.5.5.5): $(dnsq 223.5.5.5)"
+echo "  UDP DNS 经隧道(@1.1.1.1): $(dnsq 1.1.1.1)"
+echo "  内核看到的入站连接数: $("$BIN" logs 400 core 2>/dev/null | grep -c 'inbound connection from')"
+"$BIN" logs 400 core 2>/dev/null | grep 'inbound connection\|outbound connection' | tail -6 | sed 's/^/    /'
+
 echo "== 4. IPv6:关闭时必须是真拒绝,且不能绕过隧道出去"
 a6=$(resolve6 www.google.com); check "AAAA 为空" "$([ -z "$a6" ] && echo 1 || echo 0)" "${a6:-(空)}"
 t6=$(ifaceFor6 2001:4860:4860::8888)
@@ -79,8 +90,9 @@ fi
 # 不依赖跑机自己有没有 v6:直接看隧道网卡上有没有 v6 地址、v6 默认路由是不是指向它——
 # 这两条成立就说明 v6 是"被接进隧道再拒绝",不可能从物理网卡漏出去。
 check "隧道网卡带 v6 地址" "$(ifconfig "$TUN" 2>/dev/null | grep -c 'inet6 fdfe:dcba:9876')" "$(ifconfig "$TUN" 2>/dev/null | awk '/inet6/{printf "%s ", $2}')"
-# sing-tun 不改 default,而是加一对 ::/1 + 8000::/1 盖住它(v4 同理),所以这三种目的地都算数
-check "v6 默认路由指向隧道" "$(netstat -rn -f inet6 2>/dev/null | awk -v t="$TUN" '($1=="default"||$1=="::/1"||$1=="8000::/1"){for(i=2;i<=NF;i++) if($i==t) c++} END{print c+0}')" "$(netstat -rn -f inet6 2>/dev/null | awk -v t="$TUN" '$NF==t{printf "%s ", $1}')"
+# sing-tun 在 macOS 上不是改 default,而是铺一片前缀(100::/8 200::/7 … 8000::/2)把整个 v6 空间盖住,
+# 所以直接问两个差得很远的公网 v6 地址走哪张网卡,比数 default 那一行靠谱。
+check "v6 公网地址都落在隧道上" "$([ -n "$TUN" ] && [ "$(ifaceFor6 2606:4700:4700::1111)" = "$TUN" ] && [ "$(ifaceFor6 2400:3200::1)" = "$TUN" ] && echo 1 || echo 0)" "2606:4700:4700::1111 -> $(ifaceFor6 2606:4700:4700::1111) / 2400:3200::1 -> $(ifaceFor6 2400:3200::1)"
 v6=$(pub6); check "v6 出网拿不到地址" "$([ -z "$v6" ] && echo 1 || echo 0)" "${v6:-(拿不到,符合预期)}"
 check "内核配置里有 v6 拒绝规则" "$(grep -c '"ip_version": 6' "/Library/Application Support/godusevpn/data/config.json" 2>/dev/null)" "$(grep -c '"ip_version": 6' "/Library/Application Support/godusevpn/data/config.json" 2>/dev/null) 条"
 

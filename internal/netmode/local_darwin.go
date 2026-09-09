@@ -5,7 +5,7 @@
 // macOS 的解析器问的是网络服务上配的 DNS,通常就是路由器(192.168.x.1 这类),而"局域网直连"会把私网段
 // 排除在隧道之外 —— 于是每一次域名解析都绕过隧道直接问路由器:既拿不到 fake-ip(域名分流退化成只能靠嗅探),
 // 关掉 IPv6 时 AAAA 也照样返回,更要紧的是解析记录实打实泄漏给了本地网络。
-// 处理:连上时把各网络服务的 DNS 改成隧道网段里的 172.19.0.2(发到它的包会进隧道,被 hijack-dns 接住),
+// 处理:连上时把各网络服务的 DNS 改成一个会走隧道的地址(进了隧道就被 hijack-dns 接住),
 // 断开时按连接前存下的原值还原。备份落盘,守护进程崩了下次启动也能还原回去。
 //
 // 关于 IPv6:关掉 IPv6 时 TUN 照样声明 v6 地址,auto_route 会把 v6 也指进隧道,
@@ -44,7 +44,7 @@ func Protect(_ string, _ bool) error {
 	}
 	var errs []string
 	for _, s := range svcs {
-		if out, err := exec.Command("networksetup", "-setdnsservers", s, builder.TunDNS).CombinedOutput(); err != nil {
+		if out, err := exec.Command("networksetup", "-setdnsservers", s, builder.HijackDNS).CombinedOutput(); err != nil {
 			errs = append(errs, fmt.Sprintf("%s: %s", s, strings.TrimSpace(string(out))))
 		}
 	}
@@ -112,7 +112,7 @@ func currentDNS(svc string) []string {
 		if ln == "" || strings.ContainsAny(ln, " ") { // 提示句里有空格,地址没有
 			continue
 		}
-		if ln == builder.TunDNS { // 上一次没还原干净,别把隧道地址当成原值存下来
+		if ln == builder.HijackDNS { // 上一次没还原干净,别把隧道地址当成原值存下来
 			continue
 		}
 		addrs = append(addrs, ln)
