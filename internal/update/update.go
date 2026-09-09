@@ -156,7 +156,11 @@ func assetName(version string) string {
 	if arch == "arm" {
 		arch = "armv7"
 	}
-	return fmt.Sprintf("godusevpn-%s-%s-%s.tar.gz", version, runtime.GOOS, arch)
+	osName := runtime.GOOS
+	if osName == "darwin" {
+		osName = "macos" // 发布资产按用户认得的系统名叫,不用 Go 的内部名
+	}
+	return fmt.Sprintf("godusevpn-%s-%s-%s.tar.gz", version, osName, arch)
 }
 
 // Check 有更新返回它,没有返回 nil。includePre 为真时预发布也算。

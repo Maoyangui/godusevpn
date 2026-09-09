@@ -1,0 +1,97 @@
+#!/bin/sh
+# 佛跳墙 macOS 真机验收。以 root 跑:
+#   sudo sh macos-test.sh "https://面板/sub/用户名" [/usr/local/bin/godusevpn]
+# 步骤:装服务(launchd)→ 设订阅 → 连接 → 查 utun、路由、fake-ip、出口、IPv6 是否真被拦住 → 三态 → 页面接口 → 断开清理。
+# macOS 与 Linux 的差别:隧道网卡是内核分配的 utunN(不是配置里的名字),命令换成 ifconfig / netstat / route / dscacheutil。
+# 跑之前先布一个"死人开关":180 秒内没跑完就自动停服务,免得改坏路由后连不上机器。
+SUB="$1"
+BIN="${2:-/usr/local/bin/godusevpn}"
+[ -z "$SUB" ] && { echo "用法: $0 <订阅地址> [二进制路径]"; exit 2; }
+[ "$(id -u)" = 0 ] || { echo "需要 root"; exit 2; }
+fail=0
+check() { if [ "${2:-0}" -gt 0 ] 2>/dev/null; then printf '[PASS] %s  %s\n' "$1" "$3"; else printf '[FAIL] %s  %s\n' "$1" "$3"; fail=$((fail+1)); fi; }
+
+"$BIN" uninstall >/dev/null 2>&1; rm -f "/Library/Application Support/godusevpn/data/state.json"; sleep 2
+pub4() { curl -s -4 --max-time 15 https://api.ipify.org; }
+pub6() { curl -s -6 --max-time 8 https://api6.ipify.org; }
+# 系统解析器(fake-ip 要看的就是它):dscacheutil 走的是 macOS 的解析链路,和应用看到的一致
+resolve4() { dscacheutil -q host -a name "$1" 2>/dev/null | awk '/^ip_address:/{print $2; exit}'; }
+resolve6() { dscacheutil -q host -a name "$1" 2>/dev/null | awk '/^ipv6_address:/{print $2; exit}'; }
+# tun4 找到我们那条隧道网卡:按 TUN 的地址 172.19.0.1 反查 utunN
+tun4() { ifconfig | awk '/^utun/{i=$1} /inet 172\.19\.0\.1 /{sub(":","",i); print i; exit}'; }
+# ifaceFor 某个目标地址实际会从哪个网卡出去
+ifaceFor() { route -n get "$1" 2>/dev/null | awk '/interface:/{print $2; exit}'; }
+ifaceFor6() { route -n get -inet6 "$1" 2>/dev/null | awk '/interface:/{print $2; exit}'; }
+api() { curl -s --max-time 12 -X POST -H 'Content-Type: application/json' -d "${2:-[]}" "http://127.0.0.1:9800/api/$1"; }
+wait_status() { i=0; while [ $i -lt "$2" ]; do "$BIN" status 2>/dev/null | grep -q "状态:.*$1" && return 0; sleep 1; i=$((i+1)); done; return 1; }
+
+echo "== 0. 环境"
+sw_vers | tr '\n' ' '; echo; uname -m
+before=$(pub4); echo "连接前公网 IPv4: $before"
+before6=$(pub6); echo "连接前公网 IPv6: ${before6:-(本机没有 IPv6 出口)}"
+real=$(resolve4 api.ipify.org); echo "api.ipify.org 真实 IP: $real"
+defif=$(ifaceFor 1.1.1.1); echo "连接前默认出口网卡: $defif"
+
+echo "== 1. 安装(launchd)"
+"$BIN" install >/dev/null
+check "服务运行" "$("$BIN" status | head -1 | grep -c running)" "$("$BIN" status | head -1)"
+check "launchd 里能查到" "$(launchctl print system/com.maoyangui.godusevpn >/dev/null 2>&1 && echo 1 || echo 0)" "$(launchctl print system/com.maoyangui.godusevpn 2>/dev/null | awk '/state = /{print $3; exit}')"
+i=0; while [ $i -lt 15 ] && ! curl -s --max-time 2 http://127.0.0.1:9800/api/ping | grep -q version; do sleep 1; i=$((i+1)); done
+check "面板可达" "$(curl -s --max-time 5 http://127.0.0.1:9800/api/ping | grep -c version)" "$(curl -s --max-time 5 http://127.0.0.1:9800/api/ping)"
+
+echo "== 2. 订阅与连接"
+p=$("$BIN" profile "$SUB" 2>&1); check "订阅拉取" "$(echo "$p" | grep -c '个节点')" "$(echo "$p" | head -1)"
+( sleep 180; "$BIN" disconnect >/dev/null 2>&1; launchctl bootout system/com.maoyangui.godusevpn >/dev/null 2>&1 ) >/dev/null 2>&1 &
+deadman=$!
+"$BIN" connect >/dev/null
+if wait_status connected 90; then check "进入 connected" 1 "$("$BIN" status | sed -n 2p)"; else check "进入 connected" 0 "$("$BIN" status | sed -n 2p)"; fi
+
+echo "== 3. 网络栈"
+TUN=$(tun4)
+check "隧道网卡存在(utun)" "$([ -n "$TUN" ] && echo 1 || echo 0)" "${TUN:-没找到 172.19.0.1 的 utun}"
+check "公网地址的路由走隧道" "$([ -n "$TUN" ] && [ "$(ifaceFor 104.26.12.205)" = "$TUN" ] && echo 1 || echo 0)" "104.26.12.205 -> $(ifaceFor 104.26.12.205)(隧道 $TUN)"
+check "默认路由已切到隧道" "$([ -n "$TUN" ] && [ "$(ifaceFor 1.1.1.1)" = "$TUN" ] && echo 1 || echo 0)" "1.1.1.1 -> $(ifaceFor 1.1.1.1)"
+g=$(resolve4 www.google.com); check "代理域名得到 fake-ip(198.18/15)" "$(echo "$g" | grep -c '^198\.1[89]\.')" "$g"
+b=$(resolve4 www.baidu.com); check "国内域名是真实 IP" "$([ -n "$b" ] && echo "$b" | grep -vc '^198\.1[89]\.' || echo 0)" "$b"
+
+echo "== 4. IPv6:关闭时必须是真拒绝,且不能绕过隧道出去"
+a6=$(resolve6 www.google.com); check "AAAA 为空" "$([ -z "$a6" ] && echo 1 || echo 0)" "${a6:-(空)}"
+t6=$(ifaceFor6 2001:4860:4860::8888)
+check "v6 公网地址被隧道接管(不是从物理网卡出去)" "$([ -n "$TUN" ] && [ "$t6" = "$TUN" ] && echo 1 || echo 0)" "2001:4860:4860::8888 -> ${t6:-无路由}(隧道 $TUN,物理 $defif)"
+check "v6 不从物理网卡出去" "$([ "$t6" != "$defif" ] && echo 1 || echo 0)" "出口网卡 ${t6:-无}"
+v6=$(pub6); check "v6 出网拿不到地址" "$([ -z "$v6" ] && echo 1 || echo 0)" "${v6:-(拿不到,符合预期)}"
+check "内核配置里有 v6 拒绝规则" "$(grep -c '"ip_version": 6' "/Library/Application Support/godusevpn/data/config.json" 2>/dev/null)" "$(grep -c '"ip_version": 6' "/Library/Application Support/godusevpn/data/config.json" 2>/dev/null) 条"
+
+echo "== 5. 出口"
+now=$(pub4); check "规则模式出口 IP 变了" "$([ -n "$now" ] && [ "$now" != "$before" ] && echo 1 || echo 0)" "before=$before now=$now"
+via=$(curl -s -4 --max-time 15 --resolve "api.ipify.org:443:$real" https://api.ipify.org); check "直连真实 IP 也走代理" "$([ -n "$via" ] && [ "$via" != "$before" ] && echo 1 || echo 0)" "real=$real got=$via"
+lat=$("$BIN" test 2>&1); check "延迟测试" "$(echo "$lat" | grep -c ' ms')" "$lat"
+
+echo "== 6. 模式切换"
+"$BIN" mode direct >/dev/null; sleep 3; d=$(pub4); check "直连模式出口回到本机" "$([ "$d" = "$before" ] && echo 1 || echo 0)" "direct=$d"
+"$BIN" mode global >/dev/null; sleep 3; gl=$(pub4); check "全局模式出口是节点" "$([ -n "$gl" ] && [ "$gl" != "$before" ] && echo 1 || echo 0)" "global=$gl"
+"$BIN" mode rule >/dev/null
+check "节点列表" "$("$BIN" nodes | grep -c '^\*')" "$("$BIN" nodes | tr '\n' ' ' | cut -c1-80)"
+
+echo "== 7. 各功能页面的数据接口"
+for m in GetState GetSettings GetProfiles GetNodes GetLogs GetConnections GetAutostart CheckUpdate; do
+  r=$(api "$m")
+  ok=$(echo "$r" | grep -c '"result"')
+  [ "$m" = CheckUpdate ] && [ -z "$r" ] && ok=1   # 没有新版本时返回空也算正常
+  check "页面接口 $m" "$ok" "$(echo "$r" | cut -c1-70)"
+done
+r=$(api SetMode '["rule"]'); check "页面接口 SetMode" "$(echo "$r" | grep -c '"result"\|^$')" "$(echo "$r" | cut -c1-40)"
+
+echo "== 8. 断开与清理"
+kill $deadman 2>/dev/null
+"$BIN" disconnect >/dev/null; sleep 4
+check "断开后隧道网卡消失" "$([ -z "$(tun4)" ] && echo 1 || echo 0)" "$(tun4)"
+check "断开后默认路由回到物理网卡" "$([ "$(ifaceFor 1.1.1.1)" = "$defif" ] && echo 1 || echo 0)" "1.1.1.1 -> $(ifaceFor 1.1.1.1)(原 $defif)"
+after=$(pub4); check "断开后出口恢复" "$([ "$after" = "$before" ] && echo 1 || echo 0)" "after=$after"
+"$BIN" uninstall >/dev/null 2>&1
+check "卸载后 launchd 里没有了" "$(launchctl print system/com.maoyangui.godusevpn >/dev/null 2>&1 && echo 0 || echo 1)" ""
+check "卸载后 plist 删掉了" "$([ ! -f /Library/LaunchDaemons/com.maoyangui.godusevpn.plist ] && echo 1 || echo 0)" ""
+
+echo
+if [ $fail = 0 ]; then echo "全部通过"; else echo "$fail 项失败"; echo "== 内核日志"; "$BIN" logs 40 core 2>/dev/null; echo "== 服务日志"; "$BIN" logs 25 2>/dev/null; fi
+exit $fail

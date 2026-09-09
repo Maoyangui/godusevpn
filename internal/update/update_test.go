@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -93,5 +94,28 @@ func TestCheckBothFail(t *testing.T) {
 	_, err := Check(context.Background(), "0.1.0", true, srv.Client())
 	if err == nil || !strings.Contains(err.Error(), "403") || !strings.Contains(err.Error(), "备用通道") {
 		t.Fatalf("两条路都失败时错误要说清楚: %v", err)
+	}
+}
+
+// 资产名要按用户认得的系统名走:macOS 是 macos-<arch>.tar.gz,不是 Go 内部的 darwin。
+func TestAssetNameForCurrentOS(t *testing.T) {
+	got := assetName("1.2.3")
+	switch runtime.GOOS {
+	case "windows":
+		if !strings.Contains(got, "-windows-") || !strings.HasSuffix(got, "-setup.exe") {
+			t.Fatalf("Windows 资产名不对: %s", got)
+		}
+	case "darwin":
+		if !strings.Contains(got, "-macos-") || !strings.HasSuffix(got, ".tar.gz") {
+			t.Fatalf("macOS 资产名应是 macos-<架构>.tar.gz,实际 %s", got)
+		}
+	case "android":
+		if !strings.Contains(got, "-android-") || !strings.HasSuffix(got, ".apk") {
+			t.Fatalf("Android 资产名不对: %s", got)
+		}
+	default:
+		if !strings.Contains(got, "-"+runtime.GOOS+"-") || !strings.HasSuffix(got, ".tar.gz") {
+			t.Fatalf("资产名不对: %s", got)
+		}
 	}
 }

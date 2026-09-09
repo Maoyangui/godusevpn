@@ -147,6 +147,51 @@ jobs:
           name: linux-${{ needs.version.outputs.version }}
           path: out/*
 
+  macos:
+    needs: version
+    runs-on: macos-latest # 苹果芯片的跑机;既用来编译,也用来真机验收
+    env:
+      TEST_SUB_URL: ${{ secrets.TEST_SUB_URL }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Test
+        run: |
+          go vet -tags "$TAGS" ./internal/... ./cmd/godusevpn-daemon ./cmd/godusevpn-cli
+          go test -count=1 -tags "$TAGS" ./internal/... ./cmd/godusevpn-daemon ./cmd/godusevpn-cli
+
+      - name: Build (arm64, amd64)
+        run: |
+          set -e
+          V="${{ needs.version.outputs.version }}"
+          LD="-s -w -X github.com/Maoyangui/godusevpn/internal/buildinfo.Version=$V"
+          mkdir -p out
+          for arch in arm64 amd64; do
+            mkdir -p dist/macos/$arch
+            CGO_ENABLED=0 GOOS=darwin GOARCH=$arch go build -tags "$TAGS" -trimpath -ldflags "$LD" -o dist/macos/$arch/godusevpn ./cmd/godusevpn-daemon
+            tar -C dist/macos/$arch -czf out/godusevpn-$V-macos-$arch.tar.gz .
+          done
+          ls -la out
+
+      # 在这台真 Mac 上把服务装起来、真的建隧道跑流量:流量是否按规则进隧道、IPv6 是否真被拦住、各页面接口是否正常。
+      # 没配 TEST_SUB_URL 机密时只编译不验收(外部 PR 拿不到机密)。
+      - name: 真机验收(建隧道、跑流量、查 IPv6 泄漏)
+        if: env.TEST_SUB_URL != ''
+        run: |
+          set -e
+          A=arm64; [ "$(uname -m)" = "x86_64" ] && A=amd64
+          sudo install -m755 "dist/macos/$A/godusevpn" /usr/local/bin/godusevpn
+          sudo sh deploy/macos-test.sh "$TEST_SUB_URL" /usr/local/bin/godusevpn
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-${{ needs.version.outputs.version }}
+          path: out/*
+
   android:
     needs: version
     runs-on: ubuntu-latest
@@ -206,7 +251,7 @@ jobs:
           path: out/*
 
   release:
-    needs: [version, windows, linux, android]
+    needs: [version, windows, linux, macos, android]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
