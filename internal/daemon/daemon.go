@@ -87,6 +87,9 @@ func NewWithOptions(o Options) (*Daemon, error) {
 	d.settings = s
 	d.applyLogRetention()
 	d.loadProfileCaches()
+	// 上次异常退出可能留下改过的系统设置(macOS 接管的系统 DNS、Linux 加的策略路由),启动时先还原一次,
+	// 免得服务没连上、机器却因为 DNS 指着不存在的隧道打不开网页。
+	netmode.Unprotect()
 	b := make([]byte, 16)
 	_, _ = rand.Read(b)
 	d.secret = hex.EncodeToString(b)

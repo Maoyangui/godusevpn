@@ -3,7 +3,7 @@
 #   sudo sh macos-test.sh "https://面板/sub/用户名" [/usr/local/bin/godusevpn]
 # 步骤:装服务(launchd)→ 设订阅 → 连接 → 查 utun、路由、fake-ip、出口、IPv6 是否真被拦住 → 三态 → 页面接口 → 断开清理。
 # macOS 与 Linux 的差别:隧道网卡是内核分配的 utunN(不是配置里的名字),命令换成 ifconfig / netstat / route / dscacheutil。
-# 跑之前先布一个"死人开关":300 秒内没跑完就自动停服务,免得改坏路由后连不上机器。
+# 跑之前先布一个"死人开关":420 秒内没跑完就自动停服务,免得改坏路由后连不上机器。
 SUB="$1"
 BIN="${2:-/usr/local/bin/godusevpn}"
 [ -z "$SUB" ] && { echo "用法: $0 <订阅地址> [二进制路径]"; exit 2; }
@@ -45,7 +45,7 @@ echo "== 2. 订阅与连接"
 p=$("$BIN" profile "$SUB" 2>&1); check "订阅拉取" "$(echo "$p" | grep -c '个节点')" "$(echo "$p" | head -1)"
 # 订阅都没拉到节点,后面的连接 / 隧道 / IPv6 / 出口全都无从谈起,直接收尾,免得一堆连带失败盖住真正的原因
 if ! echo "$p" | grep -q '个节点'; then echo "订阅没拿到节点,后面的项跳过"; "$BIN" uninstall >/dev/null 2>&1; exit 1; fi
-( sleep 300; "$BIN" disconnect >/dev/null 2>&1; launchctl bootout system/com.maoyangui.godusevpn >/dev/null 2>&1 ) >/dev/null 2>&1 &
+( sleep 420; "$BIN" disconnect >/dev/null 2>&1; launchctl bootout system/com.maoyangui.godusevpn >/dev/null 2>&1 ) >/dev/null 2>&1 &
 deadman=$!
 "$BIN" connect >/dev/null
 # 连不上就地把日志抓出来:等跑到第 8 段卸载完,守护进程没了就再也问不到日志了
@@ -79,13 +79,25 @@ fi
 # 不依赖跑机自己有没有 v6:直接看隧道网卡上有没有 v6 地址、v6 默认路由是不是指向它——
 # 这两条成立就说明 v6 是"被接进隧道再拒绝",不可能从物理网卡漏出去。
 check "隧道网卡带 v6 地址" "$(ifconfig "$TUN" 2>/dev/null | grep -c 'inet6 fdfe:dcba:9876')" "$(ifconfig "$TUN" 2>/dev/null | awk '/inet6/{printf "%s ", $2}')"
-check "v6 默认路由指向隧道" "$(netstat -rn -f inet6 2>/dev/null | awk -v t="$TUN" '$1=="default"{for(i=2;i<=NF;i++) if($i==t) c++} END{print c+0}')" "$(netstat -rn -f inet6 2>/dev/null | awk '$1=="default"{printf "%s ", $0}' | cut -c1-70)"
+# sing-tun 不改 default,而是加一对 ::/1 + 8000::/1 盖住它(v4 同理),所以这三种目的地都算数
+check "v6 默认路由指向隧道" "$(netstat -rn -f inet6 2>/dev/null | awk -v t="$TUN" '($1=="default"||$1=="::/1"||$1=="8000::/1"){for(i=2;i<=NF;i++) if($i==t) c++} END{print c+0}')" "$(netstat -rn -f inet6 2>/dev/null | awk -v t="$TUN" '$NF==t{printf "%s ", $1}')"
 v6=$(pub6); check "v6 出网拿不到地址" "$([ -z "$v6" ] && echo 1 || echo 0)" "${v6:-(拿不到,符合预期)}"
 check "内核配置里有 v6 拒绝规则" "$(grep -c '"ip_version": 6' "/Library/Application Support/godusevpn/data/config.json" 2>/dev/null)" "$(grep -c '"ip_version": 6' "/Library/Application Support/godusevpn/data/config.json" 2>/dev/null) 条"
 
 echo "== 5. 出口"
 now=$(pub4); check "规则模式出口 IP 变了" "$([ -n "$now" ] && [ "$now" != "$before" ] && echo 1 || echo 0)" "before=$before now=$now"
 via=$(curl -s -4 --max-time 15 --resolve "api.ipify.org:443:$real" https://api.ipify.org); check "直连真实 IP 也走代理" "$([ -n "$via" ] && [ "$via" != "$before" ] && echo 1 || echo 0)" "real=$real got=$via"
+# 出网拿不到结果时当场细查一次:分清是 TCP 根本没进隧道、还是进了隧道出不去
+if [ -z "$now" ] || [ -z "$via" ]; then
+  echo "  (诊断) 明文 HTTP:"; curl -s -4 -o /dev/null -w '    code=%{http_code} 连上=%{time_connect}s 总=%{time_total}s\n' --max-time 12 http://cp.cloudflare.com/generate_204
+  echo "  (诊断) HTTPS 直接给 IP:"; curl -s -4 -o /dev/null -w '    code=%{http_code} 连上=%{time_connect}s TLS=%{time_appconnect}s 总=%{time_total}s\n' --max-time 12 --resolve "api.ipify.org:443:$real" https://api.ipify.org
+  echo "  (诊断) 这几秒的内核日志:"; "$BIN" logs 25 core 2>/dev/null | tail -18
+  # mixed 协议栈的 TCP 走的是系统栈(包要在 utun 上绕回本机);macOS 上如果这条路不通,换纯用户态的 gvisor 应该就好
+  echo "  (诊断) 换 gvisor 协议栈再试一次:"
+  "$BIN" settings tunStack=gvisor >/dev/null 2>&1; sleep 8; wait_status connected 60 >/dev/null 2>&1
+  echo "    gvisor 下出口: $(pub4)  (原出口 $before)"
+  "$BIN" settings tunStack=mixed >/dev/null 2>&1; sleep 8; wait_status connected 60 >/dev/null 2>&1
+fi
 lat=$("$BIN" test 2>&1); check "延迟测试" "$(echo "$lat" | grep -c ' ms')" "$lat"
 
 echo "== 6. 模式切换"

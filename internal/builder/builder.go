@@ -28,9 +28,12 @@ type Input struct {
 }
 
 const (
-	TestURL       = "http://www.gstatic.com/generate_204"
-	TunName       = "godusevpn"
-	tunAddr4      = "172.19.0.1/30"
+	TestURL  = "http://www.gstatic.com/generate_204"
+	TunName  = "godusevpn"
+	tunAddr4 = "172.19.0.1/30"
+	// TunDNS 隧道网段(172.19.0.0/30)里的对端地址。macOS 上把系统 DNS 指到这里,
+	// 查询就会从隧道进来被 hijack-dns 接住;指到 TUN 自己的地址会被内核当本机地址直接回环,收不到。
+	TunDNS        = "172.19.0.2"
 	tunAddr6      = "fdfe:dcba:9876::1/126"
 	fakeIP4       = "198.18.0.0/15"
 	fakeIP6       = "fc00::/18"
