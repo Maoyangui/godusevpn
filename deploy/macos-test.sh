@@ -23,7 +23,8 @@ tun4() { ifconfig | awk '/^utun/{i=$1} /inet 172\.19\.0\.1 /{sub(":","",i); prin
 ifaceFor() { route -n get "$1" 2>/dev/null | awk '/interface:/{print $2; exit}'; }
 ifaceFor6() { route -n get -inet6 "$1" 2>/dev/null | awk '/interface:/{print $2; exit}'; }
 api() { curl -s --max-time 12 -X POST -H 'Content-Type: application/json' -d "${2:-[]}" "http://127.0.0.1:9800/api/$1"; }
-wait_status() { i=0; while [ $i -lt "$2" ]; do "$BIN" status 2>/dev/null | grep -q "状态:.*$1" && return 0; sleep 1; i=$((i+1)); done; return 1; }
+# 比对状态要整词比:disconnected 里也含 connected,用 grep 会把"未连接"当成"已连接"
+wait_status() { i=0; while [ $i -lt "$2" ]; do "$BIN" status 2>/dev/null | awk -v s="$1" '/^状态:/{if ($2==s) f=1} END{exit f?0:1}' && return 0; sleep 1; i=$((i+1)); done; return 1; }
 
 echo "== 0. 环境"
 sw_vers | tr '\n' ' '; echo; uname -m
@@ -41,7 +42,9 @@ check "面板可达" "$(curl -s --max-time 5 http://127.0.0.1:9800/api/ping | gr
 
 echo "== 2. 订阅与连接"
 p=$("$BIN" profile "$SUB" 2>&1); check "订阅拉取" "$(echo "$p" | grep -c '个节点')" "$(echo "$p" | head -1)"
-( sleep 180; "$BIN" disconnect >/dev/null 2>&1; launchctl bootout system/com.maoyangui.godusevpn >/dev/null 2>&1 ) >/dev/null 2>&1 &
+# 订阅都没拉到节点,后面的连接 / 隧道 / IPv6 / 出口全都无从谈起,直接收尾,免得一堆连带失败盖住真正的原因
+if ! echo "$p" | grep -q '个节点'; then echo "订阅没拿到节点,后面的项跳过"; "$BIN" uninstall >/dev/null 2>&1; exit 1; fi
+( sleep 300; "$BIN" disconnect >/dev/null 2>&1; launchctl bootout system/com.maoyangui.godusevpn >/dev/null 2>&1 ) >/dev/null 2>&1 &
 deadman=$!
 "$BIN" connect >/dev/null
 if wait_status connected 90; then check "进入 connected" 1 "$("$BIN" status | sed -n 2p)"; else check "进入 connected" 0 "$("$BIN" status | sed -n 2p)"; fi
@@ -57,8 +60,17 @@ b=$(resolve4 www.baidu.com); check "国内域名是真实 IP" "$([ -n "$b" ] && 
 echo "== 4. IPv6:关闭时必须是真拒绝,且不能绕过隧道出去"
 a6=$(resolve6 www.google.com); check "AAAA 为空" "$([ -z "$a6" ] && echo 1 || echo 0)" "${a6:-(空)}"
 t6=$(ifaceFor6 2001:4860:4860::8888)
-check "v6 公网地址被隧道接管(不是从物理网卡出去)" "$([ -n "$TUN" ] && [ "$t6" = "$TUN" ] && echo 1 || echo 0)" "2001:4860:4860::8888 -> ${t6:-无路由}(隧道 $TUN,物理 $defif)"
-check "v6 不从物理网卡出去" "$([ "$t6" != "$defif" ] && echo 1 || echo 0)" "出口网卡 ${t6:-无}"
+# 这台机器本来有 IPv6 出口 → 必须看到 v6 被隧道接管;本来就没有 → 只能验证它没从物理网卡出去。
+# 两种情况都不允许出口网卡等于物理网卡,那才是真泄漏。
+if [ -n "$before6" ]; then
+  check "v6 公网地址被隧道接管(不从物理网卡出去)" "$([ -n "$TUN" ] && [ "$t6" = "$TUN" ] && echo 1 || echo 0)" "2001:4860:4860::8888 -> ${t6:-无路由}(隧道 $TUN,物理 $defif)"
+else
+  check "v6 没有绕开隧道的出路(本机无 v6 出口)" "$([ -z "$t6" ] || [ "$t6" = "$TUN" ] && echo 1 || echo 0)" "2001:4860:4860::8888 -> ${t6:-无路由}(隧道 $TUN,物理 $defif)"
+fi
+# 不依赖跑机自己有没有 v6:直接看隧道网卡上有没有 v6 地址、v6 默认路由是不是指向它——
+# 这两条成立就说明 v6 是"被接进隧道再拒绝",不可能从物理网卡漏出去。
+check "隧道网卡带 v6 地址" "$(ifconfig "$TUN" 2>/dev/null | grep -c 'inet6 fdfe:dcba:9876')" "$(ifconfig "$TUN" 2>/dev/null | awk '/inet6/{printf "%s ", $2}')"
+check "v6 默认路由指向隧道" "$(netstat -rn -f inet6 2>/dev/null | awk -v t="$TUN" '$1=="default"{for(i=2;i<=NF;i++) if($i==t) c++} END{print c+0}')" "$(netstat -rn -f inet6 2>/dev/null | awk '$1=="default"{printf "%s ", $0}' | cut -c1-70)"
 v6=$(pub6); check "v6 出网拿不到地址" "$([ -z "$v6" ] && echo 1 || echo 0)" "${v6:-(拿不到,符合预期)}"
 check "内核配置里有 v6 拒绝规则" "$(grep -c '"ip_version": 6' "/Library/Application Support/godusevpn/data/config.json" 2>/dev/null)" "$(grep -c '"ip_version": 6' "/Library/Application Support/godusevpn/data/config.json" 2>/dev/null) 条"
 

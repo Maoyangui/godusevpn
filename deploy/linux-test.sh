@@ -15,7 +15,8 @@ check() { if [ "${2:-0}" -gt 0 ] 2>/dev/null; then printf '[PASS] %s  %s\n' "$1"
 pub4() { curl -s -4 --max-time 15 https://api.ipify.org; }
 pub6() { curl -s -6 --max-time 8 https://api6.ipify.org; }
 resolve() { getent hosts "$1" | awk '{print $1; exit}'; }
-wait_status() { i=0; while [ $i -lt "$2" ]; do "$BIN" status 2>/dev/null | grep -q "状态:.*$1" && return 0; sleep 1; i=$((i+1)); done; return 1; }
+# 比对状态要整词比:disconnected 里也含 connected,用 grep 会把"未连接"当成"已连接"
+wait_status() { i=0; while [ $i -lt "$2" ]; do "$BIN" status 2>/dev/null | awk -v s="$1" '/^状态:/{if ($2==s) f=1} END{exit f?0:1}' && return 0; sleep 1; i=$((i+1)); done; return 1; }
 
 echo "== 0. 环境"
 uname -r; grep PRETTY_NAME /etc/os-release
