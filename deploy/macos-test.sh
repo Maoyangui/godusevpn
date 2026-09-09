@@ -70,7 +70,7 @@ echo "== 3.5 数据面自检(包进得去,回得来吗)"
 dnsq() { if command -v dig >/dev/null 2>&1; then dig +time=4 +tries=1 "@$1" example.com +short 2>&1 | head -2 | xargs echo; else nslookup -timeout=4 example.com "$1" 2>&1 | tail -3 | xargs echo; fi; }
 echo "  隧道网卡: $(ifconfig "$TUN" 2>/dev/null | xargs echo | cut -c1-200)"
 echo "  路由 172.19.0.2: $(route -n get 172.19.0.2 2>&1 | xargs echo | cut -c1-140)"
-echo "  v4 路由表(前 10 条):"; netstat -rn -f inet 2>/dev/null | head -12 | sed 's/^/    /'
+echo "  v4 路由表(前 10 条):"; netstat -rn -f inet 2>/dev/null | head -8 | sed 's/^/    /'
 echo "  TCP 握手 104.26.13.205:443: $( (nc -v -G 8 -w 8 -z 104.26.13.205 443 && echo 通) 2>&1 | xargs echo)"
 echo "  UDP DNS 经隧道(@223.5.5.5): $(dnsq 223.5.5.5)"
 echo "  UDP DNS 经隧道(@1.1.1.1): $(dnsq 1.1.1.1)"
@@ -104,11 +104,6 @@ if [ -z "$now" ] || [ -z "$via" ]; then
   echo "  (诊断) 明文 HTTP:"; curl -s -4 -o /dev/null -w '    code=%{http_code} 连上=%{time_connect}s 总=%{time_total}s\n' --max-time 12 http://cp.cloudflare.com/generate_204
   echo "  (诊断) HTTPS 直接给 IP:"; curl -s -4 -o /dev/null -w '    code=%{http_code} 连上=%{time_connect}s TLS=%{time_appconnect}s 总=%{time_total}s\n' --max-time 12 --resolve "api.ipify.org:443:$real" https://api.ipify.org
   echo "  (诊断) 这几秒的内核日志:"; "$BIN" logs 25 core 2>/dev/null | tail -18
-  # mixed 协议栈的 TCP 走的是系统栈(包要在 utun 上绕回本机);macOS 上如果这条路不通,换纯用户态的 gvisor 应该就好
-  echo "  (诊断) 换 gvisor 协议栈再试一次:"
-  "$BIN" settings tunStack=gvisor >/dev/null 2>&1; sleep 8; wait_status connected 60 >/dev/null 2>&1
-  echo "    gvisor 下出口: $(pub4)  (原出口 $before)"
-  "$BIN" settings tunStack=mixed >/dev/null 2>&1; sleep 8; wait_status connected 60 >/dev/null 2>&1
 fi
 lat=$("$BIN" test 2>&1); check "延迟测试" "$(echo "$lat" | grep -c ' ms')" "$lat"
 

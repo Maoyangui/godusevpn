@@ -146,8 +146,15 @@ func Build(in Input) ([]byte, error) {
 		// v6 地址一直加:关掉 IPv6 时也要把 v6 流量接进隧道,否则它绕过隧道从物理网卡直接出网(泄露),
 		// 进来之后由下面的 ip_version=6 拒绝规则丢掉,应用会立刻回退到 IPv4。
 		addr := []string{tunAddr4, tunAddr6}
+		stack := s.TUNStack
+		if darwin && stack != "gvisor" {
+			// macOS 上系统协议栈这条路走不通:sing-tun 把 utun 配成指向自己的点对点口(172.19.0.1 --> 172.19.0.1),
+			// 系统栈要把包绕回本机才能完成握手,绕不回去 —— 真机验收实测内核一条入站 TCP 连接都收不到、nc 直接超时,
+			// 换成纯用户态的 gvisor 立刻就通。所以这里不管设置里选了什么,macOS 一律用 gvisor。
+			stack = "gvisor"
+		}
 		tun := obj("type", "tun", "tag", "tun-in", "address", addr,
-			"auto_route", true, "strict_route", s.StrictRoute, "stack", s.TUNStack)
+			"auto_route", true, "strict_route", s.StrictRoute, "stack", stack)
 		if !darwin {
 			// macOS 的隧道网卡只能叫 utunN(内核分配),写死名字内核直接拒绝、内核起不来;留空让 sing-box 自己算
 			tun["interface_name"] = TunName

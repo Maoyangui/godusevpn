@@ -328,3 +328,36 @@ func TestTunInterfaceNameOnlyOffDarwin(t *testing.T) {
 		}
 	}
 }
+
+// macOS 上不管设置里选的是 mixed 还是 system,配置里都得落成 gvisor:
+// 系统协议栈在 macOS 上握不了手(真机验收实测 TCP 全超时),换 gvisor 才通。其它平台照设置走。
+func TestDarwinAlwaysGvisorStack(t *testing.T) {
+	for _, want := range []struct{ set, darwin, off string }{
+		{"mixed", "gvisor", "mixed"}, {"system", "gvisor", "system"}, {"gvisor", "gvisor", "gvisor"},
+	} {
+		s := settings.Default()
+		s.TUNStack = want.set
+		for _, darwin := range []bool{true, false} {
+			if !darwin && runtime.GOOS == "darwin" {
+				continue // 在 Mac 上跑时平台判定会把它变回 darwin,这一半测不了
+			}
+			raw, err := Build(Input{Profile: sampleProfile(), Settings: s, DataDir: t.TempDir(), ClashSecret: "sec", Darwin: darwin})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var c cfg
+			if err := json.Unmarshal(raw, &c); err != nil {
+				t.Fatal(err)
+			}
+			exp := want.off
+			if darwin {
+				exp = want.darwin
+			}
+			for _, in := range c.Inbounds {
+				if in["type"] == "tun" && in["stack"] != exp {
+					t.Fatalf("设置 %s,darwin=%v 时协议栈应为 %s,实际 %v", want.set, darwin, exp, in["stack"])
+				}
+			}
+		}
+	}
+}

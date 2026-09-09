@@ -429,7 +429,8 @@ async function renderSettings(el) {
   el.innerHTML = `
     <div class="card"><h3>${t('set.g.conn')}</h3>
       ${sw('f-tun', t('set.tun'), s.tun, t('set.tunHelp'))}
-      ${sel('f-stack', t('set.tunStack'), s.tunStack, [['mixed', 'mixed'], ['system', 'system'], ['gvisor', 'gvisor']])}
+      <!-- macOS 上只有 gvisor 能用:系统协议栈在 macOS 握不了手,选了也会被改回 gvisor,不如别给选 -->
+      ${sel('f-stack', t('set.tunStack'), state.platform === 'darwin' ? 'gvisor' : s.tunStack, state.platform === 'darwin' ? [['gvisor', 'gvisor']] : [['mixed', 'mixed'], ['system', 'system'], ['gvisor', 'gvisor']])}
       ${sw('f-strict', t('set.strict'), s.strictRoute, t('set.strictHelp'))}
       ${sw('f-lan', t('set.lan'), s.lanBypass, t('set.lanHelp'))}
       ${num('f-mixed', t('set.mixed'), s.mixedPort, t('set.mixedHelp'))}
