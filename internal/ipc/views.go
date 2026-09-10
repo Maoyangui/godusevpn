@@ -49,6 +49,7 @@ type StateView struct {
 	AutoNow  string            `json:"autoNow,omitempty"` // 自动选择组当前落在哪个节点(内核在跑时才有)
 	Nodes    []string          `json:"nodes"`
 	Delays   map[string]int    `json:"delays,omitempty"` // 最近一次全节点测速(节点 → 毫秒,-1 不通);内核没跑时界面靠它显示
+	Ping     int               `json:"ping,omitempty"`   // 当前节点最近一次测得的延迟(毫秒):连上后立刻测一次,之后每次健康检查顺带更新
 	Uptime   int64             `json:"uptime"`
 	Profile  *ProfileView      `json:"profile,omitempty"` // 当前订阅
 	Profiles []ProfileView     `json:"profiles"`          // 全部订阅

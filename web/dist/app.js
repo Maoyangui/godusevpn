@@ -5,7 +5,7 @@ const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': 
 let state = null;          // 最新 UIState
 let view = null;           // 当前页面名:onboard / home / settings / profiles / conns / logs / about
 let pageTimer = null;      // 页面自己的定时刷新
-let lastPing = 0;          // 最近一次测得的延迟
+let lastPing = 0;          // 手动测速刚测出来的延迟;服务每次推状态时会用它自己那份覆盖
 let tweens = {};           // 数字过渡
 
 // ---- 工具 ----
@@ -262,7 +262,8 @@ function updateHome() {
   else if (on) sub = (v.node === 'auto' ? (v.autoNow || t('pick.auto')) : v.node) + ' · ' + t('mode.' + v.mode);
   $('#status-sub').textContent = sub;
   $('#s-time').textContent = on && v.uptime ? fmtDuration(v.uptime) : '–';
-  $('#s-ping').textContent = on && lastPing ? lastPing + ' ' + t('common.ms') : '–';
+  const ping = v.ping || lastPing; // 服务每次健康检查都会测当前节点,推过来的最新;没有就用刚手动测的
+  $('#s-ping').textContent = on && ping ? ping + ' ' + t('common.ms') : '–';
   if (!on) { $('#s-down').textContent = '0 B/s'; $('#s-up').textContent = '0 B/s'; }
   $('#pk-mode-v').textContent = t('mode.' + v.mode);
   $('#pk-prof-v').textContent = v.profile ? v.profile.name : t('prof.empty');

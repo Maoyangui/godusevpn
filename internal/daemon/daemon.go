@@ -48,6 +48,7 @@ type Daemon struct {
 	secret   string
 	http     *http.Client
 	delays   map[string]int // 最近一次全节点测速结果
+	ping     int            // 当前节点最近一次测得的延迟(毫秒):健康检查本来就要测一次,顺手记下来给界面用
 	noListen bool
 }
 
@@ -403,6 +404,14 @@ func (d *Daemon) start(cfg []byte) error {
 	if s.Selected != "" {
 		_ = d.core.Select("proxy", s.Selected) // 内核里的当前节点跟着设置走(cache_file 也会记,双保险)
 	}
+	// 连上就先测一次当前节点:首页的延迟要马上有数,不然得等到第一次健康检查(三分钟后)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
+		defer cancel()
+		if ms, err := d.core.URLTest(ctx, "proxy", builder.TestURL); err == nil {
+			d.setPing(ms)
+		}
+	}()
 	if s.TUN {
 		// Linux:本机对外服务(SSH 等)的回包不能进 TUN,否则一连上远程管理就断;Windows 上是空操作
 		if err := netmode.Protect(builder.TunName, s.IPv6); err != nil {
@@ -421,6 +430,7 @@ func tunName() string { return builder.TunName }
 
 // stop 先停内核(TUN 随之消失),再撤路由规则;顺序反了会有一瞬间 TUN 还在而规则没了,远程会话可能掉。
 func (d *Daemon) stop() error {
+	d.setPing(0)
 	err := d.core.Stop()
 	netmode.Unprotect()
 	netmode.ClearGateway()
@@ -428,14 +438,24 @@ func (d *Daemon) stop() error {
 }
 
 // health 经代理测一次;内核不在了报崩溃码,让状态机重连。
+// 测出来的毫秒数顺手记下来:首页要显示当前节点的延迟,这一发本来就要打,不用再单独测。
 func (d *Daemon) health(ctx context.Context) error {
 	if !d.core.Running() {
 		return state.Errf(state.CodeCoreCrash, "内核未运行")
 	}
-	if _, err := d.core.URLTest(ctx, "proxy", builder.TestURL); err != nil {
+	ms, err := d.core.URLTest(ctx, "proxy", builder.TestURL)
+	if err != nil {
+		d.setPing(0)
 		return state.Errf(state.CodeNodeDown, "当前节点不可用: %v", err)
 	}
+	d.setPing(ms)
 	return nil
+}
+
+func (d *Daemon) setPing(ms int) {
+	d.mu.Lock()
+	d.ping = ms
+	d.mu.Unlock()
 }
 
 // maybeRefresh 定时刷新当前订阅;节点变了就重连。
@@ -566,6 +586,7 @@ func (d *Daemon) stateView() ipc.StateView {
 			v.Delays[k] = ms
 		}
 	}
+	v.Ping = d.ping
 	d.mu.Unlock()
 	return v
 }
@@ -690,6 +711,9 @@ func (d *Daemon) registerHandlers() {
 			in.Tag = "proxy"
 		}
 		ms, err := d.core.URLTest(context.Background(), in.Tag, builder.TestURL)
+		if err == nil && in.Tag == "proxy" {
+			d.setPing(ms)
+		}
 		if err != nil {
 			return nil, err
 		}
