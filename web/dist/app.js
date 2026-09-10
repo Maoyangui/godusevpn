@@ -564,6 +564,14 @@ function updateHome() {
   }
 }
 
+// openExternal 打开外部地址:桌面壳与安卓交给系统浏览器,网页面板自己开新标签。
+// 只放行 http(s) —— 续费地址来自订阅响应,不能让它塞别的协议进来交给系统去开。
+function openExternal(url) {
+  const u = String(url || '');
+  if (!/^https?:\/\//i.test(u)) return;
+  if (window.__web) window.open(u, '_blank', 'noopener');
+  else App().OpenURL(u);
+}
 async function pasteInto(sel) {
   let v = '';
   try { v = window.__web && navigator.clipboard && navigator.clipboard.readText ? (await navigator.clipboard.readText() || '').trim() : ((await App().ReadClipboard()) || '').trim(); } catch (e) { /* 没有剪贴板权限 */ }
@@ -791,14 +799,24 @@ function renderProfiles(el, editId) {
   };
   $('#prof-add').addEventListener('click', () => showForm(null));
 
-  // 当前这条摊开成一张大卡(用量条、节点数、到期、三个动作),其余的收成一列
+  // 续费按钮:面板给了地址才画,没给就什么都不显示 —— 画一个点不出东西的按钮更糟。
+  // 到期不到七天或流量用掉九成时换成橙色并写明还剩多少,该催的时候才催。
+  const renewBtn = (p, cls) => {
+    if (!p.webPage) return '';
+    const u = p.usage || {}, used = (u.upload || 0) + (u.download || 0);
+    const days = u.expire ? Math.floor((u.expire - Date.now() / 1000) / 86400) : -1;
+    const low = (days >= 0 && days <= 7) || (u.total > 0 && used / u.total >= 0.9);
+    const txt = !low ? t('prof.renew') : days >= 0 ? t('prof.renewLeft', { n: days }) : t('prof.renewSoon');
+    return `<button class="renewbtn ${cls} ${low ? 'warn' : ''}" data-act="renew" data-id="${esc(p.id)}"><svg viewBox="0 0 24 24"><path d="M14 5h5v5"/><path d="M19 5l-7.5 7.5"/><path d="M18 14v4a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4"/></svg>${esc(txt)}</button>`;
+  };
+  // 当前这条摊开成一张大卡(用量条、节点数、到期、三个动作),其余的收成一列小卡
   const bigCard = p => {
     const u = p.usage || {}, used = (u.upload || 0) + (u.download || 0);
     const pct = u.total ? Math.min(100, used / u.total * 100) : 0;
     const regions = regionCount(p);
     return `<div class="profcard">
       <div class="pc-top"><span class="dot ${p.error ? 'err' : 'on'}"></span><b>${esc(p.name)}</b><span class="pc-ago">${esc(fmtAgo(p.fetchedAt))}</span></div>
-      <div class="pc-use"><b>${esc(fmtBytes(used))}</b><span>${u.total ? t('prof.usedOf', { t: fmtBytes(u.total) }) : t('prof.usedFree')}</span></div>
+      <div class="pc-use"><b>${esc(fmtBytes(used))}</b><span>${u.total ? t('prof.usedOf', { t: fmtBytes(u.total) }) : t('prof.usedFree')}</span>${renewBtn(p, 'lg')}</div>
       <div class="pc-bar"><i style="width:${u.total ? pct.toFixed(1) : 0}%"></i></div>
       <div class="pc-meta">
         <span>${t('prof.nodes', { n: p.nodeCount })}${regions ? ' · ' + t('prof.regions', { n: regions }) : ''}</span>
@@ -811,21 +829,29 @@ function renderProfiles(el, editId) {
         <button class="btn sm icon danger" data-act="del" data-id="${esc(p.id)}" data-name="${esc(p.name)}" title="${t('prof.del')}"><svg viewBox="0 0 24 24"><path d="M4 7h16M9 7V5h6v2M6 7l1 13h10l1-13"/></svg></button>
       </div></div>`;
   };
-  const row = p => `<div class="item" data-act="use" data-id="${esc(p.id)}"><span class="check"></span>
-    <div class="name"><b>${esc(p.name)}</b><span>${p.error ? `<span style="color:var(--danger)">${esc(p.error)}</span>` : t('prof.nodes', { n: p.nodeCount }) + ' · ' + esc(fmtAgo(p.fetchedAt))}</span></div>
-    <button class="icon-btn xs muted" data-act="refresh" data-id="${esc(p.id)}" title="${t('prof.refresh')}">${ICON_REFRESH}</button></div>`;
-
+  // 其余订阅也是完整一张小卡:点整行切换过去,底下四个动作一个不少
+  // (改版时这里一度只剩刷新,编辑和删除没了路径)
+  const miniCard = p => `<div class="profmini">
+    <div class="pm-top" data-act="use" data-id="${esc(p.id)}"><span class="check"></span><b>${esc(p.name)}</b></div>
+    <div class="pm-meta"><span>${p.error ? `<em class="bad">${esc(p.error)}</em>` : t('prof.nodes', { n: p.nodeCount }) + ' · ' + esc(fmtAgo(p.fetchedAt))}</span>${renewBtn(p, 'sm')}</div>
+    <div class="pm-act">
+      <button class="btn sm" data-act="use" data-id="${esc(p.id)}">${t('prof.use')}</button>
+      <button class="btn sm" data-act="refresh" data-id="${esc(p.id)}">${t('prof.refresh')}</button>
+      <button class="btn sm" data-act="edit" data-id="${esc(p.id)}">${t('prof.edit')}</button>
+      <button class="btn sm icon danger" data-act="del" data-id="${esc(p.id)}" data-name="${esc(p.name)}" title="${t('prof.del')}"><svg viewBox="0 0 24 24"><path d="M4 7h16M9 7V5h6v2M6 7l1 13h10l1-13"/></svg></button>
+    </div></div>`;
   const load = async () => {
     let list = [];
     try { list = await App().GetProfiles() || []; } catch (e) { $('#prof-list').innerHTML = `<div class="empty">${esc(errText(e))}</div>`; return; }
     if (!list.length) { $('#prof-list').innerHTML = `<div class="empty">${t('prof.empty')}</div>`; return; }
     const cur = list.find(p => p.active) || list[0], rest = list.filter(p => p !== cur);
     $('#prof-list').innerHTML = bigCard(cur)
-      + (rest.length ? `<div class="sechead">${t('prof.others')}</div><div class="list">${rest.map(row).join('')}</div>` : '');
+      + (rest.length ? `<div class="sechead">${t('prof.others')}</div><div class="pmwrap">${rest.map(miniCard).join('')}</div>` : '');
     $('#prof-list').querySelectorAll('[data-act]').forEach(b => b.addEventListener('click', async e => {
       e.stopPropagation();
       const id = b.dataset.id, act = b.dataset.act;
       try {
+        if (act === 'renew') { openExternal((list.find(x => x.id === id) || {}).webPage); return; }
         if (act === 'use') { await App().SelectProfile(id); }
         else if (act === 'refresh') { b.disabled = true; b.classList.add('busy'); await App().RefreshProfile(id); toast(t('prof.refreshed'), 'ok'); }
         else if (act === 'edit') { showForm(list.find(x => x.id === id)); return; }
@@ -1321,7 +1347,7 @@ function renderAbout(el) {
     const pw = await askInput(t('about.webPwPrompt'), '', { password: true }); if (pw === null) return;
     try { await App().SetWebPassword(pw); toast(t('set.saved'), 'ok'); if (pw) setTimeout(() => location.reload(), 800); } catch (e) { toast(errText(e), 'err'); }
   });
-  $('#repo').addEventListener('click', () => { if (window.__web) window.open('https://github.com/Maoyangui/godusevpn', '_blank'); else App().OpenURL('https://github.com/Maoyangui/godusevpn'); });
+  $('#repo').addEventListener('click', () => openExternal('https://github.com/Maoyangui/godusevpn'));
 }
 
 // ---- 浏览器面板:登录 ----

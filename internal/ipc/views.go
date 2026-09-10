@@ -18,6 +18,7 @@ type ProfileView struct {
 	FetchedAt int64         `json:"fetchedAt"` // 0 = 还没拉到过
 	NodeCount int           `json:"nodeCount"`
 	Tags      []string      `json:"tags"`
+	WebPage   string        `json:"webPage,omitempty"` // 面板给的「选购 / 续费」地址,空 = 没配
 	Usage     profile.Usage `json:"usage"`
 	Error     string        `json:"error,omitempty"` // 最近一次拉取失败的原因
 }

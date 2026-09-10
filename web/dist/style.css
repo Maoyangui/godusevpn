@@ -485,3 +485,31 @@ body.tv .drawer-brand b { font-size: 22px; }
 .field.with-ic svg { position: absolute; left: 12px; top: 50%; transform: translateY(-50%); width: 15px; height: 15px; fill: none; stroke: var(--muted2); stroke-width: 2; stroke-linecap: round; pointer-events: none; }
 .field.with-ic input { padding-left: 34px; }
 .tag.warn { background: rgba(217, 119, 6, .12); border-color: rgba(217, 119, 6, .35); color: var(--warn); }
+
+/* 续费按钮:面板给了「选购 / 续费」地址才出现。弱于卡片底下那排操作(它是外链,不是管理动作),
+   但比纯文字链醒目;到期临近或流量快用尽时换成橙色。 */
+.renewbtn { display: inline-flex; align-items: center; gap: 5px; flex: none;
+  font-size: 12px; font-weight: 500; padding: 5px 12px; border-radius: 999px;
+  color: var(--brand2); background: rgba(47, 139, 255, .09); border: 1px solid rgba(47, 139, 255, .28);
+  transition: background .15s, border-color .15s; }
+.renewbtn:hover { background: rgba(47, 139, 255, .17); }
+.renewbtn:active { transform: scale(.97); }
+.renewbtn svg { width: 12px; height: 12px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.renewbtn.sm { font-size: 11px; padding: 3px 9px; }
+.renewbtn.lg { margin-left: auto; align-self: center; font-size: 12.5px; padding: 6px 14px; }
+.renewbtn.lg svg { width: 13px; height: 13px; }
+.renewbtn.sm svg { width: 11px; height: 11px; }
+.renewbtn.warn { color: var(--warn); background: rgba(217, 119, 6, .1); border-color: rgba(217, 119, 6, .32); }
+.renewbtn.warn:hover { background: rgba(217, 119, 6, .18); }
+
+/* 其余订阅:每条也是完整一张小卡,四个动作一个不少 */
+.pmwrap { display: flex; flex-direction: column; gap: 10px; }
+.profmini { background: var(--card); border: 1px solid var(--line); border-radius: 16px; padding: 12px 14px; box-shadow: 0 4px 14px rgba(15, 23, 42, .04); }
+.pm-top { display: flex; align-items: center; gap: 11px; }
+.pm-top b { flex: 1; min-width: 0; font-size: 14px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pm-meta { display: flex; align-items: center; gap: 10px; margin-top: 6px; padding-left: 29px; }
+.pm-meta > span { flex: 1; min-width: 0; font-size: 11px; color: var(--muted2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pm-meta em.bad { font-style: normal; color: var(--danger); }
+.pm-act { display: flex; gap: 8px; margin-top: 11px; padding-top: 10px; border-top: 1px solid var(--line); }
+.pm-act .btn { flex: 1; padding: 7px 0; border-radius: 10px; }
+.pm-act .btn.icon { flex: none; width: 38px; padding: 7px 0; }

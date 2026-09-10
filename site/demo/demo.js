@@ -79,6 +79,7 @@
   };
   const PROFILE = {
     id: 'p1', name: '演示订阅', url: 'https://panel.example.com/sub/demo', active: true,
+    webPage: 'https://example.com/buy', // 演示里的续费地址,真实客户端读的是面板发的 Profile-Web-Page-Url
     title: '演示订阅', fetchedAt: Math.floor(Date.now() / 1000) - 3600, nodeCount: NODES.length, tags: NODES.map(n => n.name),
     usage: { upload: 4.2e9, download: 6.1e10, total: 2e11, expire: Math.floor(Date.now() / 1000) + 86400 * 46 },
   };

@@ -30,8 +30,11 @@ type Usage struct {
 }
 
 type Profile struct {
-	URL       string            `json:"url"`
-	Title     string            `json:"title"`
+	URL   string `json:"url"`
+	Title string `json:"title"`
+	// WebPage 面板给的「选购 / 续费」地址(Profile-Web-Page-Url 头),空 = 面板没配。
+	// 面板那边已经按"代理填了用代理的,否则用主面板的"解析过,这里拿到的就是这条订阅该去的地方。
+	WebPage   string            `json:"webPage,omitempty"`
 	FetchedAt int64             `json:"fetchedAt"`
 	Outbounds []json.RawMessage `json:"outbounds"` // 清洗后的节点出站
 	Tags      []string          `json:"tags"`
@@ -89,11 +92,31 @@ func Parse(body []byte, hdr http.Header) (*Profile, error) {
 	if hdr != nil {
 		p.Title = decodeTitle(hdr.Get("Profile-Title"))
 		p.Usage = parseUserinfo(hdr.Get("Subscription-Userinfo"))
+		p.WebPage = safeWebPage(hdr.Get("Profile-Web-Page-Url"))
 	}
 	return p, nil
 }
 
 // decodeTitle Profile-Title 可能是 base64:xxx(Clash 系约定)或 RFC 8187 的 utf-8”%E4%B8%AD 形式。
+// safeWebPage 只认 http / https,别的一律当没有。
+// 订阅是外部输入,不能让它塞一个 file: / javascript: 之类的东西进来再交给系统去打开。
+func safeWebPage(v string) string {
+	v = strings.TrimSpace(v)
+	if len(v) > 2048 {
+		return ""
+	}
+	l := strings.ToLower(v)
+	if !strings.HasPrefix(l, "http://") && !strings.HasPrefix(l, "https://") {
+		return ""
+	}
+	for _, r := range v {
+		if r < 0x20 || r == 0x7f {
+			return ""
+		}
+	}
+	return v
+}
+
 func decodeTitle(v string) string {
 	v = strings.TrimSpace(v)
 	if v == "" {

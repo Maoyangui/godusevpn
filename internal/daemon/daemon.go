@@ -710,6 +710,7 @@ func (d *Daemon) profileViews() ([]ipc.ProfileView, *ipc.ProfileView) {
 		v := ipc.ProfileView{ID: sp.ID, Name: sp.Name, URL: sp.URL, Active: sp.ID == d.settings.ActiveProfile, Error: d.fetchErr[sp.ID]}
 		if c := d.profiles[sp.ID]; c != nil {
 			v.Title, v.FetchedAt, v.NodeCount, v.Tags, v.Usage = c.Title, c.FetchedAt, len(c.Outbounds), c.Tags, c.Usage
+			v.WebPage = c.WebPage
 		}
 		out = append(out, v)
 		if v.Active {
