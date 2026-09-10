@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -372,7 +373,8 @@ func (d *Daemon) prepare(ctx context.Context) ([]byte, error) {
 	if s.NetMode == settings.NetGateway {
 		d.resolveDeviceIPs(&s) // 设备策略按当前 IP 生效
 	}
-	cfg, err := builder.Build(builder.Input{Profile: p, Settings: s, DataDir: paths.DataDir(), ClashSecret: d.secret, RuleSetDir: paths.RuleSets()})
+	cfg, err := builder.Build(builder.Input{Profile: p, Settings: s, DataDir: paths.DataDir(), ClashSecret: d.secret, RuleSetDir: paths.RuleSets(),
+		NodeIPs: resolveNodeHosts(ctx, p)})
 	if err != nil {
 		return nil, state.Errf(state.CodeConfig, "生成配置: %v", err)
 	}
@@ -452,6 +454,53 @@ func (d *Daemon) maybeRefresh(ctx context.Context) {
 		d.logf("订阅节点有变化,重新应用")
 		d.machine.Restart()
 	}
+}
+
+// resolveNodeHosts 把订阅里用域名写的节点服务器解析成地址,给"节点服务器直连"那条规则兜底。
+//
+// 用域名写的节点,在隧道里是靠嗅探到的 SNI 命中直连规则的;不带 TLS 的协议嗅不出域名,那时就只能按地址认。
+// 解析不出来不算错(退回只按域名匹配),所以整体给一个短超时,不让它拖慢连接。
+func resolveNodeHosts(ctx context.Context, p *profile.Profile) map[string][]string {
+	if p == nil {
+		return nil
+	}
+	hosts := map[string]bool{}
+	for _, hp := range p.Servers() {
+		h := hp
+		if i := strings.LastIndex(h, ":"); i > 0 {
+			h = h[:i]
+		}
+		if h == "" || settings.IsIP(h) {
+			continue // 本来就是地址,规则里已经按地址写了
+		}
+		hosts[h] = true
+	}
+	if len(hosts) == 0 {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, 4*time.Second)
+	defer cancel()
+	out := map[string][]string{}
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	for h := range hosts {
+		wg.Add(1)
+		go func(h string) {
+			defer wg.Done()
+			addrs, err := net.DefaultResolver.LookupHost(ctx, h)
+			if err != nil || len(addrs) == 0 {
+				return
+			}
+			mu.Lock()
+			out[h] = addrs
+			mu.Unlock()
+		}(h)
+	}
+	wg.Wait()
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 func sameNodes(a, b *profile.Profile) bool {

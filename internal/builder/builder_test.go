@@ -414,3 +414,51 @@ func TestNodeServersBypassProxy(t *testing.T) {
 		}
 	}
 }
+
+// 换一份完全不同的订阅(域名 + 别的端口)照样要盖住:规则是从订阅里现算的,没有写死任何地址。
+// 域名节点靠嗅探到的 SNI 命中;嗅不出域名的协议(比如不带 TLS 的 shadowsocks)靠解析出来的地址兜底。
+func TestNodeRulesFollowProfile(t *testing.T) {
+	p := &profile.Profile{
+		Tags: []string{"甲", "乙"},
+		Outbounds: []json.RawMessage{
+			json.RawMessage(`{"type":"shadowsocks","tag":"甲","server":"a.new-provider.net","server_port":8388,"method":"aes-128-gcm","password":"p"}`),
+			json.RawMessage(`{"type":"anytls","tag":"乙","server":"a.new-provider.net","server_port":9443,"password":"p"}`),
+		},
+	}
+	raw, err := Build(Input{Profile: p, Settings: settings.Default(), DataDir: t.TempDir(), ClashSecret: "sec",
+		NodeIPs: map[string][]string{"a.new-provider.net": {"203.0.113.7", "198.18.0.9", "127.0.0.1", "10.1.2.3"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var c cfg
+	if err := json.Unmarshal(raw, &c); err != nil {
+		t.Fatal(err)
+	}
+	var byDomain, byIP map[string]any
+	modeAt := -1
+	for i, r := range c.Route.Rules {
+		switch {
+		case r["outbound"] == "direct" && r["domain"] != nil:
+			byDomain = r
+		case r["outbound"] == "direct" && r["ip_cidr"] != nil:
+			byIP = r
+		case r["clash_mode"] != nil && modeAt < 0:
+			modeAt = i
+		}
+	}
+	if byDomain == nil || byIP == nil {
+		t.Fatalf("域名节点要同时有按域名与按地址两条规则:%v %v", byDomain, byIP)
+	}
+	if fmt.Sprint(byDomain["domain"]) != "[a.new-provider.net]" {
+		t.Fatalf("域名不对: %v", byDomain["domain"])
+	}
+	// 两个端口归到同一台服务器;解析结果里的 fake-ip、回环、私网都要挡掉
+	for _, r := range []map[string]any{byDomain, byIP} {
+		if got := fmt.Sprint(r["port"]); got != "[8388 9443]" {
+			t.Fatalf("端口应归并成两个: %s", got)
+		}
+	}
+	if got := fmt.Sprint(byIP["ip_cidr"]); got != "[203.0.113.7/32]" {
+		t.Fatalf("只应保留真实公网地址(fake-ip / 回环 / 私网要挡掉): %s", got)
+	}
+}

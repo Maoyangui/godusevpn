@@ -24,8 +24,12 @@ type Input struct {
 	DataDir     string // cache.db 放这里
 	ClashSecret string // Clash API 密钥,服务每次启动随机生成
 	RuleSetDir  string // 内置离线规则集目录:有 <tag>.srs 就用本地文件,没有走远程
-	Darwin      bool   // 按 macOS 生成:隧道网卡名由内核分配(utunN),不能写死;不传时看运行平台
-	Android     bool   // 按 Android 生成:"进程名"是应用包名(package_name),按应用直连的应用整个绕过 VPN(exclude_package);不传时看运行平台
+	// NodeIPs 用域名写的节点服务器解析出来的地址(域名 → 地址列表)。
+	// 域名节点在隧道里靠嗅探到的 SNI 命中直连规则,但不带 TLS 的协议嗅不出域名,这份是兜底。
+	// 拿不到就留空,退回只按域名匹配。
+	NodeIPs map[string][]string
+	Darwin  bool // 按 macOS 生成:隧道网卡名由内核分配(utunN),不能写死;不传时看运行平台
+	Android bool // 按 Android 生成:"进程名"是应用包名(package_name),按应用直连的应用整个绕过 VPN(exclude_package);不传时看运行平台
 }
 
 const (
@@ -235,10 +239,15 @@ func Build(in Input) ([]byte, error) {
 		r := obj("port", n.Ports, "outbound", "direct")
 		if n.IsIP {
 			r["ip_cidr"] = []string{n.Host}
-		} else {
-			r["domain"] = []string{n.Host}
+			rules = append(rules, r)
+			continue
 		}
+		r["domain"] = []string{n.Host}
 		rules = append(rules, r)
+		// 一条规则里的字段是"与"的关系,域名和地址盖不到一条里,只能再来一条
+		if cidrs := hostCIDRs(in.NodeIPs[n.Host]); len(cidrs) > 0 {
+			rules = append(rules, obj("ip_cidr", cidrs, "port", n.Ports, "outbound", "direct"))
+		}
 	}
 	dr := s.DefaultRules
 	rules = append(rules, withOutbound(obj("ip_is_private", true), dr.Private))
@@ -383,6 +392,31 @@ func cidrSuffix(ip string) string {
 	}
 	return "/32"
 }
+
+// hostCIDRs 把解析出来的地址转成规则要的写法,顺手挡掉不该进来的:
+// 隧道开着时解析域名会拿到 fake-ip(198.18/15),把它写进直连规则等于把一整段假地址放直连。
+func hostCIDRs(ips []string) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, s := range ips {
+		ip, err := netip.ParseAddr(strings.TrimSpace(s))
+		if err != nil || ip.IsLoopback() || ip.IsPrivate() || ip.IsUnspecified() || ip.IsLinkLocalUnicast() {
+			continue
+		}
+		if ip.Is4() && fakeIP4Prefix.Contains(ip) {
+			continue
+		}
+		c := ip.String() + "/" + itoa(ip.BitLen())
+		if seen[c] {
+			continue
+		}
+		seen[c] = true
+		out = append(out, c)
+	}
+	return out
+}
+
+var fakeIP4Prefix = netip.MustParsePrefix(fakeIP4)
 
 // nodeServer 一台节点服务器,以及订阅里用到它的所有端口。
 type nodeServer struct {
