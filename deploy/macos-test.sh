@@ -105,10 +105,15 @@ check "节点服务器没被套一层代理" "$([ "${n:-0}" -eq 0 ] && echo 1 ||
 # 上面那条只能证明"这一轮没发生",这条能证明规则真的命中(测速用的协议不一定是 TCP,不主动打就测不到)。
 np=$(nodepairs | head -1)
 if [ -n "$np" ]; then
-  nc -G 3 -w 3 -z "${np%:*}" "${np##*:}" >/dev/null 2>&1
-  sleep 1
-  hit=$("$BIN" logs 200 core 2>/dev/null | grep "outbound/direct" | grep -cF "outbound connection to $np")
-  check "朝节点服务器发起的连接判给了直连" "$hit" "$np"
+  # 打一发就走的日志不一定马上落到能读到的那一段(内核日志很吵),多试几次再判失败
+  hit=0; i=0
+  while [ $i -lt 3 ] && [ "$hit" -eq 0 ]; do
+    nc -G 3 -w 3 -z "${np%:*}" "${np##*:}" >/dev/null 2>&1
+    sleep 2
+    hit=$("$BIN" logs 400 core 2>/dev/null | grep "outbound/direct" | grep -cF "outbound connection to $np")
+    i=$((i+1))
+  done
+  check "朝节点服务器发起的连接判给了直连" "$hit" "$np(试了 $i 次)"
 fi
 
 echo "== 4. IPv6:关闭时必须是真拒绝,且不能绕过隧道出去"
