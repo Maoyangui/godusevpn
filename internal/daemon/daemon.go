@@ -568,6 +568,10 @@ func (d *Daemon) registerHandlers() {
 			if err := d.core.SetMode(builder.ModeName(s.Mode)); err != nil {
 				return nil, err
 			}
+			// 模式同样只对新连接生效:切成直连了,已经在代理里的连接还在代理里走,得掐掉重来
+			if err := d.core.CloseAllConnections(); err != nil {
+				d.logf("切模式后掐断旧连接失败(旧连接会继续按老模式走): %v", err)
+			}
 		}
 		return d.stateView(), nil
 	})
@@ -582,6 +586,11 @@ func (d *Daemon) registerHandlers() {
 		if d.core.Running() {
 			if err := d.core.Select("proxy", tag); err != nil {
 				return nil, err
+			}
+			// 选择组只对新连接生效:不掐掉老连接,用户会看到"选了新节点,连接列表里还是老节点",
+			// 长连接(Telegram、推送、anytls 的连接池)能挂十几分钟不断。掐掉后应用自己重连,就都走新节点了。
+			if err := d.core.CloseAllConnections(); err != nil {
+				d.logf("切节点后掐断旧连接失败(旧连接会继续用老节点): %v", err)
 			}
 		}
 		s := d.getSettings()

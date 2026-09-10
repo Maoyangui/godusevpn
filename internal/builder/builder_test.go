@@ -365,3 +365,42 @@ func TestDarwinAlwaysGvisorStack(t *testing.T) {
 		}
 	}
 }
+
+// 节点服务器必须直连,而且要排在模式规则前面:否则内核自己去连节点(定时测速每轮都要连一遍)
+// 会被自己的 TUN 接住再按模式转出去,全局模式下就绕成"本机 → 隧道 → 当前节点 → 目标节点"。
+func TestNodeServersBypassProxy(t *testing.T) {
+	p := sampleProfile()
+	p.Tags = append(p.Tags, "日本3")
+	p.Outbounds = append(p.Outbounds, json.RawMessage(`{"type":"anytls","tag":"日本3","server":"az.example.com","server_port":42222,"password":"p","tls":{"enabled":true,"server_name":"az.example.com"}}`))
+	raw, err := Build(Input{Profile: p, Settings: settings.Default(), DataDir: t.TempDir(), ClashSecret: "sec"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var c cfg
+	if err := json.Unmarshal(raw, &c); err != nil {
+		t.Fatal(err)
+	}
+	domainAt, cidrAt, modeAt := -1, -1, -1
+	for i, r := range c.Route.Rules {
+		switch {
+		case r["outbound"] == "direct" && r["domain"] != nil:
+			if fmt.Sprint(r["domain"]) != "[az.example.com]" {
+				t.Fatalf("直连的节点域名不对: %v", r["domain"])
+			}
+			domainAt = i
+		case r["outbound"] == "direct" && r["ip_cidr"] != nil:
+			if got := fmt.Sprint(r["ip_cidr"]); got != "[1.2.3.4/32 1.2.3.5/32]" {
+				t.Fatalf("直连的节点 IP 不对: %s", got)
+			}
+			cidrAt = i
+		case r["clash_mode"] != nil && modeAt < 0:
+			modeAt = i
+		}
+	}
+	if domainAt < 0 || cidrAt < 0 {
+		t.Fatalf("缺少节点服务器直连规则(域名 %d,IP %d)", domainAt, cidrAt)
+	}
+	if modeAt < 0 || domainAt > modeAt || cidrAt > modeAt {
+		t.Fatalf("节点直连规则必须排在模式规则前面:域名 %d,IP %d,模式 %d", domainAt, cidrAt, modeAt)
+	}
+}

@@ -361,3 +361,21 @@ func probeBox(ctx context.Context, box *sb.Box, tags []string, link string) map[
 	wg.Wait()
 	return res
 }
+
+// CloseAllConnections 掐断当前所有连接,并让各出站重建自己的长连接(与面板上"全部断开"同一套动作)。
+//
+// 切节点或切模式之后要调一次:选择组只对新连接生效,已经建立的 TCP 会一直挂在老节点上 ——
+// 用户看到的就是"我明明选了新节点,连接列表里还是老的"。长连接(Telegram、推送、anytls 的连接池)
+// 尤其明显,能挂十几分钟不断。掐掉之后应用自己会重连,新连接就走新节点了。
+func (c *Core) CloseAllConnections() error {
+	_, ctx, ok := c.snapshot()
+	if !ok {
+		return errors.New("内核未运行")
+	}
+	nm := service.FromContext[adapter.NetworkManager](ctx)
+	if nm == nil {
+		return errors.New("拿不到网络管理器")
+	}
+	nm.ResetNetwork(ctx) // 关掉所有被跟踪的连接,再通知出入站"网络变了",让它们丢掉自己的长连接
+	return nil
+}

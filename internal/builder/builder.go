@@ -7,6 +7,7 @@ package builder
 import (
 	"encoding/json"
 	"errors"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -223,6 +224,19 @@ func Build(in Input) ([]byte, error) {
 	} else {
 		rules = append(rules, obj("action", "resolve")) // 开 IPv6 也要先解析,否则 IP 类规则(geoip、IP 段)对域名连接不生效
 	}
+	// 节点服务器本身一律直连,而且要排在所有模式规则前面。
+	// 不这么做的话,内核自己去连节点(定时测速要把每个节点都连一遍)的那一步会被自己的 TUN 接住,
+	// 再按当前模式转出去 —— 全局模式下就变成"本机 → 隧道 → 当前节点 → 目标节点",白绕一跳、
+	// 流量算两份,测出来的延迟也不是节点的真实延迟;要是主节点本身就是被绕的那个,还会自己套自己。
+	// 真机上实测过:hysteria2(UDP)那些没事,anytls(TCP)那些每次测速都在绕圈。
+	if doms, cidrs := nodeAddrs(in.Profile); len(doms) > 0 || len(cidrs) > 0 {
+		if len(doms) > 0 {
+			rules = append(rules, obj("domain", doms, "outbound", "direct"))
+		}
+		if len(cidrs) > 0 {
+			rules = append(rules, obj("ip_cidr", cidrs, "outbound", "direct"))
+		}
+	}
 	dr := s.DefaultRules
 	rules = append(rules, withOutbound(obj("ip_is_private", true), dr.Private))
 	rules = append(rules,
@@ -365,6 +379,34 @@ func cidrSuffix(ip string) string {
 		return "/128"
 	}
 	return "/32"
+}
+
+// nodeAddrs 订阅里所有节点的服务器地址,分成域名与 IP 两份(去重,顺序稳定)。
+// 域名那份靠嗅探到的 SNI 命中,IP 那份靠解析后的目的地址命中,两条都要有才盖得全。
+func nodeAddrs(p *profile.Profile) (domains, cidrs []string) {
+	if p == nil {
+		return nil, nil
+	}
+	seen := map[string]bool{}
+	for _, raw := range p.Outbounds {
+		var m struct {
+			Server string `json:"server"`
+		}
+		if json.Unmarshal(raw, &m) != nil {
+			continue
+		}
+		h := strings.TrimSpace(m.Server)
+		if h == "" || seen[h] {
+			continue
+		}
+		seen[h] = true
+		if ip, err := netip.ParseAddr(h); err == nil {
+			cidrs = append(cidrs, ip.String()+"/"+itoa(ip.BitLen()))
+		} else {
+			domains = append(domains, h)
+		}
+	}
+	return domains, cidrs
 }
 
 // withOutbound 给一条规则填出口:reject 是动作,其余是出站标签。默认规则的三项可配置,统一走这里。
