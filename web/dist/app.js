@@ -238,7 +238,7 @@ function nav(name, arg) {
   view = name;
   clearInterval(pageTimer); pageTimer = null;
   const el = document.createElement('div');
-  el.className = 'view ' + (name === 'home' ? 'home' : '') + (name === 'settings' || name === 'ruleEdit' ? ' has-bar' : ''); // 带保存栏的页:内容不够高时保存栏也贴底
+  el.className = 'view ' + name + (name === 'settings' || name === 'ruleEdit' ? ' has-bar' : ''); // 页名当类名用;带保存栏的页内容不够高时保存栏也贴底
   stage.appendChild(el);
   PAGES[name](el, arg);
   setTop(name === 'home' || name === 'onboard' ? t('app.name') : t(TITLES[name]), name !== 'home' && name !== 'onboard');
@@ -250,11 +250,22 @@ function navHome() { nav(state && state.view.profiles && state.view.profiles.len
 function renderOnboard(el) {
   el.innerHTML = `<div class="onboard">
     <svg class="logo" viewBox="-16 -50 400 400"><defs><linearGradient id="g2" gradientUnits="userSpaceOnUse" x1="70" y1="70" x2="310" y2="270"><stop offset="0" stop-color="#6a44f2"/><stop offset=".55" stop-color="#2f8bff"/><stop offset="1" stop-color="#18e3e8"/></linearGradient></defs><g fill="none" stroke="url(#g2)" stroke-width="44" stroke-linecap="round" stroke-linejoin="round"><path d="M86 248V84l146 124v52"/><path d="M332 78l-88 96"/></g><path fill="url(#g2)" d="M118 192l52 30-52 30z"/></svg>
-    <h1>${t('onboard.title')}</h1><p>${t('onboard.desc')}</p>
-    <div class="field with-btn"><input type="url" id="ob-url" placeholder="${t('onboard.url')}" autofocus><button class="btn sm ghost" id="ob-paste">${t('common.paste')}</button></div>
-    <div class="field"><input type="text" id="ob-name" placeholder="${t('onboard.name')}"></div>
+    <h1>${t('onboard.title')}</h1>
+    <p>${t('onboard.desc')}</p>
+    <div class="field with-btn"><input type="url" id="ob-url" placeholder="${t('onboard.url')}" spellcheck="false" autofocus><button class="btn sm ghost" id="ob-paste">${t('common.paste')}</button></div>
+    <input type="hidden" id="ob-name">
     <button class="btn primary block" id="ob-go">${t('onboard.go')}</button>
     <div id="ob-err" class="small" style="color:var(--danger);min-height:18px"></div>
+    <div class="or"><span></span><em>${t('onboard.or')}</em><span></span></div>
+    <div class="tipcard">
+      <span class="tipic"><svg viewBox="0 0 24 24"><path d="M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7-7l-1.7 1.7"/><path d="M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7 7l1.7-1.7"/></svg></span>
+      <span class="tiptxt"><b>${t('onboard.import')}</b><span>${t('onboard.importDesc')}</span></span>
+    </div>
+    <div class="grow1"></div>
+    <div class="notecard">
+      <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8v.5"/></svg>
+      <span>${t('onboard.privacy')}</span>
+    </div>
     <div id="ob-svc"></div>
   </div>`;
   updateOnboardSvc();
@@ -723,45 +734,85 @@ async function testNodes(force) {
 }
 
 // ---- 订阅管理 ----
+// fmtAgo "3 分钟前更新" 这类相对时间;超过一天就写日期,免得算成"29 小时前"
+function fmtAgo(ts) {
+  if (!ts) return t('prof.never');
+  const s = Math.max(0, Math.floor(Date.now() / 1000 - ts));
+  if (s < 90) return t('ago.now');
+  if (s < 3600) return t('ago.min', { n: Math.floor(s / 60) });
+  if (s < 86400) return t('ago.hour', { n: Math.floor(s / 3600) });
+  return t('prof.updated', { t: fmtTime(ts) });
+}
+// regionCount 订阅里一共几个地区:标签就是节点名,认得出地区的去重数一下
+function regionCount(p) {
+  const set = new Set();
+  for (const n of p.tags || []) { const c = geoCode(n); if (c) set.add(c); }
+  return set.size;
+}
 function renderProfiles(el, editId) {
-  el.innerHTML = `<div id="prof-form"></div><div class="list" id="prof-list"></div><div style="height:12px"></div><button class="btn primary block" id="prof-add">${t('prof.add')}</button>`;
+  el.innerHTML = `<div id="prof-form"></div><div id="prof-list"></div>
+    <button class="addcard" id="prof-add">
+      <span class="addic"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></span>
+      <span class="addtxt"><b>${t('prof.add')}</b><span>${t('prof.addHint')}</span></span>
+    </button>`;
   const showForm = (p) => {
     $('#prof-form').innerHTML = `<div class="card"><div class="field"><label>${t('prof.name')}</label><input type="text" id="pf-name" value="${esc(p ? p.name : '')}"></div>
-      <div class="field with-btn"><label>${t('prof.url')}</label><input type="url" id="pf-url" value="${esc(p ? p.url : '')}"><button class="btn sm ghost" id="pf-paste">${t('common.paste')}</button></div>
+      <div class="field with-btn"><label>${t('prof.url')}</label><input type="url" id="pf-url" spellcheck="false" value="${esc(p ? p.url : '')}"><button class="btn sm ghost" id="pf-paste">${t('common.paste')}</button></div>
       <div class="row"><button class="btn primary" id="pf-save">${t('prof.save')}</button><button class="btn" id="pf-cancel">${t('prof.cancel')}</button><span id="pf-busy"></span></div></div>`;
     $('#pf-cancel').addEventListener('click', () => { $('#prof-form').innerHTML = ''; });
     $('#pf-paste').addEventListener('click', () => pasteInto('#pf-url'));
     $('#pf-save').addEventListener('click', async () => {
       const b = $('#pf-save'); b.disabled = true; $('#pf-busy').innerHTML = '<span class="spinner"></span>';
       try {
-        if (p) await App().UpdateProfile(p.id, $('#pf-name').value, $('#pf-url').value); else await App().AddProfile($('#pf-name').value, $('#pf-url').value);
-        toast(t(p ? 'prof.saved' : 'prof.added'), 'ok'); $('#prof-form').innerHTML = ''; await load();
+        if (p && p.id) await App().UpdateProfile(p.id, $('#pf-name').value, $('#pf-url').value); else await App().AddProfile($('#pf-name').value, $('#pf-url').value);
+        toast(t(p && p.id ? 'prof.saved' : 'prof.added'), 'ok'); $('#prof-form').innerHTML = ''; await load();
       } catch (e) { toast(errText(e), 'err'); }
       b.disabled = false; $('#pf-busy').innerHTML = '';
     });
-    setTimeout(() => $(p ? '#pf-name' : '#pf-url').focus(), 80);
+    setTimeout(() => $(p && p.id ? '#pf-name' : '#pf-url').focus(), 80);
   };
   $('#prof-add').addEventListener('click', () => showForm(null));
-  const load = async () => {
-    let list = [];
-    try { list = await App().GetProfiles(); } catch (e) { $('#prof-list').innerHTML = `<div class="empty">${esc(errText(e))}</div>`; return; }
-    if (!list.length) { $('#prof-list').innerHTML = `<div class="empty">${t('prof.empty')}</div>`; return; }
-    $('#prof-list').innerHTML = list.map(p => `<div class="item" style="flex-wrap:wrap">
-      <div class="name" style="flex-basis:100%"><b>${esc(p.name)} ${p.active ? `<span class="tag">${t('prof.inUse')}</span>` : ''}</b><span>${esc(profileLine(p))}<br>${p.fetchedAt ? t('prof.updated', { t: fmtTime(p.fetchedAt) }) : t('prof.never')}${p.error ? ' · <span style="color:var(--danger)">' + esc(p.error) + '</span>' : ''}</span></div>
-      <div class="row" style="flex-basis:100%;gap:6px">
-        ${p.active ? '' : `<button class="btn sm" data-act="use" data-id="${esc(p.id)}">${t('prof.use')}</button>`}
+
+  // 当前这条摊开成一张大卡(用量条、节点数、到期、三个动作),其余的收成一列
+  const bigCard = p => {
+    const u = p.usage || {}, used = (u.upload || 0) + (u.download || 0);
+    const pct = u.total ? Math.min(100, used / u.total * 100) : 0;
+    const regions = regionCount(p);
+    return `<div class="profcard">
+      <div class="pc-top"><span class="dot ${p.error ? 'err' : 'on'}"></span><b>${esc(p.name)}</b><span class="pc-ago">${esc(fmtAgo(p.fetchedAt))}</span></div>
+      <div class="pc-use"><b>${esc(fmtBytes(used))}</b><span>${u.total ? t('prof.usedOf', { t: fmtBytes(u.total) }) : t('prof.usedFree')}</span></div>
+      <div class="pc-bar"><i style="width:${u.total ? pct.toFixed(1) : 0}%"></i></div>
+      <div class="pc-meta">
+        <span>${t('prof.nodes', { n: p.nodeCount })}${regions ? ' · ' + t('prof.regions', { n: regions }) : ''}</span>
+        <span>${u.expire ? t('prof.expire', { d: fmtDay(u.expire) }) : ''}</span>
+      </div>
+      ${p.error ? `<div class="pc-err">${esc(p.error)}</div>` : ''}
+      <div class="pc-act">
         <button class="btn sm" data-act="refresh" data-id="${esc(p.id)}">${t('prof.refresh')}</button>
         <button class="btn sm" data-act="edit" data-id="${esc(p.id)}">${t('prof.edit')}</button>
-        <span class="grow"></span><button class="btn sm danger ghost" data-act="del" data-id="${esc(p.id)}" data-name="${esc(p.name)}">${t('prof.del')}</button>
-      </div></div>`).join('');
-    $('#prof-list').querySelectorAll('button[data-act]').forEach(b => b.addEventListener('click', async () => {
-      const id = b.dataset.id;
+        <button class="btn sm icon danger" data-act="del" data-id="${esc(p.id)}" data-name="${esc(p.name)}" title="${t('prof.del')}"><svg viewBox="0 0 24 24"><path d="M4 7h16M9 7V5h6v2M6 7l1 13h10l1-13"/></svg></button>
+      </div></div>`;
+  };
+  const row = p => `<div class="item" data-act="use" data-id="${esc(p.id)}"><span class="check"></span>
+    <div class="name"><b>${esc(p.name)}</b><span>${p.error ? `<span style="color:var(--danger)">${esc(p.error)}</span>` : t('prof.nodes', { n: p.nodeCount }) + ' · ' + esc(fmtAgo(p.fetchedAt))}</span></div>
+    <button class="icon-btn xs muted" data-act="refresh" data-id="${esc(p.id)}" title="${t('prof.refresh')}">${ICON_REFRESH}</button></div>`;
+
+  const load = async () => {
+    let list = [];
+    try { list = await App().GetProfiles() || []; } catch (e) { $('#prof-list').innerHTML = `<div class="empty">${esc(errText(e))}</div>`; return; }
+    if (!list.length) { $('#prof-list').innerHTML = `<div class="empty">${t('prof.empty')}</div>`; return; }
+    const cur = list.find(p => p.active) || list[0], rest = list.filter(p => p !== cur);
+    $('#prof-list').innerHTML = bigCard(cur)
+      + (rest.length ? `<div class="sechead">${t('prof.others')}</div><div class="list">${rest.map(row).join('')}</div>` : '');
+    $('#prof-list').querySelectorAll('[data-act]').forEach(b => b.addEventListener('click', async e => {
+      e.stopPropagation();
+      const id = b.dataset.id, act = b.dataset.act;
       try {
-        if (b.dataset.act === 'use') { await App().SelectProfile(id); }
-        else if (b.dataset.act === 'refresh') { b.disabled = true; b.innerHTML = '<span class="spinner"></span>'; await App().RefreshProfile(id); toast(t('prof.refreshed'), 'ok'); }
-        else if (b.dataset.act === 'edit') { showForm(list.find(x => x.id === id)); return; }
-        else if (b.dataset.act === 'del') { if (!await askConfirm(t('prof.delConfirm', { n: b.dataset.name }), { ok: t('prof.del') })) return; await App().RemoveProfile(id); toast(t('prof.deleted'), 'ok'); }
-      } catch (e) { toast(errText(e), 'err'); }
+        if (act === 'use') { await App().SelectProfile(id); }
+        else if (act === 'refresh') { b.disabled = true; b.classList.add('busy'); await App().RefreshProfile(id); toast(t('prof.refreshed'), 'ok'); }
+        else if (act === 'edit') { showForm(list.find(x => x.id === id)); return; }
+        else if (act === 'del') { if (!await askConfirm(t('prof.delConfirm', { n: b.dataset.name }), { ok: t('prof.del') })) return; await App().RemoveProfile(id); toast(t('prof.deleted'), 'ok'); }
+      } catch (err) { toast(errText(err), 'err'); }
       await load();
     }));
   };
@@ -838,41 +889,50 @@ async function renderSettings(el) {
 const OUT_FIXED = ['proxy', 'direct', 'reject', 'auto'];
 const RULE_TYPES = ['domain_suffix', 'domain', 'domain_keyword', 'domain_regex', 'ip_cidr', 'port', 'process_name', 'geosite', 'geoip'];
 const outLabel = o => OUT_FIXED.includes(o) ? t('out.' + o) : o;
+// condChip 一条条件缩成一枚小标签:geosite / geoip 带上类型前缀,其余直接显示值
+function condChip(r) {
+  const v = String(r.value || '');
+  return esc(r.type === 'geosite' || r.type === 'geoip' ? r.type + ':' + v : v);
+}
 async function renderRules(el) {
   let s;
   try { s = await App().GetSettings(); } catch (e) { el.innerHTML = `<div class="empty">${esc(errText(e))}</div>`; return; }
   const groups = s.ruleGroups || [];
   const save = async next => { try { await App().SaveSettings({ ...s, ruleGroups: next }); toast(t('set.saved'), 'ok'); } catch (e) { toast(errText(e), 'err'); } nav('rules'); };
   const dr = Object.assign({ private: 'direct', cn: 'direct', final: 'proxy' }, s.defaultRules || {});
-  // 默认规则的一行:标题 + 出口下拉。出口取值与规则组一致(直连 / 代理 / 拒绝)
-  const drRow = (id, key, val, opts) => `<div class="cond" style="padding:4px 6px 4px 10px"><span class="val" style="font-family:inherit">${t(key)}</span>
-    <select id="${id}" data-dr="${id.slice(3)}" style="width:auto;flex:none;max-width:56%;padding:5px 8px;font-size:12.5px">${opts.map(o => `<option value="${o}" ${o === val ? 'selected' : ''}>${t('out.' + o)}</option>`).join('')}</select></div>`;
-  const summary = g => { const r = g.rules || []; return outLabel(g.outbound) + ' · ' + t('rules.count', { n: r.length }) + (r.length ? ' · ' + r.slice(0, 3).map(x => x.value).join(', ') + (r.length > 3 ? '…' : '') : ''); };
-  el.innerHTML = `<p class="small muted" style="margin:2px 0 10px">${t('rules.intro')}</p>
-    <div class="list">${groups.map((g, i) => `<div class="item rg ${g.enabled ? '' : 'off'}" style="flex-wrap:wrap;animation-delay:${i * 30}ms">
-      <div class="row" style="flex-basis:100%">
-        <div class="name"><b>${esc(g.name)}</b><span>${esc(summary(g))}</span></div>
+  const drRow = (id, key, hint, val, opts) => `<div class="drow"><div class="dtxt"><b>${t(key)}</b><span>${t(hint)}</span></div>
+    <select id="${id}" data-dr="${id.slice(3)}">${opts.map(o => `<option value="${o}" ${o === val ? 'selected' : ''}>${t('out.' + o)}</option>`).join('')}</select></div>`;
+  const card = (g, i) => {
+    const rs = g.rules || [], shown = rs.slice(0, 3);
+    return `<div class="rgcard ${g.enabled ? '' : 'off'}" data-i="${i}">
+      <div class="rg-head">
+        <div class="rg-name"><b>${esc(g.name)}</b><em class="tag ${g.enabled ? 'brand' : ''}">${g.enabled ? t('rules.goes', { o: outLabel(g.outbound) }) : t('rules.disabled')}</em></div>
         <label class="switch"><input type="checkbox" data-act="toggle" data-i="${i}" ${g.enabled ? 'checked' : ''}></label>
       </div>
-      <div class="row" style="flex-basis:100%;gap:6px">
+      <div class="rg-conds">${rs.length ? shown.map(r => `<span class="cchip">${condChip(r)}</span>`).join('') + (rs.length > 3 ? `<span class="cchip more">${t('rules.more', { n: rs.length - 3 })}</span>` : '') : `<span class="cchip more">${t('rules.noCond')}</span>`}</div>
+      <div class="rg-act">
         <button class="btn sm" data-act="edit" data-i="${i}">${t('rules.editBtn')}</button>
-        <button class="btn sm" data-act="up" data-i="${i}" ${i === 0 ? 'disabled' : ''}>↑</button>
-        <button class="btn sm" data-act="down" data-i="${i}" ${i === groups.length - 1 ? 'disabled' : ''}>↓</button>
-        <span class="grow"></span><button class="btn sm danger ghost" data-act="del" data-i="${i}">${t('prof.del')}</button>
-      </div></div>`).join('')}
-      <div class="item rg builtin" style="flex-wrap:wrap">
-        <div class="row" style="flex-basis:100%;align-items:flex-start">
-          <div class="name"><b>${t('rules.default')} <span class="tag">${dr.private === 'direct' && dr.cn === 'direct' && dr.final === 'proxy' ? t('rules.builtin') : t('rules.changed')}</span></b><span>${t('rules.defaultHint')}</span></div>
-          <button class="btn sm" id="dr-reset">${t('rules.restore')}</button>
-        </div>
-        <div class="conds" style="flex-basis:100%;margin-top:6px">
-          ${drRow('dr-private', 'rules.dPrivate', dr.private, ['direct', 'proxy', 'reject'])}
-          ${drRow('dr-cn', 'rules.dCN', dr.cn, ['direct', 'proxy', 'reject'])}
-          ${drRow('dr-final', 'rules.dFinal', dr.final, ['proxy', 'direct'])}
-        </div>
-      </div>
+        <button class="btn sm icon" data-act="up" data-i="${i}" ${i === 0 ? 'disabled' : ''} title="↑"><svg viewBox="0 0 24 24"><path d="M12 19V6M6 12l6-6 6 6"/></svg></button>
+        <button class="btn sm icon" data-act="down" data-i="${i}" ${i === groups.length - 1 ? 'disabled' : ''} title="↓"><svg viewBox="0 0 24 24"><path d="M12 5v13M6 12l6 6 6-6"/></svg></button>
+        <span class="grow"></span>
+        <button class="btn sm danger ghost" data-act="del" data-i="${i}">${t('prof.del')}</button>
+      </div></div>`;
+  };
+  const clean = dr.private === 'direct' && dr.cn === 'direct' && dr.final === 'proxy';
+  el.innerHTML = `<p class="pagehint">${t('rules.intro')}</p>
+    <div class="sechead">${t('rules.mine')}</div>
+    ${groups.length ? `<div class="rgwrap">${groups.map(card).join('')}</div>` : `<div class="empty sm">${t('rules.emptyGroups')}</div>`}
+    <button class="addcard" id="rg-add">
+      <span class="addic"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></span>
+      <span class="addtxt"><b>${t('rules.add')}</b><span>${t('rules.addHint')}</span></span>
+    </button>
+    <div class="sechead row"><span class="grow">${t('rules.default')}${clean ? '' : ` <span class="tag">${t('rules.changed')}</span>`}</span><button class="linkbtn" id="dr-reset">${t('rules.restore')}</button></div>
+    <div class="card tight">
+      ${drRow('dr-private', 'rules.dPrivate', 'rules.dPrivateHint', dr.private, ['direct', 'proxy', 'reject'])}
+      ${drRow('dr-cn', 'rules.dCN', 'rules.dCNHint', dr.cn, ['direct', 'proxy', 'reject'])}
+      ${drRow('dr-final', 'rules.dFinal', 'rules.dFinalHint', dr.final, ['proxy', 'direct'])}
     </div>
-    <div style="height:12px"></div><button class="btn primary block" id="rg-add">${t('rules.add')}</button>`;
+    <p class="pagehint">${t('rules.defaultHint')}</p>`;
   const saveDR = async next => { try { await App().SaveSettings({ ...s, defaultRules: next }); toast(t('set.saved'), 'ok'); } catch (e) { toast(errText(e), 'err'); } nav('rules'); };
   el.querySelectorAll('select[data-dr]').forEach(sel => sel.addEventListener('change', () => saveDR({ ...dr, [sel.dataset.dr]: sel.value })));
   $('#dr-reset').addEventListener('click', async () => { if (await askConfirm(t('rules.restoreConfirm'), { danger: false, ok: t('rules.restore') })) saveDR({ private: 'direct', cn: 'direct', final: 'proxy' }); });
@@ -974,38 +1034,177 @@ async function renderDevices(el) {
 }
 
 // ---- 连接 ----
+let connFilter = ''; // '' 全部 / proxy 经代理 / direct 直连
+// connDirect 判断这条连接走没走代理:链路是内核给的出站链,直连那条就叫 direct
+function connDirect(c) {
+  return String(c.chain || '').split('→').map(x => x.trim()).includes('direct');
+}
+// connAge 起始时间是 ISO 串,换算成"12 分钟"这种好读的时长
+function connAge(start) {
+  const ms = Date.parse(start);
+  if (!ms) return '';
+  const s = Math.max(0, Math.floor((Date.now() - ms) / 1000));
+  if (s < 60) return t('conns.sec', { n: s });
+  if (s < 3600) return t('conns.min', { n: Math.floor(s / 60) });
+  return t('conns.hour', { n: Math.floor(s / 3600) });
+}
+// connChain 内核给的链路是「实际出站 → 选择组 → …」,第一段才是真正出去的那个节点,
+// 最后一段是 proxy / auto 这种组名,显示出来看不出走的是哪儿。
+function connChain(c) {
+  const parts = String(c.chain || '').split('→').map(x => x.trim()).filter(Boolean);
+  return parts.length ? parts[0] : '';
+}
+let connSig = ''; // 上一次画出来的连接集合(与顺序无关),用来判断能不能只改数字
+// patchConns 就地更新流量与时长,不动 DOM 结构;对不上就返回 false 交给整块重画。
+function patchConns(shown) {
+  const box = $('#conns');
+  const items = new Map([...box.querySelectorAll('.item.conn')].map(it => [it.dataset.id, it]));
+  if (items.size !== shown.length) return false;
+  for (const c of shown) {
+    const it = items.get(c.id);
+    if (!it) return false;
+    const b = it.querySelector('.cn-b');
+    if (b) b.textContent = '↓' + fmtBytes(c.down) + ' ↑' + fmtBytes(c.up);
+    const sub = it.querySelector('.cn-sub span');
+    if (sub) sub.textContent = [c.net || '', connAge(c.start), c.app || ''].filter(Boolean).join(' · ');
+  }
+  return true;
+}
 function renderConns(el) {
-  el.innerHTML = `<div class="small muted" id="conns-n" style="margin:2px 0 8px"></div><div id="conns"></div>`;
+  connFilter = '';
+  connSig = '';
+  el.innerHTML = `<div class="tiles">
+      <div class="tile"><span>${t('conns.active')}</span><b id="cn-all">0</b></div>
+      <div class="tile"><span>${t('conns.viaProxy')}</span><b id="cn-proxy" class="brand">0</b></div>
+      <div class="tile"><span>${t('conns.direct')}</span><b id="cn-direct" class="dim">0</b></div>
+    </div>
+    <div class="chips" id="conn-chips">
+      <button class="chip on" data-f="">${t('node.all')}</button>
+      <button class="chip" data-f="proxy">${t('conns.viaProxy')}</button>
+      <button class="chip" data-f="direct">${t('conns.direct')}</button>
+    </div>
+    <div id="conns"></div>`;
+  $('#conn-chips').querySelectorAll('.chip').forEach(c => c.addEventListener('click', () => {
+    connFilter = c.dataset.f || '';
+    connSig = ''; // 换了筛选就重画,不然会拿旧集合去对
+    $('#conn-chips').querySelectorAll('.chip').forEach(x => x.classList.toggle('on', x === c));
+    load();
+  }));
   const load = async () => {
     const box = $('#conns'); if (!box) return;
     let list;
-    try { list = await App().GetConnections() || []; } catch (e) { box.innerHTML = `<div class="empty">${esc(state && (state.view.state.status === 'connected') ? errText(e) : t('conns.needCore'))}</div>`; return; }
-    const cn = $('#conns-n'); if (cn) cn.textContent = t('conns.count', { n: list.length });
-    if (!list.length) { box.innerHTML = `<div class="empty">${t('conns.empty')}</div>`; return; }
-    box.innerHTML = `<div class="list">${list.map(c => `<div class="item"><div class="name"><b class="sel">${esc(c.host)}</b><span>${esc(c.app || '')} ${c.app ? '·' : ''} ${esc(c.chain)} · ${esc(c.net)} · ↓${fmtBytes(c.down)} ↑${fmtBytes(c.up)}</span></div><button class="btn sm ghost" data-id="${esc(c.id)}">${t('conns.close')}</button></div>`).join('')}</div>`;
-    box.querySelectorAll('button[data-id]').forEach(b => b.addEventListener('click', async () => { try { await App().CloseConnection(b.dataset.id); load(); } catch (e) { toast(errText(e), 'err'); } }));
+    try { list = await App().GetConnections() || []; }
+    catch (e) { box.innerHTML = `<div class="empty">${esc(state && (state.view.state.status === 'connected') ? errText(e) : t('conns.needCore'))}</div>`; return; }
+    const direct = list.filter(connDirect).length;
+    const set = (id, n) => { const x = $(id); if (x) x.textContent = n; };
+    set('#cn-all', list.length); set('#cn-proxy', list.length - direct); set('#cn-direct', direct);
+    // 按流量从大到小排,想看的那几条总在最上面
+    const shown = list.filter(c => !connFilter || (connFilter === 'direct') === connDirect(c))
+      .sort((a, b) => (b.down + b.up) - (a.down + a.up));
+    if (!shown.length) { connSig = ''; box.innerHTML = `<div class="empty">${t(list.length ? 'conns.noneHere' : 'conns.empty')}</div>`; return; }
+    // 集合没变就只改数字:两秒一轮的整块重画会让列表周期性闪一下(行上有入场动画),
+    // 还会把滚动位置和选中的文字弄丢。集合变了才重画,那时才重新按流量排序 ——
+    // 流量每两秒都在涨,跟着排的话行序会一直跳。
+    const sig = shown.map(c => c.id).sort().join(',');
+    if (sig === connSig && patchConns(shown)) return;
+    connSig = sig;
+    box.innerHTML = `<div class="list">${shown.map(c => {
+      const d = connDirect(c), chain = connChain(c);
+      return `<div class="item conn" data-id="${esc(c.id)}"><div class="name">
+        <div class="cn-top"><span class="dot ${d ? '' : 'on2'}"></span><b>${esc(c.host)}</b><span class="cn-b">↓${fmtBytes(c.down)} ↑${fmtBytes(c.up)}</span></div>
+        <div class="cn-sub">${d ? `<em class="tag">${t('conns.direct')}</em>` : `<em class="tag brand">${esc(chain)}</em>`}<span>${[esc(c.net || ''), connAge(c.start), esc(c.app || '')].filter(Boolean).join(' · ')}</span></div>
+      </div><button class="icon-btn xs muted" data-id="${esc(c.id)}" title="${t('conns.close')}"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg></button></div>`;
+    }).join('')}</div>`;
+    box.querySelectorAll('button[data-id]').forEach(b => b.addEventListener('click', async () => {
+      try { await App().CloseConnection(b.dataset.id); load(); } catch (e) { toast(errText(e), 'err'); }
+    }));
   };
   load();
   pageTimer = setInterval(load, 2000);
 }
 
 // ---- 日志 ----
+// copyText 剪贴板:Wails / WebView 里 navigator.clipboard 不一定给用,退回老办法
+async function copyText(s) {
+  try { await navigator.clipboard.writeText(s); return true; } catch (e) { /* 换下面那条路 */ }
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = s; ta.style.cssText = 'position:fixed;opacity:0';
+    document.body.appendChild(ta); ta.select();
+    const ok = document.execCommand('copy');
+    ta.remove();
+    return ok;
+  } catch (e) { return false; }
+}
+// logParse 把一行拆成 时间 / 级别 / 正文 三段,拆不出来就整行当正文
+const LOG_LV = /\b(ERROR|ERR|FATAL|PANIC|WARN|WARNING|INFO|DEBUG|TRACE)\b/i;
+function logParse(line) {
+  const s = String(line);
+  const tm = s.match(/\d{2}:\d{2}:\d{2}/);
+  const lv = s.slice(0, 64).match(LOG_LV);
+  if (!tm && !lv) return { time: '', lv: '', text: s };
+  let text = s;
+  if (lv) text = s.slice(s.indexOf(lv[0]) + lv[0].length).trim();
+  else if (tm) text = s.slice(s.indexOf(tm[0]) + tm[0].length).trim();
+  const L = lv ? lv[0].toUpperCase() : '';
+  return { time: tm ? tm[0] : '', lv: L === 'WARNING' ? 'WARN' : L === 'ERR' ? 'ERROR' : L, text };
+}
+function logClass(lv) {
+  if (lv === 'ERROR' || lv === 'FATAL' || lv === 'PANIC') return 'err';
+  if (lv === 'WARN') return 'warn';
+  if (lv === 'DEBUG' || lv === 'TRACE') return 'dim';
+  return '';
+}
 function renderLogs(el) {
-  el.innerHTML = `<div class="row" style="margin-bottom:10px;flex-wrap:wrap">
-      <div class="seg" id="logsrc"><span class="pill"></span><button data-core="0" class="active">${t('logs.service')}</button><button data-core="1">${t('logs.core')}</button></div>
-      <button class="btn sm" id="pause">${t('logs.pause')}</button><span class="grow"></span>
-      ${window.__web || window.__android ? '' : `<button class="btn sm" id="open">${t('logs.open')}</button>`}<button class="btn sm" id="diag">${t('logs.diag')}</button>
-    </div><pre class="log sel" id="log"></pre>`;
-  let core = false, paused = false;
-  const colorize = l => { const e = esc(l); if (/ERROR|FATAL|panic/i.test(l)) return `<span class="err">${e}</span>`; if (/WARN/i.test(l)) return `<span class="warn">${e}</span>`; if (/DEBUG/i.test(l)) return `<span class="dim">${e}</span>`; return e; };
-  const load = async () => {
-    const pre = $('#log'); if (!pre || paused) return;
-    try { const lines = await App().GetLogs(300, core) || []; const atBottom = pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 8; pre.innerHTML = lines.map(colorize).join('\n'); if (atBottom) pre.scrollTop = pre.scrollHeight; }
-    catch (e) { pre.textContent = errText(e); }
+  let core = false, paused = false, errOnly = false, raw = [];
+  el.innerHTML = `<div class="chips" id="log-chips">
+      <button class="chip on" data-src="0">${t('logs.service')}</button>
+      <button class="chip" data-src="1">${t('logs.core')}</button>
+      <span class="grow"></span>
+      <button class="chip" id="log-err">${t('logs.errOnly')}</button>
+      <button class="chip" id="log-pause">${t('logs.pause')}</button>
+      ${window.__web || window.__android ? '' : `<button class="chip" id="log-open">${t('logs.open')}</button>`}
+    </div>
+    <div class="logbox" id="log"></div>
+    <div class="logact">
+      <button class="btn" id="log-copy">${t('logs.copy')}</button>
+      <button class="btn primary" id="diag">${t('logs.diag')}</button>
+    </div>
+    <p class="pagehint center">${t('logs.diagNote')}</p>`;
+  const draw = () => {
+    const box = $('#log'); if (!box) return;
+    const rows = raw.map(logParse).filter(r => !errOnly || logClass(r.lv) === 'err' || logClass(r.lv) === 'warn');
+    const atBottom = box.scrollTop + box.clientHeight >= box.scrollHeight - 10;
+    const html = rows.length
+      ? rows.map(r => `<div class="lrow ${logClass(r.lv)}"><span class="lt">${esc(r.time)}</span><span class="ll">${esc(r.lv)}</span><span class="lx">${esc(r.text)}</span></div>`).join('')
+      : `<div class="lempty">${t(errOnly ? 'logs.noErr' : 'logs.empty')}</div>`;
+    if (box.__html === html) return; // 没有新行就什么都别动,免得三秒清一次选中的文字
+    box.__html = html;
+    box.innerHTML = html;
+    if (atBottom) box.scrollTop = box.scrollHeight;
   };
-  segInit($('#logsrc'), b => { core = b.dataset.core === '1'; load(); });
-  $('#pause').addEventListener('click', () => { paused = !paused; $('#pause').textContent = t(paused ? 'logs.resume' : 'logs.pause'); if (!paused) load(); });
-  const op = $('#open'); if (op) op.addEventListener('click', () => App().OpenLogs().catch(e => toast(errText(e), 'err')));
+  const load = async () => {
+    if (paused) return;
+    try { raw = await App().GetLogs(300, core) || []; draw(); }
+    catch (e) { const box = $('#log'); if (box) box.innerHTML = `<div class="lempty">${esc(errText(e))}</div>`; }
+  };
+  $('#log-chips').querySelectorAll('.chip[data-src]').forEach(c => c.addEventListener('click', () => {
+    core = c.dataset.src === '1';
+    $('#log-chips').querySelectorAll('.chip[data-src]').forEach(x => x.classList.toggle('on', x === c));
+    load();
+  }));
+  $('#log-err').addEventListener('click', () => { errOnly = !errOnly; $('#log-err').classList.toggle('on', errOnly); draw(); });
+  $('#log-pause').addEventListener('click', () => {
+    paused = !paused;
+    $('#log-pause').textContent = t(paused ? 'logs.resume' : 'logs.pause');
+    $('#log-pause').classList.toggle('on', paused);
+    if (!paused) load();
+  });
+  const op = $('#log-open'); if (op) op.addEventListener('click', () => App().OpenLogs().catch(e => toast(errText(e), 'err')));
+  $('#log-copy').addEventListener('click', async () => {
+    const ok = await copyText(raw.join('\n'));
+    toast(t(ok ? 'logs.copied' : 'logs.copyFail'), ok ? 'ok' : 'err');
+  });
   $('#diag').addEventListener('click', exportDiag);
   load();
   pageTimer = setInterval(load, 3000);
@@ -1026,39 +1225,56 @@ async function exportDiag() {
 
 // ---- 关于 ----
 function renderAbout(el) {
-  const v = state ? state.view : {};
-  el.innerHTML = `<div class="card">
-      <div class="srow"><div class="lbl">${t('about.ui')}</div><b>v${esc(state ? state.version : '')}</b></div>
-      <div class="srow"><div class="lbl">${t('about.svc')}</div><b>v${esc(v.version || '—')}</b></div>
-      <div class="srow"><div class="lbl">${t('about.svcState')}</div><b id="about-svc">${esc(svcText(state))}</b></div>
-      <div class="srow"><div class="lbl">sing-box</div><span class="muted small">${t('about.license')}</span></div>
+  const v = state ? state.view : {}, up = state && state.update;
+  const stack = (v.settings && v.settings.tunStack) || '';
+  el.innerHTML = `<div class="abrand">
+      <svg viewBox="-16 -50 400 400"><defs><linearGradient id="ag" gradientUnits="userSpaceOnUse" x1="70" y1="70" x2="310" y2="270"><stop offset="0" stop-color="#6a44f2"/><stop offset=".55" stop-color="#2f8bff"/><stop offset="1" stop-color="#18e3e8"/></linearGradient></defs><g fill="none" stroke="url(#ag)" stroke-width="44" stroke-linecap="round" stroke-linejoin="round"><path d="M86 248V84l146 124v52"/><path d="M332 78l-88 96"/></g><path fill="url(#ag)" d="M118 192l52 30-52 30z"/></svg>
+      <b>${t('app.name')}</b>
+      <span>${esc(state ? state.version : '')}${state && state.platform ? ' · ' + esc(state.platform) : ''}</span>
     </div>
-    <div class="card" id="upd-card">
-      <div class="srow"><div class="lbl"><span id="upd-text">${state && state.update ? t('about.found', { v: state.update.version }) : t('about.updateTitle')}</span><div>${t('about.updateNote')}</div></div><button class="btn sm" id="upd-check">${t('about.check')}</button></div>
+    <div class="updcard ${up ? 'has' : ''}" id="upd-card">
+      <div class="upd-head">${up ? '<span class="dot err"></span>' : ''}<b id="upd-text">${up ? t('about.found', { v: up.version }) : t('about.updateTitle')}</b><span class="grow"></span><button class="btn sm" id="upd-check">${t('about.check')}</button></div>
+      <div class="upd-note">${t('about.updateNote')}</div>
       <div id="upd-body"></div>
     </div>
-    <div class="card">
-      ${window.__web || window.__android ? '' : `<div class="srow"><div class="lbl">${t('about.repair')}</div><button class="btn sm" id="repair">${t('about.repair')}</button></div>`}
-      <div class="srow"><div class="lbl">${t('about.diag')}</div><button class="btn sm" id="diag">${t('about.diag')}</button></div>
-      ${window.__web ? `<div class="srow"><div class="lbl">${t('about.web')}<div>${t('about.webHelp')}</div></div><button class="btn sm" id="webpw">${t('about.webPw')}</button></div>` : `<div class="srow"><div class="lbl">${t('about.quit')}<div>${t('about.quitHelp')}</div></div><button class="btn sm danger" id="quit">${t('about.quit')}</button></div>`}
+    <div class="list">
+      <div class="item"><span class="dot ${state && state.service ? 'on' : 'err'}"></span>
+        <div class="name"><b>${t('about.svc')}</b><span id="about-svc">${esc(svcText(state))}</span></div>
+        ${window.__web || window.__android ? '' : `<button class="btn sm" id="repair">${t('about.repair')}</button>`}</div>
+      <div class="item"><div class="name"><b>${t('about.kernel')}</b><span>sing-box${stack ? ' · ' + esc(stack) : ''}${v.version ? ' · ' + t('about.svcVer', { v: v.version }) : ''}</span></div></div>
     </div>
-    <p class="small muted center"><a id="repo" style="color:var(--brand2)">github.com/Maoyangui/godusevpn</a></p>`;
+    <div class="list">
+      <div class="item" id="diag"><svg class="rowic" viewBox="0 0 24 24"><path d="M6 3h9l5 5v13H6z"/><path d="M14 3v6h6M9 13h6M9 17h6"/></svg>
+        <div class="name"><b>${t('about.diag')}</b><span>${t('logs.diagNote')}</span></div>
+        <svg class="rowgo" viewBox="0 0 24 24"><path d="M9 5l7 7-7 7"/></svg></div>
+      <div class="item" id="repo"><svg class="rowic" viewBox="0 0 24 24"><path d="M4 6h16v12H4z"/><path d="M4 8l8 5 8-5"/></svg>
+        <div class="name"><b>${t('about.repo')}</b><span>github.com/Maoyangui/godusevpn</span></div>
+        <svg class="rowgo" viewBox="0 0 24 24"><path d="M9 5l7 7-7 7"/></svg></div>
+      ${window.__web
+      ? `<div class="item" id="webpw"><svg class="rowic" viewBox="0 0 24 24"><rect x="4" y="10" width="16" height="10" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg>
+          <div class="name"><b>${t('about.web')}</b><span>${t('about.webHelp')}</span></div>
+          <svg class="rowgo" viewBox="0 0 24 24"><path d="M9 5l7 7-7 7"/></svg></div>`
+      : `<div class="item danger" id="quit"><svg class="rowic" viewBox="0 0 24 24"><path d="M12 3v9"/><path d="M6.3 6.8a8 8 0 1 0 11.4 0"/></svg>
+          <div class="name"><b>${t('about.quit')}</b><span>${t('about.quitHelp')}</span></div></div>`}
+    </div>
+    <p class="pagehint center">${t('about.license')}</p>`;
   const showUpdate = rel => {
+    $('#upd-card').classList.toggle('has', !!rel);
     $('#upd-text').textContent = rel ? t('about.found', { v: rel.version }) : t('about.latest');
-    $('#upd-body').innerHTML = rel ? `<div style="margin-top:10px"><button class="btn primary block" id="upd-go">${t('about.update')}</button><div class="progress" id="upd-prog" style="margin-top:10px" hidden><i></i></div></div>` : '';
+    $('#upd-body').innerHTML = rel ? `<button class="btn primary block" id="upd-go">${t('about.update')}</button><div class="progress" id="upd-prog" style="margin-top:10px" hidden><i></i></div>` : '';
     if (rel) $('#upd-go').addEventListener('click', async () => {
       const b = $('#upd-go'); b.disabled = true; $('#upd-prog').hidden = false;
       try { await App().ApplyUpdate(); $('#upd-text').textContent = t('about.installing'); }
       catch (e) { toast(errText(e), 'err'); b.disabled = false; }
     });
   };
-  if (state && state.update) showUpdate(state.update);
+  if (up) showUpdate(up);
   $('#upd-check').addEventListener('click', async () => {
     const b = $('#upd-check'); b.disabled = true; $('#upd-text').textContent = t('about.checking');
     try { showUpdate(await App().CheckUpdate()); } catch (e) { $('#upd-text').textContent = errText(e); }
     b.disabled = false;
   });
-  const rp = $('#repair'); if (rp) rp.addEventListener('click', repairService);
+  const rp = $('#repair'); if (rp) rp.addEventListener('click', async e => { e.stopPropagation(); repairService(); });
   $('#diag').addEventListener('click', exportDiag);
   const q = $('#quit'); if (q) q.addEventListener('click', () => App().QuitApp());
   const wp = $('#webpw'); if (wp) wp.addEventListener('click', async () => {

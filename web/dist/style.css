@@ -348,3 +348,132 @@ body.android .drawer-brand svg { width: 46px; height: 46px; }
 body.android .drawer-brand b { font-size: 21px; }
 body.tv .drawer-brand svg { width: 52px; height: 52px; }
 body.tv .drawer-brand b { font-size: 22px; }
+
+/* ===== 二级页面:引导 / 订阅 / 规则 / 连接 / 日志 / 关于 ===== */
+.pagehint { font-size: 12px; color: var(--muted2); line-height: 1.6; margin: 2px 2px 12px; }
+.pagehint.center { text-align: center; }
+.sechead { font-size: 11px; font-weight: 600; color: var(--muted); letter-spacing: .4px; padding: 4px 2px 7px; }
+.sechead.row { display: flex; align-items: center; gap: 8px; }
+.linkbtn { border: 0; background: none; color: var(--brand2); font-size: 12px; font-weight: 500; padding: 2px 4px; }
+.linkbtn:hover { text-decoration: underline; }
+.empty.sm { padding: 16px 10px; font-size: 12.5px; }
+.card.tight { padding: 4px 14px; }
+
+/* 虚线的"添加"卡:订阅页与规则页共用 */
+.addcard { display: flex; align-items: center; gap: 12px; width: 100%; text-align: left; margin: 14px 0 4px; padding: 14px 16px; border: 1px dashed var(--line); border-radius: var(--radius); background: transparent; transition: border-color .15s, background .15s; }
+.addcard:hover { border-color: #2f8bff; background: var(--card); }
+.addic { width: 36px; height: 36px; border-radius: 12px; background: var(--bg2); display: flex; align-items: center; justify-content: center; flex: none; }
+.addic svg { width: 18px; height: 18px; fill: none; stroke: var(--brand1); stroke-width: 1.9; stroke-linecap: round; }
+.addtxt { flex: 1; min-width: 0; }
+.addtxt b { display: block; font-size: 13.5px; font-weight: 500; }
+.addtxt span { display: block; font-size: 11px; color: var(--muted2); margin-top: 2px; }
+
+/* 引导页 */
+.onboard { align-items: stretch; text-align: left; justify-content: flex-start; padding-top: 12px; gap: 0; }
+.onboard .logo { width: 56px; height: 56px; margin: 0 0 18px; animation: none; }
+.onboard h1 { font-size: 25px; letter-spacing: -.4px; margin: 0; }
+.onboard p { color: var(--muted); margin: 8px 0 22px; line-height: 1.65; font-size: 13px; }
+.onboard .field { margin-bottom: 10px; }
+.onboard .btn.block { padding: 12px 16px; font-size: 14px; border-radius: 14px; }
+.or { display: flex; align-items: center; gap: 12px; margin: 22px 0 18px; }
+.or span { height: 1px; flex: 1; background: var(--line); }
+.or em { font-style: normal; font-size: 11px; color: var(--muted2); }
+.tipcard { display: flex; align-items: center; gap: 13px; background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); padding: 14px 16px; }
+.tipic { width: 38px; height: 38px; border-radius: 13px; background: var(--bg2); display: flex; align-items: center; justify-content: center; flex: none; }
+.tipic svg { width: 19px; height: 19px; fill: none; stroke: var(--brand1); stroke-width: 1.9; stroke-linecap: round; stroke-linejoin: round; }
+.tiptxt { flex: 1; min-width: 0; }
+.tiptxt b { display: block; font-size: 13.5px; font-weight: 500; }
+.tiptxt span { display: block; font-size: 11px; color: var(--muted2); margin-top: 3px; line-height: 1.5; }
+.grow1 { flex: 1; min-height: 18px; }
+.notecard { display: flex; align-items: flex-start; gap: 9px; padding: 12px 14px; border-radius: 14px; background: rgba(47, 139, 255, .07); }
+.notecard svg { width: 15px; height: 15px; flex: none; margin-top: 2px; fill: none; stroke: var(--brand2); stroke-width: 1.9; stroke-linecap: round; }
+.notecard span { font-size: 11.5px; color: var(--muted); line-height: 1.6; }
+
+/* 订阅:当前那条摊成大卡 */
+.profcard { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); padding: 15px 16px; box-shadow: 0 6px 20px rgba(15, 23, 42, .05); }
+.pc-top { display: flex; align-items: center; gap: 10px; }
+.pc-top b { flex: 1; font-size: 15.5px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pc-ago { font-size: 11px; color: var(--muted2); flex: none; }
+.pc-use { display: flex; align-items: baseline; gap: 6px; margin-top: 13px; }
+.pc-use b { font-size: 23px; font-weight: 700; letter-spacing: -.5px; font-variant-numeric: tabular-nums; }
+.pc-use span { font-size: 12px; color: var(--muted); }
+.pc-bar { height: 6px; border-radius: 3px; background: var(--bg2); border: 1px solid var(--line); margin-top: 8px; overflow: hidden; }
+.pc-bar i { display: block; height: 100%; border-radius: 3px; background: linear-gradient(90deg, var(--brand1), var(--brand2), var(--brand3)); transition: width .5s var(--ease); }
+.pc-meta { display: flex; justify-content: space-between; gap: 10px; margin-top: 7px; font-size: 11px; color: var(--muted2); }
+.pc-err { font-size: 11.5px; color: var(--danger); margin-top: 8px; line-height: 1.5; }
+.pc-act { display: flex; gap: 8px; margin-top: 14px; }
+.pc-act .btn { flex: 1; padding: 9px 0; border-radius: 12px; }
+.pc-act .btn.icon { flex: none; width: 44px; padding: 9px 0; }
+.btn.icon { display: inline-flex; align-items: center; justify-content: center; }
+.btn.icon svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.9; stroke-linecap: round; stroke-linejoin: round; }
+.icon-btn.busy svg, .btn.busy svg { animation: spin .8s linear infinite; }
+
+/* 规则组卡片 */
+.rgwrap { display: flex; flex-direction: column; gap: 10px; }
+.rgcard { background: var(--card); border: 1px solid var(--line); border-radius: 16px; padding: 13px 14px; box-shadow: 0 4px 14px rgba(15, 23, 42, .04); }
+.rgcard.off { opacity: .62; }
+.rg-head { display: flex; align-items: center; gap: 10px; }
+.rg-name { flex: 1; min-width: 0; display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
+.rg-name b { font-size: 14.5px; font-weight: 600; }
+.tag.brand { background: rgba(106, 68, 242, .1); border-color: rgba(106, 68, 242, .28); color: var(--brand1); }
+.rg-conds { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 9px; }
+.cchip { font-size: 11px; padding: 3px 7px; border-radius: 7px; background: var(--bg2); border: 1px solid var(--line); font-family: Consolas, "Cascadia Mono", monospace; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cchip.more { color: var(--muted2); font-family: inherit; }
+.rg-act { display: flex; align-items: center; gap: 6px; margin-top: 11px; padding-top: 10px; border-top: 1px solid var(--line); }
+.rg-act .btn.icon { width: 34px; padding: 6px 0; }
+
+/* 默认规则的三行 */
+.drow { display: flex; align-items: center; gap: 12px; padding: 11px 0; border-bottom: 1px solid var(--line); }
+.drow:last-child { border-bottom: 0; }
+.dtxt { flex: 1; min-width: 0; }
+.dtxt b { display: block; font-size: 13.5px; font-weight: 500; }
+.dtxt span { display: block; font-size: 11px; color: var(--muted2); margin-top: 2px; }
+.drow select { width: auto; flex: none; max-width: 56%; padding: 6px 9px; font-size: 12.5px; }
+
+/* 连接:三个数 + 筛选 + 列表 */
+.tiles { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-bottom: 12px; }
+.tile { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 10px 12px; }
+.tile span { display: block; font-size: 10.5px; color: var(--muted2); }
+.tile b { display: block; font-size: 18px; font-weight: 600; font-variant-numeric: tabular-nums; margin-top: 2px; }
+.tile b.brand { color: var(--brand2); } .tile b.dim { color: var(--muted); }
+.item.conn { align-items: center; }
+.cn-top { display: flex; align-items: center; gap: 8px; }
+.cn-top b { flex: 1; min-width: 0; font-size: 13.5px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.cn-b { font-size: 11px; color: var(--muted2); font-variant-numeric: tabular-nums; flex: none; }
+.cn-sub { display: flex; align-items: center; gap: 6px; margin-top: 6px; padding-left: 14px; min-width: 0; }
+.cn-sub span { font-size: 11px; color: var(--muted2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.dot.on2 { background: var(--brand2); }
+.item.conn .dot { width: 6px; height: 6px; flex: none; }
+
+/* 日志 */
+.view.logs { display: flex; flex-direction: column; }
+.logbox { flex: 1; min-height: 200px; background: #0b0e14; border-radius: var(--radius); padding: 12px 14px; overflow: auto; font-family: Consolas, "Cascadia Mono", monospace; font-size: 11.5px; line-height: 1.8; }
+.logbox::-webkit-scrollbar { width: 6px; } .logbox::-webkit-scrollbar-thumb { background: #2a3340; border-radius: 3px; }
+.lrow { display: flex; gap: 8px; padding: 1px 6px; margin: 0 -6px; border-radius: 6px; }
+.lt { color: #5b6472; flex: none; }
+.ll { color: #8fb8ff; flex: none; width: 42px; }
+.ll:empty { display: none; } /* 服务日志那一路没有级别字段,别留一条空档 */
+.lx { color: #d6deeb; word-break: break-word; }
+.lrow.warn { background: rgba(251, 191, 36, .08); } .lrow.warn .ll, .lrow.warn .lx { color: #fbbf24; }
+.lrow.err { background: rgba(248, 113, 113, .1); } .lrow.err .ll, .lrow.err .lx { color: #f87171; }
+.lrow.dim .ll, .lrow.dim .lx { color: #7c8797; }
+.lempty { color: #5b6472; text-align: center; padding: 26px 0; }
+.logact { display: flex; gap: 10px; margin-top: 14px; }
+.logact .btn { flex: 1; padding: 11px 0; border-radius: 14px; font-size: 13.5px; }
+
+/* 关于 */
+.abrand { display: flex; flex-direction: column; align-items: center; padding: 6px 0 20px; }
+.abrand svg { width: 52px; height: 52px; }
+.abrand b { font-size: 18.5px; font-weight: 700; margin-top: 12px; }
+.abrand span { font-size: 12px; color: var(--muted2); margin-top: 4px; font-variant-numeric: tabular-nums; }
+.updcard { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); padding: 14px 16px; margin-bottom: 14px; }
+.updcard.has { background: linear-gradient(135deg, rgba(106, 68, 242, .1), rgba(24, 227, 232, .1)); border-color: rgba(47, 139, 255, .28); }
+.upd-head { display: flex; align-items: center; gap: 8px; }
+.upd-head b { font-size: 14px; font-weight: 600; }
+.upd-note { font-size: 11.5px; color: var(--muted); margin-top: 8px; line-height: 1.6; }
+.updcard .btn.block { margin-top: 12px; padding: 10px 16px; border-radius: 12px; }
+.list + .list { margin-top: 14px; }
+.rowic { width: 17px; height: 17px; flex: none; fill: none; stroke: var(--muted); stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.rowgo { width: 15px; height: 15px; flex: none; fill: none; stroke: var(--muted2); stroke-width: 1.9; stroke-linecap: round; }
+.item.danger .rowic { stroke: var(--danger); }
+.item.danger .name b { color: var(--danger); }
