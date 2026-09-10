@@ -472,6 +472,7 @@ async function renderSettings(el) {
       ${txt('f-ldns', t('set.localDns'), s.localDns, t('set.localDnsHelp'))}
       ${sw('f-fakeip', t('set.fakeip'), s.fakeIp)}
       ${sw('f-ipv6', t('set.ipv6'), s.ipv6, t('set.ipv6Help'))}
+      ${state.platform === 'android' ? '' : sw('f-nicv6', t('set.nicv6'), s.disableNicIpv6, t('set.nicv6Help'))}
     </div>
     <div class="card"><h3>${t('set.g.route')}</h3>
       ${sw('f-ad', t('set.adblock'), s.adBlock)}
@@ -493,13 +494,13 @@ async function renderSettings(el) {
       ${sel('f-theme', t('set.theme'), state.theme || 'system', [['system', t('theme.system')], ['light', t('theme.light')], ['dark', t('theme.dark')]])}
     </div>
     <div class="savebar" id="savebar"><div class="note" id="save-note">${t('set.clean')}</div><button class="btn primary" id="save" disabled>${t('set.save')}</button></div>`;
-  const watch = ['f-tun', 'f-stack', 'f-strict', 'f-lan', 'f-mixed', 'f-probe', 'f-update', 'f-rdns', 'f-ldns', 'f-fakeip', 'f-ipv6', 'f-ad', 'f-bypass', 'f-log', 'f-logdays', 'f-netmode', 'f-lansub', 'f-weblisten'].filter(id => $('#' + id));
+  const watch = ['f-tun', 'f-stack', 'f-strict', 'f-lan', 'f-mixed', 'f-probe', 'f-update', 'f-rdns', 'f-ldns', 'f-fakeip', 'f-ipv6', 'f-nicv6', 'f-ad', 'f-bypass', 'f-log', 'f-logdays', 'f-netmode', 'f-lansub', 'f-weblisten'].filter(id => $('#' + id));
   const dirty = on => { $('#save').disabled = !on; $('#savebar').classList.toggle('dirty', on); $('#save-note').textContent = on ? t('set.unsaved') + ' · ' + t('set.note') : t('set.clean'); $('#save').textContent = t(on ? 'set.saveChanges' : 'set.save'); };
   watch.forEach(id => ['input', 'change'].forEach(ev => $('#' + id).addEventListener(ev, () => dirty(true))));
   $('#save').addEventListener('click', async () => {
     const n = { ...s, tun: $('#f-tun').checked, tunStack: $('#f-stack').value, strictRoute: $('#f-strict').checked, lanBypass: $('#f-lan').checked,
       mixedPort: Number($('#f-mixed').value), probeMinutes: Number($('#f-probe').value), updateHours: Number($('#f-update').value),
-      remoteDns: $('#f-rdns').value.trim(), localDns: $('#f-ldns').value.trim(), fakeIp: $('#f-fakeip').checked, ipv6: $('#f-ipv6').checked, adBlock: $('#f-ad').checked,
+      remoteDns: $('#f-rdns').value.trim(), localDns: $('#f-ldns').value.trim(), fakeIp: $('#f-fakeip').checked, ipv6: $('#f-ipv6').checked, disableNicIpv6: $('#f-nicv6') ? $('#f-nicv6').checked : s.disableNicIpv6, adBlock: $('#f-ad').checked,
       bypassApps: $('#f-bypass').value.split(/\r?\n/).map(x => x.trim()).filter(Boolean), logLevel: $('#f-log').value, logDays: Number($('#f-logdays').value) };
     if ($('#f-netmode')) { n.netMode = $('#f-netmode').value; n.lanSubnets = $('#f-lansub').value.split(/[,，\s]+/).map(x => x.trim()).filter(Boolean); n.webListen = $('#f-weblisten').value.trim(); }
     try { s = await App().SaveSettings(n); dirty(false); toast(t('set.saved'), 'ok'); } catch (e) { toast(errText(e), 'err'); }

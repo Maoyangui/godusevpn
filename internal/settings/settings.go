@@ -14,7 +14,7 @@ import (
 	"strings"
 )
 
-const Schema = 2
+const Schema = 3
 
 const (
 	ModeRule   = "rule"
@@ -44,19 +44,22 @@ type Settings struct {
 	LocalDNS      string    `json:"localDns"`             // 直连的 DoH 服务器;"system" = 用系统 DNS
 	FakeIP        bool      `json:"fakeIp"`
 	IPv6          bool      `json:"ipv6"` // false = 全链路禁用
-	AdBlock       bool      `json:"adBlock"`
-	UpdateHours   int       `json:"updateHours"`  // 订阅刷新间隔(小时)
-	ProbeMinutes  int       `json:"probeMinutes"` // 定时测速:auto 组每隔多少分钟测一轮全部节点(1 到 60)
-	LogLevel      string    `json:"logLevel"`     // debug | info | warn | error
-	LogDays       int       `json:"logDays"`      // 日志保留天数,超过自动删除;0 = 一直保留
-	WebListen     string    `json:"webListen"`    // Web 面板监听地址(Linux),如 127.0.0.1:9800 / 0.0.0.0:9800;空 = 不开面板
-	WebPassword   string    `json:"webPassword"`  // 面板密码的加盐哈希(salt$sha256);空 = 无密码,此时只允许监听回环地址
-	NetMode       string    `json:"netMode"`      // local | gateway(Linux 软路由:代理经本机转发的局域网流量),见 gateway.go
-	LANSubnets    []string  `json:"lanSubnets"`   // 网关模式下的局域网网段;空 = 自动
-	DNSHijack     bool      `json:"dnsHijack"`    // 网关模式下劫持局域网设备的 DNS
-	Devices       []Device  `json:"devices"`      // 局域网设备策略
-	ClashPort     int       `json:"clashPort"`    // 内核 Clash API 端口(只监听回环)
-	Selected      string    `json:"selected"`     // proxy 组当前选中的节点;空 = auto
+	// DisableNICIPv6 关闭 IPv6 时,顺带把各网卡上的 IPv6 协议也停用(隧道自己那张除外),断开时还原。
+	// 只挡数据包挡不住这一条:运营商给的公网 IPv6 地址就配在网卡上,程序枚举一遍网卡就能读走再报出去。
+	DisableNICIPv6 bool     `json:"disableNicIpv6"`
+	AdBlock        bool     `json:"adBlock"`
+	UpdateHours    int      `json:"updateHours"`  // 订阅刷新间隔(小时)
+	ProbeMinutes   int      `json:"probeMinutes"` // 定时测速:auto 组每隔多少分钟测一轮全部节点(1 到 60)
+	LogLevel       string   `json:"logLevel"`     // debug | info | warn | error
+	LogDays        int      `json:"logDays"`      // 日志保留天数,超过自动删除;0 = 一直保留
+	WebListen      string   `json:"webListen"`    // Web 面板监听地址(Linux),如 127.0.0.1:9800 / 0.0.0.0:9800;空 = 不开面板
+	WebPassword    string   `json:"webPassword"`  // 面板密码的加盐哈希(salt$sha256);空 = 无密码,此时只允许监听回环地址
+	NetMode        string   `json:"netMode"`      // local | gateway(Linux 软路由:代理经本机转发的局域网流量),见 gateway.go
+	LANSubnets     []string `json:"lanSubnets"`   // 网关模式下的局域网网段;空 = 自动
+	DNSHijack      bool     `json:"dnsHijack"`    // 网关模式下劫持局域网设备的 DNS
+	Devices        []Device `json:"devices"`      // 局域网设备策略
+	ClashPort      int      `json:"clashPort"`    // 内核 Clash API 端口(只监听回环)
+	Selected       string   `json:"selected"`     // proxy 组当前选中的节点;空 = auto
 	// BypassApps 这些进程(如 steam.exe)的流量不走代理,直连出去;按进程名匹配,不分大小写
 	BypassApps []string `json:"bypassApps"`
 	// RuleGroups 用户自定义规则组,按顺序匹配,排在内置默认规则之前(见 rules.go)
@@ -68,7 +71,7 @@ type Settings struct {
 // Default 出厂默认:TUN + 规则模式 + DoH + fake-ip + 禁 IPv6。
 func Default() Settings {
 	return Settings{
-		Schema: Schema, Mode: ModeRule, TUN: true, TUNStack: "mixed", StrictRoute: true, LANBypass: true,
+		Schema: Schema, Mode: ModeRule, TUN: true, DisableNICIPv6: true, TUNStack: "mixed", StrictRoute: true, LANBypass: true,
 		MixedPort: 2080, RemoteDNS: "1.1.1.1", LocalDNS: "223.5.5.5", FakeIP: true, IPv6: false,
 		UpdateHours: 6, ProbeMinutes: 3, LogLevel: "info", LogDays: 7, ClashPort: 9090, WebListen: defaultWebListen(),
 		NetMode: NetLocal, DNSHijack: true, DefaultRules: FactoryDefaultRules(),
@@ -117,6 +120,9 @@ func (s *Settings) migrate() {
 		s.ProbeMinutes = 3
 	}
 	s.DefaultRules.normalize() // 老设置文件里没有这一段
+	if s.Schema < 3 {
+		s.DisableNICIPv6 = true // 这一项是后加的,老设置文件里读出来是 false,按新默认值补上
+	}
 	s.Schema = Schema
 }
 

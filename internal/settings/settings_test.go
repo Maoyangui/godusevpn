@@ -46,6 +46,9 @@ func TestMigrateFromSchema1(t *testing.T) {
 	if s.Schema != Schema || s.ProbeMinutes != 3 {
 		t.Fatalf("新字段应补默认值: %+v", s)
 	}
+	if !s.DisableNICIPv6 {
+		t.Fatal("网卡级停用 IPv6 是后加的项,老设置文件迁移过来要按新默认值补成开启")
+	}
 	if s.Active() == nil || s.Active().Name != "默认" {
 		t.Fatal("迁移出的订阅应叫默认并处于选中")
 	}

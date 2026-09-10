@@ -89,9 +89,10 @@ func NewWithOptions(o Options) (*Daemon, error) {
 	d.settings = s
 	d.applyLogRetention()
 	d.loadProfileCaches()
-	// 上次异常退出可能留下改过的系统设置(macOS 接管的系统 DNS、Linux 加的策略路由),启动时先还原一次,
+	// 上次异常退出可能留下改过的系统设置(macOS 接管的系统 DNS、Linux 加的策略路由、网卡上被停用的 IPv6),启动时先还原一次,
 	// 免得服务没连上、机器却因为 DNS 指着不存在的隧道打不开网页。
 	netmode.Unprotect()
+	netmode.RestoreNICIPv6() // 同理:上次异常退出可能把网卡的 IPv6 关着,先还原,别让用户莫名其妙没了 IPv6
 	b := make([]byte, 16)
 	_, _ = rand.Read(b)
 	d.secret = hex.EncodeToString(b)
@@ -388,6 +389,15 @@ func (d *Daemon) prepare(ctx context.Context) ([]byte, error) {
 
 // start 启动内核;失败按原因归类。
 func (d *Daemon) start(cfg []byte) error {
+	// 关 IPv6 时顺带把各网卡的 IPv6 协议停掉:运营商的公网 v6 地址就配在网卡上,
+	// 挡数据包挡不住"程序枚举网卡读走地址再报出去",地址不存在才是真的读不到。
+	// 放在内核启动之前做:改协议绑定会让网卡重新走一遍协议栈,别去抖刚建好的隧道。
+	// 网关模式不做:那是软路由,关掉网卡 IPv6 会连累局域网里其它设备,不是这台机器自己的事
+	if s0 := d.getSettings(); s0.TUN && !s0.IPv6 && s0.DisableNICIPv6 && s0.NetMode != settings.NetGateway {
+		if err := netmode.DisableNICIPv6(builder.TunName); err != nil {
+			d.logf("停用网卡 IPv6 失败(不影响连接,但网卡上的公网 IPv6 地址还在): %v", err)
+		}
+	}
 	if err := d.core.Start(cfg); err != nil {
 		low := strings.ToLower(err.Error())
 		switch {
@@ -432,6 +442,7 @@ func tunName() string { return builder.TunName }
 func (d *Daemon) stop() error {
 	d.setPing(0)
 	err := d.core.Stop()
+	netmode.RestoreNICIPv6()
 	netmode.Unprotect()
 	netmode.ClearGateway()
 	return err
