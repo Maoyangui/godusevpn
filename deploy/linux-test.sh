@@ -47,13 +47,31 @@ a6=$(getent ahostsv6 www.google.com 2>/dev/null | awk '{print $1}' | grep -v '^:
 # 节点服务器必须直连:内核自己去连节点(定时测速每轮都要连一遍)如果被自己的隧道接住,
 # 就会按当前模式再转出去,绕成"本机 → 隧道 → 当前节点 → 目标节点" —— 白绕一跳、流量算两份、
 # 测出来的延迟也不是节点的真实延迟。真机上出现过(anytls 这类 TCP 节点),这里长期盯着。
+# nodepairs 订阅里所有节点的"地址:端口"(诊断里现成的)。比对要连端口一起比:
+# 只按地址比会把远程 DoH(1.1.1.1:443,本来就该经代理走)也算进来。
+nodepairs() { "$BIN" diag 2>/dev/null | grep -o '"[0-9]\{1,3\}\.[0-9.]*:[0-9]\{1,5\}"' | tr -d '"' | grep -v '^127\.' | sort -u; }
 loopcheck() {
-  srv=$(grep -o '"server": "[0-9.]\{7,15\}"' "$1" 2>/dev/null | sed 's/.*: "//;s/"$//' | sort -u | tr '\n' '|' | sed 's/|$//')
-  if [ -z "$srv" ]; then echo 0; return; fi
-  "$BIN" logs 400 core 2>/dev/null | grep "outbound connection to" | grep -v "outbound/direct" | grep -cE "to ($srv):"
+  pairs=$(nodepairs)
+  [ -z "$pairs" ] && { echo 0; return; }
+  lines=$("$BIN" logs 400 core 2>/dev/null | grep "outbound connection to" | grep -v "outbound/direct")
+  n=0
+  for p in $pairs; do
+    c=$(printf '%s\n' "$lines" | grep -cF "outbound connection to $p")
+    n=$((n + c))
+  done
+  echo "$n"
 }
-n=$(loopcheck /var/lib/godusevpn/config.json)
+n=$(loopcheck)
 check "节点服务器没被套一层代理" "$([ "${n:-0}" -eq 0 ] && echo 1 || echo 0)" "绕圈的连接 ${n:-0} 条"
+# 再主动打一发:朝节点服务器建个 TCP 连接,看内核把它判给谁。判给 direct 才对 ——
+# 上面那条只能证明"这一轮没发生",这条能证明规则真的命中(测速用的协议不一定是 TCP,不主动打就测不到)。
+np=$(nodepairs | head -1)
+if [ -n "$np" ]; then
+  nc -w 3 -z "${np%:*}" "${np##*:}" >/dev/null 2>&1
+  sleep 1
+  hit=$("$BIN" logs 200 core 2>/dev/null | grep "outbound/direct" | grep -cF "outbound connection to $np")
+  check "朝节点服务器发起的连接判给了直连" "$hit" "$np"
+fi
 
 echo "== 4. 出口"
 now=$(pub4); check "规则模式出口 IP 变了" "$([ -n "$now" ] && [ "$now" != "$before" ] && echo 1 || echo 0)" "before=$before now=$now"
