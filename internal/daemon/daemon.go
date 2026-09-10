@@ -632,23 +632,32 @@ func (d *Daemon) registerHandlers() {
 			return nil, err
 		}
 		tag := strings.TrimSpace(in.Tag)
-		if d.core.Running() {
-			if err := d.core.Select("proxy", tag); err != nil {
-				return nil, err
-			}
-			// 选择组只对新连接生效:不掐掉老连接,用户会看到"选了新节点,连接列表里还是老节点",
-			// 长连接(Telegram、推送、anytls 的连接池)能挂十几分钟不断。掐掉后应用自己重连,就都走新节点了。
-			if err := d.core.CloseAllConnections(); err != nil {
-				d.logf("切节点后掐断旧连接失败(旧连接会继续用老节点): %v", err)
-			}
-		}
 		s := d.getSettings()
+		wasAuto := s.Selected == ""
 		s.Selected = tag
 		if tag == "auto" {
 			s.Selected = ""
 		}
+		nowAuto := s.Selected == ""
 		if err := d.setSettings(s); err != nil {
 			return nil, err
+		}
+		if !d.core.Running() {
+			return d.stateView(), nil
+		}
+		// 自动选择与手动指定之间来回切要重建配置:定时测速开不开是写在配置里的
+		// (手动指定时后台不再定时测速),只有重建才生效。同一类之间切就地换,不打断隧道。
+		if wasAuto != nowAuto {
+			d.machine.Restart()
+			return d.stateView(), nil
+		}
+		if err := d.core.Select("proxy", tag); err != nil {
+			return nil, err
+		}
+		// 选择组只对新连接生效:不掐掉老连接,用户会看到"选了新节点,连接列表里还是老节点",
+		// 长连接(Telegram、推送、anytls 的连接池)能挂十几分钟不断。掐掉后应用自己重连,就都走新节点了。
+		if err := d.core.CloseAllConnections(); err != nil {
+			d.logf("切节点后掐断旧连接失败(旧连接会继续用老节点): %v", err)
 		}
 		return d.stateView(), nil
 	})

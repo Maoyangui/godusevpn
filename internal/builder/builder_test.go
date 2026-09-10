@@ -462,3 +462,44 @@ func TestNodeRulesFollowProfile(t *testing.T) {
 		t.Fatalf("只应保留真实公网地址(fake-ip / 回环 / 私网要挡掉): %s", got)
 	}
 }
+
+// 定时测速只在"当前是自动选择"时开着:手动指定了节点,后台每隔几分钟把上百个节点全连一遍没有意义
+// (打开节点列表时会现测)。关掉的写法是给一个很长的间隔 —— interval 留空会退回 sing-box 默认的三分钟。
+func TestProbeOnlyWhenAuto(t *testing.T) {
+	find := func(s settings.Settings) map[string]any {
+		raw, err := Build(Input{Profile: sampleProfile(), Settings: s, DataDir: t.TempDir(), ClashSecret: "sec"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var c cfg
+		if err := json.Unmarshal(raw, &c); err != nil {
+			t.Fatal(err)
+		}
+		for _, o := range c.Outbounds {
+			if o["tag"] == "auto" {
+				return o
+			}
+		}
+		t.Fatal("没有自动选择组")
+		return nil
+	}
+
+	s := settings.Default()
+	s.ProbeMinutes = 5
+	auto := find(s) // Selected 为空 = 自动选择
+	if auto["interval"] != "5m" {
+		t.Fatalf("自动选择时应按设置定时测速,实际 %v", auto["interval"])
+	}
+	if auto["idle_timeout"] != nil {
+		t.Fatalf("自动选择时不该动 idle_timeout: %v", auto["idle_timeout"])
+	}
+
+	s.Selected = "香港1"
+	fixed := find(s)
+	if fixed["interval"] == "5m" || fixed["interval"] == nil {
+		t.Fatalf("手动指定节点时不该再定时测速,实际 %v", fixed["interval"])
+	}
+	if fixed["idle_timeout"] == nil {
+		t.Fatalf("拉长间隔时必须同时放大 idle_timeout,否则 sing-box 会拒绝启动")
+	}
+}

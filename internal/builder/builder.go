@@ -97,7 +97,7 @@ func Build(in Input) ([]byte, error) {
 	// ---- 出站 ----
 	outbounds := []any{
 		obj("type", "selector", "tag", "proxy", "outbounds", append([]string{"auto"}, tags...), "default", selected, "interrupt_exist_connections", true),
-		obj("type", "urltest", "tag", "auto", "outbounds", tags, "url", TestURL, "interval", itoa(s.ProbeMinutes)+"m", "tolerance", 50), // 定时测速:每隔 ProbeMinutes 分钟测一轮
+		autoGroup(tags, s, selected),
 	}
 	for _, raw := range in.Profile.Outbounds {
 		outbounds = append(outbounds, json.RawMessage(raw))
@@ -391,6 +391,19 @@ func cidrSuffix(ip string) string {
 		return "/128"
 	}
 	return "/32"
+}
+
+// autoGroup 自动选择组。定时测速只在"当前就是自动选择"时才开:手动指定了节点的话,
+// 后台每隔几分钟把上百个节点全连一遍没有意义 —— 打开节点列表时会现测一次,那才是用户要看的时候。
+// sing-box 的 interval 留空会退回默认三分钟,所以关掉的写法是给一个很长的间隔(idle_timeout 必须不小于它)。
+func autoGroup(tags []string, s settings.Settings, selected string) map[string]any {
+	g := obj("type", "urltest", "tag", "auto", "outbounds", tags, "url", TestURL, "tolerance", 50)
+	if selected == "auto" || selected == "" {
+		g["interval"] = itoa(s.ProbeMinutes) + "m"
+	} else {
+		g["interval"], g["idle_timeout"] = "24h", "25h"
+	}
+	return g
 }
 
 // hostCIDRs 把解析出来的地址转成规则要的写法,顺手挡掉不该进来的:

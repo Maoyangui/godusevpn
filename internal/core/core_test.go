@@ -36,6 +36,11 @@ func TestBuiltConfigPassesDryRun(t *testing.T) {
 			{Name: "单条", Enabled: true, Outbound: "auto", Rules: []settings.Rule{{Type: settings.RuleDomain, Value: "one.example"}}},
 		}
 		return s
+	}(), func() settings.Settings {
+		// 手动指定节点时自动选择组换成很长的测速间隔:间隔与 idle_timeout 的关系写错,内核会直接拒绝启动
+		s := settings.Default()
+		s.Selected = "hk"
+		return s
 	}()} {
 		raw, err := builder.Build(builder.Input{Profile: p, Settings: s, DataDir: t.TempDir(), ClashSecret: "x"})
 		if err != nil {

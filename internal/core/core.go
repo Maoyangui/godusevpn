@@ -372,10 +372,16 @@ func (c *Core) CloseAllConnections() error {
 	if !ok {
 		return errors.New("内核未运行")
 	}
+	// 只掐连接,不走 ResetNetwork:后者还会通知所有出站"网络变了",而 urltest 组收到通知就把
+	// 全部节点重测一轮 —— 切个节点而已,没必要顺带把上百个节点全连一遍。
+	if cm := service.FromContext[adapter.ConnectionManager](ctx); cm != nil {
+		cm.CloseAll()
+		return nil
+	}
 	nm := service.FromContext[adapter.NetworkManager](ctx)
 	if nm == nil {
-		return errors.New("拿不到网络管理器")
+		return errors.New("拿不到连接管理器")
 	}
-	nm.ResetNetwork(ctx) // 关掉所有被跟踪的连接,再通知出入站"网络变了",让它们丢掉自己的长连接
+	nm.ResetNetwork(ctx)
 	return nil
 }
