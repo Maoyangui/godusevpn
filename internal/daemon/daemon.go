@@ -392,8 +392,7 @@ func (d *Daemon) start(cfg []byte) error {
 	// 关 IPv6 时顺带把各网卡的 IPv6 协议停掉:运营商的公网 v6 地址就配在网卡上,
 	// 挡数据包挡不住"程序枚举网卡读走地址再报出去",地址不存在才是真的读不到。
 	// 放在内核启动之前做:改协议绑定会让网卡重新走一遍协议栈,别去抖刚建好的隧道。
-	// 网关模式不做:那是软路由,关掉网卡 IPv6 会连累局域网里其它设备,不是这台机器自己的事
-	if s0 := d.getSettings(); s0.TUN && !s0.IPv6 && s0.DisableNICIPv6 && s0.NetMode != settings.NetGateway {
+	if s0 := d.getSettings(); s0.TUN && !s0.IPv6 && s0.DisableNICIPv6 {
 		if err := netmode.DisableNICIPv6(builder.TunName); err != nil {
 			d.logf("停用网卡 IPv6 失败(不影响连接,但网卡上的公网 IPv6 地址还在): %v", err)
 		}

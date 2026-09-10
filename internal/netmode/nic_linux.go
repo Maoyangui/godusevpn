@@ -15,6 +15,8 @@ import (
 // Linux 上停用网卡 IPv6 靠 sysctl:net.ipv6.conf.<网卡>.disable_ipv6 置 1,内核会把这张网卡上的
 // v6 地址一并清掉。为什么要做见 nic_windows.go 里的说明 —— 挡数据包挡不住"程序读走网卡上的公网 v6 地址"。
 //
+// 不设例外:软路由的网关模式下同样会关(那正是希望整个局域网都没有 v6 出口的场景),
+// 只有隧道自己那张网卡不动 —— 它要靠 v6 地址把 v6 接进来再拒绝。
 // 改之前把每张网卡的原值存下来(先落盘再动手),断开时按原值写回;守护进程启动时也无条件还原一次。
 // 本来就已经是 1 的网卡不记也不动 —— 那是用户自己关的,断开后仍旧保持关闭。
 
@@ -26,11 +28,6 @@ func DisableNICIPv6(tunName string) error {
 	names, err := os.ReadDir(v6ConfDir)
 	if err != nil {
 		return nil // 内核根本没编 IPv6,没什么可关的
-	}
-	// 纯 IPv6 的机器(没有 v4 默认路由)一律不碰:那台机器的 SSH、面板全靠 v6,关掉等于把自己锁在门外。
-	// 这类机器多半是服务器,不是要防泄漏的客户端。
-	if !hasIPv4Default() {
-		return nil
 	}
 	saved := map[string]string{}
 	var errs []string
@@ -65,21 +62,6 @@ func DisableNICIPv6(tunName string) error {
 		return fmt.Errorf("停用网卡 IPv6: %s", strings.Join(errs, "; "))
 	}
 	return nil
-}
-
-// hasIPv4Default 有没有 IPv4 默认路由。/proc/net/route 里目标与掩码都是 0 的那一条。
-func hasIPv4Default() bool {
-	b, err := os.ReadFile("/proc/net/route")
-	if err != nil {
-		return true // 读不到就按"有"处理,宁可不动
-	}
-	for _, ln := range strings.Split(string(b), "\n")[1:] {
-		f := strings.Fields(ln)
-		if len(f) >= 8 && f[1] == "00000000" && f[7] == "00000000" {
-			return true
-		}
-	}
-	return false
 }
 
 func RestoreNICIPv6() {
