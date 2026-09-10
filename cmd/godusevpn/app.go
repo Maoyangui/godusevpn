@@ -31,15 +31,17 @@ const testURL = "http://www.gstatic.com/generate_204"
 
 // UIState 推给页面与托盘的一份快照:服务在不在、服务给的状态、实时速度、界面偏好。
 type UIState struct {
-	Service  bool            `json:"service"`  // 控制管道可达
-	SvcState string          `json:"svcState"` // running / stopped / not-installed / unknown(服务管理器视角)
-	View     ipc.StateView   `json:"view"`
-	Up       int64           `json:"up"`   // 字节/秒
-	Down     int64           `json:"down"` // 字节/秒
-	Lang     string          `json:"lang"`
-	Theme    string          `json:"theme"` // system / light / dark
-	Version  string          `json:"version"`
-	Update   *update.Release `json:"update,omitempty"` // 有新版本时带上
+	Service   bool            `json:"service"`  // 控制管道可达
+	SvcState  string          `json:"svcState"` // running / stopped / not-installed / unknown(服务管理器视角)
+	View      ipc.StateView   `json:"view"`
+	Up        int64           `json:"up"`        // 字节/秒
+	Down      int64           `json:"down"`      // 字节/秒
+	TotalUp   int64           `json:"totalUp"`   // 本次连接累计上行(内核停了归零)
+	TotalDown int64           `json:"totalDown"` // 本次连接累计下行
+	Lang      string          `json:"lang"`
+	Theme     string          `json:"theme"` // system / light / dark
+	Version   string          `json:"version"`
+	Update    *update.Release `json:"update,omitempty"` // 有新版本时带上
 }
 
 // uiPrefs 托盘客户端自己的偏好(和服务的设置分开,放当前用户目录)。
@@ -207,6 +209,7 @@ func (a *App) manageTraffic(st UIState) {
 		a.mu.Lock()
 		stop := a.trafficStop
 		a.trafficStop, a.clashKey = nil, ""
+		a.state.TotalUp, a.state.TotalDown = 0, 0 // 断开就重新计次:首页那格显示的是"本次连接"
 		a.mu.Unlock()
 		if stop != nil {
 			stop()
@@ -236,10 +239,14 @@ func (a *App) manageTraffic(st UIState) {
 		c := clash.New(info.Port, info.Secret)
 		for sctx.Err() == nil {
 			_ = c.Traffic(sctx, func(up, down int64) {
+				// 内核的速度流每秒一条,给的是这一秒的字节数,累加起来就是本次连接的总量。
+				// 累计值放在壳里而不是页面里:页面刷新、切到托盘再回来都不会把数字清掉。
 				a.mu.Lock()
 				a.state.Up, a.state.Down = up, down
+				a.state.TotalUp, a.state.TotalDown = a.state.TotalUp+up, a.state.TotalDown+down
+				tu, td := a.state.TotalUp, a.state.TotalDown
 				a.mu.Unlock()
-				runtime.EventsEmit(a.ctx, "traffic", map[string]int64{"up": up, "down": down})
+				runtime.EventsEmit(a.ctx, "traffic", map[string]int64{"up": up, "down": down, "totalUp": tu, "totalDown": td})
 			})
 			if sctx.Err() == nil {
 				time.Sleep(2 * time.Second)

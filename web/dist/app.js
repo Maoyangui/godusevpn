@@ -95,6 +95,32 @@ function tween(el, from, to, fmt, ms = 500) {
   };
   tweens[key] = requestAnimationFrame(step);
 }
+const THEME_ICON = {
+  system: '<svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/></svg>',
+  light: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M19.1 4.9l-1.4 1.4M6.3 17.7l-1.4 1.4"/></svg>',
+  dark: '<svg viewBox="0 0 24 24"><path d="M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5z"/></svg>',
+};
+const THEME_NEXT = { system: 'light', light: 'dark', dark: 'system' };
+let themeWish = null;           // 刚点下的主题;服务回推同一个值之前它说了算
+const curTheme = () => themeWish || (state && state.theme) || 'system';
+async function setTheme(v) {
+  themeWish = v;
+  applyTheme(v);
+  updateThemeBtn();
+  const sel = $('#f-theme');
+  if (sel && sel.value !== v) sel.value = v;
+  try { await App().SetTheme(v); }
+  catch (e) { themeWish = null; applyTheme(state ? state.theme : 'system'); updateThemeBtn(); toast(errText(e), 'err'); }
+}
+function updateThemeBtn() {
+  const b = $('#theme-btn');
+  if (!b) return;
+  const th = curTheme();
+  if (b.dataset.theme === th) return; // 只在真的变了的时候动 DOM
+  b.dataset.theme = th;
+  b.innerHTML = THEME_ICON[th] || THEME_ICON.system;
+  b.title = t('theme.' + th);
+}
 function applyTheme(theme) {
   const html = document.documentElement;
   if (theme === 'light' || theme === 'dark') html.setAttribute('data-theme', theme); else html.removeAttribute('data-theme');
@@ -140,6 +166,42 @@ function renderDrawer() {
   const u = $('#drawer-upd');
   u.hidden = !(state && state.update);
   if (state && state.update) u.textContent = t('drawer.update', { v: state.update.version });
+  updateThemeBtn();
+  renderDrawerState();
+}
+let dsLang = null;
+// renderDrawerState 抽屉顶上那张状态卡:接着品牌区往下排,顺手把三种模式摆出来,不用先回首页。
+// 卡片只搭一次(换语言才重搭),之后每次状态推送只改文字与 class —— 整块重画会把正按着的按钮换掉。
+function renderDrawerState() {
+  const box = $('#drawer-state');
+  if (!box || !state) return;
+  const v = state.view, st = v.state.status, on = st === 'connected' || st === 'degraded';
+  box.hidden = !(v.profiles && v.profiles.length); // 还没加订阅时抽屉里没什么可显示的
+  if (box.hidden) return;
+  if (dsLang !== LANG) {
+    dsLang = LANG;
+    box.innerHTML = `<div class="ds-top"><span class="dot" id="ds-dot"></span><b id="ds-state"></b><span class="grow"></span><span id="ds-time"></span></div>
+      <button class="ds-node" id="ds-node"><span class="flag none sm" id="ds-flag">${ICON_GLOBE}</span><span class="ds-mid"><b id="ds-name"></b><span id="ds-sub"></span></span></button>
+      <div class="ds-modes" id="ds-modes">${['rule', 'global', 'direct'].map(m => `<button data-mode="${m}">${t('mode.' + m)}</button>`).join('')}</div>`;
+    $('#ds-node').addEventListener('click', () => { closeDrawer(); sheetNodes(); });
+    $('#ds-modes').querySelectorAll('button').forEach(b => b.addEventListener('click', async () => {
+      if (b.classList.contains('on')) return; // 已经是这个模式就别再打扰后端
+      try { await App().SetMode(b.dataset.mode); toast(t('mode.switched', { m: t('mode.' + b.dataset.mode) }), 'ok'); }
+      catch (e) { toast(errText(e), 'err'); }
+    }));
+  }
+  $('#ds-dot').className = 'dot ' + (on ? 'on' : (st === 'error' || !state.service) ? 'err' : '');
+  $('#ds-state').textContent = state.service ? t('st.' + st) : t('svc.down');
+  $('#ds-time').textContent = on && v.uptime ? fmtDuration(v.uptime) : '';
+  const auto = v.node === 'auto' || !v.node;
+  const name = auto ? (v.autoNow || t('node.auto')) : v.node;
+  setFlag($('#ds-flag'), geoCode(name));
+  $('#ds-name').textContent = cleanName(name);
+  const ping = v.ping || lastPing;
+  $('#ds-sub').textContent = !on ? t('home.pickNode')
+    : v.mode === 'direct' ? t('home.directAll')
+      : ([v.exitIp || '', ping ? ping + ' ' + t('common.ms') : ''].filter(Boolean).join(' · ') || t('mode.' + v.mode));
+  $('#ds-modes').querySelectorAll('button').forEach(b => b.classList.toggle('on', b.dataset.mode === v.mode));
 }
 function openDrawer() {
   renderDrawer(); $('#drawer').classList.add('show'); $('#drawer-backdrop').classList.add('show');
@@ -214,24 +276,202 @@ function updateOnboardSvc() {
   if (!state.service) $('#ob-repair').addEventListener('click', repairService);
 }
 
+// ---- 地区牌子 ----
+// 节点名里一般写着地区,认出来给一块小牌子,首页和节点列表共用。
+// 认的顺序:旗帜 emoji(两个区域指示符本身就是国家代码)→ 中英文地名 → 独立的两位代码。
+// 两位代码必须两侧都不是字母数字,否则 "Russia" 里的 us、"Trojan" 里的字母都会被当成国家。
+const GEO_NAMES = [
+  ['HK', '香港,中國香港,中国香港,hongkong,hong kong'],
+  ['MO', '澳门,澳門,macao,macau'],
+  ['TW', '台湾,台灣,臺灣,taiwan,taipei,新北'],
+  ['JP', '日本,东京,東京,大阪,japan,tokyo,osaka'],
+  ['KR', '韩国,韓國,首尔,首爾,korea,seoul'],
+  ['SG', '新加坡,狮城,獅城,singapore'],
+  ['US', '美国,美國,洛杉矶,洛杉磯,圣何塞,聖何塞,西雅图,西雅圖,达拉斯,達拉斯,纽约,紐約,硅谷,凤凰城,united states,america,los angeles,san jose,seattle,dallas,new york,silicon valley,phoenix'],
+  ['GB', '英国,英國,伦敦,倫敦,united kingdom,england,london,britain'],
+  ['DE', '德国,德國,法兰克福,法蘭克福,germany,frankfurt'],
+  ['FR', '法国,法國,巴黎,france,paris'],
+  ['NL', '荷兰,荷蘭,阿姆斯特丹,netherlands,amsterdam'],
+  ['RU', '俄罗斯,俄羅斯,莫斯科,russia,moscow'],
+  ['CA', '加拿大,多伦多,多倫多,canada,toronto,montreal'],
+  ['AU', '澳大利亚,澳大利亞,澳洲,悉尼,australia,sydney'],
+  ['IN', '印度,孟买,孟買,india,mumbai'],
+  ['TR', '土耳其,伊斯坦布尔,turkey,istanbul'],
+  ['BR', '巴西,圣保罗,聖保羅,brazil,sao paulo'],
+  ['AR', '阿根廷,argentina'],
+  ['ES', '西班牙,马德里,馬德里,spain,madrid'],
+  ['IT', '意大利,米兰,米蘭,italy,milan'],
+  ['MY', '马来西亚,馬來西亞,吉隆坡,malaysia,kuala lumpur'],
+  ['TH', '泰国,泰國,曼谷,thailand,bangkok'],
+  ['VN', '越南,vietnam'],
+  ['PH', '菲律宾,菲律賓,philippines,manila'],
+  ['ID', '印尼,印度尼西亚,雅加达,indonesia,jakarta'],
+  ['AE', '阿联酋,阿聯酋,迪拜,杜拜,dubai,emirates'],
+  ['IE', '爱尔兰,愛爾蘭,都柏林,ireland,dublin'],
+  ['PL', '波兰,波蘭,华沙,poland,warsaw'],
+  ['SE', '瑞典,斯德哥尔摩,sweden,stockholm'],
+  ['CH', '瑞士,苏黎世,蘇黎世,switzerland,zurich'],
+  ['FI', '芬兰,芬蘭,赫尔辛基,finland,helsinki'],
+  ['NO', '挪威,norway,oslo'],
+  ['MX', '墨西哥,mexico'],
+  ['ZA', '南非,south africa,johannesburg'],
+  ['CN', '中国,中國,回国,回國,上海,北京,广州,廣州,深圳,china,shanghai,beijing'],
+  ['UA', '乌克兰,烏克蘭,ukraine'],
+  ['AT', '奥地利,奧地利,austria,vienna'],
+  ['BE', '比利时,比利時,belgium'],
+  ['DK', '丹麦,丹麥,denmark'],
+  ['PT', '葡萄牙,portugal,lisbon'],
+  ['CZ', '捷克,czech,prague'],
+  ['RO', '罗马尼亚,羅馬尼亞,romania'],
+  ['IL', '以色列,israel'],
+  ['SA', '沙特,saudi'],
+  ['EG', '埃及,egypt'],
+  ['CL', '智利,chile'],
+  ['NZ', '新西兰,新西蘭,new zealand'],
+  ['KZ', '哈萨克斯坦,哈薩克,kazakhstan'],
+  ['MT', '马耳他,馬耳他,malta'],
+  ['LU', '卢森堡,盧森堡,luxembourg'],
+  ['HU', '匈牙利,hungary'],
+  ['GR', '希腊,希臘,greece'],
+  ['RS', '塞尔维亚,serbia'],
+  ['BG', '保加利亚,bulgaria'],
+  ['LT', '立陶宛,lithuania'],
+  ['LV', '拉脱维亚,latvia'],
+  ['EE', '爱沙尼亚,estonia'],
+  ['IS', '冰岛,冰島,iceland'],
+];
+const GEO_SET = new Set(GEO_NAMES.map(x => x[0]));
+// 主要地区给一对贴近国旗的颜色,其余按代码散一个色相出来,同一个地区每次都一样
+const GEO_COLOR = {
+  HK: ['#e11d48', '#f97316'], MO: ['#16a34a', '#34d399'], TW: ['#2f8bff', '#18e3e8'], JP: ['#f43f5e', '#fb7185'],
+  KR: ['#3b82f6', '#ef4444'], SG: ['#ef4444', '#fb7185'], US: ['#2563eb', '#ef4444'], GB: ['#1d4ed8', '#dc2626'],
+  DE: ['#374151', '#f59e0b'], FR: ['#2563eb', '#dc2626'], NL: ['#f97316', '#2563eb'], RU: ['#2563eb', '#dc2626'],
+  CA: ['#dc2626', '#f87171'], AU: ['#1e40af', '#0ea5e9'], IN: ['#f97316', '#16a34a'], TR: ['#dc2626', '#f87171'],
+  BR: ['#16a34a', '#facc15'], ES: ['#fbbf24', '#e11d48'], IT: ['#16a34a', '#dc2626'], MY: ['#1d4ed8', '#facc15'],
+  TH: ['#dc2626', '#1d4ed8'], AE: ['#16a34a', '#374151'], CN: ['#dc2626', '#f59e0b'], IE: ['#16a34a', '#f97316'],
+};
+const ICON_GLOBE = '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a15 15 0 0 1 0 18a15 15 0 0 1 0-18"/></svg>';
+// flagCode 旗帜 emoji 是两个区域指示符,减掉基址就是 ISO 国家代码,不用查表
+function flagCode(s) {
+  const m = String(s || '').match(/[\u{1F1E6}-\u{1F1FF}]{2}/u);
+  return m ? [...m[0]].map(c => String.fromCharCode(c.codePointAt(0) - 0x1F1E6 + 65)).join('') : '';
+}
+function geoCode(name) {
+  const s = String(name || '');
+  const f = flagCode(s);
+  if (f) return f;
+  const low = s.toLowerCase();
+  for (const [code, alias] of GEO_NAMES) for (const a of alias.split(',')) if (low.includes(a)) return code;
+  const m = low.match(/(?:^|[^a-z0-9])([a-z]{2})(?=$|[^a-z0-9])/);
+  if (m) { const c = m[1].toUpperCase(); if (GEO_SET.has(c)) return c; }
+  return '';
+}
+function geoStyle(code) {
+  const c = GEO_COLOR[code];
+  if (c) return `--c1:${c[0]};--c2:${c[1]}`;
+  let h = 0;
+  for (let i = 0; i < code.length; i++) h = (h * 37 + code.charCodeAt(i)) % 360;
+  return `--c1:hsl(${h} 66% 52%);--c2:hsl(${(h + 40) % 360} 70% 44%)`;
+}
+function flagHTML(code, cls = '') {
+  const u = code ? flagURL(code) : '';
+  if (u) return `<span class="flag fl ${cls}"><img class="flag-svg" src="${u}" alt=""></span>`;
+  return code ? `<span class="flag ${cls}" style="${geoStyle(code)}">${code}</span>` : `<span class="flag none ${cls}">${ICON_GLOBE}</span>`;
+}
+// setFlag 就地换牌子:地区没变就一个字节都不动(状态每 1.5 秒推一次)
+function setFlag(el, code) {
+  if (!el) return;
+  const key = code || '-';
+  if (el.dataset.geo === key) return;
+  el.dataset.geo = key;
+  const sm = el.classList.contains('sm') ? ' sm' : '';
+  const u = code ? flagURL(code) : '';
+  el.className = 'flag' + (u ? ' fl' : code ? '' : ' none') + sm;
+  el.setAttribute('style', u || !code ? '' : geoStyle(code));
+  el.innerHTML = u ? `<img class="flag-svg" src="${u}" alt="">` : (code ? esc(code) : ICON_GLOBE);
+}
+let regionNamer = null, regionLang = '';
+// regionName 国家代码 → 短国名。中文一律用上面表里的第一个别名(香港、台湾、澳门……):
+// 各版本 WebView 自带的 ICU 数据不一样,有的会把 HK 写成"中国香港特别行政区",筛选条上排不下。
+// 英文表里没有短名,交给 Intl 的 short 样式(Hong Kong / US / UK),它也没有就直接显示代码。
+function regionName(code) {
+  if (!code) return '';
+  if (LANG !== 'en') {
+    const row = GEO_NAMES.find(x => x[0] === code);
+    if (row) return row[1].split(',')[0];
+  }
+  try {
+    if (!regionNamer || regionLang !== LANG) { regionNamer = new Intl.DisplayNames([LANG === 'en' ? 'en' : 'zh-CN'], { type: 'region', style: 'short' }); regionLang = LANG; }
+    return regionNamer.of(code) || code;
+  } catch (e) { return code; }
+}
+// cleanName 去掉名字开头的旗帜(牌子已经画出来了),后端拿到的仍是原名
+function cleanName(name) {
+  return String(name || '').replace(/^[\s\-|·]*[\u{1F1E6}-\u{1F1FF}]{2}[\s\-|·]*/u, '').trim() || String(name || '');
+}
+// nodeMult 节点名里的倍率(2x / x2 / 0.5倍);一倍和认不出来都返回 0,不显示牌子
+function nodeMult(name) {
+  const s = String(name || '');
+  const m = s.match(/(?:^|[^\d.])(\d+(?:\.\d+)?)\s*[xX×倍]/) || s.match(/[xX×]\s*(\d+(?:\.\d+)?)/);
+  if (!m) return 0;
+  const v = parseFloat(m[1]);
+  return v > 0 && v !== 1 ? v : 0;
+}
+
 // ---- 首页 ----
+let hist = [];        // 最近一分钟的速度采样:首页那条曲线就是它画出来的
+const HIST_N = 60;
+function pushHist(d, u) { hist.push([d, u]); while (hist.length > HIST_N) hist.shift(); }
+function clearHist() { hist = []; drawSpark(); }
+// drawSpark 只改三条 path 的 d,不动 DOM:速度每秒推一次,重建元素会把动画和焦点都打断。
+function drawSpark() {
+  const fill = $('#spark-fill');
+  if (!fill) return;
+  const W = 356, H = 56;
+  if (hist.length < 2) { fill.setAttribute('d', ''); $('#spark-d').setAttribute('d', ''); $('#spark-u').setAttribute('d', ''); return; }
+  const step = W / (hist.length - 1);
+  let max = 1;
+  for (const p of hist) max = Math.max(max, p[0], p[1]);
+  const pts = k => hist.map((p, i) => (i * step).toFixed(1) + ' ' + (H - 3 - p[k] / max * (H - 9)).toFixed(1));
+  const line = a => 'M' + a.join(' L');
+  const d = pts(0);
+  fill.setAttribute('d', line(d) + ' L' + W + ' ' + H + ' L0 ' + H + ' Z');
+  $('#spark-d').setAttribute('d', line(d));
+  $('#spark-u').setAttribute('d', line(pts(1)));
+}
 function renderHome(el) {
   el.innerHTML = `
     <div id="home-banner"></div>
     <div class="hero">
-    <div class="power-wrap" id="power-wrap">
-      <svg viewBox="0 0 208 208"><defs><linearGradient id="ringGrad" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#6a44f2"/><stop offset=".55" stop-color="#2f8bff"/><stop offset="1" stop-color="#18e3e8"/></linearGradient></defs>
-        <circle class="ring-bg" cx="104" cy="104" r="99"/><circle class="ring" cx="104" cy="104" r="99"/></svg>
-      <button class="power" id="power"><svg viewBox="0 0 24 24"><path d="M12 3v9"/><path d="M6.3 6.3a8 8 0 1 0 11.4 0"/></svg><b id="power-text"></b></button>
+      <div class="power-wrap" id="power-wrap">
+        <svg viewBox="0 0 208 208"><defs><linearGradient id="ringGrad" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#6a44f2"/><stop offset=".55" stop-color="#2f8bff"/><stop offset="1" stop-color="#18e3e8"/></linearGradient></defs>
+          <circle class="ring-bg" cx="104" cy="104" r="99"/><circle class="ring" cx="104" cy="104" r="99"/></svg>
+        <button class="power" id="power"><svg viewBox="0 0 24 24"><path d="M12 3v9"/><path d="M6.3 6.3a8 8 0 1 0 11.4 0"/></svg><b id="power-text"></b></button>
+      </div>
+      <div class="uptime" id="uptime" hidden><b id="s-time">–</b><span>${t('home.uptime')}</span></div>
+      <div class="status-text" id="status"></div>
+      <div class="status-sub" id="status-sub"></div>
     </div>
-    <div class="status-text" id="status"></div>
-    <div class="status-sub" id="status-sub"></div>
-    </div>
-    <div class="stats">
-      <div class="stat"><b id="s-down">0 B/s</b><span>↓ ${t('stat.down')}</span></div>
-      <div class="stat"><b id="s-up">0 B/s</b><span>↑ ${t('stat.up')}</span></div>
-      <div class="stat"><b id="s-ping">–</b><span>${t('stat.ping')}</span></div>
-      <div class="stat"><b id="s-time">–</b><span>${t('stat.time')}</span></div>
+    <button class="idcard" id="id-card">
+      <span class="flag none" id="id-flag">${ICON_GLOBE}</span>
+      <span class="idmid">
+        <span class="idtop"><b id="id-name">–</b><em class="tag" id="id-auto" hidden>${t('pick.auto')}</em><em class="tag warn" id="id-mult" hidden></em></span>
+        <span class="idsub" id="id-sub"></span>
+      </span>
+      <span class="idms" id="id-ms"><b id="s-ping">–</b><span id="id-unit"></span></span>
+    </button>
+    <div class="speed">
+      <div class="speed-row">
+        <span class="sp"><span class="k"><i class="sq d"></i>${t('stat.down')}</span><b id="s-down">0 B/s</b></span>
+        <span class="sp"><span class="k"><i class="sq u"></i>${t('stat.up')}</span><b id="s-up">0 B/s</b></span>
+        <span class="sp end"><span class="k">${t('stat.session')}</span><b id="s-total">0 B</b></span>
+      </div>
+      <svg class="spark" viewBox="0 0 356 56" preserveAspectRatio="none" aria-hidden="true">
+        <defs><linearGradient id="sparkFill" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#2f8bff" stop-opacity=".26"/><stop offset="1" stop-color="#2f8bff" stop-opacity="0"/></linearGradient></defs>
+        <path id="spark-fill" fill="url(#sparkFill)" d=""/>
+        <path id="spark-d" fill="none" stroke="#2f8bff" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" d=""/>
+        <path id="spark-u" fill="none" stroke="#18e3e8" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round" d=""/>
+      </svg>
     </div>
     <div class="pickers">
       <button class="picker" id="pk-mode"><span>${t('pick.mode')}</span><b id="pk-mode-v"></b></button>
@@ -239,40 +479,74 @@ function renderHome(el) {
       <button class="picker" id="pk-node"><span>${t('pick.node')}</span><b id="pk-node-v"></b><em id="pk-node-ms"></em></button>
     </div>`;
   $('#power').addEventListener('click', togglePower);
+  $('#id-card').addEventListener('click', sheetNodes);
   $('#pk-mode').addEventListener('click', sheetMode);
   $('#pk-prof').addEventListener('click', sheetProfiles);
   $('#pk-node').addEventListener('click', sheetNodes);
   updateHome();
+  drawSpark();
 }
 async function togglePower() {
   if (!state || !state.service) { toast(t('svc.down'), 'err'); return; }
   try { if (state.view.state.wanted) await App().Disconnect(); else await App().Connect(); }
   catch (e) { toast(errText(e), 'err'); }
 }
+// updateHome 状态每 1.5 秒推一次,这里只改文字和 class,不重建任何节点
 function updateHome() {
   if (view !== 'home' || !state) return;
   const v = state.view, st = v.state.status, wanted = v.state.wanted;
-  const wrap = $('#power-wrap'); if (!wrap) return;
+  const wrap = $('#power-wrap');
+  if (!wrap) return;
   const on = st === 'connected' || st === 'degraded';
   wrap.className = 'power-wrap ' + (on ? 'on' : (wanted && st !== 'error') ? 'busy' : (st === 'error' || !state.service) ? 'err' : '');
   $('#power-text').textContent = on ? t('home.disconnect') : wanted ? (st === 'stopping' ? t('home.stopping') : t('home.connecting')) : t('home.connect');
-  $('#status').textContent = state.service ? t('st.' + st) : t('svc.down');
-  let sub = '';
-  if (v.state.error) sub = (t('code.' + v.state.code) !== 'code.' + v.state.code ? t('code.' + v.state.code) : v.state.error);
-  else if (on) sub = (v.node === 'auto' ? (v.autoNow || t('pick.auto')) : v.node) + ' · ' + t('mode.' + v.mode);
-  $('#status-sub').textContent = sub;
+
+  // 连上了:大字显示时长,状态那两行让给下面的出口卡片;没连上或出错:照旧显示状态与原因
+  const err = v.state.error ? (t('code.' + v.state.code) !== 'code.' + v.state.code ? t('code.' + v.state.code) : v.state.error) : '';
+  $('#uptime').hidden = !(on && v.uptime);
   $('#s-time').textContent = on && v.uptime ? fmtDuration(v.uptime) : '–';
-  const ping = v.ping || lastPing; // 服务每次健康检查都会测当前节点,推过来的最新;没有就用刚手动测的
-  $('#s-ping').textContent = on && ping ? ping + ' ' + t('common.ms') : '–';
+  const quiet = on && !err;
+  $('#status').hidden = quiet;
+  $('#status').textContent = state.service ? t('st.' + st) : t('svc.down');
+  $('#status-sub').hidden = !err;
+  $('#status-sub').textContent = err;
+
+  // 出口卡片:自动选择时显示实际落到的那个节点,底下是这条线路真正的出口地址
+  const auto = v.node === 'auto' || !v.node;
+  const name = auto ? (v.autoNow || t('node.auto')) : v.node;
+  setFlag($('#id-flag'), on || !auto ? geoCode(name) : geoCode(v.node));
+  $('#id-name').textContent = cleanName(name);
+  $('#id-auto').hidden = !auto;
+  const mult = nodeMult(name);
+  $('#id-mult').hidden = !mult;
+  if (mult) $('#id-mult').textContent = t('node.mult', { n: mult });
+  let sub;
+  if (!on) sub = t('home.pickNode');
+  else if (v.mode === 'direct') sub = t('home.directAll'); // 直连模式的流量根本不经节点,别挂着节点的出口
+  else if (v.exitIp) sub = t('home.exit') + ' ' + v.exitIp + (v.exitLoc ? ' · ' + regionName(v.exitLoc) : '');
+  else sub = t('mode.' + v.mode) + ' · ' + t('home.exitWait');
+  $('#id-sub').textContent = sub;
+  const ping = v.ping || lastPing; // 服务每次健康检查都会测当前节点;没有就用刚手动测的那次
+  $('#id-ms').className = 'idms ' + (on && ping ? msClass(ping) : 'none');
+  $('#s-ping').textContent = on && ping ? ping : '–';
+  $('#id-unit').textContent = on && ping ? t('common.ms') : '';
+
   if (!on) { $('#s-down').textContent = '0 B/s'; $('#s-up').textContent = '0 B/s'; }
+  $('.spark').hidden = !on; // 没连的时候那块空图看着像没画完
+  $('#s-total').textContent = fmtBytes((on ? (state.totalDown || 0) + (state.totalUp || 0) : 0));
+
   $('#pk-mode-v').textContent = t('mode.' + v.mode);
   $('#pk-prof-v').textContent = v.profile ? v.profile.name : t('prof.empty');
-  $('#pk-node-v').textContent = v.node === 'auto' || !v.node ? t('pick.auto') : v.node;
+  $('#pk-node-v').textContent = auto ? t('pick.auto') : cleanName(v.node);
   $('#pk-node-ms').textContent = '';
   const b = $('#home-banner');
-  b.innerHTML = state.service ? '' : `<div class="banner"><span class="grow">${t('banner.svcDown')}</span><button class="btn sm" id="repair">${t('banner.repair')}</button></div>`;
-  if (!state.service) $('#repair').addEventListener('click', repairService);
+  const wantBanner = !state.service;
+  if (wantBanner !== !!b.firstChild) { // 只有横幅出现/消失时才动 DOM,免得每次推送都把按钮换掉
+    b.innerHTML = wantBanner ? `<div class="banner"><span class="grow">${t('banner.svcDown')}</span><button class="btn sm" id="repair">${t('banner.repair')}</button></div>` : '';
+    if (wantBanner) $('#repair').addEventListener('click', repairService);
+  }
 }
+
 async function pasteInto(sel) {
   let v = '';
   try { v = window.__web && navigator.clipboard && navigator.clipboard.readText ? (await navigator.clipboard.readText() || '').trim() : ((await App().ReadClipboard()) || '').trim(); } catch (e) { /* 没有剪贴板权限 */ }
@@ -325,12 +599,52 @@ function drawProfiles(list) {
 }
 function msClass(d) { return d < 0 ? 'bad' : !d ? 'none' : d < 150 ? 'good' : d < 400 ? 'mid' : 'bad'; }
 function msText(d, testing) { if (testing) return '<span class="spinner"></span>'; if (d < 0) return t('node.fail'); return d ? d + ' ms' : '–'; }
-let nodeTesting = false, nodeFilter = '', nodeFetchTried = false, nodeSig = '';
+let nodeTesting = false, nodeFilter = '', nodeRegion = '', nodeFetchTried = false, nodeSig = '';
 async function sheetNodes() {
-  nodeFilter = '';
+  nodeFilter = ''; nodeRegion = '';
   openSheet(t('sheet.nodes'), `<div class="empty"><span class="spinner"></span></div>`, { action: t('sheet.retest'), onAction: () => testNodes(true) });
   await drawNodes(false);
   testNodes(false);
+}
+// applyNodeFilter 搜索框与地区标签只是把行藏起来,不重画列表:测速正在跑时列表也不会闪
+function applyNodeFilter() {
+  const body = $('#sheet-body');
+  if (!body) return;
+  const q = nodeFilter.toLowerCase();
+  body.querySelectorAll('.item[data-name]').forEach(it => {
+    const name = it.dataset.name || '';
+    if (name === 'auto') { it.hidden = false; return; } // 自动选择永远留在最上面
+    it.hidden = !!((q && !name.toLowerCase().includes(q)) || (nodeRegion && it.dataset.geo !== nodeRegion));
+  });
+  body.querySelectorAll('.chip').forEach(c => c.classList.toggle('on', (c.dataset.geo || '') === nodeRegion));
+}
+// regionChips 按地区归堆,节点多的排前面;点一下只是筛选,不碰后端
+function regionChips(nodes) {
+  const n = new Map();
+  for (const x of nodes) {
+    if (x.name === 'auto') continue;
+    const c = geoCode(x.name);
+    if (c) n.set(c, (n.get(c) || 0) + 1);
+  }
+  const list = [...n.entries()].sort((a, b) => b[1] - a[1]).slice(0, 8); // 换行排布,太多会把列表挤下去
+  if (list.length < 2) return ''; // 只有一个地区就不用筛了
+  return `<div class="chips"><button class="chip on" data-geo="">${t('node.all')}</button>`
+    + list.map(([c, k]) => `<button class="chip" data-geo="${c}">${esc(regionName(c))} ${k}</button>`).join('') + '</div>';
+}
+function nodeRow(n, i, max, testing) {
+  if (n.name === 'auto') {
+    return `<div class="item auto ${n.current ? 'current' : ''}" data-name="auto"><span class="check"></span>
+      <div class="name"><b>${t('node.auto')}</b><span>${n.autoNow ? t('node.now', { n: esc(n.autoNow) }) : t('node.autoDesc')}</span></div>
+      <span class="ms ${msClass(n.delay)}"></span></div>`;
+  }
+  const code = geoCode(n.name), mult = nodeMult(n.name);
+  return `<div class="item ${n.current ? 'current' : ''}" data-name="${esc(n.name)}" data-geo="${code}" style="animation-delay:${Math.min(i, 12) * 25}ms"><span class="check"></span>
+    ${flagHTML(code, 'sm')}
+    <div class="name">
+      <div class="ntop"><b>${esc(cleanName(n.name))}</b>${mult ? `<em class="tag warn">${t('node.mult', { n: mult })}</em>` : ''}${n.type ? `<em class="ntype">${esc(n.type)}</em>` : ''}</div>
+      <div class="bar"><i style="width:${barWidth(n.delay, max)}"></i></div>
+    </div>
+    <span class="ms ${msClass(n.delay)}">${msText(n.delay, testing)}</span></div>`;
 }
 async function drawNodes(testing) {
   let nodes = [];
@@ -354,16 +668,18 @@ async function drawNodes(testing) {
   const st = state && state.view.state.status, online = st === 'connected' || st === 'degraded';
   const hint = online ? '' : `<div class="small muted" style="padding:0 4px 8px">${t('node.offlineHint')}</div>`;
   const keep = focusKey($('#sheet-body'), 'data-name');
-  $('#sheet-body').innerHTML = hint + (nodes.length > 8? `<div class="sheet-filter"><input type="text" id="node-filter" placeholder="${t('node.filter')}" value="${esc(nodeFilter)}"></div>` : '') + `<div class="list">${nodes.map((n, i) => `<div class="item ${n.current ? 'current' : ''}" data-name="${esc(n.name)}" style="animation-delay:${Math.min(i, 12) * 25}ms"><span class="check"></span>
-    <div class="name"><b>${esc(n.name === 'auto' ? t('node.auto') : n.name)}</b><span>${n.name === 'auto' ? (n.autoNow ? t('node.now', { n: n.autoNow }) : t('node.autoDesc')) : esc(n.type || '')}</span>${n.name !== 'auto' ? `<div class="bar"><i style="width:${barWidth(n.delay, max)}"></i></div>` : ''}</div>
-    <span class="ms ${msClass(n.delay)}">${n.name === 'auto' ? '' : msText(n.delay, testing)}</span></div>`).join('')}</div>`;
+  $('#sheet-body').innerHTML = hint
+    + (nodes.length > 8 ? `<div class="sheet-filter"><input type="text" id="node-filter" placeholder="${t('node.filter')}" value="${esc(nodeFilter)}"></div>` : '')
+    + regionChips(nodes)
+    + `<div class="list">${nodes.map((n, i) => nodeRow(n, i, max, testing)).join('')}</div>`;
   $('#sheet-body').querySelectorAll('.item').forEach(it => it.addEventListener('click', async () => {
     try { await App().SelectNode(it.dataset.name); closeSheet(); } catch (e) { toast(errText(e), 'err'); }
   }));
-  const applyFilter = () => { const q = nodeFilter.toLowerCase(); $('#sheet-body').querySelectorAll('.item').forEach(it => { it.hidden = !!q && it.dataset.name !== 'auto' && !it.dataset.name.toLowerCase().includes(q); }); };
+  $('#sheet-body').querySelectorAll('.chip').forEach(c => c.addEventListener('click', () => { nodeRegion = c.dataset.geo || ''; applyNodeFilter(); }));
   refocus($('#sheet-body'), 'data-name', keep);
   const f = $('#node-filter');
-  if (f) { f.addEventListener('input', () => { nodeFilter = f.value.trim(); applyFilter(); }); applyFilter(); }
+  if (f) f.addEventListener('input', () => { nodeFilter = f.value.trim(); applyNodeFilter(); });
+  applyNodeFilter();
 }
 // barWidth 延迟条的宽度:没测出来就是 0。条子一直留着,测完只改宽度,CSS 自带的过渡会把它抹开。
 function barWidth(delay, max) { return delay > 0 ? Math.max(6, 100 - delay / max * 80) + '%' : '0'; }
@@ -491,7 +807,7 @@ async function renderSettings(el) {
     <div class="card"><h3>${t('set.g.app')} <span class="tag">${t('set.instant')}</span></h3>
       ${state.platform === 'android' ? `<div class="srow"><div class="lbl">${t('set.autostart')}<div>${t('set.autostartAndroidHelp')}</div></div></div>` : sw('f-autostart', t(state.platform === 'linux' ? 'set.autostartLinux' : 'set.autostart'), auto, t(state.platform === 'linux' ? 'set.autostartLinuxHelp' : 'set.autostartHelp'))}
       ${sel('f-lang', t('set.lang'), LANG, [['zh', '中文'], ['en', 'English']])}
-      ${sel('f-theme', t('set.theme'), state.theme || 'system', [['system', t('theme.system')], ['light', t('theme.light')], ['dark', t('theme.dark')]])}
+      ${sel('f-theme', t('set.theme'), curTheme(), [['system', t('theme.system')], ['light', t('theme.light')], ['dark', t('theme.dark')]])}
     </div>
     <div class="savebar" id="savebar"><div class="note" id="save-note">${t('set.clean')}</div><button class="btn primary" id="save" disabled>${t('set.save')}</button></div>`;
   const watch = ['f-tun', 'f-stack', 'f-strict', 'f-lan', 'f-mixed', 'f-probe', 'f-update', 'f-rdns', 'f-ldns', 'f-fakeip', 'f-ipv6', 'f-nicv6', 'f-ad', 'f-bypass', 'f-log', 'f-logdays', 'f-netmode', 'f-lansub', 'f-weblisten'].filter(id => $('#' + id));
@@ -507,7 +823,7 @@ async function renderSettings(el) {
   });
   const fa = $('#f-autostart'); if (fa) fa.addEventListener('change', async e => { try { await App().SetAutostart(e.target.checked); toast(t('set.saved'), 'ok'); } catch (err) { toast(errText(err), 'err'); e.target.checked = !e.target.checked; } });
   $('#f-lang').addEventListener('change', async e => { LANG = e.target.value; await App().SetLang(LANG); nav('settings'); });
-  $('#f-theme').addEventListener('change', async e => { applyTheme(e.target.value); await App().SetTheme(e.target.value); });
+  $('#f-theme').addEventListener('change', e => setTheme(e.target.value));
   $('#f-rules').addEventListener('click', () => nav('rules'));
 }
 
@@ -523,8 +839,8 @@ async function renderRules(el) {
   const save = async next => { try { await App().SaveSettings({ ...s, ruleGroups: next }); toast(t('set.saved'), 'ok'); } catch (e) { toast(errText(e), 'err'); } nav('rules'); };
   const dr = Object.assign({ private: 'direct', cn: 'direct', final: 'proxy' }, s.defaultRules || {});
   // 默认规则的一行:标题 + 出口下拉。出口取值与规则组一致(直连 / 代理 / 拒绝)
-  const drRow = (id, key, val, opts) => `<div class="cond" style="padding:8px 10px"><span class="val" style="font-family:inherit">${t(key)}</span>
-    <select id="${id}" data-dr="${id.slice(3)}" style="width:auto;flex:none;max-width:52%">${opts.map(o => `<option value="${o}" ${o === val ? 'selected' : ''}>${t('out.' + o)}</option>`).join('')}</select></div>`;
+  const drRow = (id, key, val, opts) => `<div class="cond" style="padding:4px 6px 4px 10px"><span class="val" style="font-family:inherit">${t(key)}</span>
+    <select id="${id}" data-dr="${id.slice(3)}" style="width:auto;flex:none;max-width:56%;padding:5px 8px;font-size:12.5px">${opts.map(o => `<option value="${o}" ${o === val ? 'selected' : ''}>${t('out.' + o)}</option>`).join('')}</select></div>`;
   const summary = g => { const r = g.rules || []; return outLabel(g.outbound) + ' · ' + t('rules.count', { n: r.length }) + (r.length ? ' · ' + r.slice(0, 3).map(x => x.value).join(', ') + (r.length > 3 ? '…' : '') : ''); };
   el.innerHTML = `<p class="small muted" style="margin:2px 0 10px">${t('rules.intro')}</p>
     <div class="list">${groups.map((g, i) => `<div class="item rg ${g.enabled ? '' : 'off'}" style="flex-wrap:wrap;animation-delay:${i * 30}ms">
@@ -538,13 +854,16 @@ async function renderRules(el) {
         <button class="btn sm" data-act="down" data-i="${i}" ${i === groups.length - 1 ? 'disabled' : ''}>↓</button>
         <span class="grow"></span><button class="btn sm danger ghost" data-act="del" data-i="${i}">${t('prof.del')}</button>
       </div></div>`).join('')}
-      <div class="item rg builtin" style="flex-wrap:wrap"><div class="name" style="flex-basis:100%"><b>${t('rules.default')} <span class="tag">${dr.private === 'direct' && dr.cn === 'direct' && dr.final === 'proxy' ? t('rules.builtin') : t('rules.changed')}</span></b><span>${t('rules.defaultHint')}</span></div>
-        <div class="conds" style="flex-basis:100%;margin-top:8px">
+      <div class="item rg builtin" style="flex-wrap:wrap">
+        <div class="row" style="flex-basis:100%;align-items:flex-start">
+          <div class="name"><b>${t('rules.default')} <span class="tag">${dr.private === 'direct' && dr.cn === 'direct' && dr.final === 'proxy' ? t('rules.builtin') : t('rules.changed')}</span></b><span>${t('rules.defaultHint')}</span></div>
+          <button class="btn sm" id="dr-reset">${t('rules.restore')}</button>
+        </div>
+        <div class="conds" style="flex-basis:100%;margin-top:6px">
           ${drRow('dr-private', 'rules.dPrivate', dr.private, ['direct', 'proxy', 'reject'])}
           ${drRow('dr-cn', 'rules.dCN', dr.cn, ['direct', 'proxy', 'reject'])}
           ${drRow('dr-final', 'rules.dFinal', dr.final, ['proxy', 'direct'])}
         </div>
-        <div class="row" style="flex-basis:100%;margin-top:8px"><span class="grow"></span><button class="btn sm" id="dr-reset">${t('rules.restore')}</button></div>
       </div>
     </div>
     <div style="height:12px"></div><button class="btn primary block" id="rg-add">${t('rules.add')}</button>`;
@@ -790,10 +1109,12 @@ async function init() {
   if (!window.__web && !window.__android && state.platform === 'darwin') document.body.classList.add('mac');
   LANG = state.lang || 'zh';
   applyTheme(state.theme);
+  updateThemeBtn();
   document.documentElement.lang = LANG === 'en' ? 'en' : 'zh';
   $('#menu-btn').addEventListener('click', openDrawer);
   $('#back-btn').addEventListener('click', () => BACK[view] ? nav(BACK[view]) : navHome());
   $('#drawer-backdrop').addEventListener('click', closeDrawer);
+  $('#theme-btn').addEventListener('click', () => setTheme(THEME_NEXT[curTheme()] || 'system'));
   $('#drawer-upd').addEventListener('click', () => { closeDrawer(); nav('about'); });
   $('#sheet-backdrop').addEventListener('click', closeSheet);
   window.runtime.EventsOn('nav', name => { closeDrawer(); closeSheet(); if (PAGES[name]) nav(name); });
@@ -805,7 +1126,10 @@ async function init() {
   window.runtime.EventsOn('state', st => {
     const langChanged = (st.lang || 'zh') !== LANG, hadProfiles = state && state.view.profiles && state.view.profiles.length;
     state = st; LANG = st.lang || 'zh';
-    applyTheme(st.theme);
+    if (st.view.state.status !== 'connected' && st.view.state.status !== 'degraded' && hist.length) clearHist();
+    if (themeWish !== null && st.theme === themeWish) themeWish = null;
+    applyTheme(curTheme());
+    updateThemeBtn();
     $('#svc-dot').className = 'dot ' + (st.service ? 'on' : 'err');
     $('#svc-text').textContent = svcText(st);
     if ($('#drawer').classList.contains('show')) renderDrawer();
@@ -823,6 +1147,13 @@ async function init() {
     const pd = $('#s-down'), pu = $('#s-up');
     if (view === 'home' && pd) { tween(pd, state.down, tr.down, fmtSpeed, 600); tween(pu, state.up, tr.up, fmtSpeed, 600); }
     state.down = tr.down; state.up = tr.up;
+    state.totalUp = tr.totalUp || 0; state.totalDown = tr.totalDown || 0;
+    pushHist(tr.down, tr.up); // 曲线一直攒着,翻到别的页再回来还是那条线
+    if (view === 'home') {
+      drawSpark();
+      const tot = $('#s-total');
+      if (tot) tot.textContent = fmtBytes(state.totalDown + state.totalUp);
+    }
   });
   window.runtime.EventsOn('update-progress', p => {
     const bar = $('#upd-prog'); if (!bar) return;

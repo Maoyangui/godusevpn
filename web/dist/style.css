@@ -29,16 +29,21 @@ button { font: inherit; color: inherit; cursor: default; }
 
 /* 标题栏(可拖动) */
 .topbar { --wails-draggable: drag; height: 52px; display: flex; align-items: center; padding: 0 6px 0 8px; gap: 4px; background: var(--topbar); backdrop-filter: blur(12px); position: relative; z-index: 5; }
-.topbar-title { flex: 1; text-align: center; font-weight: 600; letter-spacing: .3px; }
-.icon-btn { --wails-draggable: no-drag; width: 36px; height: 36px; border: 0; background: transparent; border-radius: 10px; display: inline-flex; align-items: center; justify-content: center; transition: background .15s; }
-.icon-btn svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.9; stroke-linecap: round; stroke-linejoin: round; }
+.topbar-title { position: absolute; left: 0; right: 0; text-align: center; font-weight: 600; letter-spacing: .3px; padding: 0 88px; pointer-events: none; }
+.win { margin-left: auto; }
+.icon-btn { --wails-draggable: no-drag; width: 38px; height: 38px; border: 0; background: transparent; border-radius: 10px; display: inline-flex; align-items: center; justify-content: center; transition: background .15s; }
+.icon-btn svg { width: 21px; height: 21px; fill: none; stroke: currentColor; stroke-width: 1.9; stroke-linecap: round; stroke-linejoin: round; }
+#menu-btn svg, #back-btn svg { width: 23px; height: 23px; }
+body.android #menu-btn svg, body.android #back-btn svg { width: 30px; height: 30px; }
+body.tv #menu-btn svg, body.tv #back-btn svg { width: 27px; height: 27px; }
 .icon-btn:hover { background: rgba(127, 127, 127, .14); }
 #close-btn:hover { background: var(--danger); color: #fff; }
 .win { display: flex; }
+body.mac .topbar-title { left: -78px; }
 
 /* 页面栈 */
 .stage { position: relative; flex: 1; overflow: clip; }
-.view { position: absolute; inset: 0; overflow: auto; padding: 8px 18px 22px; animation: viewIn .32s var(--ease); }
+.view { position: absolute; inset: 0; overflow: auto; padding: 8px 22px 22px; animation: viewIn .32s var(--ease); }
 .view.pop { animation: viewOut .25s var(--ease) forwards; }
 @keyframes viewIn { from { opacity: 0; transform: translateX(24px); } to { opacity: 1; transform: none; } }
 @keyframes viewOut { to { opacity: 0; transform: translateX(24px); } }
@@ -47,18 +52,19 @@ button { font: inherit; color: inherit; cursor: default; }
 .view::-webkit-scrollbar { width: 6px; } .view::-webkit-scrollbar-thumb { background: var(--line); border-radius: 3px; }
 
 /* 首页 */
-.home { display: flex; flex-direction: column; align-items: center; padding-top: 0; }
-.hero { flex: 1; width: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 300px; }
-.power-wrap { position: relative; width: 208px; height: 208px; margin: 16px 0 6px; }
+.home { display: flex; flex-direction: column; align-items: center; padding-top: 6px; gap: 12px; }
+#home-banner:empty { display: none; } /* 空横幅也会吃掉一个 gap */
+.hero { flex: 1 1 auto; width: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; }
+.power-wrap { position: relative; width: 176px; height: 176px; flex: none; }
 .power-wrap > svg { position: absolute; inset: 0; width: 100%; height: 100%; transform: rotate(-90deg); }
 .ring-bg { fill: none; stroke: var(--ring-bg); stroke-width: 6; }
 .ring { fill: none; stroke: url(#ringGrad); stroke-width: 6; stroke-linecap: round; stroke-dasharray: 622; stroke-dashoffset: 622; transition: stroke-dashoffset .9s var(--ease), opacity .3s; opacity: 0; }
 .power-wrap.on .ring { stroke-dashoffset: 0; opacity: 1; }
 .power-wrap.busy .ring { opacity: 1; stroke-dasharray: 140 482; animation: ringSpin 1.1s linear infinite; }
 @keyframes ringSpin { to { stroke-dashoffset: -622; } }
-.power { --wails-draggable: no-drag; position: absolute; inset: 22px; border-radius: 50%; border: 0; background: var(--card); box-shadow: var(--shadow); display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; transition: transform .15s var(--ease), box-shadow .3s; }
+.power { --wails-draggable: no-drag; position: absolute; inset: 19px; border-radius: 50%; border: 0; background: var(--card); box-shadow: var(--shadow); display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 7px; transition: transform .15s var(--ease), box-shadow .3s; }
 .power:active { transform: scale(.96); }
-.power svg { width: 46px; height: 46px; fill: none; stroke: var(--muted2); stroke-width: 2.2; stroke-linecap: round; transition: stroke .3s, filter .3s; }
+.power svg { width: 42px; height: 42px; fill: none; stroke: var(--muted2); stroke-width: 2.2; stroke-linecap: round; transition: stroke .3s, filter .3s; }
 .power b { font-size: 13px; font-weight: 600; color: var(--muted); letter-spacing: 1px; }
 .power-wrap.on .power svg { stroke: #2f8bff; filter: drop-shadow(0 0 10px rgba(47, 139, 255, .55)); }
 .power-wrap.on .power { box-shadow: 0 0 0 1px rgba(47, 139, 255, .25), 0 12px 40px rgba(47, 139, 255, .25); }
@@ -66,18 +72,45 @@ button { font: inherit; color: inherit; cursor: default; }
 .power-wrap.busy .power svg { stroke: var(--warn); animation: pulse 1.2s ease-in-out infinite; }
 .power-wrap.err .power svg { stroke: var(--danger); }
 @keyframes pulse { 50% { opacity: .45; } }
-.status-text { font-size: 18px; font-weight: 600; margin-top: 6px; min-height: 24px; }
-.status-sub { color: var(--muted); font-size: 12px; margin-top: 3px; min-height: 16px; max-width: 320px; text-align: center; }
-.stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; width: 100%; margin-top: 8px; }
-.stat { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 10px 6px; text-align: center; }
-.stat b { display: block; font-size: 14px; font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap; }
-.stat span { display: block; font-size: 11px; color: var(--muted); margin-top: 2px; }
-.pickers { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; width: 100%; margin-top: 10px; margin-bottom: 2px; }
-.picker { border: 1px solid var(--line); background: var(--card); border-radius: 16px; padding: 12px 12px 10px; text-align: left; transition: transform .15s var(--ease), border-color .15s, box-shadow .2s; }
+/* 连上之后大字显示时长;没连上或出错才把状态那两行放出来 */
+.uptime { display: flex; align-items: baseline; gap: 8px; margin-top: 12px; }
+.uptime b { font-size: 27px; font-weight: 700; letter-spacing: -.5px; font-variant-numeric: tabular-nums; }
+.uptime span { font-size: 12px; color: var(--muted2); }
+.status-text { font-size: 18px; font-weight: 600; margin-top: 12px; }
+.status-sub { color: var(--muted); font-size: 12px; margin-top: 4px; max-width: 320px; text-align: center; line-height: 1.45; }
+
+/* 出口卡片:此刻真正在用的那条线路,点开就是节点面板 */
+.idcard { width: 100%; flex: none; display: flex; align-items: center; gap: 12px; text-align: left; background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); padding: 12px 14px; box-shadow: 0 6px 20px rgba(15, 23, 42, .05); transition: transform .15s var(--ease), border-color .15s, box-shadow .2s; }
+.idcard:hover { border-color: #2f8bff; box-shadow: 0 8px 24px rgba(47, 139, 255, .14); }
+.idcard:active { transform: scale(.985); }
+.idmid { flex: 1; min-width: 0; }
+.idtop { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.idtop b { flex: 0 1 auto; min-width: 0; font-size: 15px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.idsub { display: block; font-size: 11.5px; color: var(--muted2); margin-top: 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-variant-numeric: tabular-nums; }
+.idms { flex: none; text-align: right; min-width: 40px; }
+.idms b { display: block; font-size: 17px; font-weight: 600; font-variant-numeric: tabular-nums; line-height: 1.15; }
+.idms span { font-size: 10px; color: var(--muted2); }
+.idms.good b { color: var(--ok); } .idms.mid b { color: var(--warn); } .idms.bad b { color: var(--danger); } .idms.none b { color: var(--muted2); }
+
+/* 速度卡:两个当前速度 + 本次总量,底下是最近一分钟的曲线 */
+.speed { width: 100%; flex: none; display: flex; flex-direction: column; background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); padding: 12px 14px 8px; box-shadow: 0 6px 20px rgba(15, 23, 42, .05); }
+.speed-row { display: flex; align-items: flex-start; gap: 14px; flex: none; }
+.sp { flex: 1; min-width: 0; }
+.sp.end { flex: none; text-align: right; }
+.sp .k { display: flex; align-items: center; gap: 5px; font-size: 11px; color: var(--muted); }
+.sp.end .k { justify-content: flex-end; }
+.sp b { display: block; font-size: 18px; font-weight: 600; font-variant-numeric: tabular-nums; margin-top: 2px; white-space: nowrap; }
+.sp.end b { font-size: 14px; font-weight: 500; margin-top: 4px; }
+.sq { width: 7px; height: 7px; border-radius: 2px; flex: none; }
+.sq.d { background: var(--brand2); } .sq.u { background: var(--brand3); }
+.spark { flex: none; height: 56px; width: 100%; display: block; margin-top: 6px; }
+
+.pickers { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; width: 100%; flex: none; }
+.picker { border: 1px solid var(--line); background: var(--card); border-radius: 16px; padding: 10px 12px 9px; text-align: left; transition: transform .15s var(--ease), border-color .15s, box-shadow .2s; }
 .picker:hover { border-color: #2f8bff; box-shadow: 0 6px 20px rgba(47, 139, 255, .12); }
 .picker:active { transform: scale(.97); }
 .picker span { display: block; font-size: 11px; color: var(--muted); }
-.picker b { display: block; font-size: 13px; font-weight: 600; margin-top: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.picker b { display: block; font-size: 13px; font-weight: 600; margin-top: 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .picker em { font-style: normal; font-size: 11px; color: var(--muted2); }
 
 /* 引导页 */
@@ -140,7 +173,7 @@ textarea { min-height: 80px; resize: vertical; font-family: Consolas, monospace;
 pre.log { background: #0b0e14; color: #d6deeb; border-radius: 14px; padding: 12px; font-size: 11.5px; line-height: 1.5; margin: 0; white-space: pre-wrap; word-break: break-all; max-height: calc(100vh - 210px); overflow: auto; }
 pre.log .warn { color: #fbbf24; } pre.log .err { color: #f87171; } pre.log .dim { color: #7c8797; }
 .page-title { font-size: 20px; font-weight: 700; margin: 6px 0 12px; }
-.savebar { position: sticky; bottom: -22px; margin: 10px -18px -22px; padding: 10px 18px 16px; background: var(--topbar); backdrop-filter: blur(14px); border-top: 1px solid var(--line); display: flex; flex-direction: column; gap: 8px; transition: background .25s, box-shadow .25s; }
+.savebar { position: sticky; bottom: -22px; margin: 10px -22px -22px; padding: 10px 22px 16px; background: var(--topbar); backdrop-filter: blur(14px); border-top: 1px solid var(--line); display: flex; flex-direction: column; gap: 8px; transition: background .25s, box-shadow .25s; }
 .savebar .note { font-size: 11px; color: var(--muted2); text-align: center; line-height: 1.4; transition: color .25s; }
 .savebar .btn { width: 100%; padding: 11px 16px; font-size: 14px; border-radius: 14px; }
 .savebar .btn:disabled { opacity: 1; background: var(--bg2); color: var(--muted2); box-shadow: none; border: 1px solid var(--line); }
@@ -218,14 +251,17 @@ body.tv { font-size: 17px; }
 body.tv :is(button, a, .item, input, select, textarea):focus { outline: 3px solid var(--brand2); outline-offset: 3px; box-shadow: 0 0 0 7px rgba(47, 139, 255, .16); }
 body.tv .power:focus { outline-offset: 6px; box-shadow: var(--shadow), 0 0 0 10px rgba(47, 139, 255, .16); }
 body.tv .topbar { height: 64px; padding: 0 18px; } body.tv .topbar-title { font-size: 18px; }
-body.tv .icon-btn { width: 44px; height: 44px; } body.tv .icon-btn svg { width: 22px; height: 22px; }
+body.tv .icon-btn { width: 46px; height: 46px; } body.tv .icon-btn svg { width: 25px; height: 25px; }
 body.tv .view { padding: 12px 40px 28px; }
 body.tv .view:not(.home) { max-width: 860px; margin: 0 auto; }
-body.tv .home { display: grid; grid-template-columns: 1.1fr 1fr; grid-template-rows: auto 1fr auto; column-gap: 48px; align-items: center; }
+body.tv .home { display: grid; grid-template-columns: 1.1fr 1fr; grid-template-rows: auto auto auto 1fr; column-gap: 48px; align-items: center; }
 body.tv .home #home-banner { grid-column: 1 / -1; }
-body.tv .home .hero { grid-column: 1; grid-row: 2 / 4; min-height: 0; }
-body.tv .home .stats { grid-column: 2; grid-row: 2; align-self: end; grid-template-columns: repeat(4, 1fr); gap: 12px; }
-body.tv .home .pickers { grid-column: 2; grid-row: 3; align-self: start; grid-template-columns: 1fr; gap: 12px; margin-top: 12px; }
+body.tv .home .hero { grid-column: 1; grid-row: 2 / 5; min-height: 0; }
+body.tv .home .idcard { grid-column: 2; grid-row: 2; align-self: end; }
+body.tv .home .speed { grid-column: 2; grid-row: 3; margin-top: 12px; }
+body.tv .home .pickers { grid-column: 2; grid-row: 4; align-self: start; grid-template-columns: 1fr; gap: 12px; margin-top: 12px; }
+body.tv .idcard .idtop b { font-size: 19px; } body.tv .idcard .idsub { font-size: 13px; }
+body.tv .uptime b { font-size: 34px; }
 body.tv .power-wrap { width: 300px; height: 300px; } body.tv .power svg { width: 64px; height: 64px; } body.tv .power b { font-size: 16px; }
 body.tv .status-text { font-size: 24px; } body.tv .status-sub { font-size: 14px; max-width: 440px; }
 body.tv .stat { padding: 12px 6px; } body.tv .stat b { font-size: 18px; } body.tv .stat span { font-size: 12px; }
@@ -239,7 +275,7 @@ body.tv .drawer-items a:focus { background: rgba(47, 139, 255, .12); }
 body.tv .item:focus { outline-offset: -3px; background: rgba(47, 139, 255, .12); } /* 列表 overflow: hidden 会裁掉外描边,描在内侧 */
 /* 没有窗口按钮的壳(浏览器面板 / Android):标题独立居中,不受左右按钮有无影响(引导页没有菜单键也不会偏) */
 .app.web .topbar-title { position: absolute; left: 0; right: 0; padding: 0 60px; pointer-events: none; }
-body.android .icon-btn { width: 46px; height: 46px; } body.android .icon-btn svg { width: 28px; height: 28px; stroke-width: 2.2; }
+body.android .icon-btn { width: 48px; height: 48px; } body.android .icon-btn svg { width: 30px; height: 30px; stroke-width: 2.2; }
 body.android .topbar { height: 58px; padding: 0 8px; }
 body.android .topbar-title { font-size: 16px; }
 /* 抽屉:手机上更宽,条目更高更大,顶部品牌区多留一点余量 */
@@ -261,3 +297,54 @@ body.android .icon-btn.xs { width: 36px; height: 36px; border-radius: 10px; } bo
 .dialog-card input { margin-top: 12px; }
 #dialog-backdrop { z-index: 11; }
 body.tv .dialog-card { max-width: 520px; padding: 24px; } body.tv .dialog-text { font-size: 17px; }
+
+/* ---- 地区牌子:首页出口卡片与节点列表共用 ---- */
+.flag { position: relative; width: 42px; height: 42px; border-radius: 14px; flex: none; display: inline-flex; align-items: center; justify-content: center; overflow: hidden; color: #fff; font-size: 13px; font-weight: 700; letter-spacing: .5px; background: linear-gradient(135deg, var(--c1, #94a3b8), var(--c2, #64748b)); }
+.flag.fl { background: var(--bg2); } /* 旗子是按需取的文件,取回来之前先垫个底,别闪一块白 */
+.flag-svg { width: 100%; height: 100%; display: block; object-fit: cover; }
+.flag.fl::after { content: ""; position: absolute; inset: 0; border-radius: inherit; box-shadow: inset 0 0 0 1px rgba(15, 23, 42, .16); }
+.flag.sm { width: 26px; height: 26px; border-radius: 9px; font-size: 10px; letter-spacing: .3px; }
+.flag.none { background: var(--bg2); border: 1px solid var(--line); color: var(--muted2); }
+.flag svg { width: 58%; height: 58%; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; }
+
+/* ---- 节点行:牌子 + 名字(带倍率/协议)+ 延迟条 ---- */
+.tag { font-style: normal; }
+.tag.warn { background: rgba(217, 119, 6, .12); border-color: rgba(217, 119, 6, .35); color: var(--warn); }
+.list .item { gap: 10px; }
+.item .ntop { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.item .ntop b { flex: 0 1 auto; min-width: 0; }
+.ntype { font-style: normal; font-size: 10px; color: var(--muted2); text-transform: uppercase; letter-spacing: .3px; margin-left: auto; flex: none; padding-left: 6px; }
+.item.auto .name b { font-weight: 600; }
+
+/* ---- 节点面板顶上的地区条:只筛选,不碰后端 ---- */
+/* 自动换行,不做横向滚动:桌面端没有横向滚动条,鼠标滚轮也推不动,藏在右边的地区就点不到了 */
+.chips { display: flex; flex-wrap: wrap; gap: 6px; padding: 0 2px 10px; }
+.chip { flex: none; border: 1px solid var(--line); background: var(--bg2); color: var(--text); font-size: 12px; padding: 5px 12px; border-radius: 999px; white-space: nowrap; transition: background .15s, color .15s, border-color .15s; }
+.chip:hover { border-color: #2f8bff; }
+.chip.on { color: #fff; border-color: transparent; background: linear-gradient(120deg, var(--brand1), var(--brand2)); }
+
+/* ---- 抽屉里的状态卡:补上品牌区与菜单之间那块空当,顺手能切模式 ---- */
+.drawer-state { border-radius: 16px; padding: 12px 13px; margin-bottom: 12px; background: linear-gradient(135deg, rgba(106, 68, 242, .09), rgba(24, 227, 232, .09)); border: 1px solid rgba(47, 139, 255, .2); }
+.ds-top { display: flex; align-items: center; gap: 8px; }
+.ds-top b { font-size: 13.5px; font-weight: 600; }
+.ds-top #ds-time { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.ds-node { display: flex; align-items: center; gap: 9px; width: 100%; margin-top: 10px; padding: 0; border: 0; background: transparent; text-align: left; border-radius: 10px; transition: opacity .15s; }
+.ds-node:active { opacity: .6; }
+.ds-mid { flex: 1; min-width: 0; }
+.ds-mid b { display: block; font-size: 13px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ds-mid span { display: block; font-size: 11px; color: var(--muted2); margin-top: 2px; font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ds-modes { display: flex; gap: 3px; margin-top: 11px; padding: 3px; border-radius: 11px; background: var(--bg2); border: 1px solid var(--line); }
+.ds-modes button { flex: 1; border: 0; background: transparent; color: var(--muted); font-size: 12px; padding: 6px 0; border-radius: 8px; transition: color .2s, background .2s; }
+.ds-modes button:hover { color: var(--text); }
+.ds-modes button.on { color: #fff; font-weight: 500; background: linear-gradient(120deg, var(--brand1), var(--brand2)); }
+
+/* ---- 抽屉品牌区放大,和状态卡拉开层次 ---- */
+.drawer-brand { padding: 4px 10px 14px; gap: 12px; }
+.drawer-brand svg { width: 40px; height: 40px; }
+.drawer-brand b { font-size: 19px; letter-spacing: .5px; }
+.drawer-items a { padding: 12px 12px; border-radius: 13px; margin-bottom: 3px; font-size: 14.5px; }
+.drawer-items a svg { width: 20px; height: 20px; }
+body.android .drawer-brand svg { width: 46px; height: 46px; }
+body.android .drawer-brand b { font-size: 21px; }
+body.tv .drawer-brand svg { width: 52px; height: 52px; }
+body.tv .drawer-brand b { font-size: 22px; }

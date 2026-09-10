@@ -54,18 +54,20 @@ type prefs struct {
 
 // State 与 Windows 客户端的 UIState 字段一致,多 web / platform / init 让页面按环境调整。
 type State struct {
-	Service  bool            `json:"service"`
-	SvcState string          `json:"svcState"`
-	View     ipc.StateView   `json:"view"`
-	Up       int64           `json:"up"`
-	Down     int64           `json:"down"`
-	Lang     string          `json:"lang"`
-	Theme    string          `json:"theme"`
-	Version  string          `json:"version"`
-	Update   *update.Release `json:"update,omitempty"`
-	Web      bool            `json:"web"`
-	Platform string          `json:"platform"`
-	Init     string          `json:"init"`
+	Service   bool            `json:"service"`
+	SvcState  string          `json:"svcState"`
+	View      ipc.StateView   `json:"view"`
+	Up        int64           `json:"up"`
+	TotalUp   int64           `json:"totalUp"`   // 本次连接累计上行(内核停了归零)
+	TotalDown int64           `json:"totalDown"` // 本次连接累计下行
+	Down      int64           `json:"down"`
+	Lang      string          `json:"lang"`
+	Theme     string          `json:"theme"`
+	Version   string          `json:"version"`
+	Update    *update.Release `json:"update,omitempty"`
+	Web       bool            `json:"web"`
+	Platform  string          `json:"platform"`
+	Init      string          `json:"init"`
 }
 
 type NodeInfo struct {
@@ -96,9 +98,10 @@ type Service struct {
 
 	subs map[chan Event]struct{}
 
-	up, down    int64
-	trafficStop context.CancelFunc
-	clashKey    string
+	up, down       int64
+	totUp, totDown int64 // 本次连接累计:速度流每秒一条,累加得来
+	trafficStop    context.CancelFunc
+	clashKey       string
 
 	prefs     prefs
 	update    *update.Release
@@ -240,7 +243,7 @@ func (s *Service) State() State {
 	err := s.dispatch(ipc.MGetState, nil, &view)
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	st := State{Service: err == nil, SvcState: "running", View: view, Up: s.up, Down: s.down, Lang: s.prefs.Lang, Theme: s.prefs.Theme,
+	st := State{Service: err == nil, SvcState: "running", View: view, Up: s.up, Down: s.down, TotalUp: s.totUp, TotalDown: s.totDown, Lang: s.prefs.Lang, Theme: s.prefs.Theme,
 		Version: buildinfo.Version, Update: s.update, Web: true, Platform: s.o.Platform, Init: svc.Kind()}
 	if err != nil {
 		st.View.State.Status = "disconnected"
@@ -255,6 +258,7 @@ func (s *Service) manageTraffic(ctx context.Context, st State) {
 		s.mu.Lock()
 		stop := s.trafficStop
 		s.trafficStop, s.clashKey, s.up, s.down = nil, "", 0, 0
+		s.totUp, s.totDown = 0, 0 // 断开就重新计次:首页那格显示的是"本次连接"
 		s.mu.Unlock()
 		if stop != nil {
 			stop()
@@ -281,12 +285,15 @@ func (s *Service) manageTraffic(ctx context.Context, st State) {
 		c := clash.New(info.Port, info.Secret)
 		for sctx.Err() == nil {
 			_ = c.Traffic(sctx, func(up, down int64) {
+				// 每秒一条,给的是这一秒的字节数;累加即本次连接的总量,放服务端好让页面刷新后接着数。
 				s.mu.Lock()
 				s.up, s.down = up, down
+				s.totUp, s.totDown = s.totUp+up, s.totDown+down
+				tu, td := s.totUp, s.totDown
 				n := len(s.subs)
 				s.mu.Unlock()
 				if n > 0 {
-					s.Broadcast("traffic", map[string]int64{"up": up, "down": down})
+					s.Broadcast("traffic", map[string]int64{"up": up, "down": down, "totalUp": tu, "totalDown": td})
 				}
 			})
 			if sctx.Err() == nil {

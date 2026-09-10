@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -49,6 +50,8 @@ type Daemon struct {
 	http     *http.Client
 	delays   map[string]int // 最近一次全节点测速结果
 	ping     int            // 当前节点最近一次测得的延迟(毫秒):健康检查本来就要测一次,顺手记下来给界面用
+	exitIP   string         // 经当前节点出去时对外露出的地址
+	exitLoc  string         // 出口所在国家的两位代码
 	noListen bool
 }
 
@@ -413,13 +416,15 @@ func (d *Daemon) start(cfg []byte) error {
 	if s.Selected != "" {
 		_ = d.core.Select("proxy", s.Selected) // 内核里的当前节点跟着设置走(cache_file 也会记,双保险)
 	}
-	// 连上就先测一次当前节点:首页的延迟要马上有数,不然得等到第一次健康检查(三分钟后)
+	// 连上就先测一次当前节点,再查一次出口地址:首页那两项要马上有数,
+	// 不然延迟得等到第一次健康检查(三分钟后),出口地址则一直空着。
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
 		defer cancel()
 		if ms, err := d.core.URLTest(ctx, "proxy", builder.TestURL); err == nil {
 			d.setPing(ms)
 		}
+		d.refreshExit()
 	}()
 	if s.TUN {
 		// Linux:本机对外服务(SSH 等)的回包不能进 TUN,否则一连上远程管理就断;Windows 上是空操作
@@ -440,6 +445,7 @@ func tunName() string { return builder.TunName }
 // stop 先停内核(TUN 随之消失),再撤路由规则;顺序反了会有一瞬间 TUN 还在而规则没了,远程会话可能掉。
 func (d *Daemon) stop() error {
 	d.setPing(0)
+	d.clearExit()
 	err := d.core.Stop()
 	netmode.RestoreNICIPv6()
 	netmode.Unprotect()
@@ -459,12 +465,66 @@ func (d *Daemon) health(ctx context.Context) error {
 		return state.Errf(state.CodeNodeDown, "当前节点不可用: %v", err)
 	}
 	d.setPing(ms)
+	// 刚连上那会儿线路还没热,出口有可能没查着;这里顺手补一次,查到就不再动
+	d.mu.Lock()
+	need := d.exitIP == ""
+	d.mu.Unlock()
+	if need {
+		go d.refreshExit()
+	}
 	return nil
 }
 
 func (d *Daemon) setPing(ms int) {
 	d.mu.Lock()
 	d.ping = ms
+	d.mu.Unlock()
+}
+
+// exitTraceURL Cloudflare 的诊断接口:回来是几行 key=value,取 ip= 与 loc= 两行,总共几百字节。
+const exitTraceURL = "https://www.cloudflare.com/cdn-cgi/trace"
+
+// refreshExit 经当前节点查一次出口地址,首页要显示"我现在从哪儿出去"。
+// 节点名写的是机房位置,真正的出口未必在那儿(比如节点自己再套一层),所以这个值得单独查。
+// 查不到不算错:界面上那一行自然就不显示,不打扰用户,也不重试骚扰。
+func (d *Daemon) refreshExit() {
+	c, err := d.core.HTTPClient("proxy", 10*time.Second)
+	if err != nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, exitTraceURL, nil)
+	if err != nil {
+		return
+	}
+	resp, err := c.Do(req)
+	if err != nil {
+		return
+	}
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	var ip, loc string
+	for _, ln := range strings.Split(string(b), "\n") {
+		if v, ok := strings.CutPrefix(ln, "ip="); ok {
+			ip = strings.TrimSpace(v)
+		}
+		if v, ok := strings.CutPrefix(ln, "loc="); ok {
+			loc = strings.TrimSpace(v)
+		}
+	}
+	if ip == "" {
+		return
+	}
+	d.mu.Lock()
+	d.exitIP, d.exitLoc = ip, loc
+	d.mu.Unlock()
+}
+
+// clearExit 断开或换节点时先把旧的出口信息抹掉,免得界面上挂着上一个节点的地址。
+func (d *Daemon) clearExit() {
+	d.mu.Lock()
+	d.exitIP, d.exitLoc = "", ""
 	d.mu.Unlock()
 }
 
@@ -596,7 +656,7 @@ func (d *Daemon) stateView() ipc.StateView {
 			v.Delays[k] = ms
 		}
 	}
-	v.Ping = d.ping
+	v.Ping, v.ExitIP, v.ExitLoc = d.ping, d.exitIP, d.exitLoc
 	d.mu.Unlock()
 	return v
 }
@@ -690,6 +750,17 @@ func (d *Daemon) registerHandlers() {
 		if err := d.core.CloseAllConnections(); err != nil {
 			d.logf("切节点后掐断旧连接失败(旧连接会继续用老节点): %v", err)
 		}
+		// 换了节点,出口多半也变了:先抹掉旧值,再在后台重新测延迟与出口
+		d.clearExit()
+		d.setPing(0)
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
+			defer cancel()
+			if ms, err := d.core.URLTest(ctx, "proxy", builder.TestURL); err == nil {
+				d.setPing(ms)
+			}
+			d.refreshExit()
+		}()
 		return d.stateView(), nil
 	})
 	h(ipc.MProbeNodes, func(json.RawMessage) (any, error) {
