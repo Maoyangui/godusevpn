@@ -44,7 +44,7 @@ func TestProbeDirectTCP(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
 	defer cancel()
-	res := probeDirect(ctx, p)
+	res := probeDirect(ctx, p, nil)
 	if res["ok"] < 0 || res["ok"] > 1000 {
 		t.Fatalf("本机监听应很快连上: %v", res)
 	}

@@ -477,3 +477,11 @@ body.tv .drawer-brand b { font-size: 22px; }
 .rowgo { width: 15px; height: 15px; flex: none; fill: none; stroke: var(--muted2); stroke-width: 1.9; stroke-linecap: round; }
 .item.danger .rowic { stroke: var(--danger); }
 .item.danger .name b { color: var(--danger); }
+
+/* 设置页:顶上的搜索框与分组 */
+.sgroup { margin-bottom: 16px; }
+.sgroup .card.tight { padding: 2px 16px; margin-bottom: 0; }
+.field.with-ic { position: relative; margin-bottom: 14px; }
+.field.with-ic svg { position: absolute; left: 12px; top: 50%; transform: translateY(-50%); width: 15px; height: 15px; fill: none; stroke: var(--muted2); stroke-width: 2; stroke-linecap: round; pointer-events: none; }
+.field.with-ic input { padding-left: 34px; }
+.tag.warn { background: rgba(217, 119, 6, .12); border-color: rgba(217, 119, 6, .35); color: var(--warn); }

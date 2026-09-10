@@ -46,7 +46,8 @@ func endpoints(p *profile.Profile) []endpoint {
 }
 
 // probeDirect 返回 节点 → 毫秒,-1 = 不通。
-func probeDirect(ctx context.Context, p *profile.Profile) map[string]int {
+// onEach 不为空时每测出一个就先报一次,界面好一个一个显示,不用干等全部测完。
+func probeDirect(ctx context.Context, p *profile.Profile, onEach func(tag string, ms int)) map[string]int {
 	res := map[string]int{}
 	var mu sync.Mutex
 	var wg sync.WaitGroup
@@ -58,6 +59,9 @@ func probeDirect(ctx context.Context, p *profile.Profile) map[string]int {
 			mu.Lock()
 			res[e.Tag] = -1
 			mu.Unlock()
+			if onEach != nil {
+				onEach(e.Tag, -1)
+			}
 			continue
 		}
 		wg.Add(1)
@@ -86,18 +90,21 @@ func probeDirect(ctx context.Context, p *profile.Profile) map[string]int {
 			if ms < 1 {
 				ms = 1 // 计时器粒度粗时会量出 0,而 0 在界面上表示"没测过"
 			}
-			mu.Lock()
+			v := ms
 			if err != nil {
-				res[e.Tag] = -1
-			} else {
-				res[e.Tag] = ms
+				v = -1
 			}
+			mu.Lock()
+			res[e.Tag] = v
 			mu.Unlock()
+			if onEach != nil {
+				onEach(e.Tag, v)
+			}
 		}(e)
 	}
 	wg.Wait()
 	if icmpBroken.Load() && len(fallback) > 0 {
-		for k, v := range core.Probe(ctx, p.Outbounds, fallback, "") {
+		for k, v := range core.Probe(ctx, p.Outbounds, fallback, "", onEach) {
 			res[k] = v
 		}
 	}

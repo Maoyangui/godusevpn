@@ -615,7 +615,11 @@ function drawProfiles(list) {
   refocus(body, 'data-id', keep);
 }
 function msClass(d) { return d < 0 ? 'bad' : !d ? 'none' : d < 150 ? 'good' : d < 400 ? 'mid' : 'bad'; }
-function msText(d, testing) { if (testing) return '<span class="spinner"></span>'; if (d < 0) return t('node.fail'); return d ? d + ' ms' : '–'; }
+function msText(d, testing) {
+  if (testing && !d) return '<span class="spinner"></span>'; // 还没轮到的转圈,测到的立刻亮出来
+  if (d < 0) return t('node.fail');
+  return d ? d + ' ms' : '–';
+}
 let nodeTesting = false, nodeFilter = '', nodeRegion = '', nodeFetchTried = false, nodeSig = '';
 async function sheetNodes() {
   nodeFilter = ''; nodeRegion = '';
@@ -725,9 +729,23 @@ function patchNodes(nodes, max, testing) {
 async function testNodes(force) {
   if (nodeTesting && !force) return;
   nodeTesting = true;
-  $('#sheet-body').querySelectorAll('.ms').forEach((el, i) => { if (i > 0) el.innerHTML = '<span class="spinner"></span>'; });
+  const act = $('#sheet-action');
+  if (act) { act.disabled = true; act.textContent = t('sheet.testing'); }
+  // 一边测一边刷:后端是测出一个记一个的,这里每 400 毫秒取一次就能让延迟自上而下一个个冒出来。
+  // 原来是等 TestAll 整个返回再画,上百个节点要干等好几秒,那几秒里界面看着像卡住了。
+  let live = true;
+  const poll = (async () => {
+    while (live) {
+      await new Promise(r => setTimeout(r, 400));
+      if (!live || !$('#sheet').classList.contains('show')) break;
+      await drawNodes(true);
+    }
+  })();
   try { await App().TestAll(); } catch (e) { /* 内核没跑时没法测 */ }
+  live = false;
+  await poll;
   nodeTesting = false;
+  if (act) { act.disabled = false; act.textContent = t('sheet.retest'); }
   if ($('#sheet').classList.contains('show')) await drawNodes(false);
   try { lastPing = await App().TestLatency('proxy'); } catch (e) { lastPing = 0; }
   updateHome();
@@ -829,8 +847,12 @@ async function renderSettings(el) {
   const num = (id, label, val, help) => `<div class="srow"><div class="lbl">${label}${help ? `<div>${help}</div>` : ''}</div><input type="number" id="${id}" value="${esc(val)}"></div>`;
   const txt = (id, label, val, help) => `<div class="srow"><div class="lbl">${label}${help ? `<div>${help}</div>` : ''}</div><input type="text" id="${id}" value="${esc(val)}"></div>`;
   const sel = (id, label, val, opts, help) => `<div class="srow"><div class="lbl">${label}${help ? `<div>${help}</div>` : ''}</div><select id="${id}">${opts.map(o => `<option value="${o[0]}" ${o[0] === val ? 'selected' : ''}>${o[1]}</option>`).join('')}</select></div>`;
+  // 一组 = 组名 + 一张卡;组名放在卡外面,和别的页的分节标题一个样式
+  const group = (title, rows, tag) => rows.trim() ? `<div class="sgroup"><div class="sechead">${title}${tag ? ` <span class="tag">${tag}</span>` : ''}</div><div class="card tight">${rows}</div></div>` : '';
   el.innerHTML = `
-    <div class="card"><h3>${t('set.g.conn')}</h3>
+    <div class="field with-ic"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg><input type="search" id="set-search" placeholder="${t('set.search')}" spellcheck="false"></div>
+    <div id="set-nores" class="empty sm" hidden>${t('set.noMatch')}</div>
+    ${group(t('set.g.conn'), `
       ${sw('f-tun', t('set.tun'), s.tun, t('set.tunHelp'))}
       <!-- macOS 上只有 gvisor 能用:系统协议栈在 macOS 握不了手,选了也会被改回 gvisor,不如别给选 -->
       ${sel('f-stack', t('set.tunStack'), state.platform === 'darwin' ? 'gvisor' : s.tunStack, state.platform === 'darwin' ? [['gvisor', 'gvisor']] : [['mixed', 'mixed'], ['system', 'system'], ['gvisor', 'gvisor']])}
@@ -839,34 +861,52 @@ async function renderSettings(el) {
       ${num('f-mixed', t('set.mixed'), s.mixedPort, t('set.mixedHelp'))}
       ${num('f-probe', t('set.probe'), s.probeMinutes, t('set.probeHelp'))}
       ${num('f-update', t('set.update'), s.updateHours)}
-    </div>
-    <div class="card"><h3>${t('set.g.dns')}</h3>
+    `)}
+    ${group(t('set.g.privacy'), `
+      ${sw('f-ipv6', t('set.ipv6'), s.ipv6, t('set.ipv6Help'))}
+      ${state.platform === 'android' ? '' : `<div class="srow"><div class="lbl">${t('set.nicv6')} <span class="tag warn">${t('set.nicv6Tag')}</span><div>${t('set.nicv6Help')}</div></div><label class="switch"><input type="checkbox" id="f-nicv6" ${s.disableNicIpv6 ? 'checked' : ''}></label></div>`}
+    `)}
+    ${group(t('set.g.dns'), `
       ${txt('f-rdns', t('set.remoteDns'), s.remoteDns, t('set.remoteDnsHelp'))}
       ${txt('f-ldns', t('set.localDns'), s.localDns, t('set.localDnsHelp'))}
       ${sw('f-fakeip', t('set.fakeip'), s.fakeIp)}
-      ${sw('f-ipv6', t('set.ipv6'), s.ipv6, t('set.ipv6Help'))}
-      ${state.platform === 'android' ? '' : sw('f-nicv6', t('set.nicv6'), s.disableNicIpv6, t('set.nicv6Help'))}
-    </div>
-    <div class="card"><h3>${t('set.g.route')}</h3>
+    `)}
+    ${group(t('set.g.route'), `
       ${sw('f-ad', t('set.adblock'), s.adBlock)}
       <div class="srow"><div class="lbl">${t('set.rules')}<div>${t('set.rulesHelp', { n: (s.ruleGroups || []).length })}</div></div><button class="btn sm" id="f-rules">${t('set.rulesManage')}</button></div>
-      <div class="field" style="margin-top:8px"><label>${t('set.bypass')}</label><textarea id="f-bypass" placeholder="${t('rt.process_name.ph')}">${esc((s.bypassApps || []).join('\n'))}</textarea><span class="help">${t('set.bypassHelp')}</span></div>
-    </div>
-    ${state.platform === 'linux' ? `<div class="card"><h3>${t('set.g.net')}</h3>
+      <div class="field" style="margin:8px 0 12px"><label>${t('set.bypass')}</label><textarea id="f-bypass" placeholder="${t('rt.process_name.ph')}">${esc((s.bypassApps || []).join('\n'))}</textarea><span class="help">${t('set.bypassHelp')}</span></div>
+    `)}
+    ${state.platform === 'linux' ? group(t('set.g.net'), `
       ${sel('f-netmode', t('set.netMode'), s.netMode || 'local', [['local', t('set.netLocal')], ['gateway', t('set.netGateway')]], t('set.netModeHelp'))}
       ${txt('f-lansub', t('set.lanSubnets'), (s.lanSubnets || []).join(', '), t('set.lanSubnetsHelp'))}
       ${txt('f-weblisten', t('set.webListen'), s.webListen || '', t('set.webListenHelp'))}
-    </div>` : ''}
-    <div class="card"><h3>${t('set.g.logs')}</h3>
+    `) : ''}
+    ${group(t('set.g.logs'), `
       ${sel('f-log', t('set.logLevel'), s.logLevel, [['debug', 'debug'], ['info', 'info'], ['warn', 'warn'], ['error', 'error']])}
       ${num('f-logdays', t('set.logDays'), s.logDays ?? 7, t('set.logDaysHelp'))}
-    </div>
-    <div class="card"><h3>${t('set.g.app')} <span class="tag">${t('set.instant')}</span></h3>
+    `)}
+    ${group(t('set.g.app'), `
       ${state.platform === 'android' ? `<div class="srow"><div class="lbl">${t('set.autostart')}<div>${t('set.autostartAndroidHelp')}</div></div></div>` : sw('f-autostart', t(state.platform === 'linux' ? 'set.autostartLinux' : 'set.autostart'), auto, t(state.platform === 'linux' ? 'set.autostartLinuxHelp' : 'set.autostartHelp'))}
       ${sel('f-lang', t('set.lang'), LANG, [['zh', '中文'], ['en', 'English']])}
       ${sel('f-theme', t('set.theme'), curTheme(), [['system', t('theme.system')], ['light', t('theme.light')], ['dark', t('theme.dark')]])}
-    </div>
+    `, t('set.instant'))}
     <div class="savebar" id="savebar"><div class="note" id="save-note">${t('set.clean')}</div><button class="btn primary" id="save" disabled>${t('set.save')}</button></div>`;
+  // 搜索只是把对不上的行藏起来,整组都藏光了连组名一起收掉
+  $('#set-search').addEventListener('input', () => {
+    const q = $('#set-search').value.trim().toLowerCase();
+    let hit = 0;
+    el.querySelectorAll('.sgroup').forEach(g => {
+      let n = 0;
+      g.querySelectorAll('.srow, .field').forEach(r => {
+        const ok = !q || r.textContent.toLowerCase().includes(q);
+        r.hidden = !ok;
+        if (ok) n++;
+      });
+      g.hidden = !!q && !n;
+      hit += n;
+    });
+    $('#set-nores').hidden = !q || hit > 0;
+  });
   const watch = ['f-tun', 'f-stack', 'f-strict', 'f-lan', 'f-mixed', 'f-probe', 'f-update', 'f-rdns', 'f-ldns', 'f-fakeip', 'f-ipv6', 'f-nicv6', 'f-ad', 'f-bypass', 'f-log', 'f-logdays', 'f-netmode', 'f-lansub', 'f-weblisten'].filter(id => $('#' + id));
   const dirty = on => { $('#save').disabled = !on; $('#savebar').classList.toggle('dirty', on); $('#save-note').textContent = on ? t('set.unsaved') + ' · ' + t('set.note') : t('set.clean'); $('#save').textContent = t(on ? 'set.saveChanges' : 'set.save'); };
   watch.forEach(id => ['input', 'change'].forEach(ev => $('#' + id).addEventListener(ev, () => dirty(true))));

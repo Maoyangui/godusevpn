@@ -869,11 +869,21 @@ func (d *Daemon) registerHandlers() {
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
 		defer cancel()
+		// 测出一个就写进去一个:界面在测速期间会轮询 GetNodes,这样延迟是一个一个冒出来的,
+		// 而不是干等好几秒然后整列一起亮。
+		set := func(tag string, ms int) {
+			d.mu.Lock()
+			if d.delays == nil {
+				d.delays = map[string]int{}
+			}
+			d.delays[tag] = ms
+			d.mu.Unlock()
+		}
 		var res map[string]int
 		if d.core.Running() {
-			res = d.core.ProbeRunning(ctx, p.Tags, builder.TestURL) // 已连接:经每个出站做 URL 测试
+			res = d.core.ProbeRunning(ctx, p.Tags, builder.TestURL, set) // 已连接:经每个出站做 URL 测试
 		} else {
-			res = probeDirect(ctx, p) // 未连接:直连量到节点服务器的往返
+			res = probeDirect(ctx, p, set) // 未连接:直连量到节点服务器的往返
 		}
 		d.mu.Lock()
 		d.delays = res

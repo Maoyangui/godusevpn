@@ -16,7 +16,7 @@ func TestProbeOfflineUnreachable(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	start := time.Now()
-	res := Probe(ctx, outbounds, []string{"hk", "tw", "不存在"}, "")
+	res := Probe(ctx, outbounds, []string{"hk", "tw", "不存在"}, "", nil)
 	if time.Since(start) > 6*time.Second {
 		t.Fatal("超时后应尽快返回")
 	}

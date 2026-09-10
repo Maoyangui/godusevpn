@@ -291,16 +291,17 @@ func (c *Core) URLTest(ctx context.Context, tag, link string) (int, error) {
 }
 
 // ProbeRunning 内核在跑时给一批出站各测一次延迟(并发 8 路),返回 节点 → 毫秒,-1 = 不通。
-func (c *Core) ProbeRunning(ctx context.Context, tags []string, link string) map[string]int {
+// onEach 不为空时每测出一个就先报一次:上百个节点全测完要好几秒,界面得能一个一个显示出来。
+func (c *Core) ProbeRunning(ctx context.Context, tags []string, link string, onEach func(tag string, ms int)) map[string]int {
 	box, _, ok := c.snapshot()
 	if !ok {
 		return map[string]int{}
 	}
-	return probeBox(ctx, box, tags, link)
+	return probeBox(ctx, box, tags, link, onEach)
 }
 
 // Probe 内核没跑时测速:只用订阅里的出站起一个临时实例(没有入站,不碰路由、DNS 与 TUN),测完即关。
-func Probe(ctx context.Context, outbounds []json.RawMessage, tags []string, link string) map[string]int {
+func Probe(ctx context.Context, outbounds []json.RawMessage, tags []string, link string, onEach func(tag string, ms int)) map[string]int {
 	list := make([]any, 0, len(outbounds)+1)
 	for _, o := range outbounds {
 		list = append(list, o)
@@ -325,10 +326,10 @@ func Probe(ctx context.Context, outbounds []json.RawMessage, tags []string, link
 		return map[string]int{}
 	}
 	defer box.Close()
-	return probeBox(ctx, box, tags, link)
+	return probeBox(ctx, box, tags, link, onEach)
 }
 
-func probeBox(ctx context.Context, box *sb.Box, tags []string, link string) map[string]int {
+func probeBox(ctx context.Context, box *sb.Box, tags []string, link string, onEach func(tag string, ms int)) map[string]int {
 	if link == "" {
 		link = "http://www.gstatic.com/generate_204"
 	}
@@ -349,13 +350,16 @@ func probeBox(ctx context.Context, box *sb.Box, tags []string, link string) map[
 			tctx, cancel := context.WithTimeout(ctx, 8*time.Second)
 			defer cancel()
 			ms, err := urltest.URLTest(tctx, link, ob)
-			mu.Lock()
+			v := int(ms)
 			if err != nil {
-				res[tag] = -1
-			} else {
-				res[tag] = int(ms)
+				v = -1
 			}
+			mu.Lock()
+			res[tag] = v
 			mu.Unlock()
+			if onEach != nil {
+				onEach(tag, v)
+			}
 		}(tag, ob)
 	}
 	wg.Wait()

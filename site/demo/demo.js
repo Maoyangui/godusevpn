@@ -59,9 +59,9 @@
 
   let settings = {
     tun: true, tunStack: 'mixed', strictRoute: true, lanBypass: true, mixedPort: 2080,
-    probeMinutes: 3, updateHours: 12, remoteDNS: 'https://1.1.1.1/dns-query', localDNS: 'https://223.5.5.5/dns-query',
-    fakeIP: true, ipv6: false, disableNicIpv6: true, adBlock: false, logDays: 7,
-    netMode: 'local', lanSubnets: '', webListen: '127.0.0.1:9800', processDirect: '',
+    probeMinutes: 3, updateHours: 12, remoteDns: 'https://1.1.1.1/dns-query', localDns: 'https://223.5.5.5/dns-query',
+    fakeIp: true, ipv6: false, disableNicIpv6: true, adBlock: false, logLevel: 'info', logDays: 7,
+    netMode: 'local', lanSubnets: [], webListen: '127.0.0.1:9800', bypassApps: ['steam.exe'],
     mode: 'rule', selected: '香港3-高带宽',
     ruleGroups: [
       { id: 'g1', name: '流媒体', outbound: 'proxy', enabled: true, rules: [{ type: 'domain_suffix', value: 'netflix.com' }, { type: 'domain_suffix', value: 'disneyplus.com' }, { type: 'geosite', value: 'youtube' }] },
