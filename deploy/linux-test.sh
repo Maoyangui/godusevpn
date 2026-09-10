@@ -44,6 +44,17 @@ g=$(resolve www.google.com); check "代理域名得到 fake-ip(198.18/15)" "$(ec
 b=$(resolve www.baidu.com); check "国内域名是真实 IP" "$([ -n "$b" ] && echo "$b" | grep -vc '^198\.1[89]\.' || echo 0)" "$b"
 a6=$(getent ahostsv6 www.google.com 2>/dev/null | awk '{print $1}' | grep -v '^::ffff' | head -1); check "AAAA 为空(禁 IPv6)" "$([ -z "$a6" ] && echo 1 || echo 0)" "$a6"
 
+# 节点服务器必须直连:内核自己去连节点(定时测速每轮都要连一遍)如果被自己的隧道接住,
+# 就会按当前模式再转出去,绕成"本机 → 隧道 → 当前节点 → 目标节点" —— 白绕一跳、流量算两份、
+# 测出来的延迟也不是节点的真实延迟。真机上出现过(anytls 这类 TCP 节点),这里长期盯着。
+loopcheck() {
+  srv=$(grep -o '"server": "[0-9.]\{7,15\}"' "$1" 2>/dev/null | sed 's/.*: "//;s/"$//' | sort -u | tr '\n' '|' | sed 's/|$//')
+  if [ -z "$srv" ]; then echo 0; return; fi
+  "$BIN" logs 400 core 2>/dev/null | grep "outbound connection to" | grep -v "outbound/direct" | grep -cE "to ($srv):"
+}
+n=$(loopcheck /var/lib/godusevpn/config.json)
+check "节点服务器没被套一层代理" "$([ "${n:-0}" -eq 0 ] && echo 1 || echo 0)" "绕圈的连接 ${n:-0} 条"
+
 echo "== 4. 出口"
 now=$(pub4); check "规则模式出口 IP 变了" "$([ -n "$now" ] && [ "$now" != "$before" ] && echo 1 || echo 0)" "before=$before now=$now"
 v6=$(pub6); check "IPv6 出网被阻断" "$([ -z "$v6" ] && echo 1 || echo 0)" "v6=$v6"

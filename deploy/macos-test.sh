@@ -82,6 +82,17 @@ echo "  UDP DNS 经隧道(@1.1.1.1): $(dnsq 1.1.1.1)"
 echo "  内核看到的入站连接数: $("$BIN" logs 400 core 2>/dev/null | grep -c 'inbound connection from')"
 "$BIN" logs 400 core 2>/dev/null | grep 'inbound connection\|outbound connection' | tail -6 | sed 's/^/    /'
 
+# 节点服务器必须直连:内核自己去连节点(定时测速每轮都要连一遍)如果被自己的隧道接住,
+# 就会按当前模式再转出去,绕成"本机 → 隧道 → 当前节点 → 目标节点" —— 白绕一跳、流量算两份、
+# 测出来的延迟也不是节点的真实延迟。真机上出现过(anytls 这类 TCP 节点),这里长期盯着。
+loopcheck() {
+  srv=$(grep -o '"server": "[0-9.]\{7,15\}"' "$1" 2>/dev/null | sed 's/.*: "//;s/"$//' | sort -u | tr '\n' '|' | sed 's/|$//')
+  if [ -z "$srv" ]; then echo 0; return; fi
+  "$BIN" logs 400 core 2>/dev/null | grep "outbound connection to" | grep -v "outbound/direct" | grep -cE "to ($srv):"
+}
+n=$(loopcheck "/Library/Application Support/godusevpn/data/config.json")
+check "节点服务器没被套一层代理" "$([ "${n:-0}" -eq 0 ] && echo 1 || echo 0)" "绕圈的连接 ${n:-0} 条"
+
 echo "== 4. IPv6:关闭时必须是真拒绝,且不能绕过隧道出去"
 a6=$(resolve6 www.google.com); check "AAAA 为空" "$([ -z "$a6" ] && echo 1 || echo 0)" "${a6:-(空)}"
 t6=$(ifaceFor6 2001:4860:4860::8888)

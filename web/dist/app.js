@@ -324,7 +324,7 @@ function drawProfiles(list) {
 }
 function msClass(d) { return d < 0 ? 'bad' : !d ? 'none' : d < 150 ? 'good' : d < 400 ? 'mid' : 'bad'; }
 function msText(d, testing) { if (testing) return '<span class="spinner"></span>'; if (d < 0) return t('node.fail'); return d ? d + ' ms' : '–'; }
-let nodeTesting = false, nodeFilter = '', nodeFetchTried = false;
+let nodeTesting = false, nodeFilter = '', nodeFetchTried = false, nodeSig = '';
 async function sheetNodes() {
   nodeFilter = '';
   openSheet(t('sheet.nodes'), `<div class="empty"><span class="spinner"></span></div>`, { action: t('sheet.retest'), onAction: () => testNodes(true) });
@@ -345,11 +345,16 @@ async function drawNodes(testing) {
     $('#sheet-body').innerHTML = `<div class="empty">${p ? t('node.notFetched') : t('prof.empty')}</div>`; return;
   }
   const max = Math.max(1, ...nodes.filter(n => n.delay > 0).map(n => n.delay));
+  // 节点集合没变就只改数字,别整块重画:一百来个节点重画一次会先空一下,入场动画还要错峰放完,
+  // 滚动位置和筛选框里的字也跟着丢 —— 测速结束那一下看着就是"闪一下白再出来"。
+  const sig = nodes.map(n => n.name).join(' ');
+  if (sig === nodeSig && patchNodes(nodes, max, testing)) return;
+  nodeSig = sig;
   const st = state && state.view.state.status, online = st === 'connected' || st === 'degraded';
   const hint = online ? '' : `<div class="small muted" style="padding:0 4px 8px">${t('node.offlineHint')}</div>`;
   const keep = focusKey($('#sheet-body'), 'data-name');
-  $('#sheet-body').innerHTML = hint + (nodes.length > 8? `<div class="sheet-filter"><input type="text" id="node-filter" placeholder="${t('node.filter')}" value="${esc(nodeFilter)}"></div>` : '') + `<div class="list">${nodes.map((n, i) => `<div class="item ${n.current ? 'current' : ''}" data-name="${esc(n.name)}" style="animation-delay:${i * 25}ms"><span class="check"></span>
-    <div class="name"><b>${esc(n.name === 'auto' ? t('node.auto') : n.name)}</b><span>${n.name === 'auto' ? (n.autoNow ? t('node.now', { n: n.autoNow }) : t('node.autoDesc')) : esc(n.type || '')}</span>${n.name !== 'auto' && n.delay > 0 ? `<div class="bar"><i style="width:${Math.max(6, 100 - n.delay / max * 80)}%"></i></div>` : ''}</div>
+  $('#sheet-body').innerHTML = hint + (nodes.length > 8? `<div class="sheet-filter"><input type="text" id="node-filter" placeholder="${t('node.filter')}" value="${esc(nodeFilter)}"></div>` : '') + `<div class="list">${nodes.map((n, i) => `<div class="item ${n.current ? 'current' : ''}" data-name="${esc(n.name)}" style="animation-delay:${Math.min(i, 12) * 25}ms"><span class="check"></span>
+    <div class="name"><b>${esc(n.name === 'auto' ? t('node.auto') : n.name)}</b><span>${n.name === 'auto' ? (n.autoNow ? t('node.now', { n: n.autoNow }) : t('node.autoDesc')) : esc(n.type || '')}</span>${n.name !== 'auto' ? `<div class="bar"><i style="width:${barWidth(n.delay, max)}"></i></div>` : ''}</div>
     <span class="ms ${msClass(n.delay)}">${n.name === 'auto' ? '' : msText(n.delay, testing)}</span></div>`).join('')}</div>`;
   $('#sheet-body').querySelectorAll('.item').forEach(it => it.addEventListener('click', async () => {
     try { await App().SelectNode(it.dataset.name); closeSheet(); } catch (e) { toast(errText(e), 'err'); }
@@ -359,6 +364,30 @@ async function drawNodes(testing) {
   const f = $('#node-filter');
   if (f) { f.addEventListener('input', () => { nodeFilter = f.value.trim(); applyFilter(); }); applyFilter(); }
 }
+// barWidth 延迟条的宽度:没测出来就是 0。条子一直留着,测完只改宽度,CSS 自带的过渡会把它抹开。
+function barWidth(delay, max) { return delay > 0 ? Math.max(6, 100 - delay / max * 80) + '%' : '0'; }
+
+// patchNodes 就地更新延迟数字、进度条与当前项标记,不动 DOM 结构;结构对不上就返回 false,交给整块重画。
+function patchNodes(nodes, max, testing) {
+  const body = $('#sheet-body');
+  const items = new Map([...body.querySelectorAll('.item')].map(it => [it.dataset.name, it]));
+  if (items.size !== nodes.length) return false;
+  for (const n of nodes) {
+    const it = items.get(n.name);
+    if (!it) return false;
+    it.classList.toggle('current', !!n.current);
+    const ms = it.querySelector('.ms');
+    if (ms) { ms.className = 'ms ' + msClass(n.delay); ms.innerHTML = n.name === 'auto' ? '' : msText(n.delay, testing); }
+    const bar = it.querySelector('.bar i');
+    if (bar) bar.style.width = barWidth(n.delay, max);
+    if (n.name === 'auto') {
+      const sub = it.querySelector('.name span');
+      if (sub) sub.textContent = n.autoNow ? t('node.now', { n: n.autoNow }) : t('node.autoDesc');
+    }
+  }
+  return true;
+}
+
 async function testNodes(force) {
   if (nodeTesting && !force) return;
   nodeTesting = true;

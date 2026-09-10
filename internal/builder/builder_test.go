@@ -384,13 +384,15 @@ func TestNodeServersBypassProxy(t *testing.T) {
 	for i, r := range c.Route.Rules {
 		switch {
 		case r["outbound"] == "direct" && r["domain"] != nil:
-			if fmt.Sprint(r["domain"]) != "[az.example.com]" {
-				t.Fatalf("直连的节点域名不对: %v", r["domain"])
+			if fmt.Sprint(r["domain"]) != "[az.example.com]" || fmt.Sprint(r["port"]) != "[42222]" {
+				t.Fatalf("直连的节点域名 / 端口不对: %v %v", r["domain"], r["port"])
 			}
 			domainAt = i
 		case r["outbound"] == "direct" && r["ip_cidr"] != nil:
-			if got := fmt.Sprint(r["ip_cidr"]); got != "[1.2.3.4/32 1.2.3.5/32]" {
-				t.Fatalf("直连的节点 IP 不对: %s", got)
+			// 一台服务器一条规则,只放行它自己那些端口 —— 面板、订阅地址常与节点同 IP,不能整台放行
+			got := fmt.Sprint(r["ip_cidr"]) + " " + fmt.Sprint(r["port"])
+			if got != "[1.2.3.4/32] [443]" && got != "[1.2.3.5/32] [8443]" {
+				t.Fatalf("直连的节点 IP / 端口不对: %s", got)
 			}
 			cidrAt = i
 		case r["clash_mode"] != nil && modeAt < 0:
@@ -402,5 +404,13 @@ func TestNodeServersBypassProxy(t *testing.T) {
 	}
 	if modeAt < 0 || domainAt > modeAt || cidrAt > modeAt {
 		t.Fatalf("节点直连规则必须排在模式规则前面:域名 %d,IP %d,模式 %d", domainAt, cidrAt, modeAt)
+	}
+	// 同一台服务器上的其它端口(面板、订阅)不能被放行
+	for _, r := range c.Route.Rules {
+		if r["outbound"] == "direct" && fmt.Sprint(r["ip_cidr"]) == "[1.2.3.4/32]" {
+			if p := fmt.Sprint(r["port"]); strings.Contains(p, "2053") {
+				t.Fatalf("规则把面板端口也放行了: %s", p)
+			}
+		}
 	}
 }
