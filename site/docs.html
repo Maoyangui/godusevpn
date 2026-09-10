@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>文档 —— 佛跳墙</title>
+<meta name="description" content="佛跳墙客户端的安装、使用与排障。">
+<link rel="icon" href="assets/favicon.svg">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="top">
+  <div class="wrap">
+    <a class="brand" href="./">
+      <svg viewBox="-16 -50 400 400" aria-hidden="true"><defs><linearGradient id="g" gradientUnits="userSpaceOnUse" x1="70" y1="70" x2="310" y2="270"><stop offset="0" stop-color="#6a44f2"/><stop offset=".55" stop-color="#2f8bff"/><stop offset="1" stop-color="#18e3e8"/></linearGradient></defs><g fill="none" stroke="url(#g)" stroke-width="44" stroke-linecap="round" stroke-linejoin="round"><path d="M86 248V84l146 124v52"/><path d="M332 78l-88 96"/></g><path fill="url(#g)" d="M118 192l52 30-52 30z"/></svg>
+      佛跳墙
+    </a>
+    <nav>
+      <a href="docs.html" class="on">文档</a>
+      <a href="demo/">在线演示</a>
+      <a href="https://github.com/Maoyangui/godusevpn/releases">下载</a>
+      <a href="https://github.com/Maoyangui/godusevpn">GitHub</a>
+    </nav>
+  </div>
+</header>
+
+<div class="wrap doc">
+  <div class="toc">
+    <a href="#win">Windows</a><a href="#mac">macOS</a><a href="#linux">Linux</a><a href="#android">Android</a>
+    <a href="#use">日常使用</a><a href="#rules">路由规则</a><a href="#ipv6">关于 IPv6</a><a href="#cli">命令行</a><a href="#faq">排障</a>
+  </div>
+
+  <h2 id="win">Windows</h2>
+  <p>需要 <strong>Windows 10 1809(内部版本 17763)或更高</strong>,x64 与 ARM64 各一个包。Windows 7 / 8 用不了:Go 从 1.21 起不再支持它们,微软也停了那两个系统的 WebView2。</p>
+  <p>安装包会注册后台服务(自动启动)、装托盘客户端与命令行,可勾选"登录时自动启动",并注册 <code>godusevpn://</code> 供落地页一键导入。<strong>程序未签名</strong>,SmartScreen 提示时点"更多信息 → 仍要运行"。</p>
+  <p>关掉窗口只是收进托盘,连接不断。托盘的"退出"会断开连接并停掉后台服务,TUN 网卡随之消失。</p>
+
+  <h2 id="mac">macOS</h2>
+  <p>需要 <strong>macOS 13(Ventura)或更高</strong>,苹果芯片与英特尔各一个包。要管理员密码:</p>
+  <pre><code>curl -fsSL https://raw.githubusercontent.com/Maoyangui/godusevpn/master/deploy/macos-install.sh | sudo sh</code></pre>
+  <p>用 curl 装是有原因的:Gatekeeper 的"来自互联网"隔离标记是浏览器下载时打上的,curl 拿到的文件没有这个标记,不用买开发者证书,也不用你去系统设置里点允许。</p>
+  <p>装完两样东西:<code>/usr/local/bin/godusevpn</code> 是守护进程兼命令行,注册成 launchd 服务开机自启;<code>/Applications/godusevpn.app</code> 是图形界面,启动台里叫「佛跳墙」。</p>
+  <p>这一版没有菜单栏图标,关窗口只是关界面,隧道照常在后台跑,从启动台再打开就回来了。卸载:<code>sudo godusevpn uninstall</code>,再删掉那两个文件。</p>
+  <div class="note">macOS 上连接时会接管系统 DNS,断开按原值还原。不这么做的话系统一直问路由器,而私网段在隧道之外,解析记录就泄漏给本地网络了。</div>
+
+  <h2 id="linux">Linux(桌面与软路由)</h2>
+  <p>一个静态二进制,既是服务也是命令行,自带浏览器面板。root 执行:</p>
+  <pre><code>curl -fsSL https://raw.githubusercontent.com/Maoyangui/godusevpn/master/deploy/install.sh | sh</code></pre>
+  <p>装完终端会打印面板地址和随机生成的初始密码。默认监听 <code>0.0.0.0:9800</code>,局域网其它设备直接打开;云主机记得在安全组放行 TCP 9800。改密码 <code>godusevpn passwd</code>;只给本机看就 <code>godusevpn settings webListen=127.0.0.1:9800</code>。</p>
+  <h3>网关模式(软路由)</h3>
+  <p>设置 → 网络 → 网络模式选"网关",局域网设备把网关和 DNS 指向这台机器就被代理,设备的 DNS 查询由内核接管。菜单里会多出"设备"页:自动发现在线设备,每台可设跟随规则 / 强制代理 / 直连 / 拒绝上网,按 MAC 记住,换 IP 也跟着。需要内核带 nftables(OpenWrt 22.03 起的 fw4 都有)。</p>
+
+  <h2 id="android">Android(手机与电视)</h2>
+  <p>侧载 APK,最低 Android 8.0。手机与电视基本都是 arm64,不确定就装 universal 包。第一次点"连接"会弹系统的 VPN 授权。</p>
+  <p>"按进程直连"在这里是按应用包名(设置 → 分流),选中的应用整个绕过 VPN。同一个包在 Android TV 上以横屏显示,遥控器方向键能走完全部操作。</p>
+  <p>升级走应用内:下载对应 ABI 的 APK、校验 SHA256 后拉起系统安装器。每一版用同一把签名密钥,否则系统不让覆盖安装。</p>
+  <div class="note">Android 上没有"停用网卡 IPv6"这个开关——应用没有权限改物理网卡的配置。那一端只有"把 v6 接进 VPN 再拒绝"这一层。</div>
+
+  <h2 id="use">日常使用</h2>
+  <h3>第一次打开</h3>
+  <p>先填面板给的订阅链接才能进入。之后在侧边菜单的"订阅管理"里可以加更多条,点一下切换。</p>
+  <h3>三种模式</h3>
+  <table>
+    <tr><th>模式</th><th>行为</th></tr>
+    <tr><td>规则</td><td>国内域名与 IP 直连,其余走代理。默认的三条分支自己可以改。</td></tr>
+    <tr><td>全局</td><td>全部流量走代理。</td></tr>
+    <tr><td>直连</td><td>全部流量直连,隧道还在但不转发。</td></tr>
+  </table>
+  <p>切模式靠内核的 Clash API,毫秒级,不重启内核。首页下方和侧边菜单里都能切。</p>
+  <h3>选节点</h3>
+  <p>点首页的出口卡片或"节点"格子打开列表。打开时测一次速,不再定时测——只有选了"自动选择"才会按设置里的周期测全部节点并切到最快的那个。列表顶上按地区归堆,点标签只看该地区。</p>
+  <h3>出口地址</h3>
+  <p>首页那一行是<strong>经当前节点</strong>查来的,不是节点名上写的机房位置(节点自己再套一层就不是那儿了)。换节点立刻重测,自动选择在后台切了也重测,此外每 10 分钟复查一次。查不到就显示"正在查出口",不影响使用。</p>
+
+  <h2 id="rules">路由规则</h2>
+  <p>内置一组默认规则:局域网与私网直连、国内域名与 IP 直连、其余走代理。这三项各自可改(直连 / 代理 / 拒绝;"其余流量"只能选代理或直连),改乱了点"还原默认"一步回出厂。</p>
+  <p>自定义规则组要填:名称、出口(代理 / 直连 / 拒绝 / 自动选择 / 某个具体节点)、任意多条条件。条件支持域名后缀、完整域名、关键词、正则、IP 段、端口、进程名、geosite 类别、geoip 国家;组内任一条件命中即算命中。</p>
+  <p>规则组自上而下依次匹配,排在默认规则之前,<strong>只在"规则"模式下生效</strong>,可启停、排序、编辑、删除。出口选了具体节点而它不在当前订阅里时,回落到代理。</p>
+
+  <h2 id="ipv6">关于 IPv6</h2>
+  <p>默认全关,分五层:</p>
+  <ul>
+    <li>DNS 只回 A 记录</li>
+    <li>不分配 IPv6 的 fake-ip 段</li>
+    <li>隧道里按目标协议族拒绝</li>
+    <li>TUN 照样声明 IPv6 地址,把 v6 流量接进隧道再丢掉——不接进来的话它会绕过隧道从物理网卡直接出网</li>
+    <li>连接期间停用各网卡的 IPv6 协议</li>
+  </ul>
+  <p>最后一层是关键。前四层挡的都是"IPv6 数据包出网",挡不住"读取本机网卡配置":运营商发下来的公网 IPv6 地址就配在物理网卡上,原生程序(不是网页,浏览器沙箱不给读)枚举一遍网卡就能读走,再经隧道报给自己的服务器——数据包一点没漏,信息漏了,而那个前缀对应到具体一条宽带线路。</p>
+  <p>动手前每张网卡的状态会落盘,断开时按状态还原,守护进程启动时也无条件还原一次,所以上次崩溃退出不会把 IPv6 永久关掉。本来就是关闭状态的网卡记下来但不动。要保留局域网 IPv6 就在设置里把这个开关关掉。</p>
+
+  <h2 id="cli">命令行</h2>
+  <p>以管理员身份:</p>
+  <pre><code>godusevpn-svc install                          注册服务并启动
+godusevpn-cli profile https://面板/sub/用户名    设置订阅
+godusevpn-cli connect
+godusevpn-cli status
+godusevpn-cli mode global | rule | direct
+godusevpn-cli nodes / select &lt;节点&gt; / test
+godusevpn-cli settings ipv6=on probeMinutes=5 logDays=14
+godusevpn-cli logs 200 core
+godusevpn-cli diag                             导出诊断包(订阅地址已打码)
+godusevpn-svc uninstall</code></pre>
+  <p>Linux 与 macOS 上是同一个 <code>godusevpn</code> 二进制,子命令一样。</p>
+
+  <h2 id="faq">排障</h2>
+  <h3>界面显示"服务未运行"</h3>
+  <p>关于页点"修复服务"。Windows 上也可以 <code>godusevpn-svc install</code> 重装一次服务。macOS 的界面是用户身份跑的,要靠 root 守护进程开出来的套接字,重装服务能一并修好权限。</p>
+  <h3>连上了但打不开网页</h3>
+  <p>先看日志(侧边菜单 → 日志,切到"内核")。常见原因是订阅里的节点已经不通,换一个节点或点"重新测速"看看哪些还活着。</p>
+  <h3>订阅刷新失败</h3>
+  <p>刷新会自动回退:经当前节点失败就改用自动选择组,再不行直连刷新。三条都失败基本是链接本身的问题——到订阅管理里核对地址,或者账号已停用 / 用完 / 到期。</p>
+  <h3>远程 SSH 被切断</h3>
+  <p>不会。Linux 上连上后会给每个物理网卡地址加一条"回包走主表"的策略路由,本机对外服务的回包不进 TUN。</p>
+  <h3>要提交问题</h3>
+  <p>日志 → 导出诊断包,里面订阅地址已经打码。连同现象一起发到 <a href="https://github.com/Maoyangui/godusevpn/issues">Issues</a>。</p>
+</div>
+
+<footer>
+  <div class="wrap">
+    GPL-3.0。完整说明见仓库的
+    <a href="https://github.com/Maoyangui/godusevpn#readme">README</a>。
+  </div>
+</footer>
+</body>
+</html>

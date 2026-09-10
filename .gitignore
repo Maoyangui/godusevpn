@@ -10,3 +10,5 @@ android/app/build/
 android/app/libs/
 android/keystore.jks
 android/local.properties
+# 站点产物,CI 现生成
+site/dist/

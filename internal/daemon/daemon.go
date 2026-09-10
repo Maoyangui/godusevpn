@@ -37,23 +37,27 @@ import (
 const DisplayName = buildinfo.DisplayName
 
 type Daemon struct {
-	mu       sync.Mutex
-	log      *logx.Rotator
-	coreLog  *logx.Rotator
-	core     *core.Core
-	settings settings.Settings
-	profiles map[string]*profile.Profile // 订阅 id → 节点缓存
-	fetchErr map[string]string           // 订阅 id → 最近一次拉取失败原因
-	machine  *state.Machine
-	server   *ipc.Server
-	secret   string
-	http     *http.Client
-	delays   map[string]int // 最近一次全节点测速结果
-	ping     int            // 当前节点最近一次测得的延迟(毫秒):健康检查本来就要测一次,顺手记下来给界面用
-	exitIP   string         // 经当前节点出去时对外露出的地址
-	exitLoc  string         // 出口所在国家的两位代码
-	exitNode string         // 上面那个出口是哪个节点测出来的:自动选择在后台换了节点就得重测
-	noListen bool
+	mu         sync.Mutex
+	log        *logx.Rotator
+	coreLog    *logx.Rotator
+	core       *core.Core
+	settings   settings.Settings
+	profiles   map[string]*profile.Profile // 订阅 id → 节点缓存
+	fetchErr   map[string]string           // 订阅 id → 最近一次拉取失败原因
+	machine    *state.Machine
+	server     *ipc.Server
+	secret     string
+	http       *http.Client
+	delays     map[string]int // 最近一次全节点测速结果
+	ping       int            // 当前节点最近一次测得的延迟(毫秒):健康检查本来就要测一次,顺手记下来给界面用
+	exitIP     string         // 经当前节点出去时对外露出的地址
+	exitLoc    string         // 出口所在国家的两位代码
+	exitCity   string         // 出口所在城市
+	exitRegion string         // 出口所在一级行政区
+	exitISP    string         // 出口那条线路的运营商 / 机房
+	exitNode   string         // 上面那些是哪个节点测出来的:自动选择在后台换了节点就得重测
+	exitAt     time.Time      // 上次测出口的时间:节点没变也隔一阵子复查一次
+	noListen   bool
 }
 
 type persisted struct {
@@ -475,7 +479,7 @@ func (d *Daemon) health(ctx context.Context) error {
 	// 变了就重测;第一次没查着(刚连上线路还没热)也在这儿补。
 	now := d.currentNode()
 	d.mu.Lock()
-	need := d.exitIP == "" || d.exitNode != now
+	need := d.exitIP == "" || d.exitNode != now || time.Since(d.exitAt) > exitMaxAge
 	if need {
 		d.exitNode = now
 	}
@@ -506,52 +510,117 @@ func (d *Daemon) setPing(ms int) {
 	d.mu.Unlock()
 }
 
-// exitTraceURL Cloudflare 的诊断接口:回来是几行 key=value,取 ip= 与 loc= 两行,总共几百字节。
-const exitTraceURL = "https://www.cloudflare.com/cdn-cgi/trace"
+// 查出口用的两个地址。两个都是"对方看到的你是谁",不需要我再拿这个 IP 去别处查一次归属地,
+// 也不用申请密钥。请求都经当前节点发出去,对方看到的是节点的出口地址,不是用户本机的。
+//
+//	ipwho.is  一次 JSON,除了地址还给国家 / 一级行政区 / 城市 / 运营商,首页那一行要的就是它;
+//	cdn-cgi/trace  Cloudflare 自家的诊断端点,只给地址与国家代码,但几乎不会连不上,当兜底。
+//
+// 前者不通(限额、被墙、超时)就退到后者;两个都不通就什么都不记,界面上那一行显示"正在查出口",
+// 下一轮健康检查再来一次 —— 查不到不算错,不弹提示也不反复重试骚扰。
+const (
+	exitWhoURL   = "https://ipwho.is/"
+	exitTraceURL = "https://www.cloudflare.com/cdn-cgi/trace"
+)
 
-// refreshExit 经当前节点查一次出口地址,首页要显示"我现在从哪儿出去"。
-// 节点名写的是机房位置,真正的出口未必在那儿(比如节点自己再套一层),所以这个值得单独查。
-// 查不到不算错:界面上那一行自然就不显示,不打扰用户,也不重试骚扰。
+// exitInfo 一次查询的结果;ip 为空表示这次没查着。
+type exitInfo struct {
+	ip, loc, city, region, isp string
+}
+
+// refreshExit 经当前节点查一次出口,首页要显示"我现在从哪儿出去"。
+// 节点名写的是机房位置,真正的出口未必在那儿(节点自己再套一层就不是了),所以这个值得单独查。
 func (d *Daemon) refreshExit() {
 	c, err := d.core.HTTPClient("proxy", 10*time.Second)
 	if err != nil {
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
-	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, exitTraceURL, nil)
-	if err != nil {
-		return
+	info := d.exitFromWho(c)
+	if info.ip == "" {
+		info = d.exitFromTrace(c)
 	}
-	resp, err := c.Do(req)
-	if err != nil {
-		return
-	}
-	defer resp.Body.Close()
-	b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-	var ip, loc string
-	for _, ln := range strings.Split(string(b), "\n") {
-		if v, ok := strings.CutPrefix(ln, "ip="); ok {
-			ip = strings.TrimSpace(v)
-		}
-		if v, ok := strings.CutPrefix(ln, "loc="); ok {
-			loc = strings.TrimSpace(v)
-		}
-	}
-	if ip == "" {
+	if info.ip == "" {
 		return
 	}
 	d.mu.Lock()
-	d.exitIP, d.exitLoc = ip, loc
+	d.exitIP, d.exitLoc, d.exitCity, d.exitRegion, d.exitISP = info.ip, info.loc, info.city, info.region, info.isp
+	d.exitAt = time.Now()
 	d.mu.Unlock()
+}
+
+func (d *Daemon) exitGet(c *http.Client, url string) []byte {
+	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil
+	}
+	resp, err := c.Do(req)
+	if err != nil {
+		return nil
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil
+	}
+	b, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
+	return b
+}
+
+func (d *Daemon) exitFromWho(c *http.Client) exitInfo {
+	b := d.exitGet(c, exitWhoURL)
+	if len(b) == 0 {
+		return exitInfo{}
+	}
+	var r struct {
+		Success     bool   `json:"success"`
+		IP          string `json:"ip"`
+		CountryCode string `json:"country_code"`
+		Region      string `json:"region"`
+		City        string `json:"city"`
+		Connection  struct {
+			ISP string `json:"isp"`
+			Org string `json:"org"`
+		} `json:"connection"`
+	}
+	if err := json.Unmarshal(b, &r); err != nil || r.IP == "" {
+		return exitInfo{}
+	}
+	isp := r.Connection.ISP
+	if isp == "" {
+		isp = r.Connection.Org
+	}
+	return exitInfo{ip: r.IP, loc: r.CountryCode, city: r.City, region: r.Region, isp: isp}
+}
+
+func (d *Daemon) exitFromTrace(c *http.Client) exitInfo {
+	b := d.exitGet(c, exitTraceURL)
+	if len(b) == 0 {
+		return exitInfo{}
+	}
+	var out exitInfo
+	for _, ln := range strings.Split(string(b), "\n") {
+		if v, ok := strings.CutPrefix(ln, "ip="); ok {
+			out.ip = strings.TrimSpace(v)
+		}
+		if v, ok := strings.CutPrefix(ln, "loc="); ok {
+			out.loc = strings.TrimSpace(v)
+		}
+	}
+	return out
 }
 
 // clearExit 断开或换节点时先把旧的出口信息抹掉,免得界面上挂着上一个节点的地址。
 func (d *Daemon) clearExit() {
 	d.mu.Lock()
-	d.exitIP, d.exitLoc, d.exitNode = "", "", ""
+	d.exitIP, d.exitLoc, d.exitCity, d.exitRegion, d.exitISP, d.exitNode = "", "", "", "", "", ""
+	d.exitAt = time.Time{}
 	d.mu.Unlock()
 }
+
+// exitMaxAge 节点没换也隔这么久复查一次:节点自己的上游偶尔会变,总不能一直挂着旧地址。
+// 不做得更勤是因为没必要 —— 出口真变了几乎都是因为换了节点,而换节点是立刻就重测的。
+const exitMaxAge = 10 * time.Minute
 
 // maybeRefresh 定时刷新当前订阅;节点变了就重连。
 func (d *Daemon) maybeRefresh(ctx context.Context) {
@@ -682,6 +751,7 @@ func (d *Daemon) stateView() ipc.StateView {
 		}
 	}
 	v.Ping, v.ExitIP, v.ExitLoc = d.ping, d.exitIP, d.exitLoc
+	v.ExitCity, v.ExitRegion, v.ExitISP = d.exitCity, d.exitRegion, d.exitISP
 	d.mu.Unlock()
 	return v
 }

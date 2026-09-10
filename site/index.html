@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>佛跳墙 —— m-ui 面板的多平台客户端</title>
+<meta name="description" content="Windows、macOS、Linux、Android 四端共用一套界面与一个守护进程。内嵌 sing-box,TUN 全局接管,默认关掉 IPv6。">
+<link rel="icon" href="assets/favicon.svg">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="top">
+  <div class="wrap">
+    <a class="brand" href="./">
+      <svg viewBox="-16 -50 400 400" aria-hidden="true"><defs><linearGradient id="g" gradientUnits="userSpaceOnUse" x1="70" y1="70" x2="310" y2="270"><stop offset="0" stop-color="#6a44f2"/><stop offset=".55" stop-color="#2f8bff"/><stop offset="1" stop-color="#18e3e8"/></linearGradient></defs><g fill="none" stroke="url(#g)" stroke-width="44" stroke-linecap="round" stroke-linejoin="round"><path d="M86 248V84l146 124v52"/><path d="M332 78l-88 96"/></g><path fill="url(#g)" d="M118 192l52 30-52 30z"/></svg>
+      佛跳墙
+    </a>
+    <nav>
+      <a href="docs.html">文档</a>
+      <a href="demo/">在线演示</a>
+      <a href="https://github.com/Maoyangui/godusevpn/releases">下载</a>
+      <a href="https://github.com/Maoyangui/godusevpn">GitHub</a>
+    </nav>
+  </div>
+</header>
+
+<div class="hero">
+  <div class="wrap">
+    <h1>m-ui 面板的客户端<br>四个平台,一套界面</h1>
+    <p>填一条订阅链接就能用。内嵌 sing-box,开 TUN 接管全机流量,规则 / 全局 / 直连三种模式,默认把 IPv6 关掉。</p>
+    <div class="btns">
+      <a class="btn primary" href="https://github.com/Maoyangui/godusevpn/releases">下载</a>
+      <a class="btn" href="demo/">在线演示</a>
+      <a class="btn" href="docs.html">文档</a>
+    </div>
+  </div>
+</div>
+
+<div class="shots">
+  <figure><img src="assets/shots/home.png" alt="首页"><figcaption>首页:出口地址与实时速度</figcaption></figure>
+  <figure><img src="assets/shots/nodes.png" alt="节点列表"><figcaption>节点:按地区筛,带延迟条</figcaption></figure>
+  <figure><img src="assets/shots/drawer.png" alt="侧边菜单"><figcaption>侧边菜单:就地切模式</figcaption></figure>
+  <figure><img src="assets/shots/rules.png" alt="路由规则"><figcaption>路由规则:可视化编排</figcaption></figure>
+  <figure><img src="assets/shots/settings.png" alt="设置"><figcaption>设置</figcaption></figure>
+  <figure><img src="assets/shots/dark.png" alt="深色"><figcaption>深色跟随系统,也能手动切</figcaption></figure>
+</div>
+
+<section>
+  <div class="wrap">
+    <h2>它做了什么</h2>
+    <p class="lead">不是又一个订阅转换器。下面这些是装完就生效的默认行为。</p>
+    <div class="grid">
+      <div class="cell">
+        <h3>全机接管,不靠系统代理</h3>
+        <p>开 TUN 网卡把流量整个接进内核,不改系统代理设置,不挑应用。严格路由会拦掉绕过隧道的 DNS 与直连尝试。</p>
+      </div>
+      <div class="cell">
+        <h3>默认没有 IPv6</h3>
+        <p>DNS 只回 A 记录、不发 v6 fake-ip、隧道里按协议族拒绝,再加一层:连接期间停用各网卡的 IPv6 协议,断开时按动手前的状态还原。网卡上没有公网 v6 地址,应用就读不到。</p>
+      </div>
+      <div class="cell">
+        <h3>看得见的出口</h3>
+        <p>首页显示这条线路真正的出口地址与城市——节点名写的是机房位置,真正的出口未必在那儿。换节点立刻重测。</p>
+      </div>
+      <div class="cell">
+        <h3>规则组能自己排</h3>
+        <p>名称、出口、任意多条匹配条件(域名 / 关键词 / 正则 / IP 段 / 端口 / 进程名 / geosite / geoip),自上而下匹配,可启停排序。内置的三条默认规则也能改。</p>
+      </div>
+      <div class="cell">
+        <h3>订阅刷新有回退链</h3>
+        <p>经当前节点刷新失败就改用自动选择组,再不行直连刷新。回退只作用于这一条请求,选中的节点和其它流量的路由都不动。</p>
+      </div>
+      <div class="cell">
+        <h3>四端同一份代码</h3>
+        <p>守护进程、页面、数据布局都是同一份。Linux 上还多一个网关模式:局域网设备把网关指过来就能走,每台设备可单独设策略。</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <h2>支持的平台</h2>
+    <div class="grid">
+      <div class="cell"><h3>Windows 10 1809+</h3><p>x64 / ARM64。安装包带后台服务、托盘客户端与命令行,注册 <code>godusevpn://</code> 供落地页一键导入。</p></div>
+      <div class="cell"><h3>macOS 13+</h3><p>苹果芯片与英特尔各一个包。launchd 后台服务 + 启动台里的图形界面。</p></div>
+      <div class="cell"><h3>Linux</h3><p>一条命令装好守护进程,浏览器打开内置面板。软路由(含 Merlin / Entware)可用网关模式。</p></div>
+      <div class="cell"><h3>Android 8+</h3><p>VpnService 接管,手机与电视都能用,电视上遥控器可以走完全部操作。</p></div>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    GPL-3.0,与内嵌的 sing-box 一致。第三方素材的出处见仓库根的
+    <a href="https://github.com/Maoyangui/godusevpn/blob/master/NOTICE">NOTICE</a>。
+    <br>面板项目:<a href="https://github.com/Maoyangui/m-ui">m-ui</a>
+  </div>
+</footer>
+</body>
+</html>

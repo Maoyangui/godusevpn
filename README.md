@@ -1,4 +1,24 @@
-# 佛跳墙(godusevpn)
+<p align="center"><img src="brand/logo.svg" width="120" alt="佛跳墙"></p>
+<h1 align="center">佛跳墙 · godusevpn</h1>
+<p align="center"><a href="https://github.com/Maoyangui/m-ui">m-ui</a> 面板的客户端 · Windows / macOS / Linux / Android 四端一套界面 · 内嵌 <a href="https://github.com/SagerNet/sing-box">sing-box</a> · TUN 全机接管 · 默认关掉 IPv6</p>
+<p align="center"><a href="https://maoyangui.github.io/godusevpn/">介绍站</a> · <a href="https://maoyangui.github.io/godusevpn/docs.html">文档</a> · <a href="https://maoyangui.github.io/godusevpn/demo/">在线演示</a> · <a href="https://github.com/Maoyangui/godusevpn/releases">下载</a> · <a href="#默认策略">默认策略</a></p>
+<p align="center">
+  <a href="https://github.com/Maoyangui/godusevpn/actions/workflows/build.yml"><img src="https://github.com/Maoyangui/godusevpn/actions/workflows/build.yml/badge.svg" alt="build"></a>
+  <a href="https://github.com/Maoyangui/godusevpn/releases/latest"><img src="https://img.shields.io/github/v/release/Maoyangui/godusevpn?label=release" alt="latest release"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/Maoyangui/godusevpn" alt="GPL-3.0"></a>
+</p>
+
+---
+
+**先看看再装?** [在线演示](https://maoyangui.github.io/godusevpn/demo/) 就是客户端里那一份界面跑在示例数据上:不用装、不连任何服务,连接、换节点、切模式、编规则都能点,刷新即恢复。
+
+<p align="center">
+  <img src="docs/screenshots/home.png" alt="首页:出口地址、实时速度与最近一分钟的曲线" width="250">
+  <img src="docs/screenshots/nodes.png" alt="节点列表:地区旗帜、延迟条、按地区筛选" width="250">
+  <img src="docs/screenshots/drawer.png" alt="侧边菜单:状态卡与就地切模式" width="250">
+</p>
+
+## 这是什么
 
 m-ui 面板的多平台客户端:内嵌 sing-box,TUN 模式,规则 / 全局 / 直连三态,DoH + fake-ip,默认禁 IPv6(v6 接进隧道再拒绝,并在连接期间停用各网卡的 IPv6 协议),开机自启;多订阅(刷新走"当前代理 → 自动选择 → 直连"回退链)、定时测速、可视化规则组、按进程 / 应用 / 设备直连、应用内升级、日志保留、诊断包。四端共用同一个守护进程和同一套界面(一份 HTML/JS/CSS,浅色深色跟随系统或手动切换)。
 
@@ -69,7 +89,7 @@ CGO_ENABLED=1 CGO_LDFLAGS="-framework UniformTypeIdentifiers" go build -tags des
 > 地区是从节点名里认出来的:旗帜 emoji、中英文地名、独立的两位国家代码都认,认不出就画一个地球,不影响使用。旗帜是内置的 SVG(见 web/dist/flags/),不靠系统的 emoji 字体——Windows 至今没有旗帜字体。
 
 - **首页**中间是连接 / 断开的大按钮,连上之后按钮下面用大字走连接时长;再往下两张卡片:
-  - **出口卡片**:地区旗帜 + 当前节点 + 这条线路真正的出口地址与国家(经代理查 Cloudflare 的 `cdn-cgi/trace` 得来,节点名写的机房位置未必就是出口)+ 延迟,点一下直接换节点;
+  - **出口卡片**:地区旗帜 + 当前节点 + 这条线路真正的出口地址与国家、城市 + 延迟,点一下直接换节点。出口是**经当前节点**查来的:节点名写的是机房位置,真正的出口未必在那儿(节点自己再套一层就不是了)。先问 `ipwho.is`(免密钥,一次 JSON 给地址 / 国家 / 一级行政区 / 城市 / 运营商),不通就退到 Cloudflare 自家的 `cdn-cgi/trace`(只给地址与国家代码,但几乎不会连不上);两个都不通就显示正在查出口,下一轮健康检查再来一次。两个端点回的都是对方看到的你是谁,不需要再拿这个 IP 去别处查一次归属地;请求走隧道,对方看到的是节点的出口地址,不是本机的。换节点立刻重测,自动选择模式下内核在后台切了也会重测,此外每 10 分钟复查一次。
   - **速度卡片**:实时上下行、本次连接累计流量,底下是最近一分钟的速度曲线。
   最下面三格:模式(规则 / 全局 / 直连)、订阅(多订阅点击切换)、节点。
 - **节点面板**:每行带地区旗帜与延迟条,名字里写了倍率(`2x` / `x2` / `0.5倍`)会单独标出来;顶上按地区归堆成一排标签,点一下只看该地区,配合搜索框找节点。测速只改数字不重画列表,不会闪。

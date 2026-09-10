@@ -1,0 +1,53 @@
+name: pages
+
+# 介绍站 / 文档站 / 在线演示:site/ 下的手写 HTML 由 site/build.mjs(无依赖的 Node 脚本)组装,
+# 发到 GitHub Pages。在线演示用的就是客户端那一份 web/dist,所以页面一改站点也要重发。
+on:
+  push:
+    branches: [master]
+    paths:
+      - "site/**"
+      - "web/dist/**"
+      - "docs/screenshots/**"
+      - ".github/workflows/pages.yml"
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # 版本号取自最近的 tag
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: 组装站点
+        run: node site/build.mjs # 站内引用打不开会在这一步失败
+      - name: 演示页冒烟
+        run: node site/tools/demo-smoke.mjs
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site/dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - id: deploy
+        uses: actions/deploy-pages@v4

@@ -523,9 +523,15 @@ function updateHome() {
   let sub;
   if (!on) sub = t('home.pickNode');
   else if (v.mode === 'direct') sub = t('home.directAll'); // 直连模式的流量根本不经节点,别挂着节点的出口
-  else if (v.exitIp) sub = t('home.exit') + ' ' + v.exitIp + (v.exitLoc ? ' · ' + regionName(v.exitLoc) : '');
-  else sub = t('mode.' + v.mode) + ' · ' + t('home.exitWait');
+  else if (v.exitIp) {
+    const place = [v.exitLoc ? regionName(v.exitLoc) : '', v.exitCity || ''].filter(Boolean).join(' ');
+    sub = t('home.exit') + ' ' + v.exitIp + (place ? ' · ' + place : '');
+  } else sub = t('mode.' + v.mode) + ' · ' + t('home.exitWait');
   $('#id-sub').textContent = sub;
+  // 一行摆不下的(一级行政区、运营商)挂成悬停提示,不挤在卡片上
+  $('#id-sub').title = on && v.exitIp
+    ? [v.exitIp, [regionName(v.exitLoc), v.exitRegion, v.exitCity].filter(Boolean).join(' '), v.exitIsp].filter(Boolean).join(' · ')
+    : '';
   const ping = v.ping || lastPing; // 服务每次健康检查都会测当前节点;没有就用刚手动测的那次
   $('#id-ms').className = 'idms ' + (on && ping ? msClass(ping) : 'none');
   $('#s-ping').textContent = on && ping ? ping : '–';

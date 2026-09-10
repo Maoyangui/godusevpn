@@ -33,3 +33,9 @@ flag-icons —— web/dist/flags/ 下的各地区旗帜(取其 flags/1x1 方形�
   COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
   IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
   CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+---
+
+查出口用到的两个公开端点(只发请求,不带任何本机信息;请求经隧道发出,对方看到的是节点的出口地址):
+  https://ipwho.is/                        免密钥的 IP 信息接口
+  https://www.cloudflare.com/cdn-cgi/trace Cloudflare 自家的诊断端点,前者不通时兜底
