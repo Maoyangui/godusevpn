@@ -8,6 +8,7 @@ on:
 
 permissions:
   contents: write
+  actions: write # 发布后显式触发 pages,刷新站点上的版本号
 
 env:
   TAGS: with_quic,with_utls,with_clash_api,with_gvisor
@@ -319,3 +320,12 @@ jobs:
           prerelease: ${{ contains(github.ref, '-') }}
           generate_release_notes: true
           files: out/*
+
+      # 用 GITHUB_TOKEN 建出来的 Release 不会再触发别的工作流(GitHub 防循环),
+      # 所以 pages.yml 里那个 release: published 永远等不到。发完显式点一下,
+      # 站点上的版本号才不会慢一拍。触发失败不影响这次发布。
+      - name: Refresh site
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run pages.yml --ref master || echo "触发 pages 失败(不影响发布)"
