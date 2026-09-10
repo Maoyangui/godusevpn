@@ -52,6 +52,7 @@ type Daemon struct {
 	ping     int            // 当前节点最近一次测得的延迟(毫秒):健康检查本来就要测一次,顺手记下来给界面用
 	exitIP   string         // 经当前节点出去时对外露出的地址
 	exitLoc  string         // 出口所在国家的两位代码
+	exitNode string         // 上面那个出口是哪个节点测出来的:自动选择在后台换了节点就得重测
 	noListen bool
 }
 
@@ -424,6 +425,10 @@ func (d *Daemon) start(cfg []byte) error {
 		if ms, err := d.core.URLTest(ctx, "proxy", builder.TestURL); err == nil {
 			d.setPing(ms)
 		}
+		now := d.currentNode()
+		d.mu.Lock()
+		d.exitNode = now
+		d.mu.Unlock()
 		d.refreshExit()
 	}()
 	if s.TUN {
@@ -465,14 +470,34 @@ func (d *Daemon) health(ctx context.Context) error {
 		return state.Errf(state.CodeNodeDown, "当前节点不可用: %v", err)
 	}
 	d.setPing(ms)
-	// 刚连上那会儿线路还没热,出口有可能没查着;这里顺手补一次,查到就不再动
+	// 出口跟着"此刻实际在用哪个节点"走。自动选择模式下内核会自己切到更快的一个,
+	// 切了出口多半就变了,界面上却还挂着上一条线路的地址 —— 所以这里按节点名比一比,
+	// 变了就重测;第一次没查着(刚连上线路还没热)也在这儿补。
+	now := d.currentNode()
 	d.mu.Lock()
-	need := d.exitIP == ""
+	need := d.exitIP == "" || d.exitNode != now
+	if need {
+		d.exitNode = now
+	}
 	d.mu.Unlock()
 	if need {
 		go d.refreshExit()
 	}
 	return nil
+}
+
+// currentNode 内核里 proxy 组此刻实际落在哪个节点;自动选择时是 auto 组选中的那个。
+func (d *Daemon) currentNode() string {
+	now, _, err := d.core.Group("proxy")
+	if err != nil {
+		return ""
+	}
+	if now == "auto" {
+		if inner, _, err := d.core.Group("auto"); err == nil {
+			return inner
+		}
+	}
+	return now
 }
 
 func (d *Daemon) setPing(ms int) {
@@ -524,7 +549,7 @@ func (d *Daemon) refreshExit() {
 // clearExit 断开或换节点时先把旧的出口信息抹掉,免得界面上挂着上一个节点的地址。
 func (d *Daemon) clearExit() {
 	d.mu.Lock()
-	d.exitIP, d.exitLoc = "", ""
+	d.exitIP, d.exitLoc, d.exitNode = "", "", ""
 	d.mu.Unlock()
 }
 
@@ -759,6 +784,10 @@ func (d *Daemon) registerHandlers() {
 			if ms, err := d.core.URLTest(ctx, "proxy", builder.TestURL); err == nil {
 				d.setPing(ms)
 			}
+			now := d.currentNode()
+			d.mu.Lock()
+			d.exitNode = now
+			d.mu.Unlock()
 			d.refreshExit()
 		}()
 		return d.stateView(), nil
