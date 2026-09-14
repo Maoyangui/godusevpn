@@ -190,9 +190,11 @@ func (d *Daemon) Run(ctx context.Context) error {
 	for {
 		select {
 		case <-ctx.Done():
-			d.logf("服务停止")
+			// 服务停止 / 关机:只停内核,闸不撤。撤闸只认四件事(点断开、切模式、关开关、卸载),
+			// 那些都各自走处理器;这里要是也撤,net stop、关机、升级换文件的空档就全是直连,
+			// 开机那组过滤器也会跟着被删掉,"持久"就成了空话。上次连着关的机,下次启动会自动重连。
+			d.logf("服务停止(闸留着,下次启动接着用)")
 			d.machine.Disconnect()
-			d.syncGuard()
 			_ = d.server.Close()
 			d.log.Close()
 			d.coreLog.Close()
