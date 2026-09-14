@@ -83,6 +83,40 @@ func (d *Daemon) afterRefresh(id string) {
 	}
 }
 
+// inCore 内核的 proxy 组里有没有这个节点。列表来自订阅缓存,刚刷新加进来的节点内核里还没有。
+func (d *Daemon) inCore(tag string) bool {
+	_, all, err := d.core.Group("proxy")
+	if err != nil {
+		return false
+	}
+	for _, n := range all {
+		if n == tag {
+			return true
+		}
+	}
+	return false
+}
+
+// splitByCore 把订阅按"内核里有 / 没有"分成两份(下标对齐的子集)。
+func (d *Daemon) splitByCore(p *profile.Profile) (in, out *profile.Profile) {
+	_, all, err := d.core.Group("proxy")
+	have := map[string]bool{}
+	if err == nil {
+		for _, n := range all {
+			have[n] = true
+		}
+	}
+	var ins, outs []string
+	for _, t := range p.Tags {
+		if have[t] {
+			ins = append(ins, t)
+		} else {
+			outs = append(outs, t)
+		}
+	}
+	return p.Subset(ins), p.Subset(outs)
+}
+
 // needRebuildFor 选中的节点能不能就地换。列表来自订阅缓存、内核用的是它启动时那份:
 // 节点是刷新后新加的(内核里没有)、或者它的参数跟内核那份不一样,就得重建配置才连得上;
 // 空 tag 是「自动选择」,组本身一直在。
@@ -187,7 +221,11 @@ func (d *Daemon) reconcileGuard() {
 		netmode.ClearGuard()
 		return
 	}
-	d.applyGuard("启动时已开闸(上次连着关的机,闸一直在)")
+	if n, err := netmode.GuardStatus(); err == nil && n > 0 {
+		d.applyGuard("启动时核对:上次连着关的机,闸一直在,已按当前设置重装")
+	} else {
+		d.applyGuard("启动时已开闸(上次连着关的机)")
+	}
 }
 
 // guardTunUp 隧道网卡起来之后再放行它(Windows 要按网卡放行;别的平台按地址,无操作)。

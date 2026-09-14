@@ -69,5 +69,25 @@ func Diff(a, b *Profile) Change {
 	return c
 }
 
+// Subset 只留这些 tag 的节点(下标对齐),别的字段照抄;找不到的 tag 略过。
+func (p *Profile) Subset(tags []string) *Profile {
+	if p == nil {
+		return &Profile{}
+	}
+	want := make(map[string]bool, len(tags))
+	for _, t := range tags {
+		want[t] = true
+	}
+	q := *p
+	q.Outbounds, q.Tags = nil, nil
+	for i, t := range p.Tags {
+		if want[t] && i < len(p.Outbounds) {
+			q.Outbounds = append(q.Outbounds, p.Outbounds[i])
+			q.Tags = append(q.Tags, t)
+		}
+	}
+	return &q
+}
+
 // Same 节点集合与各自参数完全一致(顺序不算)。
 func Same(a, b *Profile) bool { return Diff(a, b).Empty() }

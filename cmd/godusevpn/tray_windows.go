@@ -2,6 +2,7 @@ package main
 
 import (
 	_ "embed"
+	"github.com/Maoyangui/godusevpn/internal/ipc"
 	"os"
 	"path/filepath"
 	"sync"
@@ -82,6 +83,10 @@ func (t *trayUI) onReady() {
 	// 恢复网络:服务活着就关掉「全局禁直连」的开关(闸随之撤);服务不在就提权跑恢复命令,直接删过滤器
 	t.guardFix.Click(func() {
 		if t.app.GetState().Service {
+			var v ipc.StateView
+			if err := t.app.call(ipc.MGetState, nil, &v); err == nil && v.Guard == "" && v.GuardError == "" {
+				return // 闸本来就没开,没什么可解除的;别顺手把「全局禁直连」开关关了
+			}
 			if s, err := t.app.GetSettings(); err == nil {
 				s.NoDirect = false
 				_, _ = t.app.SaveSettings(s)

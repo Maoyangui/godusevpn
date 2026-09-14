@@ -20,6 +20,9 @@ import (
 
 // Clear 撤闸。返回给用户看的一句话,以及是否真的撤干净了(没撤干净多半是没有管理员 / root 身份)。
 func Clear() (text string, ok bool) {
+	if n, err := netmode.GuardStatus(); err == nil && n == 0 {
+		return "闸本来就没开,直连不受限;「全局禁直连」开关没动。", true
+	}
 	switchedOff := switchOff()
 	netmode.ClearGuard()
 	n, _ := netmode.GuardStatus()

@@ -46,6 +46,7 @@ type Daemon struct {
 	fetchErr   map[string]string           // 订阅 id → 最近一次拉取失败原因
 	fetchLink  map[string]string           // 订阅 id → 拉取失败(404)时面板随响应给的「选购 / 续费」地址
 	running    *profile.Profile            // 正在跑的内核是按哪份订阅生成的;刷新后拿它和缓存比,决定动不动隧道
+	prepared   *profile.Profile            // prepare 刚按它生成了配置、内核还没起:start 成功后转成 running
 	guardOn    bool                        // 「全局禁直连」的闸此刻开着
 	guardErr   string                      // 闸该开却没开成的原因
 	guardMu    sync.Mutex                  // syncGuard 整段串行:判断 + 开 / 撤要一气呵成
@@ -416,8 +417,11 @@ func (d *Daemon) prepare(ctx context.Context) ([]byte, error) {
 		return nil, state.Errf(state.CodeConfig, "配置校验失败: %v", err)
 	}
 	_ = os.WriteFile(paths.Config(), cfg, 0o600)
+	// 只记"这份配置是按哪份订阅备的";要等 start 成功才算"内核在用"。Restart 是先备后停再起,
+	// 停那一步会把 running 清掉,这里直接写 running 的话起来之后就是 nil —— 之后刷新发现当前节点
+	// 被删也不会重连、选到参数变了的节点也不会重建(m14 到 m19 都有这毛病)。
 	d.mu.Lock()
-	d.running = p
+	d.prepared = p
 	d.mu.Unlock()
 	return cfg, nil
 }
@@ -444,6 +448,9 @@ func (d *Daemon) start(cfg []byte) error {
 		}
 	}
 	_ = os.WriteFile(paths.LastGood(), cfg, 0o600)
+	d.mu.Lock()
+	d.running = d.prepared // 起来了,这份订阅才是内核在用的
+	d.mu.Unlock()
 	d.guardTunUp()
 	s := d.getSettings()
 	if s.Selected != "" {
@@ -941,7 +948,10 @@ func (d *Daemon) registerHandlers() {
 		}
 		var res map[string]int
 		if d.core.Running() {
-			res = d.core.ProbeRunning(ctx, p.Tags, builder.TestURL, set) // 已连接:经每个出站做 URL 测试
+			// 已连接:只测内核里有的(经出站做 URL 测试)。列表来自订阅缓存,刚刷新加进来的节点内核里还没有,
+			// 这些不测、也不给数 —— 全局模式下守护进程自己的探测包会进 TUN,量出来是假"不通"。选它连上后自然有数。
+			in, _ := d.splitByCore(p)
+			res = d.core.ProbeRunning(ctx, in.Tags, builder.TestURL, set)
 		} else {
 			res = probeDirect(ctx, p, set) // 未连接:直连量到节点服务器的往返
 		}
@@ -959,6 +969,10 @@ func (d *Daemon) registerHandlers() {
 		}
 		if in.Tag == "" {
 			in.Tag = "proxy"
+		}
+		if in.Tag != "proxy" && d.core.Running() && !d.inCore(in.Tag) {
+			// 刚刷新加进来、内核里还没有的节点:全局模式下守护进程自己的探测包会进 TUN,量不准,不如说清楚
+			return nil, errors.New("这个节点是刚刷新加进来的,内核里还没有;选它连上后再测")
 		}
 		ms, err := d.core.URLTest(context.Background(), in.Tag, builder.TestURL)
 		if err == nil && in.Tag == "proxy" {
@@ -1271,6 +1285,12 @@ func (d *Daemon) registerHandlers() {
 					_ = d.core.SetMode(builder.ModeName(next.Mode))
 				}
 				if next.Selected != prev.Selected {
+					if d.needRebuildFor(next.Selected) {
+						if err := d.machine.Restart(); err != nil {
+							return nil, &ipc.CallError{Code: state.CodeOf(err), Msg: "切换失败,保持当前连接: " + err.Error()}
+						}
+						return d.getSettings(), nil
+					}
 					sel := next.Selected
 					if sel == "" {
 						sel = "auto"
