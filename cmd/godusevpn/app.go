@@ -493,13 +493,15 @@ func (a *App) GetNodes() ([]NodeInfo, error) {
 
 // TestAll 给全部节点测一次延迟,返回 节点 → 毫秒。
 func (a *App) TestAll() (map[string]int, error) {
+	n := len(a.GetState().View.Nodes)
 	if c, err := a.clashClient(); err == nil {
-		ctx, cancel := context.WithTimeout(a.ctx, 40*time.Second)
+		ctx, cancel := context.WithTimeout(a.ctx, clash.DelayBudget(n, 10, 8*time.Second))
 		defer cancel()
 		return c.GroupDelay(ctx, "proxy", testURL, 8*time.Second)
 	}
-	// 内核没跑:让服务用订阅里的出站起临时实例测,结果进状态里,GetNodes 就能显示
-	ctx, cancel := context.WithTimeout(a.ctx, 60*time.Second)
+	// 内核没跑:让服务用订阅里的出站起临时实例测,结果进状态里,GetNodes 就能显示。
+	// 时限和服务那边的 probeBudget 一样按节点数算,再放宽十秒,别在服务还在测的时候这头先超时
+	ctx, cancel := context.WithTimeout(a.ctx, clash.DelayBudget(n, 8, 12*time.Second)+10*time.Second)
 	defer cancel()
 	var res map[string]int
 	err := ipc.Call(ctx, ipc.MProbeNodes, nil, &res)

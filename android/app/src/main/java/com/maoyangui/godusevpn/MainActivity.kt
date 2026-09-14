@@ -16,6 +16,7 @@ import android.webkit.WebResourceRequest
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import android.widget.Toast
 import androidx.activity.addCallback
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
@@ -64,7 +65,7 @@ class MainActivity : AppCompatActivity() {
             override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
                 val u = request.url
                 if (u.host == "appassets.androidplatform.net") return false
-                startActivity(Intent(Intent.ACTION_VIEW, u)); return true // 外链交给浏览器
+                openExternal(u); return true // 外链交给浏览器
             }
         }
         web.webChromeClient = WebChromeClient() // 不设的话页面里的 confirm() / prompt() 会被直接当作"取消",删除订阅 / 规则组等确认就没反应
@@ -115,6 +116,19 @@ class MainActivity : AppCompatActivity() {
         return startConnect()
     }
 
+
+    // 交给系统浏览器打开。电视盒子之类的设备可能根本没有浏览器,startActivity 会直接抛异常 ——
+    // 它跑在 runOnUiThread 的 Runnable 里,桥那层的 try/catch 罩不到,整个应用会被带崩。
+    // 这里兜住并提示;也只放行 http(s),别的协议不该从页面里冒出来。
+    private fun openExternal(u: Uri) {
+        if (u.scheme != "http" && u.scheme != "https") return
+        try {
+            startActivity(Intent(Intent.ACTION_VIEW, u))
+        } catch (e: Exception) {
+            Toast.makeText(this, getString(R.string.no_browser, u.toString()), Toast.LENGTH_LONG).show()
+        }
+    }
+
     inner class Bridge {
         @JavascriptInterface
         fun isTV(): Boolean = this@MainActivity.isTV()
@@ -141,7 +155,7 @@ class MainActivity : AppCompatActivity() {
                 val result = when (name) {
                     "Connect" -> connect()
                     "ReadClipboard" -> JSONObject.quote((getSystemService(ClipboardManager::class.java).primaryClip?.getItemAt(0)?.coerceToText(this@MainActivity) ?: "").toString())
-                    "OpenURL" -> { runOnUiThread { startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(JSONArray(argsJSON).optString(0)))) }; "null" }
+                    "OpenURL" -> { val u = Uri.parse(JSONArray(argsJSON).optString(0)); runOnUiThread { this@MainActivity.openExternal(u) }; "null" }
                     "ExportDiag" -> {
                         val path: String = App.engine().call("ExportDiag", "[]").trim('"')
                         share(File(path)); JSONObject.quote(path)

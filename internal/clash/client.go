@@ -161,3 +161,16 @@ func (c *Client) Connections(ctx context.Context) (*Connections, error) {
 func (c *Client) CloseConnection(ctx context.Context, id string) error {
 	return c.do(ctx, http.MethodDelete, "/connections/"+url.PathEscape(id), nil)
 }
+
+// DelayBudget 一轮全节点测速的总时限:内核分批并发测(每批 conc 个,每个最多 per),节点多的时候
+// 固定 40 秒根本轮不完,排在后面的会因为总闹钟到了被记成"不通"。按节点数算,再留 10 秒余量,封顶三分钟。
+func DelayBudget(n, conc int, per time.Duration) time.Duration {
+	if conc < 1 {
+		conc = 1
+	}
+	d := time.Duration((n+conc-1)/conc)*per + 10*time.Second
+	if d > 3*time.Minute {
+		d = 3 * time.Minute
+	}
+	return d
+}

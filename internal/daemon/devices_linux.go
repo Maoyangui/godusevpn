@@ -5,6 +5,7 @@ package daemon
 import (
 	"bufio"
 	"bytes"
+	"github.com/Maoyangui/godusevpn/internal/builder"
 	"os"
 	"os/exec"
 	"strconv"
@@ -201,3 +202,6 @@ func deviceIPKey(s settings.Settings) string {
 }
 
 var _ = time.Second
+
+// tunName 隧道网卡名:扫描局域网设备时把它和回环、上游网卡一起排除。
+func tunName() string { return builder.TunName }

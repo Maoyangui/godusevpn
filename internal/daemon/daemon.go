@@ -44,6 +44,7 @@ type Daemon struct {
 	settings   settings.Settings
 	profiles   map[string]*profile.Profile // 订阅 id → 节点缓存
 	fetchErr   map[string]string           // 订阅 id → 最近一次拉取失败原因
+	fetchLink  map[string]string           // 订阅 id → 拉取失败(404)时面板随响应给的「选购 / 续费」地址
 	machine    *state.Machine
 	server     *ipc.Server
 	secret     string
@@ -57,6 +58,7 @@ type Daemon struct {
 	exitISP    string         // 出口那条线路的运营商 / 机房
 	exitNode   string         // 上面那些是哪个节点测出来的:自动选择在后台换了节点就得重测
 	exitAt     time.Time      // 上次测出口的时间:节点没变也隔一阵子复查一次
+	exitGen    uint64         // 出口查询的代数:换节点 / 重连就加一,慢的旧查询回来发现代数变了就丢弃,不会把旧节点的出口盖到新节点上
 	noListen   bool
 }
 
@@ -84,7 +86,7 @@ func NewWithOptions(o Options) (*Daemon, error) {
 		coreLog:  logx.New(filepath.Join(paths.Logs(), "core.log"), 5<<20, 3),
 		http:     &http.Client{Timeout: 30 * time.Second},
 		profiles: map[string]*profile.Profile{},
-		fetchErr: map[string]string{},
+		fetchErr: map[string]string{}, fetchLink: map[string]string{},
 	}
 	d.core = core.New(core.Writer{Printf: d.coreLog.Printf})
 	if o.Platform != nil {
@@ -268,6 +270,7 @@ func (d *Daemon) setProfileCache(id string, p *profile.Profile) {
 	d.mu.Lock()
 	d.profiles[id] = p
 	delete(d.fetchErr, id)
+	delete(d.fetchLink, id)
 	d.mu.Unlock()
 	if err := p.Save(paths.ProfileCache(id)); err != nil {
 		d.logf("写订阅缓存失败: %v", err)
@@ -275,8 +278,13 @@ func (d *Daemon) setProfileCache(id string, p *profile.Profile) {
 }
 
 func (d *Daemon) noteFetchErr(id string, err error) {
+	// 404 的错误文本末尾可能挂着面板给的续费地址:拆下来单独记,给人看的文本不带它
+	text, link := profile.SplitRenew(err.Error())
 	d.mu.Lock()
-	d.fetchErr[id] = err.Error()
+	d.fetchErr[id] = text
+	if link != "" {
+		d.fetchLink[id] = link
+	}
 	d.mu.Unlock()
 }
 
@@ -310,7 +318,11 @@ func (d *Daemon) fetchProfile(ctx context.Context, url string) (*profile.Profile
 		if ctx.Err() != nil || i == len(routes)-1 {
 			break
 		}
-		time.Sleep(2 * time.Second) // 隔两秒再试下一条路径
+		select { // 隔两秒再试下一条路径;调用方等不及了就别再往下试
+		case <-ctx.Done():
+			return nil, last
+		case <-time.After(2 * time.Second):
+		}
 	}
 	return nil, last
 }
@@ -429,11 +441,7 @@ func (d *Daemon) start(cfg []byte) error {
 		if ms, err := d.core.URLTest(ctx, "proxy", builder.TestURL); err == nil {
 			d.setPing(ms)
 		}
-		now := d.currentNode()
-		d.mu.Lock()
-		d.exitNode = now
-		d.mu.Unlock()
-		d.refreshExit()
+		d.refreshExit(d.beginExit(d.currentNode()))
 	}()
 	if s.TUN {
 		// Linux:本机对外服务(SSH 等)的回包不能进 TUN,否则一连上远程管理就断;Windows 上是空操作
@@ -448,8 +456,6 @@ func (d *Daemon) start(cfg []byte) error {
 	}
 	return nil
 }
-
-func tunName() string { return builder.TunName }
 
 // stop 先停内核(TUN 随之消失),再撤路由规则;顺序反了会有一瞬间 TUN 还在而规则没了,远程会话可能掉。
 func (d *Daemon) stop() error {
@@ -480,12 +486,9 @@ func (d *Daemon) health(ctx context.Context) error {
 	now := d.currentNode()
 	d.mu.Lock()
 	need := d.exitIP == "" || d.exitNode != now || time.Since(d.exitAt) > exitMaxAge
-	if need {
-		d.exitNode = now
-	}
 	d.mu.Unlock()
 	if need {
-		go d.refreshExit()
+		go d.refreshExit(d.beginExit(now))
 	}
 	return nil
 }
@@ -530,7 +533,20 @@ type exitInfo struct {
 
 // refreshExit 经当前节点查一次出口,首页要显示"我现在从哪儿出去"。
 // 节点名写的是机房位置,真正的出口未必在那儿(节点自己再套一层就不是了),所以这个值得单独查。
-func (d *Daemon) refreshExit() {
+// beginExit 开始一轮对 node 的出口查询:记下是哪个节点、代数加一,返回这一轮的代数。
+// 连接、切节点、健康检查各自都会起查询,先起的那个可能后回来 —— 没有代数的话它会把旧节点的
+// 出口盖到新节点头上,而健康检查看到"节点对得上、地址也有、时间也新"就十分钟不再重测。
+func (d *Daemon) beginExit(node string) uint64 {
+	d.mu.Lock()
+	d.exitGen++
+	d.exitNode = node
+	gen := d.exitGen
+	d.mu.Unlock()
+	return gen
+}
+
+// refreshExit 查一次出口;只有代数还是 gen(中途没换节点、没断开)才把结果写进去。
+func (d *Daemon) refreshExit(gen uint64) {
 	c, err := d.core.HTTPClient("proxy", 10*time.Second)
 	if err != nil {
 		return
@@ -543,8 +559,10 @@ func (d *Daemon) refreshExit() {
 		return
 	}
 	d.mu.Lock()
-	d.exitIP, d.exitLoc, d.exitCity, d.exitRegion, d.exitISP = info.ip, info.loc, info.city, info.region, info.isp
-	d.exitAt = time.Now()
+	if d.exitGen == gen {
+		d.exitIP, d.exitLoc, d.exitCity, d.exitRegion, d.exitISP = info.ip, info.loc, info.city, info.region, info.isp
+		d.exitAt = time.Now()
+	}
 	d.mu.Unlock()
 }
 
@@ -615,6 +633,7 @@ func (d *Daemon) clearExit() {
 	d.mu.Lock()
 	d.exitIP, d.exitLoc, d.exitCity, d.exitRegion, d.exitISP, d.exitNode = "", "", "", "", "", ""
 	d.exitAt = time.Time{}
+	d.exitGen++ // 还在路上的查询作废
 	d.mu.Unlock()
 }
 
@@ -711,6 +730,9 @@ func (d *Daemon) profileViews() ([]ipc.ProfileView, *ipc.ProfileView) {
 		if c := d.profiles[sp.ID]; c != nil {
 			v.Title, v.FetchedAt, v.NodeCount, v.Tags, v.Usage = c.Title, c.FetchedAt, len(c.Outbounds), c.Tags, c.Usage
 			v.WebPage = c.WebPage
+		}
+		if l := d.fetchLink[sp.ID]; l != "" {
+			v.WebPage = l // 缓存里的可能是旧的,面板刚随 404 给的更准;订阅到期后也照样有续费入口
 		}
 		out = append(out, v)
 		if v.Active {
@@ -855,11 +877,7 @@ func (d *Daemon) registerHandlers() {
 			if ms, err := d.core.URLTest(ctx, "proxy", builder.TestURL); err == nil {
 				d.setPing(ms)
 			}
-			now := d.currentNode()
-			d.mu.Lock()
-			d.exitNode = now
-			d.mu.Unlock()
-			d.refreshExit()
+			d.refreshExit(d.beginExit(d.currentNode()))
 		}()
 		return d.stateView(), nil
 	})
@@ -868,7 +886,7 @@ func (d *Daemon) registerHandlers() {
 		if p == nil || len(p.Tags) == 0 {
 			return nil, errors.New("还没有订阅")
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), probeBudget(len(p.Tags)))
 		defer cancel()
 		// 测出一个就写进去一个:界面在测速期间会轮询 GetNodes,这样延迟是一个一个冒出来的,
 		// 而不是干等好几秒然后整列一起亮。
@@ -979,6 +997,7 @@ func (d *Daemon) registerHandlers() {
 		d.mu.Lock()
 		delete(d.profiles, in.ID)
 		delete(d.fetchErr, in.ID)
+		delete(d.fetchLink, in.ID)
 		d.mu.Unlock()
 		_ = os.Remove(paths.ProfileCache(in.ID))
 		if wasActive {

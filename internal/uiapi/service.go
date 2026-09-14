@@ -373,7 +373,7 @@ func (s *Service) Call(name string, args []json.RawMessage) (any, error) {
 		return s.nodes(ctx)
 	case "TestAll":
 		if c, err := s.clashClient(); err == nil {
-			tctx, cancel := context.WithTimeout(ctx, 40*time.Second)
+			tctx, cancel := context.WithTimeout(ctx, clash.DelayBudget(len(s.State().View.Nodes), 10, 8*time.Second))
 			defer cancel()
 			return c.GroupDelay(tctx, "proxy", testURL, 8*time.Second)
 		}

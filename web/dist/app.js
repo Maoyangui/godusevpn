@@ -24,13 +24,18 @@ function fmtDuration(sec) {
 }
 const fmtDay = ts => ts ? new Date(ts * 1000).toLocaleDateString() : '';
 const fmtTime = ts => ts ? new Date(ts * 1000).toLocaleString([], { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '';
-function errText(e) {
-  const m = String((e && e.message) || e || '');
-  if (m === 'SERVICE_DOWN') return t('svc.down');
+// 到期 / 用尽的人拉订阅只有 404,面板把「选购 / 续费」地址挂在错误文本末尾(和服务端 profile.WithRenew
+// 同一格式:" [renew=地址]")。errParts 把它拆出来:text 给人看,renew 画成按钮。
+function errParts(e) {
+  let m = String((e && e.message) || e || ''), renew = '';
+  const i = m.lastIndexOf(' [renew=');
+  if (i >= 0 && m.endsWith(']')) { renew = m.slice(i + 8, -1); m = m.slice(0, i); }
+  if (m === 'SERVICE_DOWN') return { text: t('svc.down'), renew };
   const code = m.match(/^(E_[A-Z_]+):\s*(.*)$/);
-  if (code) return t('code.' + code[1]) + (code[2] && code[2] !== t('code.' + code[1]) ? ' · ' + code[2] : '');
-  return m;
+  if (code) return { text: t('code.' + code[1]) + (code[2] && code[2] !== t('code.' + code[1]) ? ' · ' + code[2] : ''), renew };
+  return { text: m, renew };
 }
+const errText = e => errParts(e).text;
 // ---- 应用内对话框 ----
 // 不用浏览器自带的 confirm / prompt:Windows 的 WebView2 会画成「wails.localhost 显示」的系统弹窗贴在窗口左上角,
 // 安卓与浏览器面板也各带一行来源地址,样式和位置都跟应用对不上。这里自己画一个,三端一致。
@@ -274,7 +279,15 @@ function renderOnboard(el) {
     if (!url) { $('#ob-url').focus(); return; }
     const b = $('#ob-go'); b.disabled = true; b.textContent = t('onboard.adding'); $('#ob-err').textContent = '';
     try { await App().AddProfile($('#ob-name').value, url); toast(t('prof.added'), 'ok'); state = await App().GetState(); if (view === 'onboard') nav('home'); }
-    catch (e) { $('#ob-err').textContent = errText(e); b.disabled = false; b.textContent = t('onboard.go'); }
+    catch (e) {
+      const { text, renew } = errParts(e), eb = $('#ob-err');
+      eb.textContent = text;
+      if (renew) { // 到期 / 用尽:面板随 404 给了续费地址,直接摆一颗按钮,不用让人回落地页找
+        const rb = document.createElement('button'); rb.className = 'renewbtn sm warn'; rb.style.marginLeft = '8px';
+        rb.textContent = t('prof.renew'); rb.addEventListener('click', () => openExternal(renew)); eb.appendChild(rb);
+      }
+      b.disabled = false; b.textContent = t('onboard.go');
+    }
   };
   $('#ob-go').addEventListener('click', submit);
   $('#ob-paste').addEventListener('click', () => pasteInto('#ob-url'));
@@ -283,8 +296,10 @@ function renderOnboard(el) {
 }
 function updateOnboardSvc() {
   const b = $('#ob-svc'); if (!b || !state) return;
-  b.innerHTML = state.service ? '' : `<div class="banner"><span class="grow">${t('banner.svcDown')}</span><button class="btn sm" id="ob-repair">${t('banner.repair')}</button></div>`;
-  if (!state.service) $('#ob-repair').addEventListener('click', repairService);
+  // 修复按钮只在桌面端有意义(网页面板和安卓没有 RepairService),别画一颗点了只会报错的按钮
+  const fix = window.__web || window.__android ? '' : `<button class="btn sm" id="ob-repair">${t('banner.repair')}</button>`;
+  b.innerHTML = state.service ? '' : `<div class="banner"><span class="grow">${t('banner.svcDown')}</span>${fix}</div>`;
+  const rb = b.querySelector('#ob-repair'); if (rb) rb.addEventListener('click', repairService);
 }
 
 // ---- 地区牌子 ----
@@ -559,8 +574,9 @@ function updateHome() {
   const b = $('#home-banner');
   const wantBanner = !state.service;
   if (wantBanner !== !!b.firstChild) { // 只有横幅出现/消失时才动 DOM,免得每次推送都把按钮换掉
-    b.innerHTML = wantBanner ? `<div class="banner"><span class="grow">${t('banner.svcDown')}</span><button class="btn sm" id="repair">${t('banner.repair')}</button></div>` : '';
-    if (wantBanner) $('#repair').addEventListener('click', repairService);
+    const fix = window.__web || window.__android ? '' : `<button class="btn sm" id="repair">${t('banner.repair')}</button>`;
+    b.innerHTML = wantBanner ? `<div class="banner"><span class="grow">${t('banner.svcDown')}</span>${fix}</div>` : '';
+    const rb = b.querySelector('#repair'); if (rb) rb.addEventListener('click', repairService); // 只在横幅里找:关于页也有个 #repair
   }
 }
 
@@ -800,13 +816,14 @@ function renderProfiles(el, editId) {
   $('#prof-add').addEventListener('click', () => showForm(null));
 
   // 续费按钮:面板给了地址才画,没给就什么都不显示 —— 画一个点不出东西的按钮更糟。
-  // 到期不到七天或流量用掉九成时换成橙色并写明还剩多少,该催的时候才催。
+  // 已到期、到期不到七天或流量用掉九成时换成橙色并写明状态,该催的时候才催。
   const renewBtn = (p, cls) => {
     if (!p.webPage) return '';
     const u = p.usage || {}, used = (u.upload || 0) + (u.download || 0);
-    const days = u.expire ? Math.floor((u.expire - Date.now() / 1000) / 86400) : -1;
-    const low = (days >= 0 && days <= 7) || (u.total > 0 && used / u.total >= 0.9);
-    const txt = !low ? t('prof.renew') : days >= 0 ? t('prof.renewLeft', { n: days }) : t('prof.renewSoon');
+    const days = u.expire ? Math.floor((u.expire - Date.now() / 1000) / 86400) : null;
+    const expired = days !== null && days < 0; // 已经过期最该催,不能把它当成"没有到期信息"
+    const low = expired || (days !== null && days <= 7) || (u.total > 0 && used / u.total >= 0.9);
+    const txt = !low ? t('prof.renew') : expired ? t('prof.renewExpired') : days !== null ? t('prof.renewLeft', { n: days }) : t('prof.renewSoon');
     return `<button class="renewbtn ${cls} ${low ? 'warn' : ''}" data-act="renew" data-id="${esc(p.id)}"><svg viewBox="0 0 24 24"><path d="M14 5h5v5"/><path d="M19 5l-7.5 7.5"/><path d="M18 14v4a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4"/></svg>${esc(txt)}</button>`;
   };
   // 当前这条摊开成一张大卡(用量条、节点数、到期、三个动作),其余的收成一列小卡

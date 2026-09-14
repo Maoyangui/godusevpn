@@ -164,11 +164,34 @@ func parseUserinfo(v string) Usage {
 
 // FetchError 带 HTTP 状态码的拉取失败:404 / 410 是"订阅无效或已到期",和网络故障要分开提示。
 type FetchError struct {
-	Status int
-	Msg    string
+	Status  int
+	Msg     string
+	WebPage string // 404 时面板随响应给的「选购 / 续费」地址:到期 / 用尽的人最需要它
 }
 
 func (e *FetchError) Error() string { return e.Msg }
+
+// 到期 / 用尽的人拉订阅只会得到 404,面板会把「选购 / 续费」地址随这个 404 一起发。
+// 错误从服务到界面一路都是字符串(IPC → 桌面壳 / 安卓桥 → 网页),所以地址就挂在错误文本末尾,
+// 界面按同一个格式拆出来画成按钮;写进"最近一次失败原因"之前也先拆掉。
+const renewMark = " [renew="
+
+// WithRenew 把续费地址挂到错误文本末尾;没有地址就原样返回。
+func WithRenew(msg, link string) string {
+	if link == "" {
+		return msg
+	}
+	return msg + renewMark + link + "]"
+}
+
+// SplitRenew 拆出 WithRenew 挂上去的地址;没挂就原样返回、地址为空。
+func SplitRenew(msg string) (text, link string) {
+	i := strings.LastIndex(msg, renewMark)
+	if i < 0 || !strings.HasSuffix(msg, "]") {
+		return msg, ""
+	}
+	return msg[:i], msg[i+len(renewMark) : len(msg)-1]
+}
 
 // Fetch 拉订阅。地址不带 format 参数时补上 format=json。
 func Fetch(ctx context.Context, rawURL string, client *http.Client) (*Profile, error) {
@@ -201,7 +224,10 @@ func Fetch(ctx context.Context, rawURL string, client *http.Client) (*Profile, e
 	}
 	switch {
 	case resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusGone:
-		return nil, &FetchError{Status: resp.StatusCode, Msg: fmt.Sprintf("面板不认识这条订阅链接,或账号已停用 / 用完 / 到期(HTTP %d,%s)", resp.StatusCode, u.Host)}
+		// 到期 / 用尽的人拉到的就是这个 404,面板会把「选购 / 续费」地址随它一起发 —— 正是这时候最需要续费入口
+		link := safeWebPage(resp.Header.Get("Profile-Web-Page-Url"))
+		return nil, &FetchError{Status: resp.StatusCode, WebPage: link,
+			Msg: WithRenew(fmt.Sprintf("面板不认识这条订阅链接,或账号已停用 / 用完 / 到期(HTTP %d,%s)", resp.StatusCode, u.Host), link)}
 	case resp.StatusCode == http.StatusTooManyRequests:
 		return nil, &FetchError{Status: resp.StatusCode, Msg: "请求太频繁,稍后再试"}
 	case resp.StatusCode != http.StatusOK:
