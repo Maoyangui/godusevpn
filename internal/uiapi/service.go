@@ -392,8 +392,6 @@ func (s *Service) Call(name string, args []json.RawMessage) (any, error) {
 		return p, err
 	case "RefreshProfile":
 		return profiles(ipc.MRefreshProfile, map[string]string{"id": arg[string](args, 0)})
-	case "ApplyProfile":
-		return view(ipc.MApplyProfile, nil)
 	case "GetProfiles":
 		return profiles(ipc.MGetProfiles, nil)
 	case "AddProfile":

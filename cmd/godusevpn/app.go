@@ -532,14 +532,6 @@ func (a *App) RefreshProfile(id string) ([]ipc.ProfileView, error) {
 	return out, err
 }
 
-// ApplyProfile 把刷新后还没用上的节点列表用起来(会重连)。
-func (a *App) ApplyProfile() (ipc.StateView, error) {
-	var v ipc.StateView
-	err := a.call(ipc.MApplyProfile, nil, &v)
-	go a.refresh()
-	return v, err
-}
-
 func (a *App) GetProfiles() ([]ipc.ProfileView, error) {
 	var out []ipc.ProfileView
 	err := a.call(ipc.MGetProfiles, nil, &out)

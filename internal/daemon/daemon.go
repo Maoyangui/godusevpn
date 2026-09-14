@@ -772,14 +772,21 @@ func (d *Daemon) stateView() ipc.StateView {
 		if m := d.core.Mode(); m != "" {
 			v.Mode = builder.SettingMode(m)
 		}
-		if now, all, err := d.core.Group("proxy"); err == nil {
-			v.Node, v.Nodes = now, all
+		if now, _, err := d.core.Group("proxy"); err == nil {
+			v.Node = now
 		}
 		if now, _, err := d.core.Group("auto"); err == nil {
 			v.AutoNow = now
 		}
-	} else if active != nil && len(active.Tags) > 0 {
+	}
+	// 节点列表直接来自最新的订阅缓存,不来自内核:刷新拿到的增删立刻反映在列表里,正在用的连接一点不动。
+	// 列表里内核还没有的节点(刚刷新加进来的)、或参数已经变了的,选中时再重建配置(见 MSelectNode)。
+	if active != nil && len(active.Tags) > 0 {
 		v.Nodes = append([]string{"auto"}, active.Tags...)
+	} else if d.core.Running() {
+		if _, all, err := d.core.Group("proxy"); err == nil {
+			v.Nodes = all
+		}
 	}
 	if v.Nodes == nil {
 		v.Nodes = []string{}
@@ -798,12 +805,6 @@ func (d *Daemon) stateView() ipc.StateView {
 	}
 	v.GuardError = d.guardErr
 	d.mu.Unlock()
-	if pc := d.pendingChange(); pc != nil {
-		v.Pending = pc
-		if v.Profile != nil {
-			v.Profile.Pending = pc
-		}
-	}
 	return v
 }
 
@@ -888,6 +889,13 @@ func (d *Daemon) registerHandlers() {
 		// 自动选择与手动指定之间来回切要重建配置:定时测速开不开是写在配置里的
 		// (手动指定时后台不再定时测速),只有重建才生效。同一类之间切就地换,不打断隧道。
 		if wasAuto != nowAuto {
+			if err := d.machine.Restart(); err != nil {
+				return nil, &ipc.CallError{Code: state.CodeOf(err), Msg: "切换失败,保持当前连接: " + err.Error()}
+			}
+			return d.stateView(), nil
+		}
+		// 选的节点内核里还没有(刚刷新加进来的)、或者参数已经跟内核用的那份不一样:就地换不了,重建配置重连
+		if d.needRebuildFor(s.Selected) {
 			if err := d.machine.Restart(); err != nil {
 				return nil, &ipc.CallError{Code: state.CodeOf(err), Msg: "切换失败,保持当前连接: " + err.Error()}
 			}
@@ -1143,12 +1151,6 @@ func (d *Daemon) registerHandlers() {
 		return views, nil
 	})
 	// ApplyProfile 把刷新后还没用上的节点列表用起来:用户明确点的「现在应用」,会重连
-	h(ipc.MApplyProfile, func(json.RawMessage) (any, error) {
-		if err := d.machine.Restart(); err != nil {
-			return nil, &ipc.CallError{Code: state.CodeOf(err), Msg: "应用失败,保持当前连接: " + err.Error()}
-		}
-		return d.stateView(), nil
-	})
 	// SetProfileURL 兼容命令行:有当前订阅就改它的地址,没有就新增一条
 	h(ipc.MSetProfileURL, func(p json.RawMessage) (any, error) {
 		in, err := ipc.Decode[struct {

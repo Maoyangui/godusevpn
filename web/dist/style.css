@@ -521,9 +521,6 @@ body.tv .drawer-brand b { font-size: 22px; }
 .guard-pill > span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .guard-pill.warn { color: var(--warn); background: rgba(217, 119, 6, .10); border-color: rgba(217, 119, 6, .32); box-shadow: none; }
 /* 刷新后待应用的提示(首页、订阅卡片、节点面板):左边图标、中间两行、右边一颗「现在应用」 */
-.pending-pill, .pc-pending, .notice { display: flex; align-items: center; gap: 10px; padding: 9px 10px 9px 11px; border-radius: 14px; background: var(--card); border: 1px solid rgba(47, 139, 255, .24); box-shadow: 0 4px 14px rgba(15, 23, 42, .05); margin: 8px 0; text-align: left; }
-.pending-pill { width: 100%; max-width: 420px; box-sizing: border-box; margin-top: 12px; }
-.pc-pending { margin: 10px 0 0; }
 .notice { margin: 0 0 10px; }
 .notice-ic { flex: none; width: 30px; height: 30px; border-radius: 10px; display: grid; place-items: center; color: #fff; background: linear-gradient(120deg, var(--brand1), var(--brand2)); box-shadow: 0 4px 10px rgba(47, 139, 255, .25); }
 .notice-ic svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }

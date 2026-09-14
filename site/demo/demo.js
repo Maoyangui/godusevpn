@@ -73,7 +73,6 @@
     state: { status: 'connected', since: 0, wanted: true, retries: 0 },
     mode: 'rule', node: '香港3-高带宽', autoNow: '香港3-高带宽',
     guard: '', // 全局禁直连的闸:切到全局模式时亮起(见 SetMode)
-    pending: /pending=1/.test(location.search) ? { added: 2, removed: 1, changed: 0 } : null, // ?pending=1 时看「重连后生效」提示
     nodes: NODES.map(n => n.name), ping: 81,
     exitIp: '', exitLoc: '', exitCity: '', exitRegion: '', exitIsp: '',
     uptime: 4127,

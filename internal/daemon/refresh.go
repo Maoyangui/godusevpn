@@ -74,7 +74,7 @@ func (d *Daemon) afterRefresh(id string) {
 	case refreshNoop:
 		d.logf("订阅刷新:%s", why)
 	case refreshDeferred:
-		d.logf("订阅刷新:%s;当前连接保持,新列表重连后生效", why)
+		d.logf("订阅刷新:%s;已更新到节点列表,当前连接不受影响", why)
 	case refreshReconnect:
 		d.logf("订阅刷新:%s;重新连接", why)
 		if err := d.machine.Restart(); err != nil {
@@ -83,22 +83,36 @@ func (d *Daemon) afterRefresh(id string) {
 	}
 }
 
-// pendingChange 刷新拿到、但正在跑的内核还没用上的节点变化;没有就是 nil。
-func (d *Daemon) pendingChange() *profile.Change {
-	if !d.core.Running() {
-		return nil
+// needRebuildFor 选中的节点能不能就地换。列表来自订阅缓存、内核用的是它启动时那份:
+// 节点是刷新后新加的(内核里没有)、或者它的参数跟内核那份不一样,就得重建配置才连得上;
+// 空 tag 是「自动选择」,组本身一直在。
+func (d *Daemon) needRebuildFor(tag string) bool {
+	if tag == "" || !d.core.Running() {
+		return false
+	}
+	_, all, err := d.core.Group("proxy")
+	if err != nil {
+		return false
+	}
+	found := false
+	for _, n := range all {
+		if n == tag {
+			found = true
+			break
+		}
+	}
+	if !found {
+		return true
 	}
 	d.mu.Lock()
 	running, fresh := d.running, d.profiles[d.settings.ActiveProfile]
 	d.mu.Unlock()
 	if running == nil || fresh == nil {
-		return nil
+		return false
 	}
-	c := profile.Diff(running, fresh)
-	if c.Empty() {
-		return nil
-	}
-	return &c
+	old, hadOld := running.Node(tag)
+	nw, hasNew := fresh.Node(tag)
+	return hadOld && hasNew && old != nw
 }
 
 // ---- 「全局禁直连」的闸 ----
