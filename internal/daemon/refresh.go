@@ -131,16 +131,11 @@ func (d *Daemon) syncGuard() {
 	d.mu.Unlock()
 	switch {
 	case want && !on:
-		spec := d.guardSpec()
-		if err := netmode.ApplyGuard(spec); err != nil {
-			d.setGuard(false, err.Error())
-			d.logf("全局禁直连:开闸失败,这段时间直连不会被拦: %v", err)
-			return
-		}
-		d.setGuard(true, "")
-		d.logf("全局禁直连:已开闸,隧道以外的流量一律拦下")
-		if d.core.Running() {
-			d.guardTunUp()
+		d.applyGuard("已开闸,隧道以外的流量一律拦下")
+	case want && on:
+		// 闸是持久的、也可能被别人动过(比如有人跑了恢复命令):核对一下还在不在,不在就补上
+		if n, err := netmode.GuardStatus(); err == nil && n == 0 {
+			d.applyGuard("闸不见了,已重新装上")
 		}
 	case !want && on:
 		netmode.ClearGuard()
@@ -150,6 +145,35 @@ func (d *Daemon) syncGuard() {
 			d.releaseTun() // Android:内核没在跑时留着的 VPN 接口是个黑洞,撤闸就得关掉
 		}
 	}
+}
+
+// applyGuard 装闸并把结果记进状态与日志;开机那组装不上只是警告。
+func (d *Daemon) applyGuard(okMsg string) {
+	if err := netmode.ApplyGuard(d.guardSpec()); err != nil {
+		d.setGuard(false, err.Error())
+		d.logf("全局禁直连:开闸失败,这段时间直连不会被拦: %v", err)
+		return
+	}
+	d.setGuard(true, "")
+	d.logf("全局禁直连:%s", okMsg)
+	if w := netmode.GuardWarning(); w != "" {
+		d.logf("全局禁直连:%s", w)
+	}
+	if d.core.Running() {
+		d.guardTunUp()
+	}
+}
+
+// reconcileGuard 服务启动时对账。闸是持久的(进程退出、重启都留着),这一刻该不该在要重新判:
+// 上次是断开状态、或不是全局、或开关关了,就把残留的清掉;该在的立刻装上(幂等)——
+// 别让"服务起来 → 连上"这几秒漏出去(重启的话开机那组过滤器已经挡到这里了)。
+func (d *Daemon) reconcileGuard() {
+	s := d.getSettings()
+	if !d.loadPersisted().Wanted || !s.NoDirect || s.Mode != settings.ModeGlobal {
+		netmode.ClearGuard()
+		return
+	}
+	d.applyGuard("启动时已开闸(上次连着关的机,闸一直在)")
 }
 
 // guardTunUp 隧道网卡起来之后再放行它(Windows 要按网卡放行;别的平台按地址,无操作)。

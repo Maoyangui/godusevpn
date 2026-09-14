@@ -590,7 +590,9 @@ function updateHome() {
   const wantBanner = !state.service;
   if (wantBanner !== !!b.firstChild) { // 只有横幅出现/消失时才动 DOM,免得每次推送都把按钮换掉
     const fix = window.__web || window.__android ? '' : `<button class="btn sm" id="repair">${t('banner.repair')}</button>`;
-    b.innerHTML = wantBanner ? `<div class="banner"><span class="grow">${t('banner.svcDown')}</span>${fix}</div>` : '';
+    const vs = state.view && state.view.settings;
+    const stuck = wantBanner && !window.__android && vs && vs.noDirect && state.view.mode === 'global' && state.view.state.wanted ? ' ' + t('banner.guardStuck') : '';
+    b.innerHTML = wantBanner ? `<div class="banner"><span class="grow">${t('banner.svcDown')}${esc(stuck)}</span>${fix}</div>` : '';
     const rb = b.querySelector('#repair'); if (rb) rb.addEventListener('click', repairService); // 只在横幅里找:关于页也有个 #repair
   }
 }
@@ -938,6 +940,7 @@ async function renderSettings(el) {
     ${group(t('set.g.privacy'), `
       ${sw('f-ipv6', t('set.ipv6'), s.ipv6, t('set.ipv6Help'))}
       ${sw('f-nodirect', t('set.noDirect'), s.noDirect, t('set.noDirectHelp'))}
+      ${state.platform === 'android' ? `<div class="srow"><div class="lbl">${t('set.vpnAlways')}<div>${t('set.vpnAlwaysHelp')}</div></div><button class="btn sm" id="f-vpnalways">${t('set.vpnAlwaysOpen')}</button></div>` : ''}
       ${state.platform === 'android' ? '' : `<div class="srow"><div class="lbl">${t('set.nicv6')} <span class="tag warn">${t('set.nicv6Tag')}</span><div>${t('set.nicv6Help')}</div></div><label class="switch"><input type="checkbox" id="f-nicv6" ${s.disableNicIpv6 ? 'checked' : ''}></label></div>`}
     `)}
     ${group(t('set.g.dns'), `
@@ -995,6 +998,7 @@ async function renderSettings(el) {
   const fa = $('#f-autostart'); if (fa) fa.addEventListener('change', async e => { try { await App().SetAutostart(e.target.checked); toast(t('set.saved'), 'ok'); } catch (err) { toast(errText(err), 'err'); e.target.checked = !e.target.checked; } });
   $('#f-lang').addEventListener('change', async e => { LANG = e.target.value; await App().SetLang(LANG); nav('settings'); });
   $('#f-theme').addEventListener('change', e => setTheme(e.target.value));
+  const va = $('#f-vpnalways'); if (va) va.addEventListener('click', () => App().OpenVpnSettings());
   $('#f-rules').addEventListener('click', () => nav('rules'));
 }
 

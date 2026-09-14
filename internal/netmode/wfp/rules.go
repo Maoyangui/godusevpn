@@ -25,110 +25,7 @@ var (
 	linkLocalRouterMulticast = wtFwpByteArray16{[16]uint8{0xFF, 0x02, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x2}}
 )
 
-func permitTunInterface(session uintptr, baseObjects *baseObjects, weight uint8, ifLUID uint64) ([]uint64, error) {
-	ifaceCondition := wtFwpmFilterCondition0{
-		fieldKey:  cFWPM_CONDITION_IP_LOCAL_INTERFACE,
-		matchType: cFWP_MATCH_EQUAL,
-		conditionValue: wtFwpConditionValue0{
-			_type: cFWP_UINT64,
-			value: (uintptr)(unsafe.Pointer(&ifLUID)),
-		},
-	}
-
-	filter := wtFwpmFilter0{
-		providerKey:         &baseObjects.provider,
-		subLayerKey:         baseObjects.filters,
-		weight:              filterWeight(weight),
-		numFilterConditions: 1,
-		filterCondition:     (*wtFwpmFilterCondition0)(unsafe.Pointer(&ifaceCondition)),
-		action: wtFwpmAction0{
-			_type: cFWP_ACTION_PERMIT,
-		},
-	}
-
-	filterID := uint64(0)
-	var ids []uint64
-
-	//
-	// #1 Permit outbound IPv4 traffic.
-	//
-	{
-		displayData, err := createWtFwpmDisplayData0("Permit outbound IPv4 traffic on TUN", "")
-		if err != nil {
-			return nil, wrapErr(err)
-		}
-
-		filter.displayData = *displayData
-		filter.layerKey = cFWPM_LAYER_ALE_AUTH_CONNECT_V4
-
-		err = fwpmFilterAdd0(session, &filter, 0, &filterID)
-		if err != nil {
-			return nil, wrapErr(err)
-		}
-		ids = append(ids, filterID)
-	}
-
-	//
-	// #2 Permit inbound IPv4 traffic.
-	//
-	{
-		displayData, err := createWtFwpmDisplayData0("Permit inbound IPv4 traffic on TUN", "")
-		if err != nil {
-			return nil, wrapErr(err)
-		}
-
-		filter.displayData = *displayData
-		filter.layerKey = cFWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V4
-
-		err = fwpmFilterAdd0(session, &filter, 0, &filterID)
-		if err != nil {
-			return nil, wrapErr(err)
-		}
-		ids = append(ids, filterID)
-	}
-
-	//
-	// #3 Permit outbound IPv6 traffic.
-	//
-	{
-		displayData, err := createWtFwpmDisplayData0("Permit outbound IPv6 traffic on TUN", "")
-		if err != nil {
-			return nil, wrapErr(err)
-		}
-
-		filter.displayData = *displayData
-		filter.layerKey = cFWPM_LAYER_ALE_AUTH_CONNECT_V6
-
-		err = fwpmFilterAdd0(session, &filter, 0, &filterID)
-		if err != nil {
-			return nil, wrapErr(err)
-		}
-		ids = append(ids, filterID)
-	}
-
-	//
-	// #4 Permit inbound IPv6 traffic.
-	//
-	{
-		displayData, err := createWtFwpmDisplayData0("Permit inbound IPv6 traffic on TUN", "")
-		if err != nil {
-			return nil, wrapErr(err)
-		}
-
-		filter.displayData = *displayData
-		filter.layerKey = cFWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V6
-
-		err = fwpmFilterAdd0(session, &filter, 0, &filterID)
-		if err != nil {
-			return nil, wrapErr(err)
-		}
-		ids = append(ids, filterID)
-	}
-
-	return ids, nil
-}
-
-func permitSelf(session uintptr, baseObjects *baseObjects, weight uint8) error {
+func permitSelf(session uintptr, baseObjects *baseObjects, weight uint8, selfPath string) error {
 	// 只按 exe 路径放行:上游还要求进程令牌里带服务 SID(它的服务按 SERVICE_SID_TYPE_UNRESTRICTED 装),
 	// 我们的服务是普通 LocalSystem,没有那个 SID。那个条件只为区分同一个 exe 起的别的进程,这里够了。
 	var conditions [1]wtFwpmFilterCondition0
@@ -136,7 +33,13 @@ func permitSelf(session uintptr, baseObjects *baseObjects, weight uint8) error {
 	//
 	// First condition is the exe path of the current process.
 	//
-	appID, err := getCurrentProcessAppID()
+	var appID *wtFwpByteBlob
+	var err error
+	if selfPath != "" {
+		appID, err = appIDFromPath(selfPath)
+	} else {
+		appID, err = getCurrentProcessAppID()
+	}
 	if err != nil {
 		return wrapErr(err)
 	}
@@ -158,7 +61,7 @@ func permitSelf(session uintptr, baseObjects *baseObjects, weight uint8) error {
 		providerKey:         &baseObjects.provider,
 		subLayerKey:         baseObjects.filters,
 		weight:              filterWeight(weight),
-		flags:               cFWPM_FILTER_FLAG_CLEAR_ACTION_RIGHT,
+		flags:               cFWPM_FILTER_FLAG_CLEAR_ACTION_RIGHT | curFlags,
 		numFilterConditions: uint32(len(conditions)),
 		filterCondition:     (*wtFwpmFilterCondition0)(unsafe.Pointer(&conditions)),
 		action: wtFwpmAction0{
@@ -257,6 +160,7 @@ func permitLoopback(session uintptr, baseObjects *baseObjects, weight uint8) err
 		providerKey:         &baseObjects.provider,
 		subLayerKey:         baseObjects.filters,
 		weight:              filterWeight(weight),
+		flags:               curFlags,
 		numFilterConditions: 1,
 		filterCondition:     (*wtFwpmFilterCondition0)(unsafe.Pointer(&condition)),
 		action: wtFwpmAction0{
@@ -379,6 +283,7 @@ func permitDHCPIPv4(session uintptr, baseObjects *baseObjects, weight uint8) err
 			layerKey:            cFWPM_LAYER_ALE_AUTH_CONNECT_V4,
 			subLayerKey:         baseObjects.filters,
 			weight:              filterWeight(weight),
+			flags:               curFlags,
 			numFilterConditions: uint32(len(conditions)),
 			filterCondition:     (*wtFwpmFilterCondition0)(unsafe.Pointer(&conditions)),
 			action: wtFwpmAction0{
@@ -426,6 +331,7 @@ func permitDHCPIPv4(session uintptr, baseObjects *baseObjects, weight uint8) err
 			layerKey:            cFWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V4,
 			subLayerKey:         baseObjects.filters,
 			weight:              filterWeight(weight),
+			flags:               curFlags,
 			numFilterConditions: uint32(len(conditions)),
 			filterCondition:     (*wtFwpmFilterCondition0)(unsafe.Pointer(&conditions)),
 			action: wtFwpmAction0{
@@ -493,6 +399,7 @@ func permitDHCPIPv6(session uintptr, baseObjects *baseObjects, weight uint8) err
 			layerKey:            cFWPM_LAYER_ALE_AUTH_CONNECT_V6,
 			subLayerKey:         baseObjects.filters,
 			weight:              filterWeight(weight),
+			flags:               curFlags,
 			numFilterConditions: uint32(len(conditions)),
 			filterCondition:     (*wtFwpmFilterCondition0)(unsafe.Pointer(&conditions)),
 			action: wtFwpmAction0{
@@ -550,6 +457,7 @@ func permitDHCPIPv6(session uintptr, baseObjects *baseObjects, weight uint8) err
 			layerKey:            cFWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V6,
 			subLayerKey:         baseObjects.filters,
 			weight:              filterWeight(weight),
+			flags:               curFlags,
 			numFilterConditions: uint32(len(conditions)),
 			filterCondition:     (*wtFwpmFilterCondition0)(unsafe.Pointer(&conditions)),
 			action: wtFwpmAction0{
@@ -786,6 +694,7 @@ func permitNdp(session uintptr, baseObjects *baseObjects, weight uint8) error {
 		providerKey: &baseObjects.provider,
 		subLayerKey: baseObjects.filters,
 		weight:      filterWeight(weight),
+		flags:       curFlags,
 		action: wtFwpmAction0{
 			_type: cFWP_ACTION_PERMIT,
 		},
@@ -813,6 +722,7 @@ func blockAll(session uintptr, baseObjects *baseObjects, weight uint8) error {
 		providerKey: &baseObjects.provider,
 		subLayerKey: baseObjects.filters,
 		weight:      filterWeight(weight),
+		flags:       curFlags,
 		action: wtFwpmAction0{
 			_type: cFWP_ACTION_BLOCK,
 		},

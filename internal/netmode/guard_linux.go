@@ -74,14 +74,29 @@ func ApplyGuard(spec GuardSpec) error {
 // GuardTunUp nft 按网卡名和地址放行,隧道起不起来无所谓。
 func GuardTunUp(GuardSpec) error { return nil }
 
+// ClearGuard 撤闸。表不随进程死(上次强杀留下的也要清),不存在也无妨。
 func ClearGuard() {
 	nftMu.Lock()
 	defer nftMu.Unlock()
-	if !nftOn {
-		// 上次没收干净(强杀)也清一下,不存在也无妨
-		_ = exec.Command("nft", "delete", "table", "inet", guardTable).Run()
-		return
-	}
 	_ = exec.Command("nft", "delete", "table", "inet", guardTable).Run()
 	nftOn = false
 }
+
+// GuardStatus 表里现在有多少条规则;0 = 没开。
+func GuardStatus() (int, error) {
+	out, err := exec.Command("nft", "list", "table", "inet", guardTable).Output()
+	if err != nil {
+		return 0, nil // 表不存在
+	}
+	n := 0
+	for _, l := range strings.Split(string(out), "\n") {
+		t := strings.TrimSpace(l)
+		if strings.HasSuffix(t, "accept") || t == "drop" {
+			n++
+		}
+	}
+	return n, nil
+}
+
+// GuardWarning Linux 一步装完,没有"装了一半"的情况。
+func GuardWarning() string { return "" }

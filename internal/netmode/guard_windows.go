@@ -4,37 +4,53 @@ package netmode
 
 import (
 	"fmt"
-	"net"
-	"unsafe"
-
-	"golang.org/x/sys/windows"
+	"net/netip"
+	"sync"
 
 	"github.com/Maoyangui/godusevpn/internal/netmode/wfp"
 )
 
-// Windows 用 WFP(Windows 过滤平台,系统防火墙底下那一层),见 wfp 包。规则在一个动态会话里:
-// 进程退出、句柄关闭,规则自动消失,服务被强杀也不会把机器留在断网状态。
-// 放行按进程(本服务 exe)、按隧道网卡(LUID,网卡起来之后才知道,所以有 GuardTunUp 这一步)、
-// 回环、局域网、DHCP、邻居发现;其余全拦。
+// Windows 用 WFP(Windows 过滤平台,系统防火墙底下那一层),见 wfp 包。对象是持久的:进程退出、被强杀、
+// 崩溃、升级、重启,闸都在;另有一组开机过滤器堵住开机到 BFE 启动之间那几秒。只有明确撤闸才删。
+// 放行按进程(本服务 exe)、按隧道地址、回环、局域网、DHCP、邻居发现;其余全拦。
 
 var (
-	iphlpapi                        = windows.NewLazySystemDLL("iphlpapi.dll")
-	procConvertInterfaceIndexToLuid = iphlpapi.NewProc("ConvertInterfaceIndexToLuid")
+	warnMu    sync.Mutex
+	guardWarn string
 )
 
-func ApplyGuard(spec GuardSpec) error { return wfp.Enable(spec.LAN) }
-
-// GuardTunUp 隧道网卡起来之后按它的 LUID 放行经隧道的流量。网卡每次重建 LUID 可能变,每次起来都要调。
-func GuardTunUp(spec GuardSpec) error {
-	ifi, err := net.InterfaceByName(spec.TunName)
+func ApplyGuard(spec GuardSpec) error {
+	var s wfp.Spec
+	s.LAN = spec.LAN
+	if a, err := netip.ParseAddr(spec.TunAddr4); err == nil && a.Is4() {
+		s.Tun4 = a.As4()
+	} else {
+		return fmt.Errorf("隧道 v4 地址不合法: %q", spec.TunAddr4)
+	}
+	if a, err := netip.ParseAddr(spec.TunAddr6); err == nil && a.Is6() {
+		s.Tun6 = a.As16()
+	}
+	warn, err := wfp.Enable(s)
 	if err != nil {
-		return fmt.Errorf("找隧道网卡 %s: %w", spec.TunName, err)
+		return err
 	}
-	var luid uint64
-	if r, _, _ := procConvertInterfaceIndexToLuid.Call(uintptr(ifi.Index), uintptr(unsafe.Pointer(&luid))); r != 0 {
-		return fmt.Errorf("ConvertInterfaceIndexToLuid(%d) 失败: %d", ifi.Index, r)
-	}
-	return wfp.SetTunLUID(luid)
+	warnMu.Lock()
+	guardWarn = warn
+	warnMu.Unlock()
+	return nil
 }
 
-func ClearGuard() { wfp.Disable() }
+// GuardTunUp 按隧道地址放行,网卡起不起来无所谓。
+func GuardTunUp(GuardSpec) error { return nil }
+
+func ClearGuard() { _ = wfp.Disable() }
+
+// GuardStatus 闸里现在有多少条过滤器;0 = 没开。
+func GuardStatus() (int, error) { return wfp.Count() }
+
+// GuardWarning 上次开闸时没装全的那部分(比如开机那组),给日志用;空 = 全装上了。
+func GuardWarning() string {
+	warnMu.Lock()
+	defer warnMu.Unlock()
+	return guardWarn
+}

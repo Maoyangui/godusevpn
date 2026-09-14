@@ -26,6 +26,7 @@ import (
 
 	"github.com/Maoyangui/godusevpn/internal/buildinfo"
 	"github.com/Maoyangui/godusevpn/internal/ipc"
+	"github.com/Maoyangui/godusevpn/internal/netmode"
 	"github.com/Maoyangui/godusevpn/internal/settings"
 )
 
@@ -236,6 +237,32 @@ func Main(args []string) int {
 				fmt.Println(l)
 			}
 		}
+	case "guard": // 「恢复网络」:守护进程起不来、闸还在,手动撤掉(要 root / 管理员)
+		sub := ""
+		if len(args) > 0 {
+			sub = args[0]
+		}
+		switch sub {
+		case "clear":
+			netmode.ClearGuard()
+			n, _ := netmode.GuardStatus()
+			if n == 0 {
+				fmt.Println("禁直连闸已解除,直连恢复。")
+			} else {
+				err = fmt.Errorf("闸没清干净,还剩 %d 条(需要 root / 管理员身份)", n)
+			}
+		case "status":
+			var n int
+			if n, err = netmode.GuardStatus(); err == nil {
+				if n == 0 {
+					fmt.Println("闸:没开(直连不受限)")
+				} else {
+					fmt.Printf("闸:开着(%d 条规则;隧道以外的流量一律拦下)\n", n)
+				}
+			}
+		default:
+			err = errors.New("用法: guard clear|status")
+		}
 	case "diag":
 		var out map[string]any
 		if err = call(ctx, ipc.MDiagnose, nil, &out); err == nil {
@@ -313,5 +340,5 @@ func printProfile(p *ipc.ProfileView) {
 // Usage 打印用法。
 func Usage() {
 	fmt.Println(buildinfo.DisplayName, buildinfo.Version)
-	fmt.Println("用法: " + Name + " status | connect | disconnect | mode <rule|global|direct> | nodes | select <节点> | test [节点|all] | profile [地址] | refresh | settings [k=v …] | rules | devices | device <MAC> <follow|proxy|direct|reject> [名字] | logs [n] [core] | diag")
+	fmt.Println("用法: " + Name + " status | connect | disconnect | mode <rule|global|direct> | nodes | select <节点> | test [节点|all] | profile [地址] | refresh | settings [k=v …] | rules | devices | device <MAC> <follow|proxy|direct|reject> [名字] | logs [n] [core] | diag | guard clear|status")
 }

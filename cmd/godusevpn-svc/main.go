@@ -19,6 +19,7 @@ import (
 
 	"github.com/Maoyangui/godusevpn/internal/buildinfo"
 	"github.com/Maoyangui/godusevpn/internal/daemon"
+	"github.com/Maoyangui/godusevpn/internal/netmode"
 	"github.com/Maoyangui/godusevpn/internal/svc"
 )
 
@@ -59,10 +60,44 @@ func main() {
 		}
 		fmt.Println("服务已安装并启动:", svc.DisplayName)
 	case "uninstall":
+		netmode.ClearGuard() // 闸是持久的,卸载前先撤,不然文件删了闸还在、机器一直断网
 		if err := svc.Uninstall(); err != nil {
 			fail(err)
 		}
 		fmt.Println("服务已卸载")
+	// guard clear:「恢复网络」——服务起不来、闸还在,手动把过滤器删掉。开始菜单的快捷方式、托盘菜单、卸载程序都走这里。
+	case "guard":
+		sub := ""
+		if len(os.Args) > 2 {
+			sub = os.Args[2]
+		}
+		switch sub {
+		case "clear":
+			if relaunchElevated() {
+				return
+			}
+			netmode.ClearGuard()
+			n, _ := netmode.GuardStatus()
+			if n == 0 {
+				fmt.Println("禁直连闸已解除,直连恢复。要再开闸,启动服务并连接即可。")
+			} else {
+				fmt.Printf("过滤器还剩 %d 条,没删干净(是不是没用管理员身份跑?)\n", n)
+				os.Exit(1)
+			}
+		case "status":
+			n, err := netmode.GuardStatus()
+			if err != nil {
+				fail(err)
+			}
+			if n == 0 {
+				fmt.Println("闸:没开(直连不受限)")
+			} else {
+				fmt.Printf("闸:开着(%d 条过滤器;隧道以外的流量一律拦下)\n", n)
+			}
+		default:
+			fmt.Println("用法: godusevpn-svc guard clear | status")
+			os.Exit(2)
+		}
 	case "start":
 		if err := svc.Start(); err != nil {
 			fail(err)
@@ -98,5 +133,5 @@ func fail(err error) {
 
 func usage() {
 	fmt.Println(daemon.DisplayName, "服务", buildinfo.Version)
-	fmt.Println("用法: godusevpn-svc install | uninstall | start | stop | status | run | version")
+	fmt.Println("用法: godusevpn-svc install | uninstall | start | stop | status | run | guard clear|status | version")
 }

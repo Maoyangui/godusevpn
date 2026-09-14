@@ -2,6 +2,8 @@ package main
 
 import (
 	_ "embed"
+	"os"
+	"path/filepath"
 	"sync"
 
 	"github.com/energye/systray"
@@ -25,14 +27,14 @@ type trayUI struct {
 	ready bool
 	last  string // 上次设置的图标状态,避免每 1.5 秒重设一次
 
-	show, conn, upgrade, rule, global, direct, quitItem *systray.MenuItem
+	show, conn, upgrade, rule, global, direct, guardFix, quitItem *systray.MenuItem
 }
 
 func newTray(a *App) *trayUI { return &trayUI{app: a} }
 
 var trayText = map[string]map[string]string{
-	"zh": {"show": "显示主窗口", "connect": "连接", "disconnect": "断开", "mode": "模式", "rule": "规则", "global": "全局", "direct": "直连", "quit": "退出", "svcdown": "服务未运行", "upgrade": "升级到"},
-	"en": {"show": "Show window", "connect": "Connect", "disconnect": "Disconnect", "mode": "Mode", "rule": "Rule", "global": "Global", "direct": "Direct", "quit": "Quit", "svcdown": "Service not running", "upgrade": "Update to"},
+	"zh": {"show": "显示主窗口", "connect": "连接", "disconnect": "断开", "mode": "模式", "rule": "规则", "global": "全局", "direct": "直连", "quit": "退出", "svcdown": "服务未运行", "upgrade": "升级到", "guardfix": "恢复网络(解除禁直连闸)"},
+	"en": {"show": "Show window", "connect": "Connect", "disconnect": "Disconnect", "mode": "Mode", "rule": "Rule", "global": "Global", "direct": "Direct", "quit": "Quit", "svcdown": "Service not running", "upgrade": "Update to", "guardfix": "Restore network (lift no-direct guard)"},
 }
 
 func (t *trayUI) tr(key string) string {
@@ -61,6 +63,7 @@ func (t *trayUI) onReady() {
 	t.global = mode.AddSubMenuItemCheckbox(t.tr("global"), "", false)
 	t.direct = mode.AddSubMenuItemCheckbox(t.tr("direct"), "", false)
 	systray.AddSeparator()
+	t.guardFix = systray.AddMenuItem(t.tr("guardfix"), "")
 	t.quitItem = systray.AddMenuItem(t.tr("quit"), "")
 
 	t.show.Click(func() { t.app.showWindow() })
@@ -76,6 +79,23 @@ func (t *trayUI) onReady() {
 	t.global.Click(func() { _, _ = t.app.SetMode("global") })
 	t.direct.Click(func() { _, _ = t.app.SetMode("direct") })
 	t.quitItem.Click(func() { t.app.QuitApp() })
+	// 恢复网络:服务活着就关掉「全局禁直连」的开关(闸随之撤);服务不在就提权跑恢复命令,直接删过滤器
+	t.guardFix.Click(func() {
+		if t.app.GetState().Service {
+			if s, err := t.app.GetSettings(); err == nil {
+				s.NoDirect = false
+				_, _ = t.app.SaveSettings(s)
+			}
+			return
+		}
+		exe, err := os.Executable()
+		if err != nil {
+			return
+		}
+		if p, err := serviceBinary(filepath.Dir(exe)); err == nil {
+			_ = runElevated(p, "guard clear")
+		}
+	})
 	t.upgrade.Click(func() { t.app.showAbout() })
 	t.mu.Lock()
 	t.ready = true

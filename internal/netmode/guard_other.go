@@ -7,3 +7,5 @@ package netmode
 func ApplyGuard(GuardSpec) error { return nil }
 func GuardTunUp(GuardSpec) error { return nil }
 func ClearGuard()                {}
+func GuardStatus() (int, error)  { return 0, nil }
+func GuardWarning() string       { return "" }

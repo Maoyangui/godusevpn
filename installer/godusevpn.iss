@@ -83,6 +83,7 @@ Source: "deps\MicrosoftEdgeWebview2Setup.exe"; DestDir: "{tmp}"; Flags: deleteaf
 [Icons]
 Name: "{group}\{#AppName}"; Filename: "{app}\godusevpn.exe"
 Name: "{group}\卸载 {#AppName}"; Filename: "{uninstallexe}"
+Name: "{group}\恢复网络(解除禁直连闸)"; Filename: "{app}\godusevpn-svc.exe"; Parameters: "guard clear"; Comment: "服务起不来、网络被禁直连闸拦住时用"
 Name: "{autodesktop}\{#AppName}"; Filename: "{app}\godusevpn.exe"
 
 [Registry]
@@ -107,6 +108,7 @@ Filename: "{app}\godusevpn.exe"; Description: "{cm:Launch}"; Flags: nowait posti
 Filename: "{app}\godusevpn.exe"; Flags: nowait runasoriginaluser; Check: WantRelaunch
 
 [UninstallRun]
+Filename: "{app}\godusevpn-svc.exe"; Parameters: "guard clear"; RunOnceId: "guard-clear"; Flags: runhidden waituntilterminated
 Filename: "{app}\godusevpn-svc.exe"; Parameters: "uninstall"; RunOnceId: "svc-uninstall"; Flags: runhidden waituntilterminated
 Filename: "taskkill.exe"; Parameters: "/F /IM godusevpn.exe"; RunOnceId: "kill-ui"; Flags: runhidden waituntilterminated
 

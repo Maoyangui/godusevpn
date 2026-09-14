@@ -156,6 +156,8 @@ class MainActivity : AppCompatActivity() {
                     "Connect" -> connect()
                     "ReadClipboard" -> JSONObject.quote((getSystemService(ClipboardManager::class.java).primaryClip?.getItemAt(0)?.coerceToText(this@MainActivity) ?: "").toString())
                     "OpenURL" -> { val u = Uri.parse(JSONArray(argsJSON).optString(0)); runOnUiThread { this@MainActivity.openExternal(u) }; "null" }
+                    // 系统的 VPN 设置页:把本应用设成「始终开启」+「阻止未经 VPN 的连接」,进程被杀了也不漏(应用自己做不到跨进程)
+                    "OpenVpnSettings" -> { runOnUiThread { runCatching { startActivity(Intent(android.provider.Settings.ACTION_VPN_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }.onFailure { Toast.makeText(this@MainActivity, "打不开系统 VPN 设置", Toast.LENGTH_SHORT).show() } }; "null" }
                     "ExportDiag" -> {
                         val path: String = App.engine().call("ExportDiag", "[]").trim('"')
                         share(File(path)); JSONObject.quote(path)

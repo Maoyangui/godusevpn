@@ -179,6 +179,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 			return fmt.Errorf("监听控制管道: %w", err)
 		}
 	}
+	d.reconcileGuard()
 	if d.loadPersisted().Wanted {
 		d.logf("上次是已连接状态,自动连接")
 		d.machine.Connect()

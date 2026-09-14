@@ -93,3 +93,16 @@ func getCurrentProcessAppID() (*wtFwpByteBlob, error) {
 	}
 	return appID, nil
 }
+
+// appIDFromPath 按 exe 路径取 WFP 的应用标识(getCurrentProcessAppID 的通用版)。
+func appIDFromPath(path string) (*wtFwpByteBlob, error) {
+	p, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		return nil, wrapErr(err)
+	}
+	var appID *wtFwpByteBlob
+	if err := fwpmGetAppIdFromFileName0(p, unsafe.Pointer(&appID)); err != nil {
+		return nil, wrapErr(err)
+	}
+	return appID, nil
+}

@@ -79,6 +79,7 @@ func Install(exe string) error {
 	}
 	s, err := m.CreateService(Name, exe, mgr.Config{
 		DisplayName: DisplayName, Description: Description, StartType: mgr.StartAutomatic,
+		Dependencies: []string{"BFE", "Tcpip"}, // 闸靠 BFE(基础筛选引擎),隧道靠 TCP/IP:等它们起来再起
 	}, "service")
 	if err != nil {
 		return fmt.Errorf("创建服务: %w", err)

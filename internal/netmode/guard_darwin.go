@@ -66,12 +66,10 @@ func ApplyGuard(spec GuardSpec) error {
 // GuardTunUp pf 按地址放行,隧道网卡起不起来无所谓。
 func GuardTunUp(GuardSpec) error { return nil }
 
+// ClearGuard 撤闸。规则不随进程死(上次强杀留下的也要清),所以不管本进程有没有装过,锚点一律清空。
 func ClearGuard() {
 	pfMu.Lock()
 	defer pfMu.Unlock()
-	if !pfOn {
-		return
-	}
 	_ = exec.Command("pfctl", "-a", pfAnchor, "-F", "all").Run()
 	if pfToken != "" {
 		_ = exec.Command("pfctl", "-X", pfToken).Run()
@@ -79,3 +77,21 @@ func ClearGuard() {
 	}
 	pfOn = false
 }
+
+// GuardStatus 锚点里现在有多少条规则;0 = 没开。
+func GuardStatus() (int, error) {
+	out, err := exec.Command("pfctl", "-a", pfAnchor, "-sr").Output()
+	if err != nil {
+		return 0, err
+	}
+	n := 0
+	for _, l := range strings.Split(string(out), "\n") {
+		if strings.TrimSpace(l) != "" {
+			n++
+		}
+	}
+	return n, nil
+}
+
+// GuardWarning macOS 一步装完,没有"装了一半"的情况。
+func GuardWarning() string { return "" }
