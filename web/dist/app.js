@@ -540,15 +540,15 @@ function updateHome() {
   $('#status-sub').textContent = err;
   // 全局禁直连的闸:开着就亮一颗小盾;该开却没开成(防火墙不可用之类)标成警告
   const gp = $('#guard-pill');
-  if (v.guardError) { gp.hidden = false; gp.className = 'guard-pill warn'; gp.textContent = t('home.guardErr') + ' · ' + v.guardError; }
-  else if (v.guard === 'on') { gp.hidden = false; gp.className = 'guard-pill'; gp.textContent = t('home.guard'); }
+  if (v.guardError) { gp.hidden = false; gp.className = 'guard-pill warn'; gp.innerHTML = ICON_WARN + `<span>${t('home.guardErr')} · ${esc(v.guardError)}</span>`; }
+  else if (v.guard === 'on') { gp.hidden = false; gp.className = 'guard-pill'; gp.innerHTML = ICON_SHIELD + `<span>${t('home.guard')}</span>`; }
   else gp.hidden = true;
   // 刷新拿到新节点列表但内核还没用上:提示一句,给一颗「现在应用」;内容没变就别重画,免得按钮在手指底下被换掉
   const pp = $('#pending-pill'), ptxt = v.pending ? changeText(v.pending) : '';
   if (pp.dataset.txt !== ptxt) {
     pp.dataset.txt = ptxt;
     pp.hidden = !ptxt;
-    pp.innerHTML = ptxt ? `<span>${t('prof.pending', { c: ptxt })}</span><button class="btn sm" id="pending-apply">${t('prof.apply')}</button>` : '';
+    pp.innerHTML = ptxt ? pendingHTML(v.pending, 'id="pending-apply"') : '';
     const pa = $('#pending-apply'); if (pa) pa.addEventListener('click', applyPending);
   }
 
@@ -597,9 +597,14 @@ function updateHome() {
 
 // openExternal 打开外部地址:桌面壳与安卓交给系统浏览器,网页面板自己开新标签。
 // 只放行 http(s) —— 续费地址来自订阅响应,不能让它塞别的协议进来交给系统去开。
+const ICON_SHIELD = '<svg viewBox="0 0 24 24"><path d="M12 3l7 3v5c0 4.6-3 8.6-7 10-4-1.4-7-5.4-7-10V6z"/><path d="M9.3 12.2l2 2 3.6-4"/></svg>';
+const ICON_WARN = '<svg viewBox="0 0 24 24"><path d="M12 3l9 16H3z"/><path d="M12 10v4"/><path d="M12 17h.01"/></svg>';
+const ICON_UPD = '<svg viewBox="0 0 24 24"><path d="M4 12a8 8 0 0 1 13.7-5.7"/><path d="M18 3v4h-4"/><path d="M20 12a8 8 0 0 1-13.7 5.7"/><path d="M6 21v-4h4"/></svg>';
 // changeText 节点变化的短文案:+3 −1 改 2
 const changeText = c => [c.added ? '+' + c.added : '', c.removed ? '−' + c.removed : '', c.changed ? t('prof.changed', { n: c.changed }) : ''].filter(Boolean).join(' ');
 // applyPending 把刷新后还没用上的节点列表用起来:会重连,先问一句
+// pendingHTML 「节点列表有更新」的小卡:左边图标、中间两行、右边一颗「现在应用」(attrs 决定它是 id 还是 data-act)
+const pendingHTML = (c, attrs) => `<span class="notice-ic">${ICON_UPD}</span><span class="notice-txt"><b>${t('prof.pendingTitle')}</b><span>${t('prof.pendingSub', { c: changeText(c) })}</span></span><button class="renewbtn sm apply" ${attrs}>${t('prof.apply')}</button>`;
 async function applyPending() {
   if (!await askConfirm(t('prof.applyConfirm'), { danger: false, ok: t('prof.apply') })) return;
   try { await App().ApplyProfile(); toast(t('prof.applied'), 'ok'); } catch (e) { toast(errText(e), 'err'); }
@@ -733,7 +738,7 @@ async function drawNodes(testing) {
   if (sig === nodeSig && patchNodes(nodes, max, testing)) return;
   nodeSig = sig;
   const st = state && state.view.state.status, online = st === 'connected' || st === 'degraded';
-  const pend = online && state.view.pending ? `<div class="notice"><span>${t('prof.pending', { c: changeText(state.view.pending) })}</span><button class="btn sm" id="nodes-apply">${t('prof.apply')}</button></div>` : '';
+  const pend = online && state.view.pending ? `<div class="notice">${pendingHTML(state.view.pending, 'id="nodes-apply"')}</div>` : '';
   const hint = pend + (online ? '' : `<div class="small muted" style="padding:0 4px 8px">${t('node.offlineHint')}</div>`);
   const keep = focusKey($('#sheet-body'), 'data-name');
   $('#sheet-body').innerHTML = hint
@@ -862,7 +867,7 @@ function renderProfiles(el, editId) {
         <span>${t('prof.nodes', { n: p.nodeCount })}${regions ? ' · ' + t('prof.regions', { n: regions }) : ''}</span>
         <span>${u.expire ? t('prof.expire', { d: fmtDay(u.expire) }) : ''}</span>
       </div>
-      ${p.pending ? `<div class="pc-pending"><span>${t('prof.pending', { c: changeText(p.pending) })}</span><button class="btn sm" data-act="apply">${t('prof.apply')}</button></div>` : ''}
+      ${p.pending ? `<div class="pc-pending">${pendingHTML(p.pending, 'data-act="apply"')}</div>` : ''}
       ${p.error ? `<div class="pc-err">${esc(p.error)}</div>` : ''}
       <div class="pc-act">
         <button class="btn sm" data-act="refresh" data-id="${esc(p.id)}">${t('prof.refresh')}</button>

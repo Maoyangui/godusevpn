@@ -28,7 +28,7 @@ const bgFrom = 24
 
 // logoScale logo 在底板上占的比例:安卓自适应图标的安全区是 66/108,这里留得比它松一点,
 // 因为我们的底板不会被启动器再裁一圈。
-const logoScale = 0.80
+const logoScale = 0.82
 
 func main() {
 	in := flag.String("in", ".", "PNG 目录(logo-<size>.png);给了 -logo 就不用它")
@@ -41,7 +41,7 @@ func main() {
 
 	imgs := map[int]*image.NRGBA{}
 	if *logo != "" {
-		src := toNRGBA(mustImg(png.Decode(mustFile(os.Open(*logo)))))
+		src := trimSquare(toNRGBA(mustImg(png.Decode(mustFile(os.Open(*logo))))), 0.04) // 原图自带的透明边先裁掉,不然 logo 在底板上只剩一半大
 		for _, s := range sizes {
 			imgs[s] = scale(src, s)
 		}
@@ -67,6 +67,13 @@ func main() {
 	}
 	must(writeICO(filepath.Join(*out, "windows", "icon.ico"), app, sizes))
 	must(writePNG(filepath.Join(*out, "appicon.png"), app[256]))
+	// macOS:系统图标本身带一圈透明边(圆角方块约占画布 82%),底板铺满整张的话 Dock 里会比别的图标大一号
+	if opaque {
+		mac := image.NewNRGBA(image.Rect(0, 0, 256, 256))
+		plate := onPlate(scale(imgs[256], 210), c)
+		draw.Draw(mac, plate.Bounds().Add(image.Pt(23, 23)), plate, image.Point{}, draw.Over)
+		must(writePNG(filepath.Join(*out, "appicon-macos.png"), mac))
+	}
 	// 托盘图标:16/20/24/32 四档,各带状态点
 	states := map[string]color.NRGBA{
 		"on":  {0x22, 0xc5, 0x5e, 0xff}, // 绿
@@ -143,6 +150,43 @@ func clamp(v float64) float64 {
 		return 255
 	}
 	return v
+}
+
+// trimSquare 裁掉透明边,再补成正方形(四周各留 margin 比例的空):logo 原图带多少透明边都不影响成品大小。
+func trimSquare(src *image.NRGBA, margin float64) *image.NRGBA {
+	b := src.Bounds()
+	minX, minY, maxX, maxY := b.Max.X, b.Max.Y, -1, -1
+	for y := b.Min.Y; y < b.Max.Y; y++ {
+		for x := b.Min.X; x < b.Max.X; x++ {
+			if src.NRGBAAt(x, y).A > 8 {
+				if x < minX {
+					minX = x
+				}
+				if y < minY {
+					minY = y
+				}
+				if x > maxX {
+					maxX = x
+				}
+				if y > maxY {
+					maxY = y
+				}
+			}
+		}
+	}
+	if maxX < 0 {
+		return src
+	}
+	w, h := maxX-minX+1, maxY-minY+1
+	side := w
+	if h > side {
+		side = h
+	}
+	n := int(float64(side)*(1+2*margin) + 0.5)
+	dst := image.NewNRGBA(image.Rect(0, 0, n, n))
+	off := image.Pt((n-w)/2, (n-h)/2)
+	draw.Draw(dst, image.Rect(off.X, off.Y, off.X+w, off.Y+h), src, image.Pt(minX, minY), draw.Src)
+	return dst
 }
 
 // onPlate 把 logo 摆到一块圆角底板上。圆角边缘按 3×3 超采样求覆盖率,小尺寸下也不会出锯齿。

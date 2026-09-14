@@ -60,7 +60,7 @@ CGO_ENABLED=1 CGO_LDFLAGS="-framework UniformTypeIdentifiers" go build -tags des
 
 或直接 `powershell -File build.ps1`,产物在 `dist\`(amd64 与 arm64)。图标、清单与版本信息由 `winres\*.json` 经 go-winres 生成到各 `cmd\*\rsrc_windows_*.syso`,CI 按 tag 重新生成。
 
-图标:`go run ./tools/mkicons -logo cmd/godusevpn/build/logo.png -out cmd/godusevpn/build`。`logo.png` 是透明底的原图;生成的应用图标会垫一块白色圆角底(和安卓的自适应图标一致),托盘图标保持透明。
+图标:`go run ./tools/mkicons -logo cmd/godusevpn/build/logo.png -out cmd/godusevpn/build`。`logo.png` 是透明底的原图;生成的应用图标会垫一块白色圆角底(和安卓的自适应图标一致),原图的透明边会先裁掉再放上去;另出一张 `appicon-macos.png`(四周留透明边,macOS 的 Dock 图标用它做 icns);托盘图标保持透明。
 
 测试:`go test -tags with_quic,with_utls,with_clash_api,with_gvisor ./...`(含内嵌 sing-box 对生成配置的干跑校验、管道往返、状态机全路径、设置迁移)。
 
