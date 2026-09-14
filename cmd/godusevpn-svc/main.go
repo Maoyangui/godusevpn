@@ -90,7 +90,7 @@ func main() {
 				os.Exit(1)
 			}
 		case "status":
-			n, err := netmode.GuardStatus()
+			n, err := guardfix.Status()
 			if err != nil {
 				fail(err)
 			}

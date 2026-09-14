@@ -27,7 +27,6 @@ import (
 	"github.com/Maoyangui/godusevpn/internal/buildinfo"
 	"github.com/Maoyangui/godusevpn/internal/guardfix"
 	"github.com/Maoyangui/godusevpn/internal/ipc"
-	"github.com/Maoyangui/godusevpn/internal/netmode"
 	"github.com/Maoyangui/godusevpn/internal/settings"
 )
 
@@ -252,7 +251,7 @@ func Main(args []string) int {
 			}
 		case "status":
 			var n int
-			if n, err = netmode.GuardStatus(); err == nil {
+			if n, err = guardfix.Status(); err == nil {
 				if n == 0 {
 					fmt.Println("闸:没开(直连不受限)")
 				} else {

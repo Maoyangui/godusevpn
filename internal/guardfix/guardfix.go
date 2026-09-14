@@ -7,7 +7,10 @@ package guardfix
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
+	"strings"
 	"time"
 
 	"github.com/Maoyangui/godusevpn/internal/ipc"
@@ -39,4 +42,13 @@ func switchOff() bool {
 	}
 	s.NoDirect = false
 	return ipc.Call(ctx, ipc.MSetSettings, s, nil) == nil
+}
+
+// Status 闸开着没有:返回规则条数。普通用户身份看不了 Windows 的过滤器,把那句难看的系统错误换成人话。
+func Status() (int, error) {
+	n, err := netmode.GuardStatus()
+	if err != nil && (errors.Is(err, fs.ErrPermission) || strings.Contains(err.Error(), "Access is denied")) {
+		return 0, errors.New("看闸的状态要管理员 / root 身份(Windows 右键「以管理员身份运行」,macOS / Linux 加 sudo)")
+	}
+	return n, err
 }
