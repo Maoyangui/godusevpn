@@ -61,9 +61,13 @@ func main() {
 		}
 		fmt.Println("服务已安装并启动:", svc.DisplayName)
 	case "uninstall":
-		netmode.ClearGuard() // 闸是持久的,卸载前先撤,不然文件删了闸还在、机器一直断网
-		if err := svc.Uninstall(); err != nil {
-			fail(err)
+		// 闸是持久的,卸载要撤掉,不然文件删了闸还在、机器一直断网。先停服务再撤:服务活着时撤,
+		// 它一有动静(重连、切节点)又会装回来。不走 guard clear:那条会把「全局禁直连」开关关掉,
+		// 卸载时留着数据的话,下次重装闸就默认是关的。
+		uerr := svc.Uninstall()
+		netmode.ClearGuard()
+		if uerr != nil {
+			fail(uerr)
 		}
 		fmt.Println("服务已卸载")
 	// guard clear:「恢复网络」——服务起不来、闸还在,手动把过滤器删掉。开始菜单的快捷方式、托盘菜单、卸载程序都走这里。
