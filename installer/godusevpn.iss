@@ -108,7 +108,6 @@ Filename: "{app}\godusevpn.exe"; Description: "{cm:Launch}"; Flags: nowait posti
 Filename: "{app}\godusevpn.exe"; Flags: nowait runasoriginaluser; Check: WantRelaunch
 
 [UninstallRun]
-Filename: "{app}\godusevpn-svc.exe"; Parameters: "guard clear"; RunOnceId: "guard-clear"; Flags: runhidden waituntilterminated
 Filename: "{app}\godusevpn-svc.exe"; Parameters: "uninstall"; RunOnceId: "svc-uninstall"; Flags: runhidden waituntilterminated
 Filename: "taskkill.exe"; Parameters: "/F /IM godusevpn.exe"; RunOnceId: "kill-ui"; Flags: runhidden waituntilterminated
 
