@@ -58,7 +58,7 @@
   };
 
   let settings = {
-    tun: true, tunStack: 'mixed', strictRoute: true, lanBypass: true, mixedPort: 2080,
+    tun: true, tunStack: 'mixed', strictRoute: true, noDirect: true, lanBypass: true, mixedPort: 2080,
     probeMinutes: 3, updateHours: 12, remoteDns: 'https://1.1.1.1/dns-query', localDns: 'https://223.5.5.5/dns-query',
     fakeIp: true, ipv6: false, disableNicIpv6: true, adBlock: false, logLevel: 'info', logDays: 7,
     netMode: 'local', lanSubnets: [], webListen: '127.0.0.1:9800', bypassApps: ['steam.exe'],

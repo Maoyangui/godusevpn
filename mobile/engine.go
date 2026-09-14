@@ -50,10 +50,12 @@ func NewEngine(dataDir, cacheDir string, host Host, listener EventListener) (*En
 			_ = debug.SetCrashOutput(f, debug.CrashOptions{})
 		}
 	}
-	d, err := daemon.NewWithOptions(daemon.Options{Platform: newPlatform(host), NoListen: true})
+	p := newPlatform(host)
+	d, err := daemon.NewWithOptions(daemon.Options{Platform: p, NoListen: true, ReleaseTun: host.CloseTun})
 	if err != nil {
 		return nil, err
 	}
+	p.SetKeepTun(d.GuardWanted) // 「全局禁直连」开着时内核重启不关 VPN 接口,接口本身就是闸
 	ui := uiapi.New(d, uiapi.Options{
 		Platform:  "android",
 		PrefsPath: filepath.Join(dataDir, "conf", "ui.json"),

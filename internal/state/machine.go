@@ -94,6 +94,7 @@ type Machine struct {
 	wanted bool
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
+	pre    []byte // Restart 提前备好的配置:下一轮 run 直接用它,不再 Prepare 一遍
 }
 
 func New(d Deps) *Machine {
@@ -164,13 +165,26 @@ func (m *Machine) Disconnect() {
 	m.set(Disconnected, nil)
 }
 
-// Restart 配置或订阅变了:想连的话停下来重走一遍,不想连的什么都不做。
-func (m *Machine) Restart() {
+// Restart 配置或订阅变了:想连的话换新配置重来一遍,不想连的什么都不做。
+// 先把新配置备好(拉订阅、解析节点地址、生成、干跑)再停旧内核 —— 准备阶段旧内核还在跑,
+// 断流的窗口只剩停与起那一下;新配置备不出来就不动旧的,原样连着并返回错误。
+func (m *Machine) Restart() error {
 	if !m.Wanted() {
-		return
+		return nil
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+	cfg, err := m.d.Prepare(ctx)
+	if err != nil {
+		m.d.Logf("新配置准备失败,保持当前连接: %v", err)
+		return err
+	}
+	m.mu.Lock()
+	m.pre = cfg
+	m.mu.Unlock()
 	m.stopLoop()
 	m.Connect()
+	return nil
 }
 
 func (m *Machine) stopLoop() {
@@ -215,7 +229,14 @@ func (m *Machine) run(ctx context.Context) {
 	attempt := 0
 	for ctx.Err() == nil {
 		m.set(Preparing, nil)
-		cfg, err := m.d.Prepare(ctx)
+		m.mu.Lock()
+		cfg := m.pre // Restart 备好的,只用一次
+		m.pre = nil
+		m.mu.Unlock()
+		var err error
+		if cfg == nil {
+			cfg, err = m.d.Prepare(ctx)
+		}
 		if err == nil {
 			m.set(Starting, nil)
 			err = m.d.Start(cfg)

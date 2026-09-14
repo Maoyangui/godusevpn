@@ -477,6 +477,8 @@ function renderHome(el) {
       <div class="uptime" id="uptime" hidden><b id="s-time">–</b><span>${t('home.uptime')}</span></div>
       <div class="status-text" id="status"></div>
       <div class="status-sub" id="status-sub"></div>
+      <div class="guard-pill" id="guard-pill" hidden></div>
+      <div class="pending-pill" id="pending-pill" hidden></div>
     </div>
     <button class="idcard" id="id-card">
       <span class="flag none" id="id-flag">${ICON_GLOBE}</span>
@@ -536,6 +538,19 @@ function updateHome() {
   $('#status').textContent = state.service ? t('st.' + st) : t('svc.down');
   $('#status-sub').hidden = !err;
   $('#status-sub').textContent = err;
+  // 全局禁直连的闸:开着就亮一颗小盾;该开却没开成(防火墙不可用之类)标成警告
+  const gp = $('#guard-pill');
+  if (v.guardError) { gp.hidden = false; gp.className = 'guard-pill warn'; gp.textContent = t('home.guardErr') + ' · ' + v.guardError; }
+  else if (v.guard === 'on') { gp.hidden = false; gp.className = 'guard-pill'; gp.textContent = t('home.guard'); }
+  else gp.hidden = true;
+  // 刷新拿到新节点列表但内核还没用上:提示一句,给一颗「现在应用」;内容没变就别重画,免得按钮在手指底下被换掉
+  const pp = $('#pending-pill'), ptxt = v.pending ? changeText(v.pending) : '';
+  if (pp.dataset.txt !== ptxt) {
+    pp.dataset.txt = ptxt;
+    pp.hidden = !ptxt;
+    pp.innerHTML = ptxt ? `<span>${t('prof.pending', { c: ptxt })}</span><button class="btn sm" id="pending-apply">${t('prof.apply')}</button>` : '';
+    const pa = $('#pending-apply'); if (pa) pa.addEventListener('click', applyPending);
+  }
 
   // 出口卡片:自动选择时显示实际落到的那个节点,底下是这条线路真正的出口地址
   const auto = v.node === 'auto' || !v.node;
@@ -582,6 +597,13 @@ function updateHome() {
 
 // openExternal 打开外部地址:桌面壳与安卓交给系统浏览器,网页面板自己开新标签。
 // 只放行 http(s) —— 续费地址来自订阅响应,不能让它塞别的协议进来交给系统去开。
+// changeText 节点变化的短文案:+3 −1 改 2
+const changeText = c => [c.added ? '+' + c.added : '', c.removed ? '−' + c.removed : '', c.changed ? t('prof.changed', { n: c.changed }) : ''].filter(Boolean).join(' ');
+// applyPending 把刷新后还没用上的节点列表用起来:会重连,先问一句
+async function applyPending() {
+  if (!await askConfirm(t('prof.applyConfirm'), { danger: false, ok: t('prof.apply') })) return;
+  try { await App().ApplyProfile(); toast(t('prof.applied'), 'ok'); } catch (e) { toast(errText(e), 'err'); }
+}
 function openExternal(url) {
   const u = String(url || '');
   if (!/^https?:\/\//i.test(u)) return;
@@ -707,11 +729,12 @@ async function drawNodes(testing) {
   const max = Math.max(1, ...nodes.filter(n => n.delay > 0).map(n => n.delay));
   // 节点集合没变就只改数字,别整块重画:一百来个节点重画一次会先空一下,入场动画还要错峰放完,
   // 滚动位置和筛选框里的字也跟着丢 —— 测速结束那一下看着就是"闪一下白再出来"。
-  const sig = nodes.map(n => n.name).join(' ');
+  const sig = nodes.map(n => n.name).join(' ') + '|' + (state && state.view.pending ? changeText(state.view.pending) : '');
   if (sig === nodeSig && patchNodes(nodes, max, testing)) return;
   nodeSig = sig;
   const st = state && state.view.state.status, online = st === 'connected' || st === 'degraded';
-  const hint = online ? '' : `<div class="small muted" style="padding:0 4px 8px">${t('node.offlineHint')}</div>`;
+  const pend = online && state.view.pending ? `<div class="notice"><span>${t('prof.pending', { c: changeText(state.view.pending) })}</span><button class="btn sm" id="nodes-apply">${t('prof.apply')}</button></div>` : '';
+  const hint = pend + (online ? '' : `<div class="small muted" style="padding:0 4px 8px">${t('node.offlineHint')}</div>`);
   const keep = focusKey($('#sheet-body'), 'data-name');
   $('#sheet-body').innerHTML = hint
     + (nodes.length > 8 ? `<div class="sheet-filter"><input type="text" id="node-filter" placeholder="${t('node.filter')}" value="${esc(nodeFilter)}"></div>` : '')
@@ -839,6 +862,7 @@ function renderProfiles(el, editId) {
         <span>${t('prof.nodes', { n: p.nodeCount })}${regions ? ' · ' + t('prof.regions', { n: regions }) : ''}</span>
         <span>${u.expire ? t('prof.expire', { d: fmtDay(u.expire) }) : ''}</span>
       </div>
+      ${p.pending ? `<div class="pc-pending"><span>${t('prof.pending', { c: changeText(p.pending) })}</span><button class="btn sm" data-act="apply">${t('prof.apply')}</button></div>` : ''}
       ${p.error ? `<div class="pc-err">${esc(p.error)}</div>` : ''}
       <div class="pc-act">
         <button class="btn sm" data-act="refresh" data-id="${esc(p.id)}">${t('prof.refresh')}</button>
@@ -869,6 +893,7 @@ function renderProfiles(el, editId) {
       const id = b.dataset.id, act = b.dataset.act;
       try {
         if (act === 'renew') { openExternal((list.find(x => x.id === id) || {}).webPage); return; }
+        if (act === 'apply') { await applyPending(); return; }
         if (act === 'use') { await App().SelectProfile(id); }
         else if (act === 'refresh') { b.disabled = true; b.classList.add('busy'); await App().RefreshProfile(id); toast(t('prof.refreshed'), 'ok'); }
         else if (act === 'edit') { showForm(list.find(x => x.id === id)); return; }
@@ -907,6 +932,7 @@ async function renderSettings(el) {
     `)}
     ${group(t('set.g.privacy'), `
       ${sw('f-ipv6', t('set.ipv6'), s.ipv6, t('set.ipv6Help'))}
+      ${sw('f-nodirect', t('set.noDirect'), s.noDirect, t('set.noDirectHelp'))}
       ${state.platform === 'android' ? '' : `<div class="srow"><div class="lbl">${t('set.nicv6')} <span class="tag warn">${t('set.nicv6Tag')}</span><div>${t('set.nicv6Help')}</div></div><label class="switch"><input type="checkbox" id="f-nicv6" ${s.disableNicIpv6 ? 'checked' : ''}></label></div>`}
     `)}
     ${group(t('set.g.dns'), `
@@ -956,7 +982,7 @@ async function renderSettings(el) {
   $('#save').addEventListener('click', async () => {
     const n = { ...s, tun: $('#f-tun').checked, tunStack: $('#f-stack').value, strictRoute: $('#f-strict').checked, lanBypass: $('#f-lan').checked,
       mixedPort: Number($('#f-mixed').value), probeMinutes: Number($('#f-probe').value), updateHours: Number($('#f-update').value),
-      remoteDns: $('#f-rdns').value.trim(), localDns: $('#f-ldns').value.trim(), fakeIp: $('#f-fakeip').checked, ipv6: $('#f-ipv6').checked, disableNicIpv6: $('#f-nicv6') ? $('#f-nicv6').checked : s.disableNicIpv6, adBlock: $('#f-ad').checked,
+      remoteDns: $('#f-rdns').value.trim(), localDns: $('#f-ldns').value.trim(), fakeIp: $('#f-fakeip').checked, ipv6: $('#f-ipv6').checked, noDirect: $('#f-nodirect').checked, disableNicIpv6: $('#f-nicv6') ? $('#f-nicv6').checked : s.disableNicIpv6, adBlock: $('#f-ad').checked,
       bypassApps: $('#f-bypass').value.split(/\r?\n/).map(x => x.trim()).filter(Boolean), logLevel: $('#f-log').value, logDays: Number($('#f-logdays').value) };
     if ($('#f-netmode')) { n.netMode = $('#f-netmode').value; n.lanSubnets = $('#f-lansub').value.split(/[,，\s]+/).map(x => x.trim()).filter(Boolean); n.webListen = $('#f-weblisten').value.trim(); }
     try { s = await App().SaveSettings(n); dirty(false); toast(t('set.saved'), 'ok'); } catch (e) { toast(errText(e), 'err'); }
@@ -1423,6 +1449,7 @@ async function init() {
   $('#drawer-upd').addEventListener('click', () => { closeDrawer(); nav('about'); });
   $('#sheet-backdrop').addEventListener('click', closeSheet);
   window.runtime.EventsOn('nav', name => { closeDrawer(); closeSheet(); if (PAGES[name]) nav(name); });
+  $('#sheet-body').addEventListener('click', e => { if (e.target.closest('#nodes-apply')) applyPending(); }); // 节点面板顶上那颗「现在应用」
   $('#min-btn').addEventListener('click', () => App().Minimize());
   $('#close-btn').addEventListener('click', () => App().HideWindow());
   document.addEventListener('keydown', e => { if (e.key === 'Escape') { if ($('#dialog')) closeDialog(false); else { closeSheet(); closeDrawer(); } } });

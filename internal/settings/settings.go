@@ -14,7 +14,7 @@ import (
 	"strings"
 )
 
-const Schema = 3
+const Schema = 4
 
 const (
 	ModeRule   = "rule"
@@ -38,12 +38,15 @@ type Settings struct {
 	TUN           bool      `json:"tun"`                  // TUN 模式(默认开);关掉只留混合端口
 	TUNStack      string    `json:"tunStack"`             // mixed | system | gvisor
 	StrictRoute   bool      `json:"strictRoute"`          // 严格路由:防泄漏,代价是部分局域网访问要靠 lanBypass
-	LANBypass     bool      `json:"lanBypass"`            // 私网段不进 TUN(打印机、NAS 直通)
-	MixedPort     int       `json:"mixedPort"`            // 本机混合端口,0 = 关
-	RemoteDNS     string    `json:"remoteDns"`            // 经代理的 DoH 服务器(IP 或域名)
-	LocalDNS      string    `json:"localDns"`             // 直连的 DoH 服务器;"system" = 用系统 DNS
-	FakeIP        bool      `json:"fakeIp"`
-	IPv6          bool      `json:"ipv6"` // false = 全链路禁用
+	// NoDirect 全局禁直连:全局模式下只要还想连着(没点断开),任何流量都不许绕过隧道直连 —— 隧道没起来、
+	// 内核在重启、节点不通、崩了在重试,统统只能等。放行的只有隧道自己(节点连接、订阅刷新的回退)、局域网、回环。
+	NoDirect  bool   `json:"noDirect"`
+	LANBypass bool   `json:"lanBypass"` // 私网段不进 TUN(打印机、NAS 直通)
+	MixedPort int    `json:"mixedPort"` // 本机混合端口,0 = 关
+	RemoteDNS string `json:"remoteDns"` // 经代理的 DoH 服务器(IP 或域名)
+	LocalDNS  string `json:"localDns"`  // 直连的 DoH 服务器;"system" = 用系统 DNS
+	FakeIP    bool   `json:"fakeIp"`
+	IPv6      bool   `json:"ipv6"` // false = 全链路禁用
 	// DisableNICIPv6 关闭 IPv6 时,顺带把各网卡上的 IPv6 协议也停用(隧道自己那张除外),断开时还原。
 	// 只挡数据包挡不住这一条:运营商给的公网 IPv6 地址就配在网卡上,程序枚举一遍网卡就能读走再报出去。
 	DisableNICIPv6 bool     `json:"disableNicIpv6"`
@@ -71,7 +74,7 @@ type Settings struct {
 // Default 出厂默认:TUN + 规则模式 + DoH + fake-ip + 禁 IPv6。
 func Default() Settings {
 	return Settings{
-		Schema: Schema, Mode: ModeRule, TUN: true, DisableNICIPv6: true, TUNStack: "mixed", StrictRoute: true, LANBypass: true,
+		Schema: Schema, Mode: ModeRule, TUN: true, DisableNICIPv6: true, TUNStack: "mixed", StrictRoute: true, NoDirect: true, LANBypass: true,
 		MixedPort: 2080, RemoteDNS: "1.1.1.1", LocalDNS: "223.5.5.5", FakeIP: true, IPv6: false,
 		UpdateHours: 6, ProbeMinutes: 3, LogLevel: "info", LogDays: 7, ClashPort: 9090, WebListen: defaultWebListen(),
 		NetMode: NetLocal, DNSHijack: true, DefaultRules: FactoryDefaultRules(),
@@ -122,6 +125,9 @@ func (s *Settings) migrate() {
 	s.DefaultRules.normalize() // 老设置文件里没有这一段
 	if s.Schema < 3 {
 		s.DisableNICIPv6 = true // 这一项是后加的,老设置文件里读出来是 false,按新默认值补上
+	}
+	if s.Schema < 4 {
+		s.NoDirect = true // 同上:全局禁直连默认开
 	}
 	s.Schema = Schema
 }

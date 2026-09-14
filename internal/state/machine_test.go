@@ -151,3 +151,42 @@ func TestRestartOnlyWhenWanted(t *testing.T) {
 	}
 	m.Disconnect()
 }
+
+// Restart 要先备好新配置再停旧的:准备期间旧内核还活着,备不出来就不动它。
+func TestRestartPreparesBeforeStopping(t *testing.T) {
+	f := &fake{}
+	var preparedAlive atomic.Bool
+	d := f.deps()
+	prep := d.Prepare
+	d.Prepare = func(ctx context.Context) ([]byte, error) {
+		if f.alive.Load() {
+			preparedAlive.Store(true)
+		}
+		return prep(ctx)
+	}
+	m := New(d)
+	m.Connect()
+	waitFor(t, m, Connected)
+	if err := m.Restart(); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, m, Connected)
+	if !preparedAlive.Load() {
+		t.Fatal("新配置应在旧内核还活着的时候准备")
+	}
+	if atomic.LoadInt32(&f.stops) != 1 || atomic.LoadInt32(&f.starts) != 2 {
+		t.Fatalf("应停一次、起两次,得 stops=%d starts=%d", f.stops, f.starts)
+	}
+
+	// 新配置备不出来:返回错误,旧内核原样连着
+	f.mu.Lock()
+	f.prepErr = errors.New("订阅坏了")
+	f.mu.Unlock()
+	if err := m.Restart(); err == nil {
+		t.Fatal("准备失败应返回错误")
+	}
+	if m.Snapshot().Status != Connected || atomic.LoadInt32(&f.stops) != 1 {
+		t.Fatalf("准备失败不该动旧内核:%+v stops=%d", m.Snapshot(), f.stops)
+	}
+	m.Disconnect()
+}

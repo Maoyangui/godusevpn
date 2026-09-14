@@ -87,6 +87,7 @@ type ifaceSpec struct {
 // platform 实现 sing-box 的 adapter.PlatformInterface,只做 Android 需要的部分,其余明确回答"不支持"。
 type platform struct {
 	host           Host
+	keepTun        func() bool // 内核关 TUN 时要不要把宿主那份也关掉的反面:「全局禁直连」开着就留着,接口本身就是闸
 	networkManager adapter.NetworkManager
 	mu             sync.Mutex
 	myTunName      string
@@ -181,18 +182,28 @@ func (p *platform) OpenInterface(options *tun.Options, platformOptions option.Tu
 	if !ok {
 		return t, nil
 	}
-	return &hostTun{NativeTun: nt, host: p.host}, nil
+	return &hostTun{NativeTun: nt, host: p.host, keep: p.keepTun}, nil
 }
+
+// SetKeepTun 设置"内核关 TUN 时宿主那份要不要留着"的判断;守护进程建好之后由引擎接上。
+func (p *platform) SetKeepTun(keep func() bool) { p.keepTun = keep }
 
 // hostTun 内核关 TUN 时顺带通知宿主。嵌的是具体类型 *tun.NativeTun,协议栈按 LinuxTUN 接口断言(批量读写、校验和卸载)照样成立。
 type hostTun struct {
 	*tun.NativeTun
 	host Host
+	keep func() bool
 	once sync.Once
 }
 
+// Close 内核关 TUN。「全局禁直连」开着(全局模式、用户没点断开)就只关内核自己那份描述符,
+// 宿主那份留着:系统的 VPN 接口还在、没人读,流量落进去就丢 —— 内核重启的空档一滴都漏不出去。
+// 撤闸(用户点断开)时守护进程会另行通知宿主关掉。
 func (t *hostTun) Close() error {
 	err := t.NativeTun.Close()
+	if t.keep != nil && t.keep() {
+		return err
+	}
 	t.once.Do(t.host.CloseTun)
 	return err
 }

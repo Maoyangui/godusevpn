@@ -35,12 +35,12 @@ type Input struct {
 const (
 	TestURL  = "http://www.gstatic.com/generate_204"
 	TunName  = "godusevpn"
-	tunAddr4 = "172.19.0.1/30"
+	TunAddr4 = "172.19.0.1/30"
 	// HijackDNS macOS 上接管系统 DNS 时填的地址。走的是"进了隧道就被 hijack-dns 接住"这条路,
 	// 所以填什么地址都一样(只要不是被排除在隧道外的私网段,也不能是 TUN 自己的地址 —— 那会被内核当本机地址回环)。
 	// 挑一个国内外都能用的公共解析器:万一哪次崩溃没来得及还原,机器照样能解析,不至于打不开网页。
 	HijackDNS     = "223.5.5.5"
-	tunAddr6      = "fdfe:dcba:9876::1/126"
+	TunAddr6      = "fdfe:dcba:9876::1/126"
 	fakeIP4       = "198.18.0.0/15"
 	fakeIP6       = "fc00::/18"
 	ruleSetBase   = "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/"
@@ -150,7 +150,7 @@ func Build(in Input) ([]byte, error) {
 	if s.TUN {
 		// v6 地址一直加:关掉 IPv6 时也要把 v6 流量接进隧道,否则它绕过隧道从物理网卡直接出网(泄露),
 		// 进来之后由下面的 ip_version=6 拒绝规则丢掉,应用会立刻回退到 IPv4。
-		addr := []string{tunAddr4, tunAddr6}
+		addr := []string{TunAddr4, TunAddr6}
 		stack := s.TUNStack
 		if darwin && stack != "gvisor" {
 			// macOS 上系统协议栈这条路走不通:sing-tun 把 utun 配成指向自己的点对点口(172.19.0.1 --> 172.19.0.1),

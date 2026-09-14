@@ -41,6 +41,7 @@ class GodVpnService : VpnService() {
     }
 
     private var tun: ParcelFileDescriptor? = null
+    private var lastSpec: String? = null // 上一次建接口用的参数:参数没变就沿用现有接口(见 openTun)
     private val listener: (String, String) -> Unit = { name, data -> if (name == "state") runCatching { updateNotification(JSONObject(data)) } }
 
     override fun onCreate() {
@@ -71,7 +72,11 @@ class GodVpnService : VpnService() {
 
     /** 按引擎给的 TunSpec 建 VPN,返回 fd(所有权交给引擎,自己留一个句柄用于关闭)。 */
     fun openTun(specJSON: String): Int {
-        closeTun()
+        // 「全局禁直连」时内核重启不会关掉接口(引擎里 hostTun.Close 只关自己那份):参数没变就把现有接口再给一次,
+        // 系统的 VPN 一直在,内核起来之前落进去的流量只会被丢,不会从 WiFi 漏出去
+        tun?.let { if (specJSON == lastSpec) { Log.i(App.TAG, "TUN 沿用现有接口"); return it.fd } }
+        val old = tun
+        tun = null
         val spec = JSONObject(specJSON)
         val b = Builder().setSession(getString(R.string.app_name)).setMtu(spec.optInt("mtu", 9000).coerceIn(1280, 65535))
         for (a in spec.optJSONArray("inet4Address").strings()) addr(b, a)
@@ -92,6 +97,8 @@ class GodVpnService : VpnService() {
         b.setBlocking(false)
         val pfd = try { b.establish() } catch (e: Exception) { Log.e(App.TAG, "establish", e); null } ?: return -1
         tun = pfd
+        lastSpec = specJSON
+        old?.let { runCatching { it.close() } } // 先建新的再关旧的,中间没有没接口的空档
         return pfd.fd
     }
 
@@ -109,6 +116,7 @@ class GodVpnService : VpnService() {
     fun closeTun() {
         val t = tun ?: return
         tun = null
+        lastSpec = null
         runCatching { t.close() }
         Log.i(App.TAG, "TUN 已关闭")
     }
@@ -138,7 +146,9 @@ class GodVpnService : VpnService() {
             else -> getString(R.string.st_disconnected)
         }
         val node = view.optString("autoNow").ifEmpty { view.optString("node") }
-        if (status == "disconnected" || status == "error" || status == "stopping") closeTun() // 内核不在跑就别让 VPN 接口留着吞流量
+        // 内核不在跑就别让 VPN 接口留着吞流量 —— 除非「全局禁直连」正开着:那时接口本身就是闸,留着才不漏;用户点断开时守护进程会来关
+        val guard = view.optJSONObject("settings")?.optBoolean("noDirect") == true && view.optString("mode") == "global" && view.optJSONObject("state")?.optBoolean("wanted") == true
+        if ((status == "disconnected" || status == "error" || status == "stopping") && !guard) closeTun()
         val n = buildNotification(text, if (status == "connected") node else null)
         if (Build.VERSION.SDK_INT >= 29) startForeground(NOTIFY_ID, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE) else startForeground(NOTIFY_ID, n)
         if (status == "disconnected" && !view.optJSONObject("state")!!.optBoolean("wanted")) {

@@ -45,6 +45,11 @@ type Daemon struct {
 	profiles   map[string]*profile.Profile // 订阅 id → 节点缓存
 	fetchErr   map[string]string           // 订阅 id → 最近一次拉取失败原因
 	fetchLink  map[string]string           // 订阅 id → 拉取失败(404)时面板随响应给的「选购 / 续费」地址
+	running    *profile.Profile            // 正在跑的内核是按哪份订阅生成的;刷新后拿它和缓存比,决定动不动隧道
+	guardOn    bool                        // 「全局禁直连」的闸此刻开着
+	guardErr   string                      // 闸该开却没开成的原因
+	guardMu    sync.Mutex                  // syncGuard 整段串行:判断 + 开 / 撤要一气呵成
+	releaseTun func()                      // 见 Options.ReleaseTun
 	machine    *state.Machine
 	server     *ipc.Server
 	secret     string
@@ -70,6 +75,8 @@ type persisted struct {
 type Options struct {
 	Platform adapter.PlatformInterface // Android:TUN、网络接口、连接归属由宿主提供
 	NoListen bool                      // 不开本机控制口(Android 只在进程内 Dispatch)
+	// ReleaseTun Android:「全局禁直连」撤闸时把留着的 VPN 接口关掉(内核没在跑时它是个黑洞);别的平台为 nil
+	ReleaseTun func()
 }
 
 // New 读设置与订阅缓存,装配各部件;不启动任何东西。
@@ -81,7 +88,7 @@ func NewWithOptions(o Options) (*Daemon, error) {
 		return nil, fmt.Errorf("建数据目录: %w", err)
 	}
 	d := &Daemon{
-		noListen: o.NoListen,
+		noListen: o.NoListen, releaseTun: o.ReleaseTun,
 		log:      logx.New(filepath.Join(paths.Logs(), "service.log"), 5<<20, 3),
 		coreLog:  logx.New(filepath.Join(paths.Logs(), "core.log"), 5<<20, 3),
 		http:     &http.Client{Timeout: 30 * time.Second},
@@ -184,6 +191,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 		case <-ctx.Done():
 			d.logf("服务停止")
 			d.machine.Disconnect()
+			d.syncGuard()
 			_ = d.server.Close()
 			d.log.Close()
 			d.coreLog.Close()
@@ -392,6 +400,7 @@ func (d *Daemon) prepare(ctx context.Context) ([]byte, error) {
 			d.logf("订阅「%s」已更新:%d 个节点", a.Name, len(p.Outbounds))
 		}
 	}
+	d.syncGuard() // 闸要在内核起来之前就到位:准备阶段本身可能要几秒,这几秒也不许漏
 	if s.NetMode == settings.NetGateway {
 		d.resolveDeviceIPs(&s) // 设备策略按当前 IP 生效
 	}
@@ -404,6 +413,9 @@ func (d *Daemon) prepare(ctx context.Context) ([]byte, error) {
 		return nil, state.Errf(state.CodeConfig, "配置校验失败: %v", err)
 	}
 	_ = os.WriteFile(paths.Config(), cfg, 0o600)
+	d.mu.Lock()
+	d.running = p
+	d.mu.Unlock()
 	return cfg, nil
 }
 
@@ -429,6 +441,7 @@ func (d *Daemon) start(cfg []byte) error {
 		}
 	}
 	_ = os.WriteFile(paths.LastGood(), cfg, 0o600)
+	d.guardTunUp()
 	s := d.getSettings()
 	if s.Selected != "" {
 		_ = d.core.Select("proxy", s.Selected) // 内核里的当前节点跟着设置走(cache_file 也会记,双保险)
@@ -461,6 +474,9 @@ func (d *Daemon) start(cfg []byte) error {
 func (d *Daemon) stop() error {
 	d.setPing(0)
 	d.clearExit()
+	d.mu.Lock()
+	d.running = nil
+	d.mu.Unlock()
 	err := d.core.Stop()
 	netmode.RestoreNICIPv6()
 	netmode.Unprotect()
@@ -654,8 +670,7 @@ func (d *Daemon) maybeRefresh(ctx context.Context) {
 		return
 	}
 	if changed {
-		d.logf("订阅节点有变化,重新应用")
-		d.machine.Restart()
+		d.afterRefresh(a.ID)
 	}
 }
 
@@ -775,7 +790,17 @@ func (d *Daemon) stateView() ipc.StateView {
 	}
 	v.Ping, v.ExitIP, v.ExitLoc = d.ping, d.exitIP, d.exitLoc
 	v.ExitCity, v.ExitRegion, v.ExitISP = d.exitCity, d.exitRegion, d.exitISP
+	if d.guardOn {
+		v.Guard = "on"
+	}
+	v.GuardError = d.guardErr
 	d.mu.Unlock()
+	if pc := d.pendingChange(); pc != nil {
+		v.Pending = pc
+		if v.Profile != nil {
+			v.Profile.Pending = pc
+		}
+	}
 	return v
 }
 
@@ -803,11 +828,13 @@ func (d *Daemon) registerHandlers() {
 		}
 		d.savePersisted(persisted{Wanted: true})
 		d.machine.Connect()
+		d.syncGuard()
 		return d.stateView(), nil
 	})
 	h(ipc.MDisconnect, func(json.RawMessage) (any, error) {
 		d.savePersisted(persisted{Wanted: false})
 		d.machine.Disconnect()
+		d.syncGuard()
 		return d.stateView(), nil
 	})
 	h(ipc.MSetMode, func(p json.RawMessage) (any, error) {
@@ -822,6 +849,7 @@ func (d *Daemon) registerHandlers() {
 		if err := d.setSettings(s); err != nil {
 			return nil, err
 		}
+		d.syncGuard()
 		if d.core.Running() {
 			if err := d.core.SetMode(builder.ModeName(s.Mode)); err != nil {
 				return nil, err
@@ -857,7 +885,9 @@ func (d *Daemon) registerHandlers() {
 		// 自动选择与手动指定之间来回切要重建配置:定时测速开不开是写在配置里的
 		// (手动指定时后台不再定时测速),只有重建才生效。同一类之间切就地换,不打断隧道。
 		if wasAuto != nowAuto {
-			d.machine.Restart()
+			if err := d.machine.Restart(); err != nil {
+				return nil, &ipc.CallError{Code: state.CodeOf(err), Msg: "切换失败,保持当前连接: " + err.Error()}
+			}
 			return d.stateView(), nil
 		}
 		if err := d.core.Select("proxy", tag); err != nil {
@@ -967,7 +997,7 @@ func (d *Daemon) registerHandlers() {
 		}
 		d.setProfileCache(sp.ID, np)
 		if first {
-			d.machine.Restart()
+			_ = d.machine.Restart() // 还没连着,只是把想连的状态接上;真要连是用户点连接
 		}
 		views, _ := d.profileViews()
 		return views, nil
@@ -1004,8 +1034,9 @@ func (d *Daemon) registerHandlers() {
 			if len(kept) == 0 {
 				d.savePersisted(persisted{Wanted: false})
 				d.machine.Disconnect()
-			} else {
-				d.machine.Restart()
+				d.syncGuard()
+			} else if err := d.machine.Restart(); err != nil {
+				d.logf("删掉当前订阅后切换失败: %v", err)
 			}
 		}
 		views, _ := d.profileViews()
@@ -1033,7 +1064,9 @@ func (d *Daemon) registerHandlers() {
 			if err := d.setSettings(s); err != nil {
 				return nil, err
 			}
-			d.machine.Restart()
+			if err := d.machine.Restart(); err != nil {
+				return nil, &ipc.CallError{Code: state.CodeOf(err), Msg: "切换订阅失败,保持当前连接: " + err.Error()}
+			}
 		}
 		return d.stateView(), nil
 	})
@@ -1075,7 +1108,9 @@ func (d *Daemon) registerHandlers() {
 				return nil, &ipc.CallError{Code: state.CodeOf(err), Msg: err.Error()}
 			}
 			if s.ActiveProfile == in.ID {
-				d.machine.Restart()
+				if err := d.machine.Restart(); err != nil {
+					return nil, &ipc.CallError{Code: state.CodeOf(err), Msg: "新地址的配置生成失败,保持当前连接: " + err.Error()}
+				}
 			}
 		}
 		views, _ := d.profileViews()
@@ -1096,11 +1131,20 @@ func (d *Daemon) registerHandlers() {
 		if err != nil {
 			return nil, &ipc.CallError{Code: state.CodeOf(err), Msg: err.Error()}
 		}
-		if changed && id == d.getSettings().ActiveProfile {
-			d.machine.Restart()
+		if changed {
+			d.afterRefresh(id)
+		} else {
+			d.logf("订阅刷新:无变化")
 		}
 		views, _ := d.profileViews()
 		return views, nil
+	})
+	// ApplyProfile 把刷新后还没用上的节点列表用起来:用户明确点的「现在应用」,会重连
+	h(ipc.MApplyProfile, func(json.RawMessage) (any, error) {
+		if err := d.machine.Restart(); err != nil {
+			return nil, &ipc.CallError{Code: state.CodeOf(err), Msg: "应用失败,保持当前连接: " + err.Error()}
+		}
+		return d.stateView(), nil
 	})
 	// SetProfileURL 兼容命令行:有当前订阅就改它的地址,没有就新增一条
 	h(ipc.MSetProfileURL, func(p json.RawMessage) (any, error) {
@@ -1160,7 +1204,9 @@ func (d *Daemon) registerHandlers() {
 			return nil, err
 		}
 		if d.core.Running() && s.NetMode == settings.NetGateway {
-			d.machine.Restart()
+			if err := d.machine.Restart(); err != nil {
+				d.logf("重新应用配置失败,保持当前连接: %v", err)
+			}
 		}
 		return d.deviceViews(), nil
 	})
@@ -1187,7 +1233,9 @@ func (d *Daemon) registerHandlers() {
 			return nil, err
 		}
 		if removedPolicy && d.core.Running() && s.NetMode == settings.NetGateway {
-			d.machine.Restart()
+			if err := d.machine.Restart(); err != nil {
+				d.logf("重新应用配置失败,保持当前连接: %v", err)
+			}
 		}
 		return d.deviceViews(), nil
 	})
@@ -1205,11 +1253,14 @@ func (d *Daemon) registerHandlers() {
 		if err := d.setSettings(next); err != nil {
 			return nil, err
 		}
+		d.syncGuard()
 		if d.core.Running() {
-			live := prev // 模式与节点是运行时可改的,别的都要重新生成配置
-			live.Mode, live.Selected = next.Mode, next.Selected
+			live := prev // 模式、节点、禁直连开关是运行时可改的,别的都要重新生成配置
+			live.Mode, live.Selected, live.NoDirect = next.Mode, next.Selected, next.NoDirect
 			if !reflect.DeepEqual(live, next) {
-				d.machine.Restart()
+				if err := d.machine.Restart(); err != nil {
+					return nil, &ipc.CallError{Code: state.CodeOf(err), Msg: "新设置的配置生成失败,保持当前连接: " + err.Error()}
+				}
 			} else {
 				if next.Mode != prev.Mode {
 					_ = d.core.SetMode(builder.ModeName(next.Mode))

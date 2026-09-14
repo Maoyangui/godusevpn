@@ -36,6 +36,32 @@ flag-icons —— web/dist/flags/ 下的各地区旗帜(取其 flags/1x1 方形�
 
 ---
 
+wireguard-windows —— internal/netmode/wfp/ 下的 Windows 过滤平台(WFP)代码改自它的 tunnel/firewall,用来做「全局禁直连」的闸
+  https://git.zx2c4.com/wireguard-windows
+  MIT License
+
+  Copyright (C) 2018-2021 WireGuard LLC. All Rights Reserved.
+
+  Permission is hereby granted, free of charge, to any person obtaining a
+  copy of this software and associated documentation files (the "Software"),
+  to deal in the Software without restriction, including without limitation
+  the rights to use, copy, modify, merge, publish, distribute, sublicense,
+  and/or sell copies of the Software, and to permit persons to whom the
+  Software is furnished to do so, subject to the following conditions:
+
+  The above copyright notice and this permission notice shall be included in
+  all copies or substantial portions of the Software.
+
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+  FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+  DEALINGS IN THE SOFTWARE.
+
+---
+
 查出口用到的两个公开端点(只发请求,不带任何本机信息;请求经隧道发出,对方看到的是节点的出口地址):
   https://ipwho.is/                        免密钥的 IP 信息接口
   https://www.cloudflare.com/cdn-cgi/trace Cloudflare 自家的诊断端点,前者不通时兜底

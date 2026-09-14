@@ -22,6 +22,7 @@ const (
 	MGetProfile     = "GetProfile"
 	MSetProfileURL  = "SetProfileURL"
 	MRefreshProfile = "RefreshProfile"
+	MApplyProfile   = "ApplyProfile" // 把刷新后还没用上的节点列表用起来(会重连)
 	MGetSettings    = "GetSettings"
 	MSetSettings    = "SetSettings"
 	MGetLogs        = "GetLogs"

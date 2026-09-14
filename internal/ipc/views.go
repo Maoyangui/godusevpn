@@ -21,6 +21,8 @@ type ProfileView struct {
 	WebPage   string        `json:"webPage,omitempty"` // 面板给的「选购 / 续费」地址,空 = 没配
 	Usage     profile.Usage `json:"usage"`
 	Error     string        `json:"error,omitempty"` // 最近一次拉取失败的原因
+	// Pending 刷新拿到、但正在跑的内核还没用上的节点变化;只有当前订阅、内核在跑时才有。重连后就用上了。
+	Pending *profile.Change `json:"pending,omitempty"`
 }
 
 // DeviceView 局域网设备(网关模式):设置里记过的带 Saved 与策略,只在网上看到的 Saved 为假。
@@ -57,7 +59,10 @@ type StateView struct {
 	ExitRegion string            `json:"exitRegion,omitempty"` // 出口所在一级行政区
 	ExitISP    string            `json:"exitIsp,omitempty"`    // 出口那条线路的运营商 / 机房
 	Uptime     int64             `json:"uptime"`
-	Profile    *ProfileView      `json:"profile,omitempty"` // 当前订阅
-	Profiles   []ProfileView     `json:"profiles"`          // 全部订阅
+	Pending    *profile.Change   `json:"pending,omitempty"`    // 刷新拿到、但正在跑的内核还没用上的节点变化(与 Profile.Pending 相同,首页用)
+	Guard      string            `json:"guard,omitempty"`      // 全局禁直连的闸:on = 开着;空 = 没开(开关关了、不是全局模式、或没在连)
+	GuardError string            `json:"guardError,omitempty"` // 闸该开却没开成(或隧道网卡放行失败)的原因
+	Profile    *ProfileView      `json:"profile,omitempty"`    // 当前订阅
+	Profiles   []ProfileView     `json:"profiles"`             // 全部订阅
 	Settings   settings.Settings `json:"settings"`
 }
