@@ -19,6 +19,7 @@ import (
 
 	"github.com/Maoyangui/godusevpn/internal/buildinfo"
 	"github.com/Maoyangui/godusevpn/internal/daemon"
+	"github.com/Maoyangui/godusevpn/internal/guardfix"
 	"github.com/Maoyangui/godusevpn/internal/netmode"
 	"github.com/Maoyangui/godusevpn/internal/svc"
 )
@@ -76,12 +77,12 @@ func main() {
 			if relaunchElevated() {
 				return
 			}
-			netmode.ClearGuard()
-			n, _ := netmode.GuardStatus()
-			if n == 0 {
-				fmt.Println("禁直连闸已解除,直连恢复。要再开闸,启动服务并连接即可。")
-			} else {
-				fmt.Printf("过滤器还剩 %d 条,没删干净(是不是没用管理员身份跑?)\n", n)
+			text, ok := guardfix.Clear()
+			fmt.Println(text)
+			if len(os.Args) > 3 && os.Args[3] == "--popup" {
+				notify(text)
+			}
+			if !ok {
 				os.Exit(1)
 			}
 		case "status":

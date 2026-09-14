@@ -93,7 +93,7 @@ func (t *trayUI) onReady() {
 			return
 		}
 		if p, err := serviceBinary(filepath.Dir(exe)); err == nil {
-			_ = runElevated(p, "guard clear")
+			_ = runElevated(p, "guard clear --popup")
 		}
 	})
 	t.upgrade.Click(func() { t.app.showAbout() })

@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/Maoyangui/godusevpn/internal/buildinfo"
+	"github.com/Maoyangui/godusevpn/internal/guardfix"
 	"github.com/Maoyangui/godusevpn/internal/ipc"
 	"github.com/Maoyangui/godusevpn/internal/netmode"
 	"github.com/Maoyangui/godusevpn/internal/settings"
@@ -244,12 +245,10 @@ func Main(args []string) int {
 		}
 		switch sub {
 		case "clear":
-			netmode.ClearGuard()
-			n, _ := netmode.GuardStatus()
-			if n == 0 {
-				fmt.Println("禁直连闸已解除,直连恢复。")
-			} else {
-				err = fmt.Errorf("闸没清干净,还剩 %d 条(需要 root / 管理员身份)", n)
+			text, ok := guardfix.Clear()
+			fmt.Println(text)
+			if !ok {
+				err = errors.New("需要 root / 管理员身份")
 			}
 		case "status":
 			var n int

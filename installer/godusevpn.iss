@@ -83,7 +83,7 @@ Source: "deps\MicrosoftEdgeWebview2Setup.exe"; DestDir: "{tmp}"; Flags: deleteaf
 [Icons]
 Name: "{group}\{#AppName}"; Filename: "{app}\godusevpn.exe"
 Name: "{group}\卸载 {#AppName}"; Filename: "{uninstallexe}"
-Name: "{group}\恢复网络(解除禁直连闸)"; Filename: "{app}\godusevpn-svc.exe"; Parameters: "guard clear"; Comment: "服务起不来、网络被禁直连闸拦住时用"
+Name: "{group}\恢复网络(解除禁直连闸)"; Filename: "{app}\godusevpn-svc.exe"; Parameters: "guard clear --popup"; Comment: "服务起不来、网络被禁直连闸拦住时用"
 Name: "{autodesktop}\{#AppName}"; Filename: "{app}\godusevpn.exe"
 
 [Registry]

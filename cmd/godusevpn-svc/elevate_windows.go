@@ -27,3 +27,10 @@ func relaunchElevated() bool {
 	dir, _ := syscall.UTF16PtrFromString(filepath.Dir(exe))
 	return windows.ShellExecute(0, verb, file, args, dir, windows.SW_SHOWNORMAL) == nil
 }
+
+// notify 弹个框把结果告诉用户:从开始菜单 / 托盘走过来的没有控制台可看。
+func notify(text string) {
+	t, _ := syscall.UTF16PtrFromString(text)
+	c, _ := syscall.UTF16PtrFromString("佛跳墙 · 恢复网络")
+	_, _ = windows.MessageBox(0, t, c, windows.MB_OK|windows.MB_ICONINFORMATION|windows.MB_SETFOREGROUND)
+}
