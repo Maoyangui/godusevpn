@@ -267,8 +267,13 @@ jobs:
           export ANDROID_NDK_HOME="$ANDROID_NDK_LATEST_HOME"
           gomobile init
           mkdir -p android/app/libs
-          gomobile bind -target android/arm64,android/arm,android/amd64 -androidapi 26 -javapkg com.maoyangui.godusevpn \
-            -tags "$TAGS" -ldflags "$LD" -trimpath -o android/app/libs/godusevpn.aar ./mobile
+          # sum.golang.org 时不时抽风("stream error … INTERNAL_ERROR"),gomobile 里的 go mod tidy 会因此失败:重试三次
+          for i in 1 2 3; do
+            if gomobile bind -target android/arm64,android/arm,android/amd64 -androidapi 26 -javapkg com.maoyangui.godusevpn \
+              -tags "$TAGS" -ldflags "$LD" -trimpath -o android/app/libs/godusevpn.aar ./mobile; then break; fi
+            [ "$i" = 3 ] && exit 1
+            echo "gomobile bind 第 $i 次失败,30 秒后重试"; sleep 30
+          done
           ls -la android/app/libs
 
       - name: Signing key (仓库机密里的自建密钥;没有就用 debug 签名)
