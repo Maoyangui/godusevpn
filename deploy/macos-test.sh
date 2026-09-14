@@ -129,7 +129,7 @@ if [ -n "$U" ] && [ -n "$defif" ]; then
 else
   echo "  (跳过直连探测:U=$U defif=$defif)"
 fi
-t=$(curl -s -m 15 -o /dev/null -w '%{http_code}' http://1.1.1.1/cdn-cgi/trace 2>/dev/null || true)
+t=$(curl -s -m 15 -o /dev/null -w '%{http_code}' https://1.1.1.1/cdn-cgi/trace 2>/dev/null || true) # 明文 http 会被 301 到 https,拿 https 直接要 200
 check "经隧道照常" "$([ "$t" = "200" ] && echo 1 || echo 0)" "http=${t:-000}"
 "$BIN" mode rule >/dev/null 2>&1
 sleep 2
