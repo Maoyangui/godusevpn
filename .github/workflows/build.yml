@@ -328,4 +328,5 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/v')
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh workflow run pages.yml --ref master || echo "触发 pages 失败(不影响发布)"
+        # release 作业没 checkout,gh 在空目录里找不到仓库上下文,必须显式 -R
+        run: gh workflow run pages.yml --ref master -R "$GITHUB_REPOSITORY" || echo "触发 pages 失败(不影响发布)"
