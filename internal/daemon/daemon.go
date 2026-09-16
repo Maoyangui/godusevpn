@@ -18,6 +18,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/sagernet/sing-box/adapter"
@@ -40,6 +41,7 @@ type Daemon struct {
 	mu         sync.Mutex
 	log        *logx.Rotator
 	coreLog    *logx.Rotator
+	coreLevel  atomic.Int32 // 内核日志记到哪一级(core.Writer 按它过滤)
 	core       *core.Core
 	settings   settings.Settings
 	profiles   map[string]*profile.Profile // 订阅 id → 节点缓存
@@ -96,7 +98,8 @@ func NewWithOptions(o Options) (*Daemon, error) {
 		profiles: map[string]*profile.Profile{},
 		fetchErr: map[string]string{}, fetchLink: map[string]string{},
 	}
-	d.core = core.New(core.Writer{Printf: d.coreLog.Printf})
+	d.coreLevel.Store(core.LevelOf(d.settings.LogLevel))
+	d.core = core.New(core.Writer{Printf: d.coreLog.Printf, Level: &d.coreLevel})
 	if o.Platform != nil {
 		d.core.SetPlatform(o.Platform)
 	}
@@ -389,6 +392,7 @@ func (d *Daemon) refreshProfile(ctx context.Context, id string) (changed bool, e
 // prepare 状态机的第一步:当前订阅过期就刷新(失败用缓存),生成配置,干跑。
 func (d *Daemon) prepare(ctx context.Context) ([]byte, error) {
 	s := d.getSettings()
+	d.coreLevel.Store(core.LevelOf(s.LogLevel)) // 内核日志按设置的级别写,改了设置下次连接生效
 	a, p := d.activeProfile()
 	if a == nil {
 		return nil, state.Errf(state.CodeProfileMissing, "还没有添加订阅")

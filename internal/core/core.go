@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	M "github.com/sagernet/sing/common/metadata"
@@ -65,14 +66,29 @@ type discard struct{}
 func (discard) WriteMessage(log.Level, string) {}
 
 // Writer 把内核日志转成 "LEVEL message" 行交给一个 Printf 风格的函数(服务日志滚动器)。
+// sing-box 把每一级的消息都交给平台写入器,配置里的 level 只管它自己的默认输出 —— 不在这里按级别过滤的话,
+// 设置 info 时 core.log 里照样全是 DEBUG,每小时十来 MB 落盘。Level 为 nil 时不过滤。
 type Writer struct {
 	Printf func(level, format string, a ...any)
+	Level  *atomic.Int32 // 记到这一级为止(sing-box 的 log.Level 数值:panic 0 … info 4, debug 5, trace 6)
 }
 
 func (w Writer) WriteMessage(level log.Level, message string) {
+	if w.Level != nil && int32(level) > w.Level.Load() {
+		return
+	}
 	if w.Printf != nil {
 		w.Printf(strings.ToUpper(log.FormatLevel(level)), "%s", message)
 	}
+}
+
+// LevelOf 设置里的级别名转成 sing-box 的数值;认不出按 info。
+func LevelOf(name string) int32 {
+	lv, err := log.ParseLevel(name)
+	if err != nil {
+		lv = log.LevelInfo
+	}
+	return int32(lv)
 }
 
 // 大坑:sing-box 的 New 会把注册表放进 ctx;要在 New 之前就把注册表建好,之后才能从同一个 ctx 拿到 Clash 服务等对象。
