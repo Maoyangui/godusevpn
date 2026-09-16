@@ -306,6 +306,25 @@ func (c *Core) URLTest(ctx context.Context, tag, link string) (int, error) {
 	return int(ms), nil
 }
 
+// GroupTest 让自动选择组测一轮全部成员并按结果换到最快的(等价于 Clash API 的 /group/{tag}/delay)。
+// 配置里把 sing-box 自己的定时测速关了(builder.autoGroup),什么时候测由守护进程按"定时测速(分钟)"来叫。
+// 组里正在测就直接返回空结果(sing-box 自己有个 checking 标记),不会叠着测两轮。
+func (c *Core) GroupTest(ctx context.Context, tag string) (map[string]uint16, error) {
+	box, _, ok := c.snapshot()
+	if !ok {
+		return nil, errors.New("内核未运行")
+	}
+	ob, found := box.Outbound().Outbound(tag)
+	if !found {
+		return nil, fmt.Errorf("没有出站 %q", tag)
+	}
+	g, isGroup := ob.(adapter.URLTestGroup)
+	if !isGroup {
+		return nil, fmt.Errorf("%q 不是自动选择组", tag)
+	}
+	return g.URLTest(ctx)
+}
+
 // ProbeRunning 内核在跑时给一批出站各测一次延迟(并发 8 路),返回 节点 → 毫秒,-1 = 不通。
 // onEach 不为空时每测出一个就先报一次:上百个节点全测完要好几秒,界面得能一个一个显示出来。
 func (c *Core) ProbeRunning(ctx context.Context, tags []string, link string, onEach func(tag string, ms int)) map[string]int {

@@ -42,6 +42,10 @@ type Daemon struct {
 	log        *logx.Rotator
 	coreLog    *logx.Rotator
 	coreLevel  atomic.Int32 // 内核日志记到哪一级(core.Writer 按它过滤)
+	restarting atomic.Bool  // 正在重建配置重连:stop() 期间别还原网卡的 IPv6 绑定(起来时马上又要关)
+	nicOff     atomic.Bool  // 各网卡的 IPv6 绑定已由我们停掉、还没还原
+	probeMu    sync.Mutex
+	probeAt    time.Time // auto 组上次测完一轮全部节点的时间,autoProbeLoop 按它算下一次
 	core       *core.Core
 	settings   settings.Settings
 	profiles   map[string]*profile.Profile // 订阅 id → 节点缓存
@@ -184,6 +188,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 		}
 	}
 	d.reconcileGuard()
+	go d.autoProbeLoop(ctx)
 	if d.loadPersisted().Wanted {
 		d.logf("上次是已连接状态,自动连接")
 		d.machine.Connect()
@@ -435,9 +440,12 @@ func (d *Daemon) start(cfg []byte) error {
 	// 关 IPv6 时顺带把各网卡的 IPv6 协议停掉:运营商的公网 v6 地址就配在网卡上,
 	// 挡数据包挡不住"程序枚举网卡读走地址再报出去",地址不存在才是真的读不到。
 	// 放在内核启动之前做:改协议绑定会让网卡重新走一遍协议栈,别去抖刚建好的隧道。
-	if s0 := d.getSettings(); s0.TUN && !s0.IPv6 && s0.DisableNICIPv6 {
+	// 重建配置重连时上次 stop() 没还原(见 restart),绑定还是关着的,不用再跑一遍。
+	if wantNICOff(d.getSettings()) && !d.nicOff.Load() {
 		if err := netmode.DisableNICIPv6(builder.TunName); err != nil {
 			d.logf("停用网卡 IPv6 失败(不影响连接,但网卡上的公网 IPv6 地址还在): %v", err)
+		} else {
+			d.nicOff.Store(true)
 		}
 	}
 	if err := d.core.Start(cfg); err != nil {
@@ -455,6 +463,7 @@ func (d *Daemon) start(cfg []byte) error {
 	d.mu.Lock()
 	d.running = d.prepared // 起来了,这份订阅才是内核在用的
 	d.mu.Unlock()
+	d.markProbed() // sing-box 启动时(PostStart)自己会把 auto 组全测一轮,定时测速从这时候起算
 	d.guardTunUp()
 	s := d.getSettings()
 	if s.Selected != "" {
@@ -462,6 +471,7 @@ func (d *Daemon) start(cfg []byte) error {
 	}
 	// 连上就先测一次当前节点,再查一次出口地址:首页那两项要马上有数,
 	// 不然延迟得等到第一次健康检查(三分钟后),出口地址则一直空着。
+	// (自动选择时不用在这里叫 auto 组测一轮:sing-box 的 urltest 组 PostStart 会自己把全部成员测一遍。)
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
 		defer cancel()
@@ -492,7 +502,11 @@ func (d *Daemon) stop() error {
 	d.running = nil
 	d.mu.Unlock()
 	err := d.core.Stop()
-	netmode.RestoreNICIPv6()
+	// 重建配置重连、且新设置照样要停网卡 IPv6:绑定留着不还原,起来时也不用再关(见 restart)
+	if !(d.restarting.Load() && wantNICOff(d.getSettings())) {
+		netmode.RestoreNICIPv6()
+		d.nicOff.Store(false)
+	}
 	netmode.Unprotect()
 	netmode.ClearGateway()
 	return err
@@ -521,6 +535,67 @@ func (d *Daemon) health(ctx context.Context) error {
 		go d.refreshExit(d.beginExit(now))
 	}
 	return nil
+}
+
+// restart 重建配置重连:内核停了再起,隧道要断几秒,所以能就地改的(切节点、自动 / 手动、切模式、定时测速)
+// 都不走这里。期间不还原网卡的 IPv6 绑定:停 / 起各改一次协议绑定,网卡各重走一遍协议栈,三秒的重连拖成
+// 六七秒,局域网也跟着抖。
+func (d *Daemon) restart() error {
+	d.restarting.Store(true)
+	defer d.restarting.Store(false)
+	return d.machine.Restart()
+}
+
+// wantNICOff 这份设置要不要停掉各网卡的 IPv6 协议绑定。
+func wantNICOff(s settings.Settings) bool {
+	return s.TUN && !s.IPv6 && s.DisableNICIPv6
+}
+
+// groupTest 让 auto 组测一轮全部节点并换到最快的,记下时间。sing-box 自己的定时测速在配置里关掉了
+// (builder.autoGroup),什么时候测由这里叫:切到自动选择时立刻一次,之后 autoProbeLoop 按"定时测速(分钟)"来。
+func (d *Daemon) groupTest(ctx context.Context) {
+	tctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	if _, err := d.core.GroupTest(tctx, "auto"); err != nil {
+		d.logf("自动选择组测速失败: %v", err)
+		return
+	}
+	d.markProbed()
+}
+
+func (d *Daemon) markProbed() {
+	d.probeMu.Lock()
+	d.probeAt = time.Now()
+	d.probeMu.Unlock()
+}
+
+// autoProbeLoop "定时测速(分钟)":自动选择时每隔这么久让 auto 组测一轮全部节点并换到最快的。手动指定节点时不测
+// (后台每几分钟把上百个节点全连一遍没有意义,打开节点列表时会现测)。以前这个间隔写在 auto 组的配置里,
+// 自动 / 手动之间切一次就得重建配置重连,断几秒网;现在配置不随模式变,切换就地完成,改间隔也即刻生效。
+func (d *Daemon) autoProbeLoop(ctx context.Context) {
+	t := time.NewTicker(15 * time.Second)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+		s := d.getSettings()
+		if s.Selected != "" || !d.core.Running() {
+			continue
+		}
+		every := time.Duration(s.ProbeMinutes) * time.Minute
+		if every < time.Minute {
+			every = 3 * time.Minute
+		}
+		d.probeMu.Lock()
+		due := time.Since(d.probeAt) >= every
+		d.probeMu.Unlock()
+		if due {
+			d.groupTest(ctx)
+		}
+	}
 }
 
 // currentNode 内核里 proxy 组此刻实际落在哪个节点;自动选择时是 auto 组选中的那个。
@@ -885,29 +960,21 @@ func (d *Daemon) registerHandlers() {
 		}
 		tag := strings.TrimSpace(in.Tag)
 		s := d.getSettings()
-		wasAuto := s.Selected == ""
 		s.Selected = tag
 		if tag == "auto" {
 			s.Selected = ""
 		}
-		nowAuto := s.Selected == ""
 		if err := d.setSettings(s); err != nil {
 			return nil, err
 		}
 		if !d.core.Running() {
 			return d.stateView(), nil
 		}
-		// 自动选择与手动指定之间来回切要重建配置:定时测速开不开是写在配置里的
-		// (手动指定时后台不再定时测速),只有重建才生效。同一类之间切就地换,不打断隧道。
-		if wasAuto != nowAuto {
-			if err := d.machine.Restart(); err != nil {
-				return nil, &ipc.CallError{Code: state.CodeOf(err), Msg: "切换失败,保持当前连接: " + err.Error()}
-			}
-			return d.stateView(), nil
-		}
+		// 自动 / 手动之间切换也是就地换:定时测速不再写在配置里(autoProbeLoop 按设置叫),配置不随模式变,
+		// 不用重建重连。以前这里要重启内核,每切一次断几秒网。
 		// 选的节点内核里还没有(刚刷新加进来的)、或者参数已经跟内核用的那份不一样:就地换不了,重建配置重连
 		if d.needRebuildFor(s.Selected) {
-			if err := d.machine.Restart(); err != nil {
+			if err := d.restart(); err != nil {
 				return nil, &ipc.CallError{Code: state.CodeOf(err), Msg: "切换失败,保持当前连接: " + err.Error()}
 			}
 			return d.stateView(), nil
@@ -924,6 +991,10 @@ func (d *Daemon) registerHandlers() {
 		d.clearExit()
 		d.setPing(0)
 		go func() {
+			// 切到自动选择:先让 auto 组现测一轮换到最快的,首页的延迟 / 出口才是新节点的
+			if s.Selected == "" {
+				d.groupTest(context.Background())
+			}
 			ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
 			defer cancel()
 			if ms, err := d.core.URLTest(ctx, "proxy", builder.TestURL); err == nil {
@@ -1026,7 +1097,7 @@ func (d *Daemon) registerHandlers() {
 		}
 		d.setProfileCache(sp.ID, np)
 		if first {
-			_ = d.machine.Restart() // 还没连着,只是把想连的状态接上;真要连是用户点连接
+			_ = d.restart() // 还没连着,只是把想连的状态接上;真要连是用户点连接
 		}
 		views, _ := d.profileViews()
 		return views, nil
@@ -1064,7 +1135,7 @@ func (d *Daemon) registerHandlers() {
 				d.savePersisted(persisted{Wanted: false})
 				d.machine.Disconnect()
 				d.syncGuard()
-			} else if err := d.machine.Restart(); err != nil {
+			} else if err := d.restart(); err != nil {
 				d.logf("删掉当前订阅后切换失败: %v", err)
 			}
 		}
@@ -1093,7 +1164,7 @@ func (d *Daemon) registerHandlers() {
 			if err := d.setSettings(s); err != nil {
 				return nil, err
 			}
-			if err := d.machine.Restart(); err != nil {
+			if err := d.restart(); err != nil {
 				return nil, &ipc.CallError{Code: state.CodeOf(err), Msg: "切换订阅失败,保持当前连接: " + err.Error()}
 			}
 		}
@@ -1137,7 +1208,7 @@ func (d *Daemon) registerHandlers() {
 				return nil, &ipc.CallError{Code: state.CodeOf(err), Msg: err.Error()}
 			}
 			if s.ActiveProfile == in.ID {
-				if err := d.machine.Restart(); err != nil {
+				if err := d.restart(); err != nil {
 					return nil, &ipc.CallError{Code: state.CodeOf(err), Msg: "新地址的配置生成失败,保持当前连接: " + err.Error()}
 				}
 			}
@@ -1227,7 +1298,7 @@ func (d *Daemon) registerHandlers() {
 			return nil, err
 		}
 		if d.core.Running() && s.NetMode == settings.NetGateway {
-			if err := d.machine.Restart(); err != nil {
+			if err := d.restart(); err != nil {
 				d.logf("重新应用配置失败,保持当前连接: %v", err)
 			}
 		}
@@ -1256,7 +1327,7 @@ func (d *Daemon) registerHandlers() {
 			return nil, err
 		}
 		if removedPolicy && d.core.Running() && s.NetMode == settings.NetGateway {
-			if err := d.machine.Restart(); err != nil {
+			if err := d.restart(); err != nil {
 				d.logf("重新应用配置失败,保持当前连接: %v", err)
 			}
 		}
@@ -1278,10 +1349,10 @@ func (d *Daemon) registerHandlers() {
 		}
 		d.syncGuard()
 		if d.core.Running() {
-			live := prev // 模式、节点、禁直连开关是运行时可改的,别的都要重新生成配置
-			live.Mode, live.Selected, live.NoDirect = next.Mode, next.Selected, next.NoDirect
+			live := prev // 模式、节点、禁直连开关、定时测速间隔是运行时可改的,别的都要重新生成配置
+			live.Mode, live.Selected, live.NoDirect, live.ProbeMinutes = next.Mode, next.Selected, next.NoDirect, next.ProbeMinutes
 			if !reflect.DeepEqual(live, next) {
-				if err := d.machine.Restart(); err != nil {
+				if err := d.restart(); err != nil {
 					return nil, &ipc.CallError{Code: state.CodeOf(err), Msg: "新设置的配置生成失败,保持当前连接: " + err.Error()}
 				}
 			} else {
@@ -1290,7 +1361,7 @@ func (d *Daemon) registerHandlers() {
 				}
 				if next.Selected != prev.Selected {
 					if d.needRebuildFor(next.Selected) {
-						if err := d.machine.Restart(); err != nil {
+						if err := d.restart(); err != nil {
 							return nil, &ipc.CallError{Code: state.CodeOf(err), Msg: "切换失败,保持当前连接: " + err.Error()}
 						}
 						return d.getSettings(), nil
@@ -1298,6 +1369,7 @@ func (d *Daemon) registerHandlers() {
 					sel := next.Selected
 					if sel == "" {
 						sel = "auto"
+						go d.groupTest(context.Background()) // 切到自动选择:现测一轮换到最快的
 					}
 					_ = d.core.Select("proxy", sel)
 				}

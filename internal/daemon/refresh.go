@@ -77,7 +77,7 @@ func (d *Daemon) afterRefresh(id string) {
 		d.logf("订阅刷新:%s;已更新到节点列表,当前连接不受影响", why)
 	case refreshReconnect:
 		d.logf("订阅刷新:%s;重新连接", why)
-		if err := d.machine.Restart(); err != nil {
+		if err := d.restart(); err != nil {
 			d.logf("重新连接失败,保持当前连接: %v", err)
 		}
 	}

@@ -207,12 +207,14 @@ func TestBypassAppsRule(t *testing.T) {
 	}
 }
 
+// "定时测速(分钟)"不写进配置:由守护进程按它定时叫 auto 组测一轮(Core.GroupTest),配置里 sing-box 自己的
+// 定时测速一律关掉。写进配置的话自动 / 手动之间切换就得重建配置重连,断几秒网。
 func TestProbeInterval(t *testing.T) {
 	s := settings.Default()
 	s.ProbeMinutes = 7
 	_, raw := build(t, s)
-	if !strings.Contains(raw, "\"interval\": \"7m\"") {
-		t.Fatalf("auto 组的测速间隔应跟设置走: %s", raw)
+	if strings.Contains(raw, "\"interval\": \"7m\"") {
+		t.Fatalf("测速间隔不该写进配置(由守护进程定时叫): %s", raw)
 	}
 }
 
@@ -463,8 +465,8 @@ func TestNodeRulesFollowProfile(t *testing.T) {
 	}
 }
 
-// 定时测速只在"当前是自动选择"时开着:手动指定了节点,后台每隔几分钟把上百个节点全连一遍没有意义
-// (打开节点列表时会现测)。关掉的写法是给一个很长的间隔 —— interval 留空会退回 sing-box 默认的三分钟。
+// auto 组的配置不随"自动 / 手动"变(两者之间切换才能就地完成、不重连):sing-box 自己的定时测速一律关掉,
+// 关掉的写法是给一个很长的间隔 —— interval 留空会退回 sing-box 默认的三分钟,idle_timeout 必须不小于它。
 func TestProbeOnlyWhenAuto(t *testing.T) {
 	find := func(s settings.Settings) map[string]any {
 		raw, err := Build(Input{Profile: sampleProfile(), Settings: s, DataDir: t.TempDir(), ClashSecret: "sec"})
@@ -487,19 +489,13 @@ func TestProbeOnlyWhenAuto(t *testing.T) {
 	s := settings.Default()
 	s.ProbeMinutes = 5
 	auto := find(s) // Selected 为空 = 自动选择
-	if auto["interval"] != "5m" {
-		t.Fatalf("自动选择时应按设置定时测速,实际 %v", auto["interval"])
-	}
-	if auto["idle_timeout"] != nil {
-		t.Fatalf("自动选择时不该动 idle_timeout: %v", auto["idle_timeout"])
+	if auto["interval"] != "24h" || auto["idle_timeout"] != "25h" {
+		t.Fatalf("自动选择时 sing-box 自己的定时测速也要关掉(由守护进程定时叫),实际 %v / %v", auto["interval"], auto["idle_timeout"])
 	}
 
 	s.Selected = "香港1"
 	fixed := find(s)
-	if fixed["interval"] == "5m" || fixed["interval"] == nil {
-		t.Fatalf("手动指定节点时不该再定时测速,实际 %v", fixed["interval"])
-	}
-	if fixed["idle_timeout"] == nil {
-		t.Fatalf("拉长间隔时必须同时放大 idle_timeout,否则 sing-box 会拒绝启动")
+	if fixed["interval"] != "24h" || fixed["idle_timeout"] != "25h" {
+		t.Fatalf("手动指定节点时 auto 组应与自动选择时一模一样(切换才能不重建配置),实际 %v / %v", fixed["interval"], fixed["idle_timeout"])
 	}
 }

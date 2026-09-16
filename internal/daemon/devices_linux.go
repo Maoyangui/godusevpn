@@ -187,7 +187,7 @@ func (d *Daemon) deviceRescan() {
 			}
 		}
 		d.mu.Unlock()
-		d.machine.Restart()
+		d.restart()
 	}
 }
 

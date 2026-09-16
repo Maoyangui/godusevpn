@@ -25,13 +25,17 @@ import (
 func nicBackup() string { return filepath.Join(paths.DataDir(), "nic-ipv6-backup.txt") }
 
 // DisableNICIPv6 停用各网卡的 IPv6 绑定,隧道自己那张除外 —— 隧道要靠 v6 地址把 v6 流量接进来再拒绝,
-// 关了它反而少一层防护。
+// 关了它反而少一层防护。已有备份(上次停了还没还原,比如重建配置重连时守护进程故意不还原)就不再覆盖:
+// 这时候各网卡都是关着的,再备份一次记下的全是"关",最后还原时就什么都开不回来了。
 func DisableNICIPv6(tunName string) error {
 	script := `
 $ErrorActionPreference = 'SilentlyContinue'
 $tun = '` + psQuote(tunName) + `'
 $all = @(Get-NetAdapterBinding -ComponentID ms_tcpip6 | Where-Object { $_.Name -ne $tun })
-@($all | ForEach-Object { $_.Name + "` + "\t" + `" + $_.Enabled }) | Set-Content -Encoding utf8 -LiteralPath '` + psQuote(nicBackup()) + `'
+$b = '` + psQuote(nicBackup()) + `'
+if (-not (Test-Path -LiteralPath $b)) {
+  @($all | ForEach-Object { $_.Name + "` + "\t" + `" + $_.Enabled }) | Set-Content -Encoding utf8 -LiteralPath $b
+}
 foreach ($a in $all) { if ($a.Enabled) { Disable-NetAdapterBinding -Name $a.Name -ComponentID ms_tcpip6 -ErrorAction SilentlyContinue } }
 `
 	if out, err := runPS(script); err != nil {
