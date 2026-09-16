@@ -50,7 +50,18 @@ func DisableNICIPv6(tunName string) error {
 	if len(saved) == 0 {
 		return nil
 	}
-	if b, err := json.Marshal(saved); err == nil {
+	// 已有备份(上次停了还没还原,比如重建配置重连时守护进程故意不还原)就并进去而不是覆盖:
+	// 覆盖的话原来记的那些网卡就丢了,最后还原时开不回来。
+	record := map[string]string{}
+	if old, err := os.ReadFile(nicBackup()); err == nil {
+		_ = json.Unmarshal(old, &record)
+	}
+	for n, v := range saved {
+		if _, dup := record[n]; !dup {
+			record[n] = v
+		}
+	}
+	if b, err := json.Marshal(record); err == nil {
 		_ = os.WriteFile(nicBackup(), b, 0o600)
 	}
 	for n := range saved {
