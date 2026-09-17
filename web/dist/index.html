@@ -10,6 +10,21 @@
    什么都不显示,用户和我们都看不到任何线索。这段负责把原因直接打在屏幕上,截个图就能定位。
    注意:这里只能用 ES5 写法。 */
 (function () {
+  // flex 布局里的 gap 要 Chrome 84。老内核(国行电视盒子的 WebView 常年停在 Chrome 66 一线)不认,
+  // 一行里的元素会全部贴死。这里实测一次,不支持才给 <html> 挂 nogap,样式里有一整套 margin 兜底。
+  // 必须实测而不是查版本号:CSS 里没有可靠的特性查询能区分 flex gap(grid 的 gap 老内核是支持的)。
+  try {
+    var probe = document.createElement('div');
+    probe.style.cssText = 'display:flex;flex-direction:column;row-gap:1px;position:absolute;visibility:hidden';
+    probe.appendChild(document.createElement('div'));
+    probe.appendChild(document.createElement('div'));
+    var host = document.body || document.documentElement;
+    host.appendChild(probe);
+    var gapWorks = probe.scrollHeight === 1;
+    host.removeChild(probe);
+    if (!gapWorks) document.documentElement.className += ' nogap';
+  } catch (e) { }
+
   var errs = [];
   function show() {
     try {
