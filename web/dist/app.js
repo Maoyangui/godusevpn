@@ -1,7 +1,7 @@
 // 佛跳墙 竖向客户端页面。后端方法在 window.go.main.App;服务端每 1.5 秒推 "state",内核每秒推 "traffic"。
 const App = () => window.go.main.App;
 const $ = s => document.querySelector(s);
-const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const esc = s => String(s === null || s === undefined ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 let state = null;          // 最新 UIState
 let view = null;           // 当前页面名:onboard / home / settings / profiles / conns / logs / about
 let pageTimer = null;      // 页面自己的定时刷新
@@ -45,7 +45,8 @@ function closeDialog(result) {
   dialogClose = null;
   const box = $('#dialog');
   if (box) box.remove();
-  $('#dialog-backdrop')?.remove();
+  const bd = $('#dialog-backdrop');
+  if (bd) bd.remove();
   if (f) f(result);
 }
 function askDialog(opts) {
@@ -938,7 +939,7 @@ async function renderSettings(el) {
     `) : ''}
     ${group(t('set.g.logs'), `
       ${sel('f-log', t('set.logLevel'), s.logLevel, [['debug', 'debug'], ['info', 'info'], ['warn', 'warn'], ['error', 'error']])}
-      ${num('f-logdays', t('set.logDays'), s.logDays ?? 7, t('set.logDaysHelp'))}
+      ${num('f-logdays', t('set.logDays'), (s.logDays === null || s.logDays === undefined ? 7 : s.logDays), t('set.logDaysHelp'))}
     `)}
     ${group(t('set.g.app'), `
       ${state.platform === 'android' ? `<div class="srow"><div class="lbl">${t('set.autostart')}<div>${t('set.autostartAndroidHelp')}</div></div></div>` : sw('f-autostart', t(state.platform === 'linux' ? 'set.autostartLinux' : 'set.autostart'), auto, t(state.platform === 'linux' ? 'set.autostartLinuxHelp' : 'set.autostartHelp'))}
@@ -1410,6 +1411,7 @@ function initLogin() {
 
 // ---- 启动 ----
 async function init() {
+  window.__godBooted = true; // 给 index.html 的看门狗看:app.js 解析通过了,init 也进来了
   if (window.__web) { $('#app').classList.add('web'); document.body.classList.add('web'); initLogin(); }
   if (window.__android) {
     PLATFORM = 'android';

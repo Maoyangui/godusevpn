@@ -17,7 +17,7 @@
   }
 }
 * { box-sizing: border-box; }
-html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); font-size: 14px; overflow: clip; }
+html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); font-size: 14px; overflow: hidden; }
 body { -webkit-user-select: none; user-select: none; -webkit-font-smoothing: antialiased; }
 input, textarea, .sel, pre, code { -webkit-user-select: text; user-select: text; }
 button { font: inherit; color: inherit; cursor: default; }
@@ -25,7 +25,7 @@ button { font: inherit; color: inherit; cursor: default; }
 .muted { color: var(--muted); } .small { font-size: 12px; } .mono { font-family: Consolas, "Cascadia Mono", monospace; }
 .row { display: flex; align-items: center; gap: 10px; } .grow { flex: 1; } .center { text-align: center; }
 
-.app { position: relative; height: 100vh; display: flex; flex-direction: column; background: var(--bg); overflow: clip; }
+.app { position: relative; height: 100vh; display: flex; flex-direction: column; background: var(--bg); overflow: hidden; }
 
 /* 标题栏(可拖动) */
 .topbar { --wails-draggable: drag; height: 52px; display: flex; align-items: center; padding: 0 6px 0 8px; gap: 4px; background: var(--topbar); backdrop-filter: blur(12px); position: relative; z-index: 5; }
@@ -35,6 +35,8 @@ button { font: inherit; color: inherit; cursor: default; }
 .icon-btn svg { width: 21px; height: 21px; fill: none; stroke: currentColor; stroke-width: 1.9; stroke-linecap: round; stroke-linejoin: round; }
 #menu-btn svg, #back-btn svg { width: 23px; height: 23px; }
 body.android #menu-btn svg, body.android #back-btn svg { width: 30px; height: 30px; }
+/* 电视和低端手机:几十条列表项各带一段入场动画会明显掉帧,安卓上一律不做 */
+body.android .item, body.android .cond { animation: none; }
 body.tv #menu-btn svg, body.tv #back-btn svg { width: 27px; height: 27px; }
 .icon-btn:hover { background: rgba(127, 127, 127, .14); }
 #close-btn:hover { background: var(--danger); color: #fff; }
@@ -42,8 +44,8 @@ body.tv #menu-btn svg, body.tv #back-btn svg { width: 27px; height: 27px; }
 body.mac .topbar-title { left: -78px; }
 
 /* 页面栈 */
-.stage { position: relative; flex: 1; overflow: clip; }
-.view { position: absolute; inset: 0; overflow: auto; padding: 8px 22px 22px; animation: viewIn .32s var(--ease); }
+.stage { position: relative; flex: 1; overflow: hidden; }
+.view { position: absolute; top: 0; right: 0; bottom: 0; left: 0; overflow: auto; padding: 8px 22px 22px; animation: viewIn .32s var(--ease); }
 .view.pop { animation: viewOut .25s var(--ease) forwards; }
 @keyframes viewIn { from { opacity: 0; transform: translateX(24px); } to { opacity: 1; transform: none; } }
 @keyframes viewOut { to { opacity: 0; transform: translateX(24px); } }
@@ -56,13 +58,13 @@ body.mac .topbar-title { left: -78px; }
 #home-banner:empty { display: none; } /* 空横幅也会吃掉一个 gap */
 .hero { flex: 1 1 auto; width: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; }
 .power-wrap { position: relative; width: 176px; height: 176px; flex: none; }
-.power-wrap > svg { position: absolute; inset: 0; width: 100%; height: 100%; transform: rotate(-90deg); }
+.power-wrap > svg { position: absolute; top: 0; right: 0; bottom: 0; left: 0; width: 100%; height: 100%; transform: rotate(-90deg); }
 .ring-bg { fill: none; stroke: var(--ring-bg); stroke-width: 6; }
 .ring { fill: none; stroke: url(#ringGrad); stroke-width: 6; stroke-linecap: round; stroke-dasharray: 622; stroke-dashoffset: 622; transition: stroke-dashoffset .9s var(--ease), opacity .3s; opacity: 0; }
 .power-wrap.on .ring { stroke-dashoffset: 0; opacity: 1; }
 .power-wrap.busy .ring { opacity: 1; stroke-dasharray: 140 482; animation: ringSpin 1.1s linear infinite; }
 @keyframes ringSpin { to { stroke-dashoffset: -622; } }
-.power { --wails-draggable: no-drag; position: absolute; inset: 19px; border-radius: 50%; border: 0; background: var(--card); box-shadow: var(--shadow); display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 7px; transition: transform .15s var(--ease), box-shadow .3s; }
+.power { --wails-draggable: no-drag; position: absolute; top: 19px; right: 19px; bottom: 19px; left: 19px; border-radius: 50%; border: 0; background: var(--card); box-shadow: var(--shadow); display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 7px; transition: transform .15s var(--ease), box-shadow .3s; }
 .power:active { transform: scale(.96); }
 .power svg { width: 42px; height: 42px; fill: none; stroke: var(--muted2); stroke-width: 2.2; stroke-linecap: round; transition: stroke .3s, filter .3s; }
 .power b { font-size: 13px; font-weight: 600; color: var(--muted); letter-spacing: 1px; }
@@ -138,7 +140,7 @@ textarea { min-height: 80px; resize: vertical; font-family: Consolas, monospace;
 .btn.danger { color: var(--danger); } .btn.block { width: 100%; } .btn.sm { padding: 6px 11px; font-size: 12px; border-radius: 10px; }
 .btn.ghost { background: transparent; border-color: transparent; }
 .switch { display: inline-flex; align-items: center; gap: 10px; }
-.switch input { appearance: none; width: 42px; height: 24px; border-radius: 12px; background: var(--line); position: relative; margin: 0; transition: background .2s; }
+.switch input { -webkit-appearance: none; appearance: none; width: 42px; height: 24px; border-radius: 12px; background: var(--line); position: relative; margin: 0; transition: background .2s; }
 .switch input::after { content: ""; position: absolute; top: 3px; left: 3px; width: 18px; height: 18px; border-radius: 50%; background: #fff; box-shadow: 0 1px 3px rgba(0, 0, 0, .25); transition: left .2s var(--ease); }
 .switch input:checked { background: #2f8bff; } .switch input:checked::after { left: 21px; }
 .srow { display: flex; align-items: center; gap: 12px; padding: 10px 0; border-bottom: 1px solid var(--line); }
@@ -183,7 +185,7 @@ pre.log .warn { color: #fbbf24; } pre.log .err { color: #f87171; } pre.log .dim 
 @keyframes lift { from { transform: translateY(6px); opacity: .6; } }
 
 /* 抽屉(左)与底部面板 */
-.backdrop { position: absolute; inset: 0; background: rgba(0, 0, 0, .35); opacity: 0; pointer-events: none; transition: opacity .25s; z-index: 8; }
+.backdrop { position: absolute; top: 0; right: 0; bottom: 0; left: 0; background: rgba(0, 0, 0, .35); opacity: 0; pointer-events: none; transition: opacity .25s; z-index: 8; }
 .backdrop.show { opacity: 1; pointer-events: auto; }
 .drawer { position: absolute; top: 0; bottom: 0; left: 0; width: 76%; max-width: 300px; background: var(--sheet); box-shadow: var(--shadow); z-index: 9; transform: translateX(-104%); transition: transform .3s var(--ease); display: flex; flex-direction: column; padding: 18px 12px 14px; }
 .drawer.show { transform: none; }
@@ -231,11 +233,11 @@ pre.log .warn { color: #fbbf24; } pre.log .err { color: #f87171; } pre.log .dim 
 body.mac .topbar { padding-left: 78px; }
 @media (min-width: 640px) {
   body.web { background: linear-gradient(135deg, #e9edf5, #f6f7fb 55%, #e6f0ff); }
-  body.web .app { width: 420px; height: min(800px, calc(100vh - 40px)); margin: 20px auto; border-radius: 22px; box-shadow: 0 20px 60px rgba(15, 23, 42, .18); border: 1px solid rgba(15, 23, 42, .06); }
+  body.web .app { width: 420px; height: 800px; height: min(800px, calc(100vh - 40px)); margin: 20px auto; border-radius: 22px; box-shadow: 0 20px 60px rgba(15, 23, 42, .18); border: 1px solid rgba(15, 23, 42, .06); }
   :root[data-theme="dark"] body.web { background: linear-gradient(135deg, #0b0e14, #121722 55%, #0d1320); }
   @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) body.web { background: linear-gradient(135deg, #0b0e14, #121722 55%, #0d1320); } }
 }
-.login { position: absolute; inset: 0; z-index: 30; background: var(--bg); display: flex; align-items: center; justify-content: center; padding: 24px; }
+.login { position: absolute; top: 0; right: 0; bottom: 0; left: 0; z-index: 30; background: var(--bg); display: flex; align-items: center; justify-content: center; padding: 24px; }
 .login-card { width: 100%; max-width: 320px; display: flex; flex-direction: column; align-items: center; gap: 10px; text-align: center; }
 .login-card h1 { font-size: 22px; margin: 4px 0 0; } .login-card p { color: var(--muted); margin: 0 0 8px; }
 .login-card input { width: 100%; }
@@ -248,7 +250,7 @@ body.mac .topbar { padding-left: 78px; }
 .app.android .win { display: none; }
 body.android .topbar { --wails-draggable: no-drag; }
 body.tv { font-size: 17px; }
-body.tv :is(button, a, .item, input, select, textarea):focus { outline: 3px solid var(--brand2); outline-offset: 3px; box-shadow: 0 0 0 7px rgba(47, 139, 255, .16); }
+body.tv button:focus, body.tv a:focus, body.tv .item:focus, body.tv input:focus, body.tv select:focus, body.tv textarea:focus { outline: 3px solid var(--brand2); outline-offset: 3px; box-shadow: 0 0 0 7px rgba(47, 139, 255, .16); }
 body.tv .power:focus { outline-offset: 6px; box-shadow: var(--shadow), 0 0 0 10px rgba(47, 139, 255, .16); }
 body.tv .topbar { height: 64px; padding: 0 18px; } body.tv .topbar-title { font-size: 18px; }
 body.tv .icon-btn { width: 46px; height: 46px; } body.tv .icon-btn svg { width: 25px; height: 25px; }
@@ -290,7 +292,7 @@ body.android .drawer-foot { padding: 12px 12px 0; font-size: 13px; }
 body.android .icon-btn.xs { width: 36px; height: 36px; border-radius: 10px; } body.android .icon-btn.xs svg { width: 20px; height: 20px; }
 
 /* 应用内对话框:替代浏览器自带的 confirm / prompt(它们在 Windows 上会画成系统弹窗贴在窗口角上) */
-.dialog { position: absolute; inset: 0; z-index: 12; display: flex; align-items: center; justify-content: center; padding: 24px; pointer-events: none; }
+.dialog { position: absolute; top: 0; right: 0; bottom: 0; left: 0; z-index: 12; display: flex; align-items: center; justify-content: center; padding: 24px; pointer-events: none; }
 .dialog-card { pointer-events: auto; width: 100%; max-width: 340px; background: var(--sheet); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow); padding: 18px 18px 14px; animation: dlgIn .18s var(--ease); }
 @keyframes dlgIn { from { opacity: 0; transform: translateY(8px) scale(.97); } }
 .dialog-text { font-size: 14px; line-height: 1.55; white-space: pre-wrap; }
@@ -302,7 +304,7 @@ body.tv .dialog-card { max-width: 520px; padding: 24px; } body.tv .dialog-text {
 .flag { position: relative; width: 42px; height: 42px; border-radius: 14px; flex: none; display: inline-flex; align-items: center; justify-content: center; overflow: hidden; color: #fff; font-size: 13px; font-weight: 700; letter-spacing: .5px; background: linear-gradient(135deg, var(--c1, #94a3b8), var(--c2, #64748b)); }
 .flag.fl { background: var(--bg2); } /* 旗子是按需取的文件,取回来之前先垫个底,别闪一块白 */
 .flag-svg { width: 100%; height: 100%; display: block; object-fit: cover; }
-.flag.fl::after { content: ""; position: absolute; inset: 0; border-radius: inherit; box-shadow: inset 0 0 0 1px rgba(15, 23, 42, .16); }
+.flag.fl::after { content: ""; position: absolute; top: 0; right: 0; bottom: 0; left: 0; border-radius: inherit; box-shadow: inset 0 0 0 1px rgba(15, 23, 42, .16); }
 .flag.sm { width: 26px; height: 26px; border-radius: 9px; font-size: 10px; letter-spacing: .3px; }
 .flag.none { background: var(--bg2); border: 1px solid var(--line); color: var(--muted2); }
 .flag svg { width: 58%; height: 58%; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; }

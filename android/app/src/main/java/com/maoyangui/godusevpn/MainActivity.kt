@@ -10,8 +10,11 @@ import android.net.Uri
 import android.net.VpnService
 import android.os.Bundle
 import android.util.Log
+import android.webkit.ConsoleMessage
 import android.webkit.JavascriptInterface
+import android.webkit.RenderProcessGoneDetail
 import android.webkit.WebChromeClient
+import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
 import android.webkit.WebSettings
 import android.webkit.WebView
@@ -22,6 +25,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.FileProvider
 import androidx.webkit.WebViewAssetLoader
+import androidx.webkit.WebViewCompat
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -67,8 +71,38 @@ class MainActivity : AppCompatActivity() {
                 if (u.host == "appassets.androidplatform.net") return false
                 openExternal(u); return true // 外链交给浏览器
             }
+
+            // 页面加载失败原来悄无声息,用户只看到白屏,我们也无从查起
+            override fun onReceivedError(view: WebView, request: WebResourceRequest, error: WebResourceError) {
+                if (request.isForMainFrame) Log.w(App.TAG, "页面加载失败 ${error.errorCode} ${error.description} ${request.url}")
+            }
+
+            // 渲染进程被系统杀掉(电视这类小内存设备最容易碰上):不接管的话整个应用跟着崩。
+            // 重建一个 WebView 装回去;连接在服务里跑,不受影响。
+            override fun onRenderProcessGone(view: WebView, detail: RenderProcessGoneDetail): Boolean {
+                Log.w(App.TAG, "WebView 渲染进程没了(崩溃=${detail.didCrash()}),重建界面")
+                if (view !== web) return true
+                App.listeners.remove(listener) // 先摘监听:引擎推事件过来时那个 WebView 已经没了
+                runCatching { (web.parent as? android.view.ViewGroup)?.removeView(web); web.destroy() }
+                if (!isFinishing && !isDestroyed) recreate()
+                return true
+            }
         }
-        web.webChromeClient = WebChromeClient() // 不设的话页面里的 confirm() / prompt() 会被直接当作"取消",删除订阅 / 规则组等确认就没反应
+        // 不设 WebChromeClient 的话页面里的 confirm() / prompt() 会被直接当作"取消",删除订阅 / 规则组等确认就没反应。
+        // 顺带把页面的 console 落进 logcat:老设备上页面报的错(比如脚本语法不被支持)就从这儿看。
+        web.webChromeClient = object : WebChromeClient() {
+            override fun onConsoleMessage(m: ConsoleMessage): Boolean {
+                val line = "页面 ${m.messageLevel()} ${m.message()} @${m.sourceId()}:${m.lineNumber()}"
+                if (m.messageLevel() == ConsoleMessage.MessageLevel.ERROR) Log.w(App.TAG, line) else Log.i(App.TAG, line)
+                return true
+            }
+        }
+        // WebView 的版本决定页面能用哪些写法。电视 / 盒子常年停在很旧的版本,出问题时这一行是第一手线索。
+        Log.i(App.TAG, "WebView: " + (runCatching { WebViewCompat.getCurrentWebViewPackage(this)?.let { it.packageName + " " + it.versionName } }.getOrNull() ?: "取不到"))
+        if (isTV()) { // 电视没有触摸,WebView 不主动要焦点的话遥控器方向键根本进不到页面里
+            web.isFocusableInTouchMode = true
+            web.requestFocus()
+        }
         web.addJavascriptInterface(Bridge(), "GodusevpnBridge")
         WebView.setWebContentsDebuggingEnabled(BuildConfig.DEBUG)
         web.loadUrl("https://appassets.androidplatform.net/web/index.html")
@@ -80,10 +114,21 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    /** 电视 / 盒子:页面据此切横版布局并开遥控器焦点导航。 */
+    /**
+     * 电视 / 盒子:页面据此切横版布局并开遥控器焦点导航(页面里的方向键导航整个挂在 body.tv 上,
+     * 这里判错就等于电视上根本没法用遥控器操作)。
+     *
+     * 原来只认 UI_MODE_TYPE_TELEVISION 和 leanback,而**国行电视(小米、创维、海信这些)不走 Google 认证,
+     * 多半两个都不声明**,只声明 android.hardware.type.television。所以这里三条都认,再加一条没有触摸屏的兜底。
+     */
     private fun isTV(): Boolean {
         val ui = getSystemService(UiModeManager::class.java)
-        return ui?.currentModeType == Configuration.UI_MODE_TYPE_TELEVISION || packageManager.hasSystemFeature(PackageManager.FEATURE_LEANBACK)
+        if (ui?.currentModeType == Configuration.UI_MODE_TYPE_TELEVISION) return true
+        val pm = packageManager
+        // FEATURE_TELEVISION 那个常量已废弃,直接写字符串,免得编译期告警
+        if (pm.hasSystemFeature(PackageManager.FEATURE_LEANBACK) || pm.hasSystemFeature("android.hardware.type.television")) return true
+        // 兜底:连触摸屏都没有的设备,只可能是电视或盒子
+        return resources.configuration.touchscreen == Configuration.TOUCHSCREEN_NOTOUCH && !pm.hasSystemFeature(PackageManager.FEATURE_TOUCHSCREEN)
     }
 
     override fun onNewIntent(intent: Intent) {

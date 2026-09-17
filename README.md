@@ -29,7 +29,7 @@ m-ui 面板的多平台客户端:内嵌 sing-box,TUN 模式,规则 / 全局 / �
 | Linux 桌面 / 服务器(systemd) | 可用 | 单一二进制,自带浏览器面板,一键安装脚本 |
 | OpenWrt / iStoreOS 等软路由 | 可用(网关模式,容器实验室验证) | 同一二进制,procd 自启,ipk 包;局域网设备策略 |
 | 梅林(Asuswrt-Merlin / Entware) | 开发中 | TProxy 模式,无真机待反馈 |
-| Android 手机 / TV | 测试版(手机已真机验证,电视仅模拟器) | WebView 承载同一套页面 + gomobile 引擎,VpnService 建隧道,按 ABI 分包的 APK |
+| Android 手机 / TV | 测试版(手机已真机验证;电视按真机反馈修过一轮,待复测) | WebView 承载同一套页面 + gomobile 引擎,VpnService 建隧道,按 ABI 分包的 APK。页面写法迁就老电视的 WebView(底线 Chrome 66),`web/compat_test.go` 把关 |
 
 ## 结构
 

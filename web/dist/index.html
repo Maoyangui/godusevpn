@@ -5,6 +5,41 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>佛跳墙</title>
 <link rel="stylesheet" href="style.css">
+<script>
+/* 白屏自曝。老设备(比如中国版小米电视,WebView 常年停在 Chrome 66)遇到页面里的新语法,会整份脚本解析失败、
+   什么都不显示,用户和我们都看不到任何线索。这段负责把原因直接打在屏幕上,截个图就能定位。
+   注意:这里只能用 ES5 写法。 */
+(function () {
+  var errs = [];
+  function show() {
+    try {
+      var el = document.getElementById('boot-error');
+      if (!el) {
+        el = document.createElement('div');
+        el.id = 'boot-error';
+        el.setAttribute('style', 'position:fixed;left:0;top:0;right:0;bottom:0;z-index:99999;background:#101418;color:#e7eaf0;font:18px/1.7 monospace;padding:24px;overflow:auto;white-space:pre-wrap;word-break:break-all');
+        (document.body || document.documentElement).appendChild(el);
+      }
+      el.textContent = '\u4f5b\u8df3\u5899 \u754c\u9762\u6ca1\u80fd\u542f\u52a8 / UI failed to start\n\n' + errs.join('\n\n') + '\n\n' + navigator.userAgent;
+    } catch (e) { }
+  }
+  window.onerror = function (msg, src, line, col) {
+    errs.push(String(msg) + '\n  ' + String(src || '') + ':' + line + ':' + col);
+    show();
+    return false;
+  };
+  window.addEventListener('error', function (e) {
+    var t = e && e.target;
+    if (t && t !== window && (t.src || t.href)) { errs.push('\u8d44\u6e90\u52a0\u8f7d\u5931\u8d25 ' + (t.src || t.href)); show(); }
+  }, true);
+  setTimeout(function () {
+    if (!window.__godBooted) {
+      errs.push('\u754c\u9762 10 \u79d2\u6ca1\u8d77\u6765\uff1a\u811a\u672c\u53ef\u80fd\u88ab\u8fd9\u53f0\u8bbe\u5907\u7684\u6d4f\u89c8\u5668\u5185\u6838\u62d2\u7edd\u4e86');
+      show();
+    }
+  }, 10000);
+})();
+</script>
 </head>
 <body>
 <div class="app" id="app">
