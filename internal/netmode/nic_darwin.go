@@ -91,3 +91,12 @@ func v6Mode(svc string) string {
 	}
 	return ""
 }
+
+// NICIPv6Off 网卡的 IPv6 此刻是不是被我们关着的(有备份 = 关过还没还原)。
+func NICIPv6Off() bool {
+	_, err := os.Stat(nicBackup())
+	return err == nil
+}
+
+// NICIPv6Manageable 这台机器能不能动物理网卡的 IPv6。
+func NICIPv6Manageable() bool { return true }

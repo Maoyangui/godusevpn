@@ -35,6 +35,12 @@ import java.io.File
  * 桥是同步调用:call(name, argsJSON) → {"result":…} 或 {"error":"…"};事件由 Go 推过来再 evaluateJavascript 给页面。
  */
 class MainActivity : AppCompatActivity() {
+    companion object {
+        // 跨 recreate() 存活(recreate 不重启进程):界面崩溃的计数与窗口起点
+        @Volatile private var goneCount = 0
+        @Volatile private var goneSince = 0L
+    }
+
     private lateinit var web: WebView
     private var pendingConnect = false
     // 页面的调用在这里跑;几个线程足够,测速那种慢活也不会互相挡住
@@ -84,6 +90,17 @@ class MainActivity : AppCompatActivity() {
                 if (view !== web) return true
                 App.listeners.remove(listener) // 先摘监听:引擎推事件过来时那个 WebView 已经没了
                 runCatching { (web.parent as? android.view.ViewGroup)?.removeView(web); web.destroy() }
+                // 内存实在不够时重建也会马上再崩,无限重建只会让设备更卡。短时间内崩太多次就退到后台,
+                // 连接在服务里跑,不受影响;用户下次自己打开时是干净的一轮。recreate() 不重启进程,所以计数存得住。
+                val now = android.os.SystemClock.elapsedRealtime()
+                if (now - goneSince > 60_000L) { goneSince = now; goneCount = 0 }
+                goneCount++
+                if (goneCount > 3) {
+                    Log.w(App.TAG, "一分钟内界面崩了 $goneCount 次,不再重建,退到后台(连接不受影响)")
+                    runCatching { Toast.makeText(applicationContext, getString(R.string.webview_gone), Toast.LENGTH_LONG).show() }
+                    moveTaskToBack(true)
+                    return true
+                }
                 if (!isFinishing && !isDestroyed) recreate()
                 return true
             }

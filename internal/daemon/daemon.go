@@ -42,8 +42,8 @@ type Daemon struct {
 	log        *logx.Rotator
 	coreLog    *logx.Rotator
 	coreLevel  atomic.Int32 // 内核日志记到哪一级(core.Writer 按它过滤)
-	restarting atomic.Bool  // 正在重建配置重连:stop() 期间别还原网卡的 IPv6 绑定(起来时马上又要关)
-	nicOff     atomic.Bool  // 各网卡的 IPv6 绑定已由我们停掉、还没还原
+	nicOff     atomic.Bool  // 各网卡的 IPv6 绑定已由我们停掉、还没还原(和闸一样,跨内核重启 / 服务重启一直有效)
+	nicMu      sync.Mutex   // syncNICIPv6 串行化:停用那一步要起 PowerShell,不能两个一起跑
 	probeMu    sync.Mutex
 	probeAt    time.Time // auto 组上次测完一轮全部节点的时间,autoProbeLoop 按它算下一次
 	core       *core.Core
@@ -117,7 +117,8 @@ func NewWithOptions(o Options) (*Daemon, error) {
 	// 上次异常退出可能留下改过的系统设置(macOS 接管的系统 DNS、Linux 加的策略路由、网卡上被停用的 IPv6),启动时先还原一次,
 	// 免得服务没连上、机器却因为 DNS 指着不存在的隧道打不开网页。
 	netmode.Unprotect()
-	netmode.RestoreNICIPv6() // 同理:上次异常退出可能把网卡的 IPv6 关着,先还原,别让用户莫名其妙没了 IPv6
+	// 网卡上被停用的 IPv6 不在这里无条件还原:它和「全局禁直连」的闸一样是持久的,上次连着关的机就该一直关着
+	// (见 reconcileNICIPv6)。在这儿还原的话,开机到服务重新关上它之间,公网 v6 地址就白白露了几十秒。
 	b := make([]byte, 16)
 	_, _ = rand.Read(b)
 	d.secret = hex.EncodeToString(b)
@@ -188,8 +189,11 @@ func (d *Daemon) Run(ctx context.Context) error {
 		}
 	}
 	d.reconcileGuard()
+	d.reconcileNICIPv6()
 	go d.autoProbeLoop(ctx)
-	go d.nicIPv6Loop(ctx)
+	if netmode.NICIPv6Manageable() {
+		go d.nicIPv6Loop(ctx)
+	}
 	if d.loadPersisted().Wanted {
 		d.logf("上次是已连接状态,自动连接")
 		d.machine.Connect()
@@ -414,7 +418,8 @@ func (d *Daemon) prepare(ctx context.Context) ([]byte, error) {
 			d.logf("订阅「%s」已更新:%d 个节点", a.Name, len(p.Outbounds))
 		}
 	}
-	d.syncGuard() // 闸要在内核起来之前就到位:准备阶段本身可能要几秒,这几秒也不许漏
+	d.syncGuard()   // 闸要在内核起来之前就到位:准备阶段本身可能要几秒,这几秒也不许漏
+	d.syncNICIPv6() // 同理;而且改网卡绑定会让网卡重走一遍协议栈,放在内核启动之前才不会去抖刚建好的隧道
 	if s.NetMode == settings.NetGateway {
 		d.resolveDeviceIPs(&s) // 设备策略按当前 IP 生效
 	}
@@ -438,17 +443,8 @@ func (d *Daemon) prepare(ctx context.Context) ([]byte, error) {
 
 // start 启动内核;失败按原因归类。
 func (d *Daemon) start(cfg []byte) error {
-	// 关 IPv6 时顺带把各网卡的 IPv6 协议停掉:运营商的公网 v6 地址就配在网卡上,
-	// 挡数据包挡不住"程序枚举网卡读走地址再报出去",地址不存在才是真的读不到。
-	// 放在内核启动之前做:改协议绑定会让网卡重新走一遍协议栈,别去抖刚建好的隧道。
-	// 重建配置重连时上次 stop() 没还原(见 restart),绑定还是关着的,不用再跑一遍。
-	if wantNICOff(d.getSettings()) && !d.nicOff.Load() {
-		if err := netmode.DisableNICIPv6(builder.TunName); err != nil {
-			d.logf("停用网卡 IPv6 失败(不影响连接,但网卡上的公网 IPv6 地址还在): %v", err)
-		} else {
-			d.nicOff.Store(true)
-		}
-	}
+	// 网卡 IPv6 的停用不在这里做:它跟的是"用户想不想连着"而不是"内核在不在跑"(见 syncNICIPv6),
+	// prepare() 里已经对齐过了 —— 那也正好在内核启动之前,改协议绑定会让网卡重新走一遍协议栈,不该去抖刚建好的隧道。
 	if err := d.core.Start(cfg); err != nil {
 		low := strings.ToLower(err.Error())
 		switch {
@@ -503,11 +499,8 @@ func (d *Daemon) stop() error {
 	d.running = nil
 	d.mu.Unlock()
 	err := d.core.Stop()
-	// 重建配置重连、且新设置照样要停网卡 IPv6:绑定留着不还原,起来时也不用再关(见 restart)
-	if !(d.restarting.Load() && wantNICOff(d.getSettings())) {
-		netmode.RestoreNICIPv6()
-		d.nicOff.Store(false)
-	}
+	// 网卡 IPv6 不在这里还原:内核停了不代表用户不想连了(崩了在退避重试、切订阅重连、服务被杀、关机),
+	// 这些时候地址一冒出来就能被程序读走。只有用户真的断开 / 关掉开关 / 卸载才还原,和闸一个道理。
 	netmode.Unprotect()
 	netmode.ClearGateway()
 	return err
@@ -539,17 +532,101 @@ func (d *Daemon) health(ctx context.Context) error {
 }
 
 // restart 重建配置重连:内核停了再起,隧道要断几秒,所以能就地改的(切节点、自动 / 手动、切模式、定时测速)
-// 都不走这里。期间不还原网卡的 IPv6 绑定:停 / 起各改一次协议绑定,网卡各重走一遍协议栈,三秒的重连拖成
-// 六七秒,局域网也跟着抖。
+// 都不走这里。网卡的 IPv6 绑定期间一直关着不动 —— 停 / 起各改一次协议绑定,网卡各重走一遍协议栈,
+// 三秒的重连会拖成六七秒,局域网也跟着抖;而且那几秒地址露出来就能被读走。
 func (d *Daemon) restart() error {
-	d.restarting.Store(true)
-	defer d.restarting.Store(false)
 	return d.machine.Restart()
 }
 
 // wantNICOff 这份设置要不要停掉各网卡的 IPv6 协议绑定。
+// 安卓上应用没权限动物理网卡,整套逻辑在那边一律不做(NICIPv6Manageable 为假),
+// 免得记假账、打"已停用"的假日志,又对着关不掉的移动网络反复重试。
 func wantNICOff(s settings.Settings) bool {
-	return s.TUN && !s.IPv6 && s.DisableNICIPv6
+	return netmode.NICIPv6Manageable() && s.TUN && !s.IPv6 && s.DisableNICIPv6
+}
+
+// nicIPv6Wanted 网卡的 IPv6 此刻该不该关着。**和「全局禁直连」的闸同一套判断**:设置要求关、且用户想连着
+// (没点断开)。内核停了、崩了在重试、切订阅在重连、服务被杀、关机重启,只要这两条还成立就得一直关着 ——
+// 挡数据包挡不住"程序枚举网卡读走地址再报出去",地址一旦冒出来,哪怕只有几十秒也够被读走留到以后用。
+func (d *Daemon) nicIPv6Wanted() bool {
+	return wantNICOff(d.getSettings()) && d.machine.Wanted()
+}
+
+// nicAction 该对网卡 IPv6 做什么。
+type nicAction int
+
+const (
+	nicNoop    nicAction = iota // 现状已经对了,别动(停用 / 还原都要起子进程,很贵)
+	nicDisable                  // 该关还没关
+	nicRestore                  // 不该关了,按动手前的状态还原
+)
+
+// nicIPv6Action 抽成纯函数是为了能穷举测试:这套判断错一格,轻则用户的 IPv6 永久回不来,
+// 重则该藏起来的公网地址露在外面 —— 两种都是不能靠"看着像对的"来保证的。
+//
+//	want = 此刻该不该关着(设置要求关 + 用户想连着 + 这个平台动得了物理网卡)
+//	on   = 现在是不是我们关着的
+func nicIPv6Action(want, on bool) nicAction {
+	switch {
+	case want && !on:
+		return nicDisable
+	case !want && on:
+		return nicRestore
+	default:
+		return nicNoop
+	}
+}
+
+// syncNICIPv6 把网卡 IPv6 的状态和"该不该关"对齐;幂等。连接意愿、设置变了都要调一次。
+// 停用 / 还原都要起 PowerShell(Windows)或改 sysctl,挺慢,所以用 nicOff 记着当前状态,状态没变就什么都不做。
+func (d *Daemon) syncNICIPv6() {
+	d.nicMu.Lock()
+	defer d.nicMu.Unlock()
+	switch nicIPv6Action(d.nicIPv6Wanted(), d.nicOff.Load()) {
+	case nicDisable:
+		if err := netmode.DisableNICIPv6(builder.TunName); err != nil {
+			d.logf("停用网卡 IPv6 失败(不影响连接,但网卡上的公网 IPv6 地址还在): %v", err)
+			return
+		}
+		d.nicOff.Store(true)
+	case nicRestore:
+		netmode.RestoreNICIPv6()
+		d.nicOff.Store(false)
+		d.logf("网卡 IPv6:已按动手前的状态还原")
+	}
+}
+
+// reconcileNICIPv6 启动时核对一次,和 reconcileGuard 对称:上次连着关的机就接着关着,否则还原。
+// 机器刚启动时状态机还没 Connect,所以这里看的是落盘的连接意愿而不是 machine.Wanted()。
+func (d *Daemon) reconcileNICIPv6() {
+	d.nicMu.Lock()
+	defer d.nicMu.Unlock()
+	d.nicOff.Store(netmode.NICIPv6Off()) // 有备份就说明上次关过还没还原
+	on := d.nicOff.Load()
+	// 机器刚启动时状态机还没 Connect,所以这里用落盘的连接意愿代替 machine.Wanted()
+	want := d.loadPersisted().Wanted && wantNICOff(d.getSettings())
+	switch nicIPv6Action(want, on) {
+	case nicRestore:
+		netmode.RestoreNICIPv6()
+		d.nicOff.Store(false)
+		d.logf("网卡 IPv6:上次不是连着关的机(或设置已关掉),已还原")
+		return
+	case nicNoop:
+		if !want {
+			return // 本来就不该关,也没关着
+		}
+		// 该关、也记着关过了:再看一眼真没漏(比如关机期间插了张新网卡),没漏就不必再跑一遍那段慢脚本
+		if !netmode.NICIPv6Leaking(builder.TunName) {
+			d.logf("网卡 IPv6:上次连着关的机,一直关着")
+			return
+		}
+	}
+	if err := netmode.DisableNICIPv6(builder.TunName); err != nil {
+		d.logf("停用网卡 IPv6 失败(不影响连接,但网卡上的公网 IPv6 地址还在): %v", err)
+		return
+	}
+	d.nicOff.Store(true)
+	d.logf("网卡 IPv6:已停用(上次连着关的机)")
 }
 
 // groupTest 让 auto 组测一轮全部节点并换到最快的,记下时间。sing-box 自己的定时测速在配置里关掉了
@@ -614,7 +691,7 @@ func (d *Daemon) nicIPv6Loop(ctx context.Context) {
 			return
 		case <-t.C:
 		}
-		if !d.core.Running() || !wantNICOff(d.getSettings()) {
+		if !d.nicIPv6Wanted() {
 			fails, quiet = 0, false
 			continue
 		}
@@ -632,8 +709,13 @@ func (d *Daemon) nicIPv6Loop(ctx context.Context) {
 		if !quiet {
 			d.logf("发现网卡上又有公网 IPv6 地址(多半是新接了一张网卡),重新停用")
 		}
-		if err := netmode.DisableNICIPv6(builder.TunName); err != nil {
+		d.nicMu.Lock()
+		err := netmode.DisableNICIPv6(builder.TunName)
+		d.nicMu.Unlock()
+		if err != nil {
 			d.logf("停用新网卡的 IPv6 失败: %v", err)
+		} else {
+			d.nicOff.Store(true)
 		}
 		fails++
 		if fails >= 3 && !quiet {
@@ -964,12 +1046,14 @@ func (d *Daemon) registerHandlers() {
 		d.savePersisted(persisted{Wanted: true})
 		d.machine.Connect()
 		d.syncGuard()
+		go d.syncNICIPv6() // 起 PowerShell 要一两秒,别把这次调用卡住;prepare 里还会再对齐一次
 		return d.stateView(), nil
 	})
 	h(ipc.MDisconnect, func(json.RawMessage) (any, error) {
 		d.savePersisted(persisted{Wanted: false})
 		d.machine.Disconnect()
 		d.syncGuard()
+		go d.syncNICIPv6() // 断开才还原网卡 IPv6;慢活扔后台,别卡住这次调用
 		return d.stateView(), nil
 	})
 	h(ipc.MSetMode, func(p json.RawMessage) (any, error) {
@@ -985,6 +1069,7 @@ func (d *Daemon) registerHandlers() {
 			return nil, err
 		}
 		d.syncGuard()
+		go d.syncNICIPv6()
 		if d.core.Running() {
 			if err := d.core.SetMode(builder.ModeName(s.Mode)); err != nil {
 				return nil, err
@@ -1180,6 +1265,7 @@ func (d *Daemon) registerHandlers() {
 				d.savePersisted(persisted{Wanted: false})
 				d.machine.Disconnect()
 				d.syncGuard()
+				go d.syncNICIPv6()
 			} else if err := d.restart(); err != nil {
 				d.logf("删掉当前订阅后切换失败: %v", err)
 			}
@@ -1393,6 +1479,7 @@ func (d *Daemon) registerHandlers() {
 			return nil, err
 		}
 		d.syncGuard()
+		go d.syncNICIPv6() // 关掉「连接时停用网卡 IPv6」或打开 IPv6 时,这里把绑定还原回去
 		if d.core.Running() {
 			live := prev // 模式、节点、禁直连开关、定时测速间隔是运行时可改的,别的都要重新生成配置
 			live.Mode, live.Selected, live.NoDirect, live.ProbeMinutes = next.Mode, next.Selected, next.NoDirect, next.ProbeMinutes

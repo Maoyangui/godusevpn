@@ -26,27 +26,55 @@
   } catch (e) { }
 
   var errs = [];
+
+  // 界面到底画出来没有。画出来了就说明脚本是好的,之后再报错只写控制台,别拿全屏黑板糊住能用的界面。
+  function uiUp() {
+    try {
+      var st = document.getElementById('stage');
+      if (st && st.children.length) return true;
+      var lg = document.getElementById('login'); // 网页面板的登录页是另一块,也算画出来了
+      return !!(lg && !lg.hidden);
+    } catch (e) { return false; }
+  }
+
   function show() {
     try {
       var el = document.getElementById('boot-error');
       if (!el) {
         el = document.createElement('div');
         el.id = 'boot-error';
-        el.setAttribute('style', 'position:fixed;left:0;top:0;right:0;bottom:0;z-index:99999;background:#101418;color:#e7eaf0;font:18px/1.7 monospace;padding:24px;overflow:auto;white-space:pre-wrap;word-break:break-all');
+        el.setAttribute('style', 'position:fixed;left:0;top:0;right:0;bottom:0;z-index:99999;background:#101418;color:#e7eaf0;font:18px/1.7 monospace;padding:24px;overflow:auto;white-space:pre-wrap;word-break:break-all;cursor:pointer');
+        el.onclick = function () { if (el.parentNode) el.parentNode.removeChild(el); };
         (document.body || document.documentElement).appendChild(el);
       }
-      el.textContent = '\u4f5b\u8df3\u5899 \u754c\u9762\u6ca1\u80fd\u542f\u52a8 / UI failed to start\n\n' + errs.join('\n\n') + '\n\n' + navigator.userAgent;
+      el.textContent = '\u4f5b\u8df3\u5899 \u754c\u9762\u6ca1\u80fd\u542f\u52a8 / UI failed to start\n\n' + errs.join('\n\n') + '\n\n' + navigator.userAgent + '\n\n(\u70b9\u4e00\u4e0b\u5173\u6389\u8fd9\u5757)';
     } catch (e) { }
   }
-  window.onerror = function (msg, src, line, col) {
-    errs.push(String(msg) + '\n  ' + String(src || '') + ':' + line + ':' + col);
+
+  // 记一律记(排障要用),盖板只在界面还没起来时才盖
+  function report(line) {
+    errs.push(line);
+    if (uiUp()) { try { console.error(line); } catch (e) { } return; }
     show();
+  }
+
+  window.onerror = function (msg, src, line, col) {
+    report(String(msg) + '\n  ' + String(src || '') + ':' + line + ':' + col);
     return false;
   };
+  window.addEventListener('unhandledrejection', function (e) {
+    report('\u672a\u5904\u7406\u7684 Promise \u9519\u8bef: ' + String((e && e.reason) || ''));
+  });
   window.addEventListener('error', function (e) {
     var t = e && e.target;
-    if (t && t !== window && (t.src || t.href)) { errs.push('\u8d44\u6e90\u52a0\u8f7d\u5931\u8d25 ' + (t.src || t.href)); show(); }
+    if (!t || t === window || !(t.src || t.href)) return;
+    var tag = (t.tagName || '').toUpperCase();
+    var what = '\u8d44\u6e90\u52a0\u8f7d\u5931\u8d25 ' + (t.src || t.href);
+    // 只有脚本和样式表缺了才可能整页起不来;图片之类缺一个不该弹黑板
+    if (tag === 'SCRIPT' || tag === 'LINK') report(what);
+    else { errs.push(what); try { console.warn(what); } catch (x) { } }
   }, true);
+
   setTimeout(function () {
     if (!window.__godBooted) {
       errs.push('\u754c\u9762 10 \u79d2\u6ca1\u8d77\u6765\uff1a\u811a\u672c\u53ef\u80fd\u88ab\u8fd9\u53f0\u8bbe\u5907\u7684\u6d4f\u89c8\u5668\u5185\u6838\u62d2\u7edd\u4e86');

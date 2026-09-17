@@ -66,6 +66,7 @@ func main() {
 		// 卸载时留着数据的话,下次重装闸就默认是关的。
 		uerr := svc.Uninstall()
 		netmode.ClearGuard()
+		netmode.RestoreNICIPv6() // 网卡 IPv6 同样是持久的,卸载不还原的话用户的 v6 就永远没了
 		if uerr != nil {
 			fail(uerr)
 		}

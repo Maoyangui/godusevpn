@@ -10,4 +10,5 @@
     <string name="st_disconnected">未连接</string>
     <string name="share_diag">发送诊断包</string>
     <string name="no_browser">没有找到浏览器,请手动打开:%1$s</string>
+    <string name="webview_gone">界面反复崩溃,已退到后台。连接不受影响,可以重新打开应用。</string>
 </resources>

@@ -17,7 +17,7 @@
   }
 }
 * { box-sizing: border-box; }
-html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); font-size: 14px; overflow: hidden; }
+html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); font-size: 14px; overflow: hidden; overflow: clip; }
 body { -webkit-user-select: none; user-select: none; -webkit-font-smoothing: antialiased; }
 input, textarea, .sel, pre, code { -webkit-user-select: text; user-select: text; }
 button { font: inherit; color: inherit; cursor: default; }
@@ -26,7 +26,7 @@ button { font: inherit; color: inherit; cursor: default; }
 .row { display: flex; align-items: center; gap: 10px; }
 .nogap .row > *:not([hidden]) + *:not([hidden]) { margin-left: 10px; } .grow { flex: 1; } .center { text-align: center; }
 
-.app { position: relative; height: 100vh; display: flex; flex-direction: column; background: var(--bg); overflow: hidden; }
+.app { position: relative; height: 100vh; display: flex; flex-direction: column; background: var(--bg); overflow: hidden; overflow: clip; }
 
 /* 标题栏(可拖动) */
 .topbar { --wails-draggable: drag; height: 52px; display: flex; align-items: center; padding: 0 6px 0 8px; gap: 4px; background: var(--topbar); backdrop-filter: blur(12px); position: relative; z-index: 5; }
@@ -46,7 +46,9 @@ body.tv #menu-btn svg, body.tv #back-btn svg { width: 27px; height: 27px; }
 body.mac .topbar-title { left: -78px; }
 
 /* 页面栈 */
-.stage { position: relative; flex: 1; overflow: hidden; }
+/* 两条并列:老内核(Chrome 90 以下)不认 clip 会丢掉后一条留下 hidden;新内核用 clip —— hidden 会让容器可滚动,
+   焦点落到已关闭面板里的控件时浏览器会把整个界面推出视口。 */
+.stage { position: relative; flex: 1; overflow: hidden; overflow: clip; }
 .view { position: absolute; top: 0; right: 0; bottom: 0; left: 0; overflow: auto; padding: 8px 22px 22px; animation: viewIn .32s var(--ease); }
 .view.pop { animation: viewOut .25s var(--ease) forwards; }
 @keyframes viewIn { from { opacity: 0; transform: translateX(24px); } to { opacity: 1; transform: none; } }

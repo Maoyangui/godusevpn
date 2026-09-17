@@ -82,3 +82,12 @@ func runPS(script string) (string, error) {
 // psQuote PowerShell 单引号字符串里的转义:单引号写两遍。网卡名里有中文、空格和星号(比如「本地连接* 12」),
 // 全程用 -LiteralPath / -Name 传,不让它当通配符解释。
 func psQuote(s string) string { return strings.ReplaceAll(s, "'", "''") }
+
+// NICIPv6Off 网卡的 IPv6 此刻是不是被我们关着的(有备份 = 关过还没还原)。
+func NICIPv6Off() bool {
+	_, err := os.Stat(nicBackup())
+	return err == nil
+}
+
+// NICIPv6Manageable 这台机器能不能动物理网卡的 IPv6。
+func NICIPv6Manageable() bool { return true }

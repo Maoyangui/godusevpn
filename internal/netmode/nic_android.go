@@ -6,3 +6,10 @@ package netmode
 func DisableNICIPv6(string) error { return nil }
 
 func RestoreNICIPv6() {}
+
+// NICIPv6Off 安卓上动不了物理网卡,永远是"没关"。
+func NICIPv6Off() bool { return false }
+
+// NICIPv6Manageable 安卓上动不了物理网卡:整套"停用网卡 IPv6"在这边是空操作,守护进程据此完全跳过,
+// 免得打出做过了的假日志、又对着关不掉的移动网络反复重试。
+func NICIPv6Manageable() bool { return false }
