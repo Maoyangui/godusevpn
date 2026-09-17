@@ -632,7 +632,20 @@ func (d *Daemon) reconcileNICIPv6() {
 // groupTest 让 auto 组测一轮全部节点并换到最快的,记下时间。sing-box 自己的定时测速在配置里关掉了
 // (builder.autoGroup),什么时候测由这里叫:切到自动选择时立刻一次,之后 autoProbeLoop 按"定时测速(分钟)"来。
 func (d *Daemon) groupTest(ctx context.Context) {
-	tctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	// 超时要按节点数给。sing-box 是并发分批测的,节点多时 20 秒根本测不完,而 ctx 一到期
+	// 没轮到的那些会被当成"测失败"清掉历史 —— 下次自动选择就只能在测过的那几个里挑。
+	// 每个节点算 400ms,下限 20 秒、上限 3 分钟(和定时测速的最小间隔留足余量)。
+	budget := 20 * time.Second
+	if _, all, err := d.core.Group("auto"); err == nil && len(all) > 0 {
+		budget = time.Duration(len(all)) * 400 * time.Millisecond
+		if budget < 20*time.Second {
+			budget = 20 * time.Second
+		}
+		if budget > 3*time.Minute {
+			budget = 3 * time.Minute
+		}
+	}
+	tctx, cancel := context.WithTimeout(ctx, budget)
 	defer cancel()
 	if _, err := d.core.GroupTest(tctx, "auto"); err != nil {
 		d.logf("自动选择组测速失败: %v", err)
@@ -1483,6 +1496,9 @@ func (d *Daemon) registerHandlers() {
 		if d.core.Running() {
 			live := prev // 模式、节点、禁直连开关、定时测速间隔是运行时可改的,别的都要重新生成配置
 			live.Mode, live.Selected, live.NoDirect, live.ProbeMinutes = next.Mode, next.Selected, next.NoDirect, next.ProbeMinutes
+			// 这四项都不进 sing-box 的配置:面板监听地址与密码归内置 HTTP 面板管,
+			// 日志保留天数归滚动器管,订阅刷新间隔归 Run 的循环管 —— 改它们不该让隧道断一下
+			live.WebListen, live.WebPassword, live.LogDays, live.UpdateHours = next.WebListen, next.WebPassword, next.LogDays, next.UpdateHours
 			if !reflect.DeepEqual(live, next) {
 				if err := d.restart(); err != nil {
 					return nil, &ipc.CallError{Code: state.CodeOf(err), Msg: "新设置的配置生成失败,保持当前连接: " + err.Error()}
@@ -1504,6 +1520,13 @@ func (d *Daemon) registerHandlers() {
 						go d.groupTest(context.Background()) // 切到自动选择:现测一轮换到最快的
 					}
 					_ = d.core.Select("proxy", sel)
+					// 和节点列表里切节点保持一致:选择组只对新连接生效,不掐掉老连接的话
+					// 用户会看到"选了新节点、连接列表里还是老节点";出口和延迟也得清掉重测
+					if err := d.core.CloseAllConnections(); err != nil {
+						d.logf("切节点后掐断旧连接失败(旧连接会继续用老节点): %v", err)
+					}
+					d.clearExit()
+					d.setPing(0)
 				}
 			}
 		}

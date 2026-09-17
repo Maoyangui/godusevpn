@@ -43,18 +43,33 @@ func New(ui *uiapi.Service, logf func(string, ...any)) *Server {
 // Serve 跑到 ctx 结束;设置里的监听地址改了(比如从只听本机改成 0.0.0.0)就换地址重开,不用重启服务。
 func (s *Server) Serve(ctx context.Context, listen string) error {
 	go s.ui.Run(ctx)
+	fails := 0 // 连着绑不上就把重试拉长,别每 10 秒刷一条日志
 	for ctx.Err() == nil {
 		if listen == "" {
 			s.logf("面板未启用(设置 webListen 为空)")
 		} else if err := s.serveOnce(ctx, listen); err != nil {
-			s.logf("面板监听 %s 失败: %v(10 秒后重试)", listen, err)
+			// 绑不上多半是端口被临时占着(比如上一个实例还没退干净),原地重试就好。
+			// 早先这里等完 10 秒就掉进下面那个"等地址变化"的循环,等于同一个地址再也不试了,
+			// 日志却写着"10 秒后重试" —— 面板永远起不来,用户还以为在重试。
+			fails++
+			wait := 10 * time.Second
+			if fails > 3 {
+				wait = time.Minute
+			}
+			s.logf("面板监听 %s 失败: %v(%s 后重试)", listen, err, wait)
 			select {
 			case <-ctx.Done():
 				return nil
-			case <-time.After(10 * time.Second):
+			case <-time.After(wait):
 			}
+			if cur := strings.TrimSpace(s.ui.Settings().WebListen); cur != listen {
+				listen, fails = cur, 0 // 这段时间里用户自己改了地址,那就用新的、重新计数
+			}
+			continue
 		}
-		for ctx.Err() == nil { // 等地址变化
+		fails = 0
+		// serveOnce 正常返回 = 设置里的地址变了(或者 ctx 结束):等到真的变了再开新的
+		for ctx.Err() == nil {
 			cur := strings.TrimSpace(s.ui.Settings().WebListen)
 			if cur != listen {
 				listen = cur
@@ -203,6 +218,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.mu.Unlock()
+	now := time.Now()
 	if !s.ui.Settings().CheckWebPassword(in.Password) {
 		s.mu.Lock()
 		s.fails[ip] = append(s.fails[ip], time.Now())
@@ -214,7 +230,13 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	_, _ = rand.Read(tok)
 	id := hex.EncodeToString(tok)
 	s.mu.Lock()
-	s.sessions[id] = time.Now().Add(30 * 24 * time.Hour)
+	// 顺手扫掉过期会话:表原来只增不减,长期开着的面板会一直攒。登录本身很少发生,扫一遍不值钱。
+	for k, exp := range s.sessions {
+		if now.After(exp) {
+			delete(s.sessions, k)
+		}
+	}
+	s.sessions[id] = now.Add(30 * 24 * time.Hour)
 	delete(s.fails, ip)
 	s.mu.Unlock()
 	http.SetCookie(w, &http.Cookie{Name: "gvsid", Value: id, Path: "/", HttpOnly: true, SameSite: http.SameSiteLaxMode, MaxAge: 30 * 24 * 3600})

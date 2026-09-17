@@ -985,7 +985,8 @@ async function renderSettings(el) {
 // ---- 路由规则 ----
 const OUT_FIXED = ['proxy', 'direct', 'reject', 'auto'];
 const RULE_TYPES = ['domain_suffix', 'domain', 'domain_keyword', 'domain_regex', 'ip_cidr', 'port', 'process_name', 'geosite', 'geoip'];
-const outLabel = o => OUT_FIXED.includes(o) ? t('out.' + o) : o;
+// 固定出口那几个是 i18n 里的常量,安全;回落分支是节点名 —— 来自订阅,可能带尖括号引号,必须转义
+const outLabel = o => OUT_FIXED.includes(o) ? t('out.' + o) : esc(o);
 // condChip 一条条件缩成一枚小标签:geosite / geoip 带上类型前缀,其余直接显示值
 function condChip(r) {
   const v = String(r.value || '');

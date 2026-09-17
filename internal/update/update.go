@@ -364,15 +364,20 @@ func Download(ctx context.Context, rel *Release, dir string, client *http.Client
 		}
 	}
 	f.Close()
-	if rel.SumsURL != "" {
-		want, err := fetchSum(ctx, client, rel.SumsURL, filepath.Base(path))
-		if err != nil {
-			return "", fmt.Errorf("读取校验和: %w", err)
-		}
-		if got := hex.EncodeToString(h.Sum(nil)); want != "" && got != want {
-			os.Remove(path)
-			return "", errors.New("安装包校验失败,已删除")
-		}
+	// 校验和拿不到就拒装,不是跳过 —— 这个更新器是以管理员身份静默安装的,
+	// "没校验成功"和"校验失败"必须一样对待。每次发布都会带 SHA256SUMS,拿不到本身就说明不对劲。
+	if rel.SumsURL == "" {
+		os.Remove(path)
+		return "", errors.New("这个版本没有发布校验和文件,不装")
+	}
+	want, err := fetchSum(ctx, client, rel.SumsURL, filepath.Base(path))
+	if err != nil {
+		os.Remove(path)
+		return "", fmt.Errorf("读取校验和: %w", err)
+	}
+	if got := hex.EncodeToString(h.Sum(nil)); got != want {
+		os.Remove(path)
+		return "", errors.New("安装包校验失败,已删除")
 	}
 	return path, nil
 }
@@ -388,6 +393,10 @@ func fetchSum(ctx context.Context, client *http.Client, url, name string) (strin
 		return "", err
 	}
 	defer resp.Body.Close()
+	// 不看状态码的话,404 那个 HTML 页面也会被拿去逐行扫,扫不出东西就成了"没有校验和"
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("SHA256SUMS HTTP %d", resp.StatusCode)
+	}
 	sc := bufio.NewScanner(resp.Body)
 	for sc.Scan() {
 		fields := strings.Fields(sc.Text())
@@ -395,5 +404,9 @@ func fetchSum(ctx context.Context, client *http.Client, url, name string) (strin
 			return strings.ToLower(fields[0]), nil
 		}
 	}
-	return "", nil
+	if err := sc.Err(); err != nil {
+		return "", err
+	}
+	// 找不到也是错:返回空串会让调用方以为"这个文件不需要校验"
+	return "", fmt.Errorf("SHA256SUMS 里没有 %s", name)
 }
