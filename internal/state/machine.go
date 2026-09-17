@@ -88,6 +88,10 @@ type Deps struct {
 }
 
 type Machine struct {
+	// opMu 生命周期串行锁:Connect / Disconnect / Restart 的"停旧起新"那一段不许交错。
+	// 只保护动作顺序,不保护字段(字段仍归 mu 管);取锁顺序固定是 opMu → mu,不会成环。
+	// Restart 里备配置那一步(最长三分钟)**不持这把锁**,不然用户点断开会被堵到 IPC 超时。
+	opMu   sync.Mutex
 	mu     sync.Mutex
 	d      Deps
 	snap   Snapshot
@@ -142,6 +146,13 @@ func (m *Machine) set(st Status, err error) {
 
 // Connect 记下"想连"并启动循环;已在跑则无操作。
 func (m *Machine) Connect() {
+	m.opMu.Lock()
+	defer m.opMu.Unlock()
+	m.connect()
+}
+
+// connect 调用方必须已经持有 opMu。
+func (m *Machine) connect() {
 	m.mu.Lock()
 	m.wanted = true
 	if m.cancel != nil {
@@ -158,6 +169,8 @@ func (m *Machine) Connect() {
 
 // Disconnect 用户主动断开:记下"不想连",停循环,停内核。
 func (m *Machine) Disconnect() {
+	m.opMu.Lock()
+	defer m.opMu.Unlock()
 	m.mu.Lock()
 	m.wanted = false
 	m.mu.Unlock()
@@ -174,19 +187,30 @@ func (m *Machine) Restart() error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
-	cfg, err := m.d.Prepare(ctx)
+	cfg, err := m.d.Prepare(ctx) // 这一步最长三分钟,不能持着 opMu —— 那会把用户点的断开堵到 IPC 超时
 	if err != nil {
 		m.d.Logf("新配置准备失败,保持当前连接: %v", err)
 		return err
+	}
+	m.opMu.Lock()
+	defer m.opMu.Unlock()
+	// 备配置这几分钟里用户可能已经点了断开。不复查的话下面的 connect() 会把 wanted 改回 true、
+	// 隧道自己回来,而磁盘上记的是"不想连",闸也在断开时撤掉了没人再装 —— 成了"连着但没闸"。
+	// 这份 cfg 直接丢掉是对的:下次用户点连接会重新备一份,不用担心这份已经放旧了。
+	if !m.Wanted() {
+		m.d.Logf("新配置备好时用户已经断开,不再重连")
+		return nil
 	}
 	m.mu.Lock()
 	m.pre = cfg
 	m.mu.Unlock()
 	m.stopLoop()
-	m.Connect()
+	m.connect()
 	return nil
 }
 
+// stopLoop 停掉当前这一轮 run 并停内核。**调用方必须持有 opMu** —— 不然两个人同时进来,
+// 后到的那个会发现 cancel 已被取走而直接返回,于是旧的 stop() 和新的 start() 交错着跑。
 func (m *Machine) stopLoop() {
 	m.mu.Lock()
 	cancel := m.cancel
