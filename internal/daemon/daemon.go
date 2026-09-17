@@ -605,6 +605,9 @@ func (d *Daemon) autoProbeLoop(ctx context.Context) {
 func (d *Daemon) nicIPv6Loop(ctx context.Context) {
 	t := time.NewTicker(30 * time.Second)
 	defer t.Stop()
+	// 关不掉的情况是存在的(权限不够、或者某些虚拟网卡自己又开回来)。真碰上就别每半分钟白跑一次
+	// PowerShell 还把日志刷满:连着几轮没治好就退避,只在第一次和恢复时各说一句。
+	fails, quiet := 0, false
 	for {
 		select {
 		case <-ctx.Done():
@@ -612,14 +615,30 @@ func (d *Daemon) nicIPv6Loop(ctx context.Context) {
 		case <-t.C:
 		}
 		if !d.core.Running() || !wantNICOff(d.getSettings()) {
+			fails, quiet = 0, false
 			continue
 		}
 		if !netmode.NICIPv6Leaking(builder.TunName) {
+			if quiet {
+				d.logf("网卡的 IPv6 地址没有了,恢复正常盯着")
+			}
+			fails, quiet = 0, false
 			continue
 		}
-		d.logf("发现网卡上又有公网 IPv6 地址(多半是新接了一张网卡),重新停用")
+		if quiet && fails%20 != 0 { // 退避后改成每 10 分钟试一次
+			fails++
+			continue
+		}
+		if !quiet {
+			d.logf("发现网卡上又有公网 IPv6 地址(多半是新接了一张网卡),重新停用")
+		}
 		if err := netmode.DisableNICIPv6(builder.TunName); err != nil {
 			d.logf("停用新网卡的 IPv6 失败: %v", err)
+		}
+		fails++
+		if fails >= 3 && !quiet {
+			quiet = true
+			d.logf("连着几次都没能停掉这张网卡的 IPv6,改成每 10 分钟再试;先去设置里看看「连接时停用网卡 IPv6」这一项")
 		}
 	}
 }
