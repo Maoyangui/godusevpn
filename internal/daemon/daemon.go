@@ -189,6 +189,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 	}
 	d.reconcileGuard()
 	go d.autoProbeLoop(ctx)
+	go d.nicIPv6Loop(ctx)
 	if d.loadPersisted().Wanted {
 		d.logf("上次是已连接状态,自动连接")
 		d.machine.Connect()
@@ -594,6 +595,31 @@ func (d *Daemon) autoProbeLoop(ctx context.Context) {
 		d.probeMu.Unlock()
 		if due {
 			d.groupTest(ctx)
+		}
+	}
+}
+
+// nicIPv6Loop 连接期间盯着网卡:新插一张网卡、开个热点、起个虚拟机,那张新网卡上的 IPv6 没人管,
+// 公网 v6 地址就又能被程序读走了(数据包有闸挡着不会真漏流量,但"地址读不到"才是这个功能的意义)。
+// 停用那一步要起 PowerShell,挺贵;所以先用标准库枚举一遍地址,真发现漏了才去跑。
+func (d *Daemon) nicIPv6Loop(ctx context.Context) {
+	t := time.NewTicker(30 * time.Second)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+		if !d.core.Running() || !wantNICOff(d.getSettings()) {
+			continue
+		}
+		if !netmode.NICIPv6Leaking(builder.TunName) {
+			continue
+		}
+		d.logf("发现网卡上又有公网 IPv6 地址(多半是新接了一张网卡),重新停用")
+		if err := netmode.DisableNICIPv6(builder.TunName); err != nil {
+			d.logf("停用新网卡的 IPv6 失败: %v", err)
 		}
 	}
 }

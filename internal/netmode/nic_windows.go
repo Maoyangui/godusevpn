@@ -25,17 +25,26 @@ import (
 func nicBackup() string { return filepath.Join(paths.DataDir(), "nic-ipv6-backup.txt") }
 
 // DisableNICIPv6 停用各网卡的 IPv6 绑定,隧道自己那张除外 —— 隧道要靠 v6 地址把 v6 流量接进来再拒绝,
-// 关了它反而少一层防护。已有备份(上次停了还没还原,比如重建配置重连时守护进程故意不还原)就不再覆盖:
-// 这时候各网卡都是关着的,再备份一次记下的全是"关",最后还原时就什么都开不回来了。
+// 关了它反而少一层防护。
+//
+// 备份是**并进去**而不是覆盖:已有备份说明上次停了还没还原(重建配置重连时守护进程故意不还原,
+// 或者连接期间又冒出一张新网卡),这时候原来那些网卡都是关着的,整份重记会记成一片"关",
+// 最后什么都开不回来;而整份跳过又会漏掉新网卡的原始状态,那张就被永久关着了。只补没记过的那些才两头都对。
 func DisableNICIPv6(tunName string) error {
 	script := `
 $ErrorActionPreference = 'SilentlyContinue'
 $tun = '` + psQuote(tunName) + `'
 $all = @(Get-NetAdapterBinding -ComponentID ms_tcpip6 | Where-Object { $_.Name -ne $tun })
 $b = '` + psQuote(nicBackup()) + `'
-if (-not (Test-Path -LiteralPath $b)) {
-  @($all | ForEach-Object { $_.Name + "` + "\t" + `" + $_.Enabled }) | Set-Content -Encoding utf8 -LiteralPath $b
+$known = @{}
+if (Test-Path -LiteralPath $b) {
+  foreach ($line in @(Get-Content -Encoding utf8 -LiteralPath $b)) {
+    $p = $line -split "` + "\t" + `"
+    if ($p.Count -ge 2 -and $p[0].Trim()) { $known[$p[0]] = $true }
+  }
 }
+$new = @($all | Where-Object { -not $known.ContainsKey($_.Name) } | ForEach-Object { $_.Name + "` + "\t" + `" + $_.Enabled })
+if ($new.Count -gt 0) { $new | Add-Content -Encoding utf8 -LiteralPath $b }
 foreach ($a in $all) { if ($a.Enabled) { Disable-NetAdapterBinding -Name $a.Name -ComponentID ms_tcpip6 -ErrorAction SilentlyContinue } }
 `
 	if out, err := runPS(script); err != nil {
