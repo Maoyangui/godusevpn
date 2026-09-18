@@ -47,7 +47,14 @@ func installUpdate(b Backend, rel *update.Release, archive string) error {
 	return nil
 }
 
-// extractBinary 从 tar.gz 里取出名为 godusevpn 的文件写到 dst。
+// extractBinary 从 tar.gz 里取出**压缩包根目录下**那个 godusevpn 写到 dst。
+//
+// 一定要按整条路径认,不能按文件名认:macOS 的发布包里有两个文件都叫 godusevpn ——
+// 根目录下的守护进程,和 godusevpn.app/Contents/MacOS/godusevpn 那个图形界面。
+// 早先是"basename 对上就用、第一个命中就返回",tar 里谁在前面就抽谁;抽到界面那一份的话,
+// /usr/local/bin/godusevpn 会被换成一个 Cocoa 窗口程序,launchd 以 root 反复拉起它,
+// VPN 彻底不能用,而且文档里教的 `godusevpn uninstall` / `status` 也一起没了(那个二进制不认这些子命令),
+// 用户只能重装。
 func extractBinary(archive, dst string) error {
 	f, err := os.Open(archive)
 	if err != nil {
@@ -68,7 +75,7 @@ func extractBinary(archive, dst string) error {
 		if err != nil {
 			return err
 		}
-		if h.Typeflag != tar.TypeReg || filepath.Base(h.Name) != "godusevpn" {
+		if h.Typeflag != tar.TypeReg || !isRootBinary(h.Name) {
 			continue
 		}
 		out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o755)
@@ -79,5 +86,5 @@ func extractBinary(archive, dst string) error {
 		out.Close()
 		return err
 	}
-	return errors.New("压缩包里没有 godusevpn")
+	return errors.New("压缩包里没有根目录下的 godusevpn")
 }

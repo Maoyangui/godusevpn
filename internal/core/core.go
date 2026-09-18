@@ -98,6 +98,28 @@ func newContext() (context.Context, context.CancelFunc) {
 	return ctx, cancel
 }
 
+// dryContext 干跑用的上下文:平台接口套一层只读壳,别让临时实例改到正在跑的那个内核的东西。
+func (c *Core) dryContext() (context.Context, context.CancelFunc) {
+	ctx, cancel := newContext()
+	c.mu.Lock()
+	p := c.platform
+	c.mu.Unlock()
+	if p != nil {
+		ctx = service.ContextWith[adapter.PlatformInterface](ctx, dryPlatform{p})
+	}
+	return ctx, cancel
+}
+
+// dryPlatform 只改一件事:Initialize 什么都不做。
+// 其余方法原样转发给真的平台接口 —— 干跑要的就是"和真实启动同一套构造过程",只是不许留下痕迹。
+// 真正会写共享状态的只有 Initialize(存 networkManager)和 OpenInterface(建 TUN、记接口名),
+// 而 OpenInterface 只在 box.Start() 里调,干跑从不 Start。
+type dryPlatform struct {
+	adapter.PlatformInterface
+}
+
+func (dryPlatform) Initialize(adapter.NetworkManager) error { return nil }
+
 func parse(ctx context.Context, raw []byte) (option.Options, error) {
 	var opt option.Options
 	if err := opt.UnmarshalJSONContext(ctx, raw); err != nil {
@@ -107,14 +129,24 @@ func parse(ctx context.Context, raw []byte) (option.Options, error) {
 }
 
 // Validate 干跑:解析并构造全部对象但不启动,随即关闭。抓解析层抓不到的错误。
+//
+// 注意干跑用的是**只读的平台壳**(dryPlatform)。直接把真的平台接口带进来的话,sb.New 会调它的
+// Initialize 把 networkManager 换成这个临时实例的 —— 而此刻正跑着的内核用的是同一个平台对象,
+// 于是它从这一刻起就收不到"默认网络变了"的回调了(Android 上就是 ConnectivityManager 那条)。
+// 干跑发生在每次改设置 / 切节点 / 刷订阅之前,窗口最长能有几十秒;这段时间里拔网线、切 Wi-Fi,
+// 正在跑的隧道会通着却一点流量都过不去。干跑按定义不该对活着的实例有任何副作用。
+//
+// 也不传 PlatformLogWriter:干跑用不上平台日志。(注意这一条并不能少构造什么 —— 我们的配置本来就
+// 显式开了 cache_file 和 clash_api,needCacheFile / needClashAPI 无论如何都是真;
+// 真正靠它省事的是 Probe 那份没有 experimental 段的临时配置,见那边的注释。)
 func (c *Core) Validate(raw []byte) error {
-	ctx, cancel := c.newContext()
+	ctx, cancel := c.dryContext()
 	defer cancel()
 	opt, err := parse(ctx, raw)
 	if err != nil {
 		return err
 	}
-	box, err := sb.New(sb.Options{Context: ctx, Options: opt, PlatformLogWriter: discard{}})
+	box, err := sb.New(sb.Options{Context: ctx, Options: opt})
 	if err != nil {
 		return err
 	}
@@ -336,32 +368,79 @@ func (c *Core) ProbeRunning(ctx context.Context, tags []string, link string, onE
 }
 
 // Probe 内核没跑时测速:只用订阅里的出站起一个临时实例(没有入站,不碰路由、DNS 与 TUN),测完即关。
-func Probe(ctx context.Context, outbounds []json.RawMessage, tags []string, link string, onEach func(tag string, ms int)) map[string]int {
-	list := make([]any, 0, len(outbounds)+1)
-	for _, o := range outbounds {
-		list = append(list, o)
-	}
-	list = append(list, map[string]any{"type": "direct", "tag": "direct"})
-	raw, err := json.Marshal(map[string]any{"log": map[string]any{"level": "warn"}, "outbounds": list})
-	if err != nil {
-		return map[string]int{}
+//
+// 两处是踩过坑才写成现在这样的:
+//
+//   - **不传 PlatformLogWriter。** sing-box 的 needCacheFile 是
+//     `CacheFile.Enabled || options.PlatformLogWriter != nil`,而这份临时配置里没有 experimental 段,
+//     于是缓存文件会落到默认路径 "cache.db" —— 相对进程当前目录。Android 上当前目录是 /,写不进去,
+//     box.Start() 直接失败,测速一个数都出不来;Windows 上服务以 SYSTEM 跑,则会往 System32 里丢文件。
+//   - **只放要测的那几个出站,而且逐个先验一遍。** 原来是把订阅里全部出站一股脑塞进去,
+//     只要有一个内核解不动(比如 1.14 已经把 wireguard 从 outbounds 挪走了),整份配置解析失败,
+//     **所有**节点都测不出来。现在坏的那个自己跳过,别的照测。
+//
+// 返回的 error 只表示"这一轮整个没跑起来";单个节点测不通体现为结果里的 -1。
+func Probe(ctx context.Context, outbounds []json.RawMessage, tags []string, link string, onEach func(tag string, ms int)) (map[string]int, error) {
+	want := make(map[string]bool, len(tags))
+	for _, t := range tags {
+		want[t] = true
 	}
 	bctx, cancel := newContext()
 	defer cancel()
+
+	list := make([]any, 0, len(tags)+1)
+	var bad []string
+	for _, o := range outbounds {
+		var head struct {
+			Tag string `json:"tag"`
+		}
+		if json.Unmarshal(o, &head) != nil || !want[head.Tag] {
+			continue
+		}
+		if err := parseOutbound(bctx, o); err != nil {
+			bad = append(bad, head.Tag)
+			continue
+		}
+		list = append(list, o)
+	}
+	list = append(list, map[string]any{"type": "direct", "tag": "direct"})
+
+	raw, err := json.Marshal(map[string]any{"log": map[string]any{"level": "warn"}, "outbounds": list})
+	if err != nil {
+		return map[string]int{}, err
+	}
 	opt, err := parse(bctx, raw)
 	if err != nil {
-		return map[string]int{}
+		return map[string]int{}, err
 	}
-	box, err := sb.New(sb.Options{Context: bctx, Options: opt, PlatformLogWriter: discard{}})
+	box, err := sb.New(sb.Options{Context: bctx, Options: opt})
 	if err != nil {
-		return map[string]int{}
+		return map[string]int{}, fmt.Errorf("构造测速实例: %w", err)
 	}
 	if err := box.Start(); err != nil {
 		_ = box.Close()
-		return map[string]int{}
+		return map[string]int{}, fmt.Errorf("启动测速实例: %w", err)
 	}
 	defer box.Close()
-	return probeBox(ctx, box, tags, link, onEach)
+	res := probeBox(ctx, box, tags, link, onEach)
+	for _, tag := range bad { // 内核解不动的节点报 -1,而不是在界面上留个空白让人以为"还没测"
+		if _, ok := res[tag]; !ok {
+			res[tag] = -1
+			if onEach != nil {
+				onEach(tag, -1)
+			}
+		}
+	}
+	if len(bad) > 0 {
+		return res, fmt.Errorf("这些节点内核解不动,已跳过: %s", strings.Join(bad, "、"))
+	}
+	return res, nil
+}
+
+// parseOutbound 单独验一个出站,用来找出"内核解不动"的那一个。
+func parseOutbound(ctx context.Context, raw json.RawMessage) error {
+	var one option.Outbound
+	return one.UnmarshalJSONContext(ctx, raw)
 }
 
 func probeBox(ctx context.Context, box *sb.Box, tags []string, link string, onEach func(tag string, ms int)) map[string]int {

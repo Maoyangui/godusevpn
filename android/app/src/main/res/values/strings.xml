@@ -10,5 +10,7 @@
     <string name="st_disconnected">未连接</string>
     <string name="share_diag">发送诊断包</string>
     <string name="no_browser">没有找到浏览器,请手动打开:%1$s</string>
-    <string name="webview_gone">界面反复崩溃,已退到后台。连接不受影响,可以重新打开应用。</string>
+    <string name="webview_gone">界面反复崩溃,已关闭。连接不受影响,重新打开应用即可。</string>
+    <string name="no_vpn_dialog">这台设备的系统里没有 VPN 授权界面,无法连接。可到「设置 → 网络 → VPN」里手动允许本应用。</string>
+    <string name="vpn_denied">没有允许 VPN 请求,无法连接。再点一次连接会重新询问。</string>
 </resources>

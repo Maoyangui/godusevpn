@@ -58,7 +58,7 @@ func endpoints(p *profile.Profile) []endpoint {
 
 // probeDirect 返回 节点 → 毫秒,-1 = 不通。
 // onEach 不为空时每测出一个就先报一次,界面好一个一个显示,不用干等全部测完。
-func probeDirect(ctx context.Context, p *profile.Profile, onEach func(tag string, ms int)) map[string]int {
+func probeDirect(ctx context.Context, p *profile.Profile, onEach func(tag string, ms int), logf func(string, ...any)) map[string]int {
 	res := map[string]int{}
 	var mu sync.Mutex
 	var wg sync.WaitGroup
@@ -114,7 +114,14 @@ func probeDirect(ctx context.Context, p *profile.Profile, onEach func(tag string
 	}
 	wg.Wait()
 	if len(fallback) > 0 {
-		for k, v := range core.Probe(ctx, p.Outbounds, fallback, "", onEach) {
+		got, err := core.Probe(ctx, p.Outbounds, fallback, "", onEach)
+		if err != nil {
+			// 以前这里失败是完全静默的:界面上那批节点永远没有数字,用户看到的是"点了没反应"。
+			if logf != nil {
+				logf("未连接时测速:%v", err)
+			}
+		}
+		for k, v := range got {
 			res[k] = v
 		}
 	}
@@ -157,9 +164,18 @@ func pingHost(ctx context.Context, host string) (time.Duration, error) {
 }
 
 func pingICMP(ctx context.Context, ip net.IP) (time.Duration, error) {
+	// 先试原始套接字(Windows 服务以 SYSTEM 跑、Linux 有 CAP_NET_RAW 时都能开)。
+	// 开不了就退到非特权 ICMP:Android 的应用进程没有 CAP_NET_RAW,原始套接字 100% 是 EPERM,
+	// 但系统的 ping_group_range 允许 SOCK_DGRAM 的 ICMP —— 不退这一步,手机 / 电视上所有
+	// hysteria2 / tuic / wireguard 节点都会白白掉进"临时实例真连一次"那条慢路。
+	unprivileged := false
 	c, err := icmp.ListenPacket("ip4:icmp", "0.0.0.0")
 	if err != nil {
-		return 0, &icmpUnavailable{err}
+		c, err = icmp.ListenPacket("udp4", "0.0.0.0")
+		if err != nil {
+			return 0, &icmpUnavailable{err}
+		}
+		unprivileged = true
 	}
 	defer c.Close()
 	id := os.Getpid() & 0xffff
@@ -175,7 +191,11 @@ func pingICMP(ctx context.Context, ip net.IP) (time.Duration, error) {
 	}
 	_ = c.SetDeadline(dl)
 	start := time.Now()
-	if _, err := c.WriteTo(b, &net.IPAddr{IP: ip}); err != nil {
+	var dst net.Addr = &net.IPAddr{IP: ip}
+	if unprivileged {
+		dst = &net.UDPAddr{IP: ip} // 非特权 ICMP 走的是 UDP 套接字的地址形状,端口填 0
+	}
+	if _, err := c.WriteTo(b, dst); err != nil {
 		return 0, err
 	}
 	buf := make([]byte, 1500)
@@ -197,8 +217,23 @@ func pingICMP(ctx context.Context, ip net.IP) (time.Duration, error) {
 		if err != nil || m.Type != ipv4.ICMPTypeEchoReply {
 			continue
 		}
-		if e, ok := m.Body.(*icmp.Echo); ok && e.ID == id && e.Seq == seq && peer != nil && peer.String() == ip.String() {
+		// 非特权 ICMP 的 ID 由内核自己分配(它拿来区分是哪个套接字的),应用写进去的那个不会原样回来,
+		// 所以这一路只比对序号;对端地址也要按 IP 比 —— 那边给回来的是带 :0 的 UDP 地址。
+		if e, ok := m.Body.(*icmp.Echo); ok && e.Seq == seq && (unprivileged || e.ID == id) && samePeer(peer, ip) {
 			return time.Since(start), nil
 		}
+	}
+}
+
+// samePeer 回包是不是来自我们 ping 的那台机器。原始套接字给的是 *net.IPAddr,
+// 非特权 ICMP 给的是 *net.UDPAddr(端口 0),所以按 IP 比,不能比字符串。
+func samePeer(peer net.Addr, ip net.IP) bool {
+	switch a := peer.(type) {
+	case *net.IPAddr:
+		return a.IP.Equal(ip)
+	case *net.UDPAddr:
+		return a.IP.Equal(ip)
+	default:
+		return false
 	}
 }

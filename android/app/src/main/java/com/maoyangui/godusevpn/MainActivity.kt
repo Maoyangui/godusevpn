@@ -8,6 +8,7 @@ import android.content.pm.PackageManager
 import android.content.res.Configuration
 import android.net.Uri
 import android.net.VpnService
+import android.os.Build
 import android.os.Bundle
 import android.util.Log
 import android.webkit.ConsoleMessage
@@ -39,19 +40,32 @@ class MainActivity : AppCompatActivity() {
         // 跨 recreate() 存活(recreate 不重启进程):界面崩溃的计数与窗口起点
         @Volatile private var goneCount = 0
         @Volatile private var goneSince = 0L
+        // 深链带来的订阅,等页面起来自己来取(见 handleDeepLink)。
+        // 必须跟上面两个一样放在 companion 里:冷启动深链的时间窗正好是页面从 assets 装出来的那几百毫秒,
+        // 这期间只要发生一次 recreate()(小内存电视上很常见),实例字段就没了,而 intent.data 已经被清空 ——
+        // 深链彻底丢失,页面起来调 takePendingImport 也拿不到东西。
+        @Volatile private var pendingImport: String? = null
     }
 
     private lateinit var web: WebView
-    private var pendingConnect = false
     // 页面的调用在这里跑;几个线程足够,测速那种慢活也不会互相挡住
     private val bridgePool = java.util.concurrent.Executors.newFixedThreadPool(4)
     private val listener: (String, String) -> Unit = { name, data ->
         runOnUiThread { web.evaluateJavascript("window.__godEvent && window.__godEvent(${JSONObject.quote(name)}, ${JSONObject.quote(data)})", null) }
     }
     private val vpnPermission = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { r ->
-        if (r.resultCode == Activity.RESULT_OK && pendingConnect) Thread { runCatching { startConnect() } }.start()
-        pendingConnect = false
+        // 不再用一个「有没有挂起的连接请求」的字段来把关:授权框开着的时候 Activity 可能被销毁重建
+        // (电视内存小,或者 onRenderProcessGone 走到 recreate()),挂起的请求会投递到**新实例**的回调上,
+        // 而新实例的那个字段是 false —— 用户明明点了「允许」,却什么都没发生。
+        // 走到这个回调本身就说明我们刚请求过授权,拿到 OK 就该连。
+        if (r.resultCode == Activity.RESULT_OK) {
+            Thread { runCatching { startConnect() } }.start()
+        } else {
+            // 遥控器上误触返回键的概率比手机高得多,得让用户知道为什么没连上
+            runCatching { Toast.makeText(this, getString(R.string.vpn_denied), Toast.LENGTH_LONG).show() }
+        }
     }
+    private val notifyPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
 
     /** 服务先起(通知栏显示"连接中",进程转前台),再让引擎连。 */
     private fun startConnect(): String {
@@ -90,15 +104,20 @@ class MainActivity : AppCompatActivity() {
                 if (view !== web) return true
                 App.listeners.remove(listener) // 先摘监听:引擎推事件过来时那个 WebView 已经没了
                 runCatching { (web.parent as? android.view.ViewGroup)?.removeView(web); web.destroy() }
-                // 内存实在不够时重建也会马上再崩,无限重建只会让设备更卡。短时间内崩太多次就退到后台,
+                // 内存实在不够时重建也会马上再崩,无限重建只会让设备更卡。短时间内崩太多次就把界面关掉,
                 // 连接在服务里跑,不受影响;用户下次自己打开时是干净的一轮。recreate() 不重启进程,所以计数存得住。
                 val now = android.os.SystemClock.elapsedRealtime()
                 if (now - goneSince > 60_000L) { goneSince = now; goneCount = 0 }
                 goneCount++
                 if (goneCount > 3) {
-                    Log.w(App.TAG, "一分钟内界面崩了 $goneCount 次,不再重建,退到后台(连接不受影响)")
+                    // 这里必须 finish,不能只退到后台。launchMode 是 singleTask:不结束的话从启动器再打开
+                    // 命中的是同一个实例、onCreate 不会再跑,而它的内容视图刚刚被 removeView + destroy 掉了 ——
+                    // 屏幕上就是永久空白,"下次打开是干净的一轮"根本不成立。而且连着 VPN 时进程是前台服务
+                    // 优先级,系统几乎不会回收它,白屏会一直留着;电视上又没有"从最近任务划掉"的手势,
+                    // 用户只能进系统设置强行停止,基本等于救不回来。
+                    Log.w(App.TAG, "一分钟内界面崩了 $goneCount 次,不再重建,关掉界面(连接不受影响)")
                     runCatching { Toast.makeText(applicationContext, getString(R.string.webview_gone), Toast.LENGTH_LONG).show() }
-                    moveTaskToBack(true)
+                    finish()
                     return true
                 }
                 if (!isFinishing && !isDestroyed) recreate()
@@ -124,6 +143,7 @@ class MainActivity : AppCompatActivity() {
         WebView.setWebContentsDebuggingEnabled(BuildConfig.DEBUG)
         web.loadUrl("https://appassets.androidplatform.net/web/index.html")
         App.listeners.add(listener)
+        askNotificationPermission()
         handleDeepLink(intent)
         // 返回键:先让页面收面板 / 退回上一页,页面说没什么可退的(首页)就把应用放到后台,连接不受影响
         onBackPressedDispatcher.addCallback(this) {
@@ -153,11 +173,24 @@ class MainActivity : AppCompatActivity() {
         handleDeepLink(intent)
     }
 
-    /** godusevpn://import?url=<订阅地址>[&name=<订阅名>],落地页的一键导入。 */
+    /**
+     * godusevpn://import?url=<订阅地址>[&name=<订阅名>],落地页的一键导入。
+     *
+     * 冷启动时**推不过去**:onCreate 里 loadUrl 是异步的,页面从 assets 装出来要几百毫秒,
+     * 而这个 post 在下一轮主线程循环就跑了 —— 那时 window.__godEvent 还不存在,
+     * `window.__godEvent &&` 直接短路,什么都不发生,连一行日志都没有。
+     * 于是"应用没开着时从落地页点一键导入"必然失败,而电视上遥控器打字几乎不可能,
+     * 这条路等于是唯一能加订阅的通路。
+     *
+     * 所以改成:存一份,同时推一次。页面起来后主动来取(takePendingImport),两条路哪条先到都行。
+     * 取走即清空,免得 recreate() 带着同一个 intent 重进 onCreate 时把用户正在填的表单又冲掉一遍。
+     */
     private fun handleDeepLink(intent: Intent?) {
         val u = intent?.data ?: return
         val url = u.getQueryParameter("url") ?: return
         val payload = JSONObject().put("url", url).put("name", u.getQueryParameter("name") ?: "").toString()
+        pendingImport = payload
+        intent.data = null // 这个 intent 已经消费过了:recreate() / 从最近任务恢复时别再触发一次
         web.post { web.evaluateJavascript("window.__godEvent && window.__godEvent('import', ${JSONObject.quote(payload)})", null) }
     }
 
@@ -167,15 +200,40 @@ class MainActivity : AppCompatActivity() {
         super.onDestroy()
     }
 
-    /** 连接前要先拿到系统的 VPN 授权(第一次会弹系统对话框)。 */
+    /**
+     * 连接前要先拿到系统的 VPN 授权(第一次会弹系统对话框)。
+     *
+     * launch 一定要兜住:VpnService.prepare() 返回的是一个**显式**指向 com.android.vpndialogs 的 Intent,
+     * 系统并不检查那个组件在不在。不走 Google 认证的国行电视 / 盒子常把它裁掉或禁掉,launch 会抛
+     * ActivityNotFoundException —— 而它跑在 runOnUiThread 的 Runnable 里,桥那层的 try/catch 在别的线程上,
+     * 罩不到,整个应用直接闪退,而且每次点连接都闪退。同一个文件里 openExternal 早就为同类问题做了防护,
+     * 这里是唯一漏掉的一处。
+     */
     private fun connect(): String {
         val prep = VpnService.prepare(this)
         if (prep != null) {
-            pendingConnect = true
-            runOnUiThread { vpnPermission.launch(prep) }
+            runOnUiThread {
+                // 捕 Exception 而不只是 ActivityNotFoundException:授权框开着时 Activity 被销毁,
+                // ActivityResultRegistry 会把 key 反注册掉,这时 launch 抛的是 IllegalStateException。
+                runCatching { vpnPermission.launch(prep) }.onFailure {
+                    Log.w(App.TAG, "打不开系统 VPN 授权界面", it)
+                    runCatching { Toast.makeText(this, getString(R.string.no_vpn_dialog), Toast.LENGTH_LONG).show() }
+                }
+            }
             return App.engine().call("GetState", "[]")
         }
         return startConnect()
+    }
+
+    /**
+     * Android 13 起通知要用户点头才显示。前台服务通知是「断开」按钮的所在,电视上尤其重要 ——
+     * 抽屉深处的入口够不着时,通知栏是另一条路。申请动作本身也要兜住:电视 ROM 上可能根本没有权限对话框。
+     */
+    private fun askNotificationPermission() {
+        if (Build.VERSION.SDK_INT < 33) return
+        if (checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED) return
+        runCatching { notifyPermission.launch(android.Manifest.permission.POST_NOTIFICATIONS) }
+            .onFailure { Log.w(App.TAG, "申请通知权限失败", it) }
     }
 
 
@@ -194,6 +252,14 @@ class MainActivity : AppCompatActivity() {
     inner class Bridge {
         @JavascriptInterface
         fun isTV(): Boolean = this@MainActivity.isTV()
+
+        /** 页面起来后主动来取深链带来的订阅(冷启动时事件推得比页面早,推不过去)。取走即清空。 */
+        @JavascriptInterface
+        fun takePendingImport(): String {
+            val p = pendingImport ?: return ""
+            pendingImport = null
+            return p
+        }
 
         /**
          * 异步调用:立刻返回,活干完了再把结果回调给页面。

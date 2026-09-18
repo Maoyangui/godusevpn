@@ -159,3 +159,211 @@ func stripComments(s string) string {
 	}
 	return string(out)
 }
+
+// ---- CSS 侧 ----
+//
+// 这一侧原来一条测试都没有,而电视上出过的两次问题都在 CSS 里:flex 的 gap 在 Chrome 66 上不生效,
+// 一行里的元素全贴在一起;抽屉那一格没写 overflow/min-height,菜单最后一项掉到屏幕外还滚不到。
+// 老内核遇到不认识的属性是**静默丢弃那一条声明** —— 不报错、不白屏,只是布局悄悄错掉,
+// 而我们在新机器上永远看不到。所以只能靠这里挡。
+
+// bannedCSS 里 fallback 不为空的,表示"可以用,但同一条规则里得先有一条老内核认识的写法垫底"。
+var bannedCSS = []struct {
+	pat, name, fallback string
+	chrome              int
+}{
+	{pat: "overflow: clip", name: "overflow: clip", chrome: 90, fallback: "overflow: hidden"},
+	{pat: "inset:", name: "inset 简写", chrome: 87},
+	{pat: ":is(", name: ":is()", chrome: 88},
+	{pat: ":where(", name: ":where()", chrome: 88},
+	{pat: "aspect-ratio:", name: "aspect-ratio", chrome: 88},
+	{pat: "clamp(", name: "clamp()", chrome: 79},
+	{pat: "min(", name: "min()", chrome: 79, fallback: ";"}, // 前面得有一条同属性的定值声明
+	{pat: "max(", name: "max()", chrome: 79, fallback: ";"},
+	{pat: "backdrop-filter:", name: "backdrop-filter", chrome: 76, fallback: "background"}, // 退化成不模糊,能接受
+	{pat: "content-visibility:", name: "content-visibility", chrome: 85},
+	{pat: "accent-color:", name: "accent-color", chrome: 93},
+	{pat: "position: sticky", name: "position: sticky", chrome: 56}, // 66 上有,列在这里只是备忘
+}
+
+func TestDistCSSRunsOnOldWebView(t *testing.T) {
+	for _, f := range cssFiles(t) {
+		css := stripComments(readDist(t, f))
+		for _, r := range bannedCSS {
+			if r.chrome <= minChrome {
+				continue
+			}
+			for _, at := range offsets(css, r.pat) {
+				if r.fallback != "" && ruleAt(css, at, r.pat) != "" && declBefore(css, at, r.pat, r.fallback) {
+					continue
+				}
+				t.Errorf("%s 第 %d 行用了 %s(要 Chrome %d,底线是 %d)—— 老内核会静默丢掉这条声明,页面不报错但布局是错的%s",
+					f, lineAt(css, at), r.name, r.chrome, minChrome,
+					fallbackHint(r.fallback))
+			}
+		}
+	}
+}
+
+func fallbackHint(fb string) string {
+	if fb == "" {
+		return ""
+	}
+	if fb == ";" {
+		return ";要用的话同一条规则里先写一条定值垫底"
+	}
+	return ";要用的话同一条规则里先写一条老写法(" + fb + ")垫底"
+}
+
+// TestFlexGapHasNogapFallback flex 的 gap 要到 Chrome 84 才有。页面靠 index.html 里那段脚本实测一次,
+// 不管用就给 <html> 加 nogap 类,再由 .nogap 那批相邻兄弟选择器用 margin 补回间距。
+// 漏掉任何一个用了 gap 的 flex 容器,那一行在电视上间距就是 0 —— 图标、名字、延迟全糊在一起。
+func TestFlexGapHasNogapFallback(t *testing.T) {
+	css := stripComments(readDist(t, "dist/style.css"))
+	sels := flexGapSelectors(css)
+	// 解析器要是哪天被 CSS 的写法变化弄瞎了,这条测试会变成"一个都没找到、于是全过",
+	// 那比没有测试更糟。样式表里 flex + gap 的容器有五十多个,给个下限钉住。
+	if len(sels) < 40 {
+		t.Fatalf("只解析出 %d 个 flex+gap 选择器,解析器八成瞎了:%v", len(sels), sels)
+	}
+	for _, sel := range sels {
+		// 兜底规则长这样:.nogap <选择器> > *:not([hidden]) + *:not([hidden]) { margin-left: … }
+		// 也允许写成 .nogap body.xxx <选择器>(平台特化那几条)
+		if !strings.Contains(css, ".nogap "+sel+" > *") && !strings.Contains(css, ".nogap "+strings.TrimPrefix(sel, ".")+" > *") &&
+			!regexpContainsNogap(css, sel) {
+			t.Errorf("选择器 %s 是 flex 且用了 gap,却没有对应的 .nogap 兜底规则 —— 电视那种老内核上这一行间距会变成 0", sel)
+		}
+	}
+}
+
+func regexpContainsNogap(css, sel string) bool {
+	// 平台特化写法:.nogap body.android .drawer-brand > *…
+	for _, ln := range strings.Split(css, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(ln), ".nogap ") && strings.Contains(ln, sel+" > *") {
+			return true
+		}
+	}
+	return false
+}
+
+// flexGapSelectors 找出"同一条规则里既 display: flex 又写了 gap"的选择器。
+func flexGapSelectors(css string) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, block := range strings.Split(css, "}") {
+		i := strings.Index(block, "{")
+		if i < 0 {
+			continue
+		}
+		sel, body := strings.TrimSpace(block[:i]), block[i+1:]
+		if sel == "" || strings.HasPrefix(sel, "@") || strings.Contains(sel, "@media") {
+			// 媒体查询里 selector 会带上前缀,取最后一段
+			if j := strings.LastIndex(sel, "{"); j >= 0 {
+				sel = strings.TrimSpace(sel[j+1:])
+			}
+		}
+		if sel == "" || strings.HasPrefix(sel, "@") {
+			continue
+		}
+		if !strings.Contains(body, "gap:") || strings.Contains(body, "grid-gap") {
+			continue
+		}
+		if !strings.Contains(body, "display: flex") && !strings.Contains(body, "display: inline-flex") {
+			continue // grid 的 gap 在 Chrome 66 上有(grid-gap),不归这条管
+		}
+		sel = strings.TrimSpace(sel[strings.LastIndex(sel, "\n")+1:])
+		if sel != "" && !seen[sel] {
+			seen[sel] = true
+			out = append(out, sel)
+		}
+	}
+	return out
+}
+
+// TestDrawerListScrolls 抽屉那一格必须能滚。电视的 WebView 视口常常只有 960×540,菜单一屏装不下;
+// flex 子项不写 min-height: 0 会被"最小内容尺寸"撑开,内容溢出到屏幕外面,而且没有任何可滚的容器 ——
+// 遥控器把焦点移过去了,画面上什么也没动。2026-09-18 用户的索尼电视上「关于」就是这么消失的,
+// 连带着导出诊断包、检查更新、退出全都够不着。两条缺一不可。
+func TestDrawerListScrolls(t *testing.T) {
+	css := stripComments(readDist(t, "dist/style.css"))
+	i := strings.Index(css, ".drawer-items {")
+	if i < 0 {
+		t.Fatal("找不到 .drawer-items 规则 —— 选择器被改名了,这条测试要跟着更新")
+	}
+	rule := css[i:]
+	if j := strings.Index(rule, "}"); j > 0 {
+		rule = rule[:j]
+	}
+	for _, need := range []string{"overflow-y: auto", "min-height: 0"} {
+		if !strings.Contains(rule, need) {
+			t.Errorf(".drawer-items 少了 %q —— 少任意一条,电视上菜单最后几项就会掉到屏幕外面且滚不到。规则现在是:%s", need, rule)
+		}
+	}
+}
+
+// ---- 上面几条要用的小工具 ----
+
+func cssFiles(t *testing.T) []string {
+	t.Helper()
+	files, err := fs.Glob(dist, "dist/*.css")
+	if err != nil || len(files) == 0 {
+		t.Fatalf("没找到 dist 下的 css: %v", err)
+	}
+	return files
+}
+
+func readDist(t *testing.T, name string) string {
+	t.Helper()
+	b, err := fs.ReadFile(dist, name)
+	if err != nil {
+		t.Fatalf("%s: %v", name, err)
+	}
+	return string(b)
+}
+
+// offsets pat 出现的所有字节位置。
+func offsets(s, pat string) []int {
+	var out []int
+	for off := 0; ; {
+		i := strings.Index(s[off:], pat)
+		if i < 0 {
+			return out
+		}
+		out = append(out, off+i)
+		off += i + len(pat)
+	}
+}
+
+// ruleAt 取 at 所在的那条规则的内容({ 与 } 之间)。
+func ruleAt(s string, at int, _ string) string {
+	start := strings.LastIndex(s[:at], "{")
+	if start < 0 {
+		return ""
+	}
+	end := strings.Index(s[at:], "}")
+	if end < 0 {
+		return s[start+1:]
+	}
+	return s[start+1 : at+end]
+}
+
+// declBefore 同一条规则里,这个位置**之前**有没有垫底的老写法。
+// fallback 为 ";" 表示"同属性先有一条定值声明"(比如 height: 800px; height: min(…)):
+// 只要这条规则里、匹配点之前还有别的声明就算数。
+func declBefore(s string, at int, pat, fallback string) bool {
+	start := strings.LastIndex(s[:at], "{")
+	if start < 0 {
+		return false
+	}
+	before := s[start+1 : at]
+	if fallback == ";" {
+		// 取当前属性名,看它前面是不是已经出现过一次
+		lineStart := strings.LastIndexAny(before, ";{") + 1
+		prop := strings.TrimSpace(before[lineStart:])
+		if i := strings.Index(prop, ":"); i > 0 {
+			prop = strings.TrimSpace(prop[:i])
+		}
+		return prop != "" && strings.Contains(before[:lineStart], prop+":")
+	}
+	return strings.Contains(before, fallback)
+}

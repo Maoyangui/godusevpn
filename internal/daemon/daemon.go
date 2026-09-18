@@ -31,6 +31,7 @@ import (
 	"github.com/Maoyangui/godusevpn/internal/netmode"
 	"github.com/Maoyangui/godusevpn/internal/paths"
 	"github.com/Maoyangui/godusevpn/internal/profile"
+	"github.com/Maoyangui/godusevpn/internal/ruleset"
 	"github.com/Maoyangui/godusevpn/internal/settings"
 	"github.com/Maoyangui/godusevpn/internal/state"
 )
@@ -38,40 +39,46 @@ import (
 const DisplayName = buildinfo.DisplayName
 
 type Daemon struct {
-	mu         sync.Mutex
-	log        *logx.Rotator
-	coreLog    *logx.Rotator
-	coreLevel  atomic.Int32 // 内核日志记到哪一级(core.Writer 按它过滤)
-	nicOff     atomic.Bool  // 各网卡的 IPv6 绑定已由我们停掉、还没还原(和闸一样,跨内核重启 / 服务重启一直有效)
-	nicMu      sync.Mutex   // syncNICIPv6 串行化:停用那一步要起 PowerShell,不能两个一起跑
-	probeMu    sync.Mutex
-	probeAt    time.Time // auto 组上次测完一轮全部节点的时间,autoProbeLoop 按它算下一次
-	core       *core.Core
-	settings   settings.Settings
-	profiles   map[string]*profile.Profile // 订阅 id → 节点缓存
-	fetchErr   map[string]string           // 订阅 id → 最近一次拉取失败原因
-	fetchLink  map[string]string           // 订阅 id → 拉取失败(404)时面板随响应给的「选购 / 续费」地址
-	running    *profile.Profile            // 正在跑的内核是按哪份订阅生成的;刷新后拿它和缓存比,决定动不动隧道
-	prepared   *profile.Profile            // prepare 刚按它生成了配置、内核还没起:start 成功后转成 running
-	guardOn    bool                        // 「全局禁直连」的闸此刻开着
-	guardErr   string                      // 闸该开却没开成的原因
-	guardMu    sync.Mutex                  // syncGuard 整段串行:判断 + 开 / 撤要一气呵成
-	releaseTun func()                      // 见 Options.ReleaseTun
-	machine    *state.Machine
-	server     *ipc.Server
-	secret     string
-	http       *http.Client
-	delays     map[string]int // 最近一次全节点测速结果
-	ping       int            // 当前节点最近一次测得的延迟(毫秒):健康检查本来就要测一次,顺手记下来给界面用
-	exitIP     string         // 经当前节点出去时对外露出的地址
-	exitLoc    string         // 出口所在国家的两位代码
-	exitCity   string         // 出口所在城市
-	exitRegion string         // 出口所在一级行政区
-	exitISP    string         // 出口那条线路的运营商 / 机房
-	exitNode   string         // 上面那些是哪个节点测出来的:自动选择在后台换了节点就得重测
-	exitAt     time.Time      // 上次测出口的时间:节点没变也隔一阵子复查一次
-	exitGen    uint64         // 出口查询的代数:换节点 / 重连就加一,慢的旧查询回来发现代数变了就丢弃,不会把旧节点的出口盖到新节点上
-	noListen   bool
+	mu        sync.Mutex
+	log       *logx.Rotator
+	coreLog   *logx.Rotator
+	coreLevel atomic.Int32 // 内核日志记到哪一级(core.Writer 按它过滤)
+	nicOff    atomic.Bool  // 各网卡的 IPv6 绑定已由我们停掉、还没还原(和闸一样,跨内核重启 / 服务重启一直有效)
+	nicMu     sync.Mutex   // syncNICIPv6 串行化:停用那一步要起 PowerShell,不能两个一起跑
+	probeMu   sync.Mutex
+	probeAt   time.Time // auto 组上次测完一轮全部节点的时间,autoProbeLoop 按它算下一次
+	core      *core.Core
+	settings  settings.Settings
+	profiles  map[string]*profile.Profile // 订阅 id → 节点缓存
+	fetchErr  map[string]string           // 订阅 id → 最近一次拉取失败原因
+	fetchLink map[string]string           // 订阅 id → 拉取失败(404)时面板随响应给的「选购 / 续费」地址
+	running   *profile.Profile            // 正在跑的内核是按哪份订阅生成的;刷新后拿它和缓存比,决定动不动隧道
+	prepared  *profile.Profile            // prepare 刚按它生成了配置、内核还没起:start 成功后转成 running
+	guardOn   bool                        // 「全局禁直连」的闸此刻开着
+	guardErr  string                      // 闸该开却没开成的原因
+	// guardApplied 闸现在实际按哪份规格装着。设置里改了「局域网直通」/ 网关模式之后要据此重装 ——
+	// 闸是持久的,只看"在不在"的话,连着的时候改这两项永远不生效。
+	guardApplied netmode.GuardSpec
+	guardMu      sync.Mutex // syncGuard 整段串行:判断 + 开 / 撤要一气呵成
+	releaseTun   func()     // 见 Options.ReleaseTun
+	machine      *state.Machine
+	server       *ipc.Server
+	secret       string
+	http         *http.Client
+	delays       map[string]int // 最近一次全节点测速结果
+	ping         int            // 当前节点最近一次测得的延迟(毫秒):健康检查本来就要测一次,顺手记下来给界面用
+	exitIP       string         // 经当前节点出去时对外露出的地址
+	exitLoc      string         // 出口所在国家的两位代码
+	exitCity     string         // 出口所在城市
+	exitRegion   string         // 出口所在一级行政区
+	exitISP      string         // 出口那条线路的运营商 / 机房
+	exitNode     string         // 上面那些是哪个节点测出来的:自动选择在后台换了节点就得重测
+	exitAt       time.Time      // 上次测出口的时间:节点没变也隔一阵子复查一次
+	exitGen      uint64         // 出口查询的代数:换节点 / 重连就加一,慢的旧查询回来发现代数变了就丢弃,不会把旧节点的出口盖到新节点上
+	noListen     bool
+
+	missingSets []builder.MissingRuleSet // 上一次生成配置时本地没有、因此摘掉了的规则集(界面要提示,连上之后要去补)
+	fillingSets bool                     // 补规则集的活正在跑,别叠第二份
 }
 
 type persisted struct {
@@ -94,6 +101,10 @@ func NewWithOptions(o Options) (*Daemon, error) {
 	if err := paths.Ensure(); err != nil {
 		return nil, fmt.Errorf("建数据目录: %w", err)
 	}
+	// 内置规则集先铺好。内核在启动阶段就要把规则集全读进来,读不到整个起不来 ——
+	// 早先客户端让内核自己去 GitHub 现下,一台全新设备只要第一次下不动就永远连不上(见 internal/ruleset)。
+	// 铺不下去也只是少几条规则、连接照常,所以不当致命错误,等日志建好再说一声。
+	installErr := ruleset.Install(paths.RuleSets())
 	d := &Daemon{
 		noListen: o.NoListen, releaseTun: o.ReleaseTun,
 		log:      logx.New(filepath.Join(paths.Logs(), "service.log"), 5<<20, 3),
@@ -101,6 +112,14 @@ func NewWithOptions(o Options) (*Daemon, error) {
 		http:     &http.Client{Timeout: 30 * time.Second},
 		profiles: map[string]*profile.Profile{},
 		fetchErr: map[string]string{}, fetchLink: map[string]string{},
+	}
+	if installErr != nil {
+		d.logf("内置规则集铺不下去(少几条规则,连接不受影响): %v", installErr)
+	}
+	// 数据目录里有节点凭据、订阅地址、面板密码哈希,还有一层规则集会被内核当路由依据读进去,
+	// 默认从 %ProgramData% 继承来的权限是"同机任何标准用户都能读、还能往里新建文件"。每次启动都收一遍。
+	if err := paths.Harden(); err != nil {
+		d.logf("数据目录权限没收紧(里面有节点凭据,建议用管理员身份装一次): %v", err)
 	}
 	d.coreLevel.Store(core.LevelOf(d.settings.LogLevel))
 	d.core = core.New(core.Writer{Printf: d.coreLog.Printf, Level: &d.coreLevel})
@@ -128,6 +147,7 @@ func NewWithOptions(o Options) (*Daemon, error) {
 		Stop:    d.stop,
 		Alive:   d.core.Running,
 		Health:  d.health,
+		Recover: d.recoverRoute,
 		OnChange: func(s state.Snapshot) {
 			d.logf("状态 → %s%s", s.Status, map[bool]string{true: "(" + s.Code + " " + s.Error + ")", false: ""}[s.Error != ""])
 		},
@@ -423,11 +443,12 @@ func (d *Daemon) prepare(ctx context.Context) ([]byte, error) {
 	if s.NetMode == settings.NetGateway {
 		d.resolveDeviceIPs(&s) // 设备策略按当前 IP 生效
 	}
-	cfg, err := builder.Build(builder.Input{Profile: p, Settings: s, DataDir: paths.DataDir(), ClashSecret: d.secret, RuleSetDir: paths.RuleSets(),
+	cfg, rep, err := builder.BuildEx(builder.Input{Profile: p, Settings: s, DataDir: paths.DataDir(), ClashSecret: d.secret, RuleSetDir: paths.RuleSets(),
 		NodeIPs: resolveNodeHosts(ctx, p)})
 	if err != nil {
 		return nil, state.Errf(state.CodeConfig, "生成配置: %v", err)
 	}
+	d.noteMissingRuleSets(rep.Missing)
 	if err := d.core.Validate(cfg); err != nil {
 		return nil, state.Errf(state.CodeConfig, "配置校验失败: %v", err)
 	}
@@ -446,15 +467,7 @@ func (d *Daemon) start(cfg []byte) error {
 	// 网卡 IPv6 的停用不在这里做:它跟的是"用户想不想连着"而不是"内核在不在跑"(见 syncNICIPv6),
 	// prepare() 里已经对齐过了 —— 那也正好在内核启动之前,改协议绑定会让网卡重新走一遍协议栈,不该去抖刚建好的隧道。
 	if err := d.core.Start(cfg); err != nil {
-		low := strings.ToLower(err.Error())
-		switch {
-		case strings.Contains(low, "wintun") || strings.Contains(low, "adapter") || strings.Contains(low, "tun"):
-			return state.Errf(state.CodeTunDriver, "TUN 网卡创建失败(需要管理员权限的服务在跑,或被安全软件拦住): %v", err)
-		case strings.Contains(low, "route"):
-			return state.Errf(state.CodeRouteConflict, "路由设置失败(可能与其它 VPN 冲突): %v", err)
-		default:
-			return state.Errf(state.CodeCoreStart, "%v", err)
-		}
+		return d.classifyStart(err)
 	}
 	_ = os.WriteFile(paths.LastGood(), cfg, 0o600)
 	d.mu.Lock()
@@ -477,6 +490,7 @@ func (d *Daemon) start(cfg []byte) error {
 		}
 		d.refreshExit(d.beginExit(d.currentNode()))
 	}()
+	go d.fillMissingRuleSets() // 隧道通了才去补规则集:直连多半拿不到 GitHub
 	if s.TUN {
 		// Linux:本机对外服务(SSH 等)的回包不能进 TUN,否则一连上远程管理就断;Windows 上是空操作
 		if err := netmode.Protect(builder.TunName, s.IPv6); err != nil {
@@ -1014,6 +1028,9 @@ func (d *Daemon) stateView() ipc.StateView {
 			v.Nodes = all
 		}
 	}
+	for _, m := range d.MissingRuleSets() {
+		v.MissingRuleSets = append(v.MissingRuleSets, m.Tag)
+	}
 	if v.Nodes == nil {
 		v.Nodes = []string{}
 	}
@@ -1171,7 +1188,7 @@ func (d *Daemon) registerHandlers() {
 			in, _ := d.splitByCore(p)
 			res = d.core.ProbeRunning(ctx, in.Tags, builder.TestURL, set)
 		} else {
-			res = probeDirect(ctx, p, set) // 未连接:直连量到节点服务器的往返
+			res = probeDirect(ctx, p, set, d.logf) // 未连接:直连量到节点服务器的往返
 		}
 		d.mu.Lock()
 		d.delays = res

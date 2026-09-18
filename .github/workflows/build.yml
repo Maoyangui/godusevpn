@@ -276,7 +276,7 @@ jobs:
           done
           ls -la android/app/libs
 
-      - name: Signing key (仓库机密里的自建密钥;没有就用 debug 签名)
+      - name: Signing key (仓库机密里的自建密钥)
         if: env.ANDROID_KEYSTORE_B64 != ''
         run: echo "$ANDROID_KEYSTORE_B64" | base64 -d > android/keystore.jks
 
@@ -288,12 +288,21 @@ jobs:
         run: |
           set -e
           V="${{ needs.version.outputs.version }}"
-          gradle -p android --no-daemon -q assembleRelease "-PappVersion=$V" "-PsplitAbi=true" "-PversionCode=${{ github.run_number }}"
           mkdir -p out
-          for pair in arm64-v8a:arm64 armeabi-v7a:armv7 x86_64:x86_64 universal:universal; do
-            abi=${pair%%:*}; name=${pair##*:}
-            cp android/app/build/outputs/apk/release/app-$abi-release.apk out/godusevpn-$V-android-$name.apk
-          done
+          # 没有签名密钥就只编 debug 包。正式包退回 debug 签名等于让已装用户再也升不了级(签名不一致装不上),
+          # 所以 build.gradle.kts 里那道守门会直接让 assembleRelease 失败 —— fork 过来的 PR 拿不到机密,
+          # 这里必须自己绕开,不然每个外部 PR 的 android 作业都是红的。
+          if [ -f android/keystore.jks ]; then
+            gradle -p android --no-daemon -q assembleRelease "-PappVersion=$V" "-PsplitAbi=true"
+            for pair in arm64-v8a:arm64 armeabi-v7a:armv7 x86_64:x86_64 universal:universal; do
+              abi=${pair%%:*}; name=${pair##*:}
+              cp android/app/build/outputs/apk/release/app-$abi-release.apk out/godusevpn-$V-android-$name.apk
+            done
+          else
+            echo "没有签名密钥(fork 的 PR 拿不到机密):只编 debug 包验证能不能编过,不产出可发布的安装包"
+            gradle -p android --no-daemon -q assembleDebug "-PappVersion=$V"
+            cp android/app/build/outputs/apk/debug/app-debug.apk out/godusevpn-$V-android-debug-UNSIGNED-DO-NOT-SHIP.apk
+          fi
           ls -la out
 
       - uses: actions/upload-artifact@v4
@@ -312,6 +321,11 @@ jobs:
         run: |
           mkdir -p out
           find art -type f -exec cp {} out/ \;
+          # 没有签名密钥时 android 作业出的是 debug 包(见那边的注释)。那种包对已装用户等于
+          # "再也升不了级",绝不能混进发布。名字里带着记号,这里当场拦下。
+          if ls out/ | grep -q "DO-NOT-SHIP"; then
+            echo "::error::产物里有未签名的 debug 包,不能发布:"; ls out/ | grep "DO-NOT-SHIP"; exit 1
+          fi
           cd out && sha256sum * > SHA256SUMS && cat SHA256SUMS
       - uses: actions/upload-artifact@v4
         with:

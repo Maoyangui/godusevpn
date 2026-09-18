@@ -36,10 +36,15 @@ const (
 	CodeConfig         = "E_CONFIG"
 	CodeTunDriver      = "E_TUN_DRIVER"
 	CodeRouteConflict  = "E_ROUTE_CONFLICT"
-	CodeCoreStart      = "E_CORE_START"
-	CodeCoreCrash      = "E_CORE_CRASH"
-	CodeNodeDown       = "E_NODE_DOWN"
-	CodeUnknown        = "E_UNKNOWN"
+	// CodeRuleSet 规则集读不出来。规则集是在内核启动阶段全部载入的,坏一个就整个起不来,
+	// 早先这类失败会落进 E_CORE_START(界面只显示「内核启动失败」),用户完全无从下手。
+	CodeRuleSet = "E_RULESET"
+	// CodePortBusy 要监听的端口被别人占着(混合端口、Clash API)。同样是启动阶段才暴露。
+	CodePortBusy  = "E_PORT_BUSY"
+	CodeCoreStart = "E_CORE_START"
+	CodeCoreCrash = "E_CORE_CRASH"
+	CodeNodeDown  = "E_NODE_DOWN"
+	CodeUnknown   = "E_UNKNOWN"
 )
 
 // Error 带码的错误。
@@ -74,17 +79,23 @@ type Snapshot struct {
 
 // Deps 状态机需要的动作,由 daemon 注入。
 type Deps struct {
-	Prepare  func(ctx context.Context) ([]byte, error) // 刷新订阅 + 生成配置 + 干跑
-	Start    func(cfg []byte) error
-	Stop     func() error
-	Alive    func() bool                     // 内核还活着吗(每 AliveEvery 查一次)
-	Health   func(ctx context.Context) error // 经代理测一次(每 HealthEvery 一次);连续两次失败进 Degraded
+	Prepare func(ctx context.Context) ([]byte, error) // 刷新订阅 + 生成配置 + 干跑
+	Start   func(cfg []byte) error
+	Stop    func() error
+	Alive   func() bool                     // 内核还活着吗(每 AliveEvery 查一次)
+	Health  func(ctx context.Context) error // 经代理测一次(每 HealthEvery 一次);连续两次失败进 Degraded
+	// Recover 线路连着但不通、连续失败到放弃边缘时叫一次,给守护进程一个自救的机会
+	// (比如手动选定的节点挂了,换到一个测得通的节点上)。
+	// 返回 true = 确实动了什么,再给一轮观察期;false / 未设置 = 直接重建连接。
+	Recover  func(ctx context.Context) bool
 	OnChange func(Snapshot)
 	Logf     func(format string, a ...any)
 
 	AliveEvery  time.Duration
 	HealthEvery time.Duration
-	Backoff     []time.Duration // 重试间隔序列,超过最后一项按最后一项
+	// DegradedEvery 进了 Degraded 之后健康检查改成多久一次(默认 degradedEvery)。
+	DegradedEvery time.Duration
+	Backoff       []time.Duration // 重试间隔序列,超过最后一项按最后一项
 }
 
 type Machine struct {
@@ -107,6 +118,9 @@ func New(d Deps) *Machine {
 	}
 	if d.HealthEvery == 0 {
 		d.HealthEvery = 3 * time.Minute
+	}
+	if d.DegradedEvery == 0 {
+		d.DegradedEvery = degradedEvery
 	}
 	if len(d.Backoff) == 0 {
 		d.Backoff = []time.Duration{time.Second, 2 * time.Second, 5 * time.Second, 10 * time.Second, 20 * time.Second, 30 * time.Second, 60 * time.Second}
@@ -299,13 +313,28 @@ func (m *Machine) run(ctx context.Context) {
 	}
 }
 
-// watch 连接期间盯着内核:活着就定期做健康检查;返回 false = 被取消,true = 内核死了。
+// degradedEvery 进了 Degraded 之后健康检查改成多久一次。
+// 正常间隔是三分钟,那是"一切正常时别瞎折腾";已经发现不对劲了就得盯紧点,
+// 否则光是确认"真的救不回来"就要十分钟,用户对着一块写着「已连接 · 节点不稳」、实际一点网都没有的电视干等。
+const degradedEvery = 30 * time.Second
+
+// degradedGiveUp 连续失败到第几次就不再等了。第 2 次进 Degraded,之后按 degradedEvery 复查,
+// 到第 4 次(约 1 分钟)还不行就重建连接。
+const degradedGiveUp = 4
+
+// watch 连接期间盯着内核:活着就定期做健康检查;返回 false = 被取消,true = 该重建连接了。
+//
+// 注意"返回 true"以前只表示"内核死了",现在也包括"内核还在跑,但这条线路已经救不回来"。
+// 调用方(run)两种情况的处理本来就一样:停干净、退避、从头 Prepare + Start。
+// 早先没有这条出路 —— 手动选定节点的用户夜里节点被墙,界面就永久停在「已连接 · 节点不稳」,
+// 既不会自己换线也不会重连,开着「全局禁直连」时连直连都没有,只能人去点断开再连。
 func (m *Machine) watch(ctx context.Context) bool {
 	alive := time.NewTicker(m.d.AliveEvery)
 	health := time.NewTicker(m.d.HealthEvery)
 	defer alive.Stop()
 	defer health.Stop()
 	fails := 0
+	tried := false // 这一轮不健康期间已经叫过一次自救了
 	for {
 		select {
 		case <-ctx.Done():
@@ -321,7 +350,10 @@ func (m *Machine) watch(ctx context.Context) bool {
 			err := m.d.Health(ctx)
 			cur := m.Snapshot().Status
 			if err == nil {
-				fails = 0
+				if fails > 0 {
+					health.Reset(m.d.HealthEvery) // 好了,回到正常节奏
+				}
+				fails, tried = 0, false
 				if cur == Degraded {
 					m.set(Connected, nil)
 				}
@@ -333,7 +365,21 @@ func (m *Machine) watch(ctx context.Context) bool {
 			fails++
 			if fails >= 2 && cur != Degraded {
 				m.set(Degraded, err)
+				health.Reset(m.d.DegradedEvery)
 			}
+			if fails < degradedGiveUp {
+				continue
+			}
+			// 先给守护进程一次自救的机会(换一个测得通的节点),换过就重新给一轮观察期
+			if m.d.Recover != nil && !tried {
+				tried = true
+				if m.d.Recover(ctx) {
+					fails = 1
+					continue
+				}
+			}
+			m.d.Logf("连续 %d 次健康检查都不通,重建连接: %v", fails, err)
+			return true
 		}
 	}
 }

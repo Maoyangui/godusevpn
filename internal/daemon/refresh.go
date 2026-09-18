@@ -181,9 +181,12 @@ func (d *Daemon) syncGuard() {
 	case want && !on:
 		d.applyGuard("已开闸,隧道以外的流量一律拦下")
 	case want && on:
-		// 闸是持久的、也可能被别人动过(比如有人跑了恢复命令):核对一下还在不在,不在就补上
-		if n, err := netmode.GuardStatus(); err == nil && n == 0 {
-			d.applyGuard("闸不见了,已重新装上")
+		n, err := netmode.GuardStatus()
+		if err != nil {
+			break // 查不到就别乱动:重装一次的代价比"以为没装"高
+		}
+		if msg := guardRedoReason(n, d.appliedGuardSpec(), d.guardSpec()); msg != "" {
+			d.applyGuard(msg)
 		}
 	case !want && on:
 		netmode.ClearGuard()
@@ -195,13 +198,47 @@ func (d *Daemon) syncGuard() {
 	}
 }
 
+// guardRedoReason 闸已经开着时,要不要重装、为什么。返回空串 = 不用动。
+//
+// 两种要重装的情况:
+//   - 闸不见了(有人跑了恢复命令、或者被别的东西清掉了)。
+//   - 规格变了。闸是**持久**的,用户改「局域网直通」或网关模式时它不会自己跟着变。
+//     早先这里只判断"在不在",于是连着的时候改这两项完全不生效,必须断开再连。
+//     2026-09-18 用户关掉局域网直通之后又打开,手机连不上电脑热点就是这个:
+//     闸一直用着"不放行局域网"那份规格,把客户端的 DHCP 广播拦了,设备拿不到 IP。
+//
+// 重装本身是安全的:wfp.Enable 在一个事务里先删后建,中间没有不设防的窗口。
+func guardRedoReason(installed int, applied, want netmode.GuardSpec) string {
+	if installed == 0 {
+		return "闸不见了,已重新装上"
+	}
+	if applied != want {
+		return "设置变了,闸已按新规格重装"
+	}
+	return ""
+}
+
+// appliedGuardSpec 闸现在**实际**按哪份规格装着。空值表示还没装过 / 装失败了。
+func (d *Daemon) appliedGuardSpec() netmode.GuardSpec {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.guardApplied
+}
+
 // applyGuard 装闸并把结果记进状态与日志;开机那组装不上只是警告。
 func (d *Daemon) applyGuard(okMsg string) {
-	if err := netmode.ApplyGuard(d.guardSpec()); err != nil {
+	spec := d.guardSpec()
+	if err := netmode.ApplyGuard(spec); err != nil {
+		d.mu.Lock()
+		d.guardApplied = netmode.GuardSpec{}
+		d.mu.Unlock()
 		d.setGuard(false, err.Error())
 		d.logf("全局禁直连:开闸失败,这段时间直连不会被拦: %v", err)
 		return
 	}
+	d.mu.Lock()
+	d.guardApplied = spec
+	d.mu.Unlock()
 	d.setGuard(true, "")
 	d.logf("全局禁直连:%s", okMsg)
 	if w := netmode.GuardWarning(); w != "" {

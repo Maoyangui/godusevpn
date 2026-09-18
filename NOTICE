@@ -9,6 +9,24 @@ sing-box —— 内嵌的代理内核
 
 ---
 
+sing-geosite / sing-geoip —— internal/ruleset/data/ 下随安装包内置的三个规则集
+  geosite-cn.srs、geosite-category-ads-all.srs 取自 sing-geosite 的 rule-set 分支
+  https://github.com/SagerNet/sing-geosite
+  仓库许可:MIT License,Copyright (c) 2022 世界
+  数据源自 Loyalsoldier/v2ray-rules-dat(CC-BY-SA-4.0),由上游编译成 .srs
+
+  geoip-cn.srs 取自 sing-geoip 的 rule-set 分支
+  https://github.com/SagerNet/sing-geoip
+  仓库许可:MIT License,Copyright (c) 2022 世界
+  数据源自 MaxMind GeoLite2 Country(CC-BY-SA-4.0),由上游编译成 .srs
+  This product includes GeoLite2 data created by MaxMind, available from https://www.maxmind.com
+
+  三份都是二进制数据文件,原样收录、未作改动,只是随安装包一起分发,不构成对程序的修改。
+  MIT 与 CC-BY-SA-4.0 都允许再分发,与本程序的 GPL-3.0 并存没有冲突(数据不是程序的衍生作品)。
+  收录时间 2026-09-18;更新方式见 docs/wiki/设置项与文件位置.md。
+
+---
+
 flag-icons —— web/dist/flags/ 下的各地区旗帜(取其 flags/1x1 方形版本,做了无损精简)
   https://github.com/lipis/flag-icons
   MIT License

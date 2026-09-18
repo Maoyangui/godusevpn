@@ -28,7 +28,7 @@ func TestRuleGroupsRendered(t *testing.T) {
 		{Name: "关掉的", Enabled: false, Outbound: settings.OutDirect, Rules: []settings.Rule{{Type: settings.RuleDomain, Value: "off.example"}}},
 		{Name: "空的", Enabled: true, Outbound: settings.OutDirect},
 	}
-	c, raw := build(t, s)
+	c, raw := buildWith(t, s, ruleSetRoot(t, "geosite-netflix"))
 
 	stream := findRule(c, func(r map[string]any) bool { return r["outbound"] == "台湾2" })
 	if stream == nil || stream["type"] != "logical" || stream["mode"] != "or" {
@@ -43,7 +43,7 @@ func TestRuleGroupsRendered(t *testing.T) {
 	}
 	var netflixSet bool
 	for _, rs := range c.Route.RuleSet {
-		if rs["tag"] == "geosite-netflix" && strings.HasSuffix(rs["url"].(string), "geosite-netflix.srs") {
+		if rs["tag"] == "geosite-netflix" && strings.HasSuffix(rs["path"].(string), "geosite-netflix.srs") {
 			netflixSet = true
 		}
 	}

@@ -105,8 +105,10 @@ func runElevated(exe, args string) error {
 }
 
 func runElevatedScript(script string) error {
-	// osascript 里那层字符串要按 AppleScript 的规矩转义
-	as := strings.ReplaceAll(script, `\`, `\`)
+	// osascript 里那层字符串要按 AppleScript 的规矩转义。
+	// 反斜杠必须先转、而且要转成两个 —— 原来写的是「把 \ 换成 \」,等于什么都没做。
+	// 今天走不到(拼进来的路径都不含反斜杠),但这是一条以 root 身份执行的脚本,不能留着这种洞。
+	as := strings.ReplaceAll(script, `\`, `\\`)
 	as = strings.ReplaceAll(as, `"`, `\"`)
 	out, err := exec.Command("osascript", "-e", `do shell script "`+as+`" with administrator privileges`).CombinedOutput()
 	if err != nil {

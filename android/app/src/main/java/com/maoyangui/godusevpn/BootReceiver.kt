@@ -13,10 +13,20 @@ import org.json.JSONObject
 class BootReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         if (VpnService.prepare(context) != null) return // 授权被收回,只能等用户打开界面
-        val engine = App.engine()
-        val wanted = runCatching {
-            JSONObject(engine.state()).optJSONObject("view")?.optJSONObject("state")?.optBoolean("wanted") == true
-        }.getOrDefault(false)
-        if (wanted) GodVpnService.start(context)
+        // onReceive 跑在主线程,而广播只有十秒。App.engine() 第一次调用会把整个守护进程建起来
+        // (建目录、开日志、读设置与订阅缓存、落一次盘),慢速电视盒子上很容易超时 ANR。
+        // 用 goAsync() 把广播的生命周期延长,活挪到后台线程做。
+        val pending = goAsync()
+        Thread {
+            try {
+                val engine = App.engine()
+                val wanted = runCatching {
+                    JSONObject(engine.state()).optJSONObject("view")?.optJSONObject("state")?.optBoolean("wanted") == true
+                }.getOrDefault(false)
+                if (wanted) GodVpnService.start(context)
+            } finally {
+                pending.finish()
+            }
+        }.start()
     }
 }

@@ -3,11 +3,14 @@ package builder
 import (
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
 
 	"github.com/Maoyangui/godusevpn/internal/profile"
+	"github.com/Maoyangui/godusevpn/internal/ruleset"
 	"github.com/Maoyangui/godusevpn/internal/settings"
 )
 
@@ -40,9 +43,31 @@ type cfg struct {
 	} `json:"experimental"`
 }
 
+// ruleSetRoot 造一个"装好之后"的规则集目录:内置的三个都在,extra 里的当成用户下下来的那一层。
+// 测试默认都用它,免得测出来的是一台还没装规则集的机器上的样子。
+func ruleSetRoot(t *testing.T, extra ...string) string {
+	t.Helper()
+	root := t.TempDir()
+	if err := ruleset.Install(root); err != nil {
+		t.Fatal(err)
+	}
+	for _, tag := range extra {
+		// 内容得是内核真读得动的:查找那一步会整份解一遍,解不开就当它不存在(见 ruleset.Find)
+		if err := writeFile(filepath.Join(root, tag+".srs"), ruleset.Bytes("geosite-cn")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return root
+}
+
 func build(t *testing.T, s settings.Settings) (cfg, string) {
 	t.Helper()
-	raw, err := Build(Input{Profile: sampleProfile(), Settings: s, DataDir: t.TempDir(), ClashSecret: "sec"})
+	return buildWith(t, s, ruleSetRoot(t))
+}
+
+func buildWith(t *testing.T, s settings.Settings, root string) (cfg, string) {
+	t.Helper()
+	raw, err := Build(Input{Profile: sampleProfile(), Settings: s, DataDir: t.TempDir(), ClashSecret: "sec", RuleSetDir: root})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -153,29 +178,136 @@ func TestSelectedUnknownFallsBackToAuto(t *testing.T) {
 	}
 }
 
-func TestLocalRuleSetPreferred(t *testing.T) {
-	dir := t.TempDir()
-	if err := writeFile(dir+"/geosite-cn.srs", []byte("x")); err != nil {
+// 规则集永远不能写成 type: remote。sing-box 在没有缓存时是**在启动阶段同步下载**远程规则集的,
+// 一条下不到,box.Start() 就整个失败(route/router.go 那组是 FastFail),客户端于是变成
+// "能不能连取决于此刻能不能访问 GitHub"。2026-09-18 用户的索尼电视就是这样卡死的:
+// 界面只显示「内核启动失败,自动重试中」,全局和规则模式都连不上。
+// 这条测试是那次的回归闸门 —— 改配置生成时如果又想用远程规则集,先想清楚上面这段。
+func TestRuleSetsNeverRemote(t *testing.T) {
+	s := settings.Default()
+	s.AdBlock = true
+	s.RuleGroups = []settings.RuleGroup{{Name: "流媒体", Enabled: true, Outbound: settings.OutProxy,
+		Rules: []settings.Rule{{Type: settings.RuleGeosite, Value: "netflix"}, {Type: settings.RuleGeoIP, Value: "jp"}}}}
+	c, _ := buildWith(t, s, ruleSetRoot(t, "geosite-netflix", "geoip-jp"))
+	if len(c.Route.RuleSet) == 0 {
+		t.Fatal("这组设置下应该有规则集")
+	}
+	for _, rs := range c.Route.RuleSet {
+		if rs["type"] != "local" {
+			t.Fatalf("规则集 %v 不是 local —— 内核启动会去联网下,下不到就整个起不来", rs)
+		}
+		// remote 才有的几个键一个都不能留下
+		for _, k := range []string{"url", "download_detour", "update_interval"} {
+			if rs[k] != nil {
+				t.Fatalf("本地规则集不该带 %s: %v", k, rs)
+			}
+		}
+		// path 必须是一个**真的存在**的文件。只判 != nil 挡不住空串:
+		// 规则集没找到却照样写进配置时,path 是 "",内核启动时按空路径去读,一样起不来。
+		// (这条是自己做变异测试时发现的:把"找不到就摘掉"那一步弄坏,原来的断言居然还是绿的。)
+		p, _ := rs["path"].(string)
+		if p == "" {
+			t.Fatalf("本地规则集的 path 是空的: %v", rs)
+		}
+		if st, err := os.Stat(p); err != nil || st.Size() == 0 {
+			t.Fatalf("规则集 %v 指向的文件不存在或是空的: %v", rs["tag"], err)
+		}
+	}
+}
+
+// 内置的三个在,配置就应该引用它们。
+func TestBuiltinRuleSetsUsed(t *testing.T) {
+	s := settings.Default()
+	s.AdBlock = true
+	c, _ := build(t, s)
+	got := map[string]bool{}
+	for _, rs := range c.Route.RuleSet {
+		got[rs["tag"].(string)] = true
+	}
+	for _, tag := range ruleset.Builtin() {
+		if !got[tag] {
+			t.Fatalf("内置规则集 %s 没被用上: %v", tag, c.Route.RuleSet)
+		}
+	}
+}
+
+// 一个规则集都没有的机器(全新安装、内置文件被杀毒软件删了、目录被清过)也必须能生成出
+// 一份内核起得来的配置:少几条规则可以,连不上不行。
+func TestNoRuleSetsStillBuilds(t *testing.T) {
+	s := settings.Default()
+	s.AdBlock = true
+	raw, rep, err := BuildEx(Input{Profile: sampleProfile(), Settings: s, DataDir: t.TempDir(), ClashSecret: "sec", RuleSetDir: t.TempDir()})
+	if err != nil {
+		t.Fatalf("一个规则集都没有就生成不出配置了: %v", err)
+	}
+	var c cfg
+	if err := json.Unmarshal(raw, &c); err != nil {
 		t.Fatal(err)
 	}
-	raw, err := Build(Input{Profile: sampleProfile(), Settings: settings.Default(), DataDir: t.TempDir(), RuleSetDir: dir})
+	if len(c.Route.RuleSet) != 0 {
+		t.Fatalf("没有本地文件却还是写了规则集: %v", c.Route.RuleSet)
+	}
+	// 配置里任何地方都不能再引用这些标签,引用一个不存在的规则集同样会让内核起不来
+	if strings.Contains(string(raw), "geosite-cn") || strings.Contains(string(raw), "geoip-cn") {
+		t.Fatalf("规则集摘掉了,却还有地方引用它: %s", raw)
+	}
+	if len(rep.Missing) != 3 {
+		t.Fatalf("缺了的三个应该都报出来,实际: %v", rep.Missing)
+	}
+	for _, m := range rep.Missing {
+		if !strings.HasSuffix(m.URL, m.Tag+".srs") {
+			t.Fatalf("缺失项要带上能去下载的地址: %v", m)
+		}
+	}
+}
+
+// 规则组只写了 geosite,而那个规则集本地没有:整条规则要摘掉,不能留一条空的 logical/or。
+func TestRuleGroupDroppedWhenItsOnlyRuleSetMissing(t *testing.T) {
+	s := settings.Default()
+	s.RuleGroups = []settings.RuleGroup{{Name: "流媒体", Enabled: true, Outbound: settings.OutProxy,
+		Rules: []settings.Rule{{Type: settings.RuleGeosite, Value: "netflix"}}}}
+	raw, rep, err := BuildEx(Input{Profile: sampleProfile(), Settings: s, DataDir: t.TempDir(), ClashSecret: "sec", RuleSetDir: ruleSetRoot(t)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "geosite-netflix") {
+		t.Fatalf("本地没有的规则集不该出现在配置里: %s", raw)
+	}
+	var c cfg
+	_ = json.Unmarshal(raw, &c)
+	for _, r := range c.Route.Rules {
+		if r["type"] == "logical" {
+			if rules, ok := r["rules"].([]any); ok && len(rules) == 0 {
+				t.Fatalf("留下了一条没有任何条件的规则: %v", r)
+			}
+		}
+	}
+	if len(rep.Missing) != 1 || rep.Missing[0].Tag != "geosite-netflix" {
+		t.Fatalf("应当只报 geosite-netflix 缺失,实际: %v", rep.Missing)
+	}
+}
+
+// 用户自己往 rulesets/ 里放的同名文件优先级最高,盖过内置的那份。
+func TestUserRuleSetWins(t *testing.T) {
+	root := ruleSetRoot(t)
+	if err := writeFile(root+"/geosite-cn.srs", ruleset.Bytes("geoip-cn")); err != nil { // 内容换一份,只要内核读得动就行
+		t.Fatal(err)
+	}
+	raw, _, err := BuildEx(Input{Profile: sampleProfile(), Settings: settings.Default(), DataDir: t.TempDir(), ClashSecret: "sec", RuleSetDir: root})
 	if err != nil {
 		t.Fatal(err)
 	}
 	var c cfg
 	_ = json.Unmarshal(raw, &c)
-	var local, remote bool
 	for _, rs := range c.Route.RuleSet {
-		if rs["tag"] == "geosite-cn" && rs["type"] == "local" {
-			local = true
-		}
-		if rs["tag"] == "geoip-cn" && rs["type"] == "remote" {
-			remote = true
+		if rs["tag"] == "geosite-cn" {
+			if p, _ := rs["path"].(string); !strings.HasSuffix(filepath.ToSlash(p), "/geosite-cn.srs") || strings.Contains(filepath.ToSlash(p), "/builtin/") {
+				t.Fatalf("应该用用户放的那份,实际: %s", p)
+			}
+			return
 		}
 	}
-	if !local || !remote {
-		t.Fatalf("有离线文件的用本地、没有的走远程: %v", c.Route.RuleSet)
-	}
+	t.Fatal("配置里没有 geosite-cn")
 }
 
 func TestModeNames(t *testing.T) {
@@ -497,5 +629,66 @@ func TestProbeOnlyWhenAuto(t *testing.T) {
 	fixed := find(s)
 	if fixed["interval"] != "24h" || fixed["idle_timeout"] != "25h" {
 		t.Fatalf("手动指定节点时 auto 组应与自动选择时一模一样(切换才能不重建配置),实际 %v / %v", fixed["interval"], fixed["idle_timeout"])
+	}
+}
+
+// Android 上那两个本地监听口都不该生成。它们是**启动期硬依赖**:端口被别人占着内核就整个起不来,
+// 而手机 / 电视上根本没人会去连它们 —— 混合端口的流量全走 TUN,Clash API 由守护进程在进程内直接取用。
+// 电视上界面里既改不了端口、也看不懂英文报错,一个用不上的监听口不该有让连接失败的权力。
+func TestAndroidHasNoLocalListeners(t *testing.T) {
+	s := settings.Default()
+	raw, err := Build(Input{Profile: sampleProfile(), Settings: s, DataDir: t.TempDir(), ClashSecret: "sec", RuleSetDir: ruleSetRoot(t), Android: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var c cfg
+	if err := json.Unmarshal(raw, &c); err != nil {
+		t.Fatal(err)
+	}
+	for _, in := range c.Inbounds {
+		if in["type"] == "mixed" {
+			t.Fatalf("Android 上不该有混合入站: %v", in)
+		}
+	}
+	if got := c.Experimental.ClashAPI["external_controller"]; got != "" {
+		t.Fatalf("Android 上 Clash API 不该监听端口,实际 %q", got)
+	}
+	// 但 clash_api 这一节本身要留着:模式切换、选节点、流量统计都靠它注册进内核
+	if c.Experimental.ClashAPI["default_mode"] == nil {
+		t.Fatal("clash_api 整节被删了,模式切换会失效")
+	}
+
+	// 桌面端照旧监听,外部面板要连
+	raw, err = Build(Input{Profile: sampleProfile(), Settings: s, DataDir: t.TempDir(), ClashSecret: "sec", RuleSetDir: ruleSetRoot(t)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var d cfg
+	_ = json.Unmarshal(raw, &d)
+	if got, _ := d.Experimental.ClashAPI["external_controller"].(string); !strings.HasPrefix(got, "127.0.0.1:") {
+		t.Fatalf("桌面端应该继续监听,实际 %q", got)
+	}
+}
+
+// Android 上关掉 TUN(设置里允许)时,混合端口必须留着 —— 否则渲染出来的是一份一个入站都没有的配置:
+// 内核起得来、通知栏也在,一点流量都不过,而且没有任何报错。settings.Validate 的
+// 「TUN 关了就必须开混合端口,否则没有任何入口」这条不变量,靠的就是它一定会被生成。
+func TestAndroidKeepsMixedInboundWhenTunOff(t *testing.T) {
+	s := settings.Default()
+	s.TUN = false
+	s.MixedPort = 2080
+	raw, err := Build(Input{Profile: sampleProfile(), Settings: s, DataDir: t.TempDir(), ClashSecret: "sec", RuleSetDir: ruleSetRoot(t), Android: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var c cfg
+	if err := json.Unmarshal(raw, &c); err != nil {
+		t.Fatal(err)
+	}
+	if len(c.Inbounds) == 0 {
+		t.Fatal("一个入站都没有:内核会起来,但一点流量都不过,而且不报错")
+	}
+	if c.Inbounds[0]["type"] != "mixed" {
+		t.Fatalf("关掉 TUN 后唯一的入口应该是混合端口: %v", c.Inbounds)
 	}
 }

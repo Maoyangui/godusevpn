@@ -1,0 +1,15 @@
+# 二进制文件不许做换行转换。仓库里有人开着 core.autocrlf=true,靠 Git 自己嗅探二进制虽然多半没问题,
+# 但规则集(.srs)一旦被改过一个字节就解不开,而"解不开的规则集"会让内核整个起不来 ——
+# 客户端表现为永远连不上(见 internal/ruleset)。这种代价太高的事不留给嗅探。
+*.srs binary
+*.aar binary
+*.apk binary
+*.jar binary
+*.zip binary
+*.exe binary
+*.dll binary
+*.png binary
+*.jpg binary
+*.ico binary
+*.mp4 binary
+*.woff2 binary

@@ -32,8 +32,21 @@ function errParts(e) {
   if (i >= 0 && m.endsWith(']')) { renew = m.slice(i + 8, -1); m = m.slice(0, i); }
   if (m === 'SERVICE_DOWN') return { text: t('svc.down'), renew };
   const code = m.match(/^(E_[A-Z_]+):\s*(.*)$/);
-  if (code) return { text: t('code.' + code[1]) + (code[2] && code[2] !== t('code.' + code[1]) ? ' · ' + code[2] : ''), renew };
+  if (code) return { text: codeText(code[1], code[2]), renew };
   return { text: m, renew };
+}
+// codeText 错误码的译文 + 具体原因。译文只说得清"属于哪一类",具体原因才说得清是哪个规则集下不到、
+// 哪个端口被占着。早先首页那处只取译文、把原因丢掉,用户电视上就只剩一句「内核启动失败」,谁也查不下去。
+function codeText(code, detail) {
+  const label = code ? t('code.' + code) : '';
+  // 译文缺失(服务端比页面新、多出一个错误码)时 t() 会把键原样返回,直接显示会在界面上出现裸的
+  // 「code.E_XXX」。那种情况只给细节。
+  const known = label && label !== 'code.' + code;
+  if (!known) return detail || ''; // label 此刻就是那个裸键,宁可什么都不显示
+  if (!detail) return label;
+  // 后端有几条消息本来就是以译文同样的话开头的(「当前节点不可用: …」),再拼一次就成了「X · X…」
+  if (detail === label || detail.indexOf(label) === 0) return detail;
+  return label + ' · ' + detail;
 }
 const errText = e => errParts(e).text;
 // ---- 应用内对话框 ----
@@ -47,6 +60,7 @@ function closeDialog(result) {
   if (box) box.remove();
   const bd = $('#dialog-backdrop');
   if (bd) bd.remove();
+  releaseFocus(null); // 对话框整块被 remove 了,焦点已经掉回 body:这里只负责把它放回页面上
   if (f) f(result);
 }
 function askDialog(opts) {
@@ -214,7 +228,20 @@ function openDrawer() {
   try { App().PokeUpdate(); } catch (e) { /* 旧服务没有这个方法 */ }
   tvFocus();
 }
-function closeDrawer() { $('#drawer').classList.remove('show'); $('#drawer-backdrop').classList.remove('show'); }
+function closeDrawer() { $('#drawer').classList.remove('show'); $('#drawer-backdrop').classList.remove('show'); releaseFocus($('#drawer')); }
+// releaseFocus 关掉浮层时把焦点收回来。不收的话焦点还留在已经滑出屏幕的那一层里:
+// 遥控器按方向键像是"卡住了"(空间导航算的是屏幕外那一层的坐标),按 OK 更糟 ——
+// 会静默地重新点一次屏幕外的那一项,那些监听器并没有解绑,只是被 translate 走了。
+// 用户在节点面板里翻到一半按返回退出,再按 OK,结果是"莫名其妙换了个节点"。
+// isTVMode 电视(遥控器)模式。桌面端有鼠标,抢焦点、自动滚动都只会添乱。
+function isTVMode() { return document.body.classList.contains('tv'); }
+function releaseFocus(layer) {
+  const cur = document.activeElement;
+  if (layer && cur && cur !== document.body && layer.contains(cur)) {
+    try { cur.blur(); } catch (e) { /* 老内核上个别元素 blur 会抛 */ }
+  }
+  tvFocus(); // 焦点落回当前页面的第一个可选项
+}
 let sheetOnClose = null;
 function openSheet(title, html, opts = {}) {
   $('#sheet-head').innerHTML = `<span class="grow">${esc(title)}</span>${opts.action ? `<button class="btn sm ghost" id="sheet-action">${esc(opts.action)}</button>` : ''}`;
@@ -226,6 +253,7 @@ function openSheet(title, html, opts = {}) {
 }
 function closeSheet() {
   $('#sheet').classList.remove('show'); $('#sheet-backdrop').classList.remove('show');
+  releaseFocus($('#sheet'));
   if (sheetOnClose) { const f = sheetOnClose; sheetOnClose = null; f(); }
 }
 function setTop(title, back) {
@@ -530,7 +558,7 @@ function updateHome() {
   $('#power-text').textContent = on ? t('home.disconnect') : wanted ? (st === 'stopping' ? t('home.stopping') : t('home.connecting')) : t('home.connect');
 
   // 连上了:大字显示时长,状态那两行让给下面的出口卡片;没连上或出错:照旧显示状态与原因
-  const err = v.state.error ? (t('code.' + v.state.code) !== 'code.' + v.state.code ? t('code.' + v.state.code) : v.state.error) : '';
+  const err = v.state.error || v.state.code ? codeText(v.state.code, v.state.error) : '';
   $('#uptime').hidden = !(on && v.uptime);
   $('#s-time').textContent = on && v.uptime ? fmtDuration(v.uptime) : '–';
   const quiet = on && !err;
@@ -1017,7 +1045,13 @@ async function renderRules(el) {
       </div></div>`;
   };
   const clean = dr.private === 'direct' && dr.cn === 'direct' && dr.final === 'proxy';
-  el.innerHTML = `<p class="pagehint">${t('rules.intro')}</p>
+  // 本地还没有的规则集会被整条摘掉,规则开着却不起作用 —— 不说一声的话用户根本看不出来。
+  const missing = (state && state.view && state.view.missingRuleSets) || [];
+  const missNote = missing.length ? `<div class="notecard" style="margin-bottom:10px">
+      <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8v.5"/></svg>
+      <span>${t('rules.missingSets', { n: missing.length, list: esc(missing.join('、')) })}</span>
+    </div>` : '';
+  el.innerHTML = `${missNote}<p class="pagehint">${t('rules.intro')}</p>
     <div class="sechead">${t('rules.mine')}</div>
     ${groups.length ? `<div class="rgwrap">${groups.map(card).join('')}</div>` : `<div class="empty sm">${t('rules.emptyGroups')}</div>`}
     <button class="addcard" id="rg-add">
@@ -1101,10 +1135,17 @@ async function renderRuleEdit(el, id) {
 const DEV_MODES = ['', 'proxy', 'direct', 'reject'];
 async function renderDevices(el) {
   el.innerHTML = `<p class="small muted" style="margin:2px 0 10px">${t('dev.intro')}</p><div id="dev-list"><div class="empty"><span class="spinner"></span></div></div>`;
+  let devSig = ''; // 上一次画出来的设备列表长什么样:一个字没变就别重画
   const draw = list => {
     const box = $('#dev-list'); if (!box) return;
-    if (!list.length) { box.innerHTML = `<div class="empty">${t('dev.empty')}</div>`; return; }
+    if (!list.length) { devSig = ''; box.innerHTML = `<div class="empty">${t('dev.empty')}</div>`; return; }
     list.sort((a, b) => (b.online - a.online) || (b.saved - a.saved) || a.ip.localeCompare(b.ip, undefined, { numeric: true }));
+    // 这一页十秒刷一轮。原来不比对就整块重建:行上的入场动画每十秒重放一遍,遥控器焦点也跟着丢
+    // (焦点所在的 .item 被销毁,按方向键会被扔回列表最上面)。内容没变就什么都不做。
+    const sig = list.map(d => [d.mac, d.ip, d.name, d.mode, d.online, d.saved].join('|')).join(';');
+    if (sig === devSig && box.querySelector('.item')) return;
+    devSig = sig;
+    const keep = focusKey(box, 'data-mac');
     box.innerHTML = `<div class="list">${list.map((d, i) => `<div class="item dev" style="flex-wrap:wrap;animation-delay:${i * 20}ms" data-mac="${esc(d.mac)}" data-ip="${esc(d.ip)}">
       <div class="row" style="flex-basis:100%">
         <span class="dot ${d.online ? 'on' : ''}" title="${t(d.online ? 'dev.online' : 'dev.offline')}"></span>
@@ -1125,6 +1166,7 @@ async function renderDevices(el) {
         try { draw(await App().SetDevice(it.dataset.mac, name.trim(), mode, it.dataset.ip)); } catch (e) { toast(errText(e), 'err'); }
       });
     });
+    refocus(box, 'data-mac', keep); // 重画会销毁焦点所在的行,遥控器上表现为焦点被甩回列表最上面
   };
   const load = async () => { try { draw(await App().GetDevices() || []); } catch (e) { const b = $('#dev-list'); if (b) b.innerHTML = `<div class="empty">${esc(errText(e))}</div>`; } };
   load();
@@ -1206,6 +1248,19 @@ function renderConns(el) {
     const sig = shown.map(c => c.id).sort().join(',');
     if (sig === connSig && patchConns(shown)) return;
     connSig = sig;
+    // 整块重画会把焦点所在的那一行销毁掉,焦点退回 body —— 电视上表现为"每隔两秒遥控器就失灵一次",
+    // 按方向键会被扔回列表最上面。连着 VPN 的时候连接开开关关,这块几乎一直在重画。
+    // 记下焦点在哪一条、以及它此刻排第几:那条连接断了就退回同一位置,别把用户甩回顶上。
+    // 位置必须**当场从 DOM 里数**:用户按方向键换行时集合没变、走的是 patchConns 那条早返回,
+    // 存在模块变量里的位置根本不会更新,等真要用的时候拿到的是几秒前的旧值。
+    const keepId = focusKey(box, 'data-id');
+    let keepIdx = -1;
+    if (keepId != null) {
+      const old = box.querySelectorAll('.item[data-id]');
+      for (let i = 0; i < old.length; i++) {
+        if (old[i].dataset.id === keepId) { keepIdx = i; break; }
+      }
+    }
     box.innerHTML = `<div class="list">${shown.map(c => {
       const d = connDirect(c), chain = connChain(c);
       return `<div class="item conn" data-id="${esc(c.id)}"><div class="name">
@@ -1216,6 +1271,18 @@ function renderConns(el) {
     box.querySelectorAll('button[data-id]').forEach(b => b.addEventListener('click', async () => {
       try { await App().CloseConnection(b.dataset.id); load(); } catch (e) { toast(errText(e), 'err'); }
     }));
+    if (keepId != null) {
+      refocus(box, 'data-id', keepId);
+      // 焦点那条连接刚好断了:按同一个位置落回去,而不是把用户甩回列表最上面。
+      // 只在电视上做:桌面端是鼠标点的「关闭」按钮,那之后把焦点硬塞到另一行、还顺带把列表滚走,
+      // 用户只会觉得列表自己乱跳。
+      if (isTVMode()) {
+        const rows = box.querySelectorAll('.item[data-id]');
+        if (rows.length && !box.contains(document.activeElement)) {
+          focusEl(rows[Math.max(0, Math.min(keepIdx < 0 ? 0 : keepIdx, rows.length - 1))]);
+        }
+      }
+    }
   };
   load();
   pageTimer = setInterval(load, 2000);
@@ -1263,7 +1330,7 @@ function renderLogs(el) {
       <button class="chip" id="log-pause">${t('logs.pause')}</button>
       ${window.__web || window.__android ? '' : `<button class="chip" id="log-open">${t('logs.open')}</button>`}
     </div>
-    <div class="logbox" id="log"></div>
+    <div class="logbox" id="log" tabindex="0"></div>
     <div class="logact">
       <button class="btn" id="log-copy">${t('logs.copy')}</button>
       <button class="btn primary" id="diag">${t('logs.diag')}</button>
@@ -1476,6 +1543,14 @@ async function init() {
       if (tot) tot.textContent = fmtBytes(state.totalDown + state.totalUp);
     }
   });
+  // 安卓的系统安装器拉不起来(没给"安装未知应用"的权限、或者下载期间用户切走了应用被后台启动限制拦掉)。
+  // 这条路原来只有一行 logcat,页面会永远停在「正在安装」,用户和我们都查不出为什么。
+  window.runtime.EventsOn('install-error', p => {
+    const m = (p && p.message) || String(p || '');
+    if (!m) return;
+    toast(m, 'err');
+    const el = $('#upd-text'); if (el) el.textContent = m;
+  });
   window.runtime.EventsOn('update-progress', p => {
     const bar = $('#upd-prog'); if (!bar) return;
     const pct = p.total > 0 ? Math.round(p.done / p.total * 100) : 0;
@@ -1493,9 +1568,21 @@ async function init() {
       const n = $('#pf-name'); if (n && name) n.value = name;
     }, 350);
   });
+  // 冷启动(应用没开着时从落地页点一键导入)时,外壳推这条事件的时候页面还没加载完,
+  // 推了等于没推。所以外壳会另存一份,这里注册完监听主动来取一次 —— 电视上遥控器打字几乎不可能,
+  // 一键导入是唯一现实的添加订阅通路,丢不得。
+  try {
+    const b = window.GodusevpnBridge;
+    if (b && typeof b.takePendingImport === 'function') {
+      const pending = b.takePendingImport();
+      if (pending) window.__godEvent('import', pending);
+    }
+  } catch (e) { /* 老外壳没有这个方法 */ }
 }
 // ---- 遥控器 / 方向键(Android):WebView 不自带空间导航,按元素位置找下一个焦点;Enter 等于点击;返回键交给 __godBack ----
-const FOCUS_SEL = 'button:not([disabled]), input:not([type=hidden]):not([disabled]), select:not([disabled]), textarea:not([disabled]), a, .item';
+// .logbox 也要算可聚焦:它里面没有任何可点的元素,遥控器只有先落到框上才谈得上用上下键滚(见 scrollBox)。
+// 漏掉它的话 tabindex 加了、滚动代码写了、焦点圈也画了,却永远走不到 —— 全是死代码。
+const FOCUS_SEL = 'button:not([disabled]), input:not([type=hidden]):not([disabled]), select:not([disabled]), textarea:not([disabled]), a, .item, .logbox';
 function focusLayer() {
   if ($('#dialog')) return [$('#dialog')];
   if ($('#sheet').classList.contains('show')) return [$('#sheet')];
@@ -1518,6 +1605,20 @@ function focusEl(el) {
   el.focus({ preventScroll: true });
   el.scrollIntoView({ block: 'nearest', inline: 'nearest' });
 }
+// scrollBox 焦点在一个自己能滚的框里、而且那个方向还滚得动,就滚一屏并返回 true。
+// 到头了返回 false,让方向键继续把焦点带出去。
+function scrollBox(el, dir) {
+  const box = el.closest('.logbox');
+  if (!box) return false;
+  const max = box.scrollHeight - box.clientHeight;
+  if (max <= 2) return false;
+  const step = Math.max(60, box.clientHeight - 40);
+  const at = box.scrollTop;
+  if (dir === 'down' && at >= max - 2) return false;
+  if (dir === 'up' && at <= 2) return false;
+  box.scrollTop = dir === 'down' ? Math.min(max, at + step) : Math.max(0, at - step);
+  return true;
+}
 function spatialMove(dir) {
   const layers = focusLayer(), list = focusables(layers);
   if (!list.length) return;
@@ -1525,8 +1626,11 @@ function spatialMove(dir) {
   if (!cur || cur === document.body || !layers.some(l => l.contains(cur))) { focusEl(list[0]); return; }
   const a = cur.getBoundingClientRect(), ax = (a.left + a.right) / 2, ay = (a.top + a.bottom) / 2;
   let best = null, bestScore = Infinity;
+  // 上下走整行,左右可以走进当前行内部。原来对四个方向一律排除"自己的后代",于是列表行右边那颗
+  // 关闭 / 删除按钮在电视上永远选不中 —— 行本身是焦点,按钮是它的孩子。
+  const vert = dir === 'up' || dir === 'down';
   for (const el of list) {
-    if (el === cur || cur.contains(el)) continue;
+    if (el === cur || (vert && cur.contains(el))) continue;
     const b = el.getBoundingClientRect(), bx = (b.left + b.right) / 2, by = (b.top + b.bottom) / 2;
     let primary, ortho;
     if (dir === 'down') { if (by <= ay) continue; primary = b.top - a.bottom; ortho = Math.abs(bx - ax); }
@@ -1554,6 +1658,9 @@ document.addEventListener('keydown', e => {
   const dir = { ArrowUp: 'up', ArrowDown: 'down', ArrowLeft: 'left', ArrowRight: 'right' }[e.key];
   if (dir) {
     if (editing && (dir === 'left' || dir === 'right' || tag !== 'INPUT')) return; // 输入框里左右移光标;多行框与下拉框上下也归它们
+    // 焦点停在能自己滚的框里(日志页那块)时,上下先用来滚它 —— 框里没有任何可聚焦元素,
+    // 空间导航会直接跳出去,电视上等于只能看到最后一屏日志,而日志恰恰是出问题时唯一的线索来源。
+    if ((dir === 'up' || dir === 'down') && el && scrollBox(el, dir)) { e.preventDefault(); return; }
     e.preventDefault(); spatialMove(dir);
   } else if (e.key === 'Enter' && el && el !== document.body) {
     const native = tag === 'BUTTON' || (tag === 'A' && el.href) || editing;

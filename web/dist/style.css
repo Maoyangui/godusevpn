@@ -4,14 +4,21 @@
   --brand1: #6a44f2; --brand2: #2f8bff; --brand3: #18e3e8; --ok: #16a34a; --warn: #d97706; --danger: #e11d48;
   --ring-bg: #e7eaf1; --sheet: #ffffff; --shadow: 0 8px 30px rgba(15, 23, 42, .12); --topbar: rgba(243, 245, 249, .9);
   --radius: 18px; --ease: cubic-bezier(.2, .8, .2, 1);
+  /* 只翻 CSS 变量翻不动系统自绘的那部分:<select> 展开的弹层、密码框的光标与自动填充底色、
+     WebView2 的默认滚动条。声明 color-scheme 才跟着走。
+     要 Chrome 81,电视那种老内核上会被静默丢弃 —— 那正是渐进增强的本意:老内核照旧按浅色画系统控件,
+     页面本身的深色由上面那些变量决定,不受影响。所以它不在 compat_test 的禁用清单里。 */
+  color-scheme: light;
   font-family: -apple-system, "Segoe UI Variable", "Segoe UI", "Microsoft YaHei UI", "PingFang SC", system-ui, sans-serif;
 }
 [data-theme="dark"] {
+  color-scheme: dark;
   --bg: #0c0f15; --bg2: #12161e; --card: #161b24; --line: #232a36; --text: #e7eaf0; --muted: #98a2b3; --muted2: #6b7280;
   --ring-bg: #1f2632; --sheet: #161b24; --shadow: 0 10px 40px rgba(0, 0, 0, .5); --topbar: rgba(12, 15, 21, .85);
 }
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
+    color-scheme: dark;
     --bg: #0c0f15; --bg2: #12161e; --card: #161b24; --line: #232a36; --text: #e7eaf0; --muted: #98a2b3; --muted2: #6b7280;
     --ring-bg: #1f2632; --sheet: #161b24; --shadow: 0 10px 40px rgba(0, 0, 0, .5); --topbar: rgba(12, 15, 21, .85);
   }
@@ -86,7 +93,7 @@ body.mac .topbar-title { left: -78px; }
 .uptime b { font-size: 27px; font-weight: 700; letter-spacing: -.5px; font-variant-numeric: tabular-nums; }
 .uptime span { font-size: 12px; color: var(--muted2); }
 .status-text { font-size: 18px; font-weight: 600; margin-top: 12px; }
-.status-sub { color: var(--muted); font-size: 12px; margin-top: 4px; max-width: 320px; text-align: center; line-height: 1.45; }
+.status-sub { color: var(--muted); font-size: 12px; margin-top: 4px; max-width: 320px; text-align: center; line-height: 1.45; word-break: break-word; }
 
 /* 出口卡片:此刻真正在用的那条线路,点开就是节点面板 */
 .idcard { width: 100%; flex: none; display: flex; align-items: center; gap: 12px; text-align: left; background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); padding: 12px 14px; box-shadow: 0 6px 20px rgba(15, 23, 42, .05); transition: transform .15s var(--ease), border-color .15s, box-shadow .2s; }
@@ -205,11 +212,16 @@ pre.log .warn { color: #fbbf24; } pre.log .err { color: #f87171; } pre.log .dim 
 /* 抽屉(左)与底部面板 */
 .backdrop { position: absolute; top: 0; right: 0; bottom: 0; left: 0; background: rgba(0, 0, 0, .35); opacity: 0; pointer-events: none; transition: opacity .25s; z-index: 8; }
 .backdrop.show { opacity: 1; pointer-events: auto; }
-.drawer { position: absolute; top: 0; bottom: 0; left: 0; width: 76%; max-width: 300px; background: var(--sheet); box-shadow: var(--shadow); z-index: 9; transform: translateX(-104%); transition: transform .3s var(--ease); display: flex; flex-direction: column; padding: 18px 12px 14px; }
+.drawer { position: absolute; top: 0; bottom: 0; left: 0; width: 76%; max-width: 300px; background: var(--sheet); box-shadow: var(--shadow); z-index: 9; transform: translateX(-104%); transition: transform .3s var(--ease); display: flex; flex-direction: column; padding: 18px 12px 14px; overflow: hidden; }
 .drawer.show { transform: none; }
 .drawer-brand { display: flex; align-items: center; gap: 10px; padding: 6px 10px 18px; }
 .nogap .drawer-brand > *:not([hidden]) + *:not([hidden]) { margin-left: 10px; }
-.drawer-items { flex: 1; }
+/* min-height: 0 少一条,这一格就会被 flex 的"最小内容尺寸"撑到和内容一样高,抽屉整体比一屏还长,
+   多出来的部分直接掉到屏幕外面,而且没有任何可滚的容器 —— 遥控器把焦点移过去了,画面上却什么也没动。
+   2026-09-18 用户的索尼电视上「关于」就是这么消失的(菜单停在「日志」),连带着导出诊断包、检查更新、
+   退出全都够不着。overflow-y 与 min-height 这两条必须成对,少一条就白改。 */
+.drawer-items { flex: 1; min-height: 0; overflow-y: auto; }
+.drawer-items::-webkit-scrollbar { width: 6px; } .drawer-items::-webkit-scrollbar-thumb { background: var(--line); border-radius: 3px; }
 .drawer-items a { display: flex; align-items: center; gap: 12px; padding: 11px 12px; border-radius: 12px; margin-bottom: 2px; color: var(--text); transition: background .15s; }
 .nogap .drawer-items a > *:not([hidden]) + *:not([hidden]) { margin-left: 12px; }
 .drawer-items a:hover { background: var(--bg2); }
@@ -301,6 +313,11 @@ body.tv .srow { padding: 14px 0; } body.tv .srow input[type=number], body.tv .sr
 body.tv .card h3 { font-size: 13px; } body.tv .page-title { font-size: 24px; }
 body.tv .drawer-items a:focus { background: rgba(47, 139, 255, .12); }
 body.tv .item:focus { outline-offset: -3px; background: rgba(47, 139, 255, .12); } /* 列表 overflow: hidden 会裁掉外描边,描在内侧 */
+/* 抽屉菜单同理:这一格改成可滚(overflow-y: auto)之后就成了裁剪盒,
+   描在外面 3px、光晕再外 7px 的焦点圈会被两侧裁掉一半,电视上看不清焦点在哪一项。描在内侧。 */
+body.tv .drawer-items a:focus { outline-offset: -3px; box-shadow: none; background: rgba(47, 139, 255, .16); }
+/* 日志框现在是遥控器的落点(靠它滚),它自己也在可滚容器里,同样描内侧 */
+body.tv .logbox:focus { outline-offset: -3px; }
 /* 没有窗口按钮的壳(浏览器面板 / Android):标题独立居中,不受左右按钮有无影响(引导页没有菜单键也不会偏) */
 .app.web .topbar-title { position: absolute; left: 0; right: 0; padding: 0 60px; pointer-events: none; }
 body.android .icon-btn { width: 48px; height: 48px; } body.android .icon-btn svg { width: 30px; height: 30px; stroke-width: 2.2; }
@@ -505,6 +522,8 @@ body.tv .drawer-brand b { font-size: 22px; }
 /* 日志 */
 .view.logs { display: flex; flex-direction: column; }
 .logbox { flex: 1; min-height: 200px; background: #0b0e14; border-radius: var(--radius); padding: 12px 14px; overflow: auto; font-family: Consolas, "Cascadia Mono", monospace; font-size: 11.5px; line-height: 1.8; }
+/* 电视上遥控器靠焦点落在这个框里再上下滚(见 app.js 的 scrollBox):没有可见的焦点圈,用户根本不知道现在能滚 */
+.logbox:focus { outline: 2px solid var(--brand2); outline-offset: -2px; }
 .logbox::-webkit-scrollbar { width: 6px; } .logbox::-webkit-scrollbar-thumb { background: #2a3340; border-radius: 3px; }
 .lrow { display: flex; gap: 8px; padding: 1px 6px; margin: 0 -6px; border-radius: 6px; }
 .nogap .lrow > *:not([hidden]) + *:not([hidden]) { margin-left: 8px; }
@@ -601,3 +620,16 @@ body.tv .drawer-brand b { font-size: 22px; }
    一行里的勾选标记、旗帜、名字、延迟会全部贴在一起(实测间距归零)。
    index.html 里那段脚本会实测一次 flex gap 到底管不管用,不管用才给 <html> 加 nogap 类,
    所以新内核上这一整套规则永远不会命中,四端的现有观感一点不变。 */
+
+/* 矮屏幕(1080p 电视的 WebView 常常只有 960×540 这么大的 CSS 视口)上,抽屉里那套放大过的字号与内边距
+   会把菜单挤到一屏装不下。上面已经让它能滚了,这里再把固定占位收一收,让六项通常一屏就能看全 —— 
+   电视上没有滚动条提示,能不滚就不滚。 */
+@media (max-height: 640px) {
+  body.tv .drawer { padding: 12px 14px 10px; }
+  body.tv .drawer-brand { padding: 4px 12px 10px; }
+  body.tv .drawer-brand svg { width: 38px; height: 38px; }
+  body.tv .drawer-brand b { font-size: 18px; }
+  body.tv .drawer-items a { padding: 9px 16px; font-size: 16px; }
+  body.tv .drawer-state { padding: 8px 11px; margin-bottom: 8px; }
+  body.tv .drawer-foot { padding: 6px 12px 0; }
+}

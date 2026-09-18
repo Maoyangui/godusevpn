@@ -47,7 +47,9 @@ func (f *fake) deps() Deps {
 		OnChange:    func(s Snapshot) { f.mu.Lock(); f.changes = append(f.changes, s.Status); f.mu.Unlock() },
 		AliveEvery:  20 * time.Millisecond,
 		HealthEvery: 30 * time.Millisecond,
-		Backoff:     []time.Duration{20 * time.Millisecond, 40 * time.Millisecond},
+		// 不设的话会取默认的 30 秒:降级之后健康检查会放慢,这个用例就等不到恢复了
+		DegradedEvery: 30 * time.Millisecond,
+		Backoff:       []time.Duration{20 * time.Millisecond, 40 * time.Millisecond},
 	}
 }
 

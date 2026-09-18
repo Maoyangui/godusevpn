@@ -45,3 +45,8 @@ echo "== 首页再按返回:应该退到后台(应用不退出)"
 key KEYCODE_BACK; sleep 1
 a shell dumpsys activity activities | grep -m1 "topResumedActivity\|ResumedActivity" | tr -d '\r'
 echo "-- logcat(引擎 / 崩溃):"; a logcat -d -s godusevpn:* AndroidRuntime:E chromium:E | tail -12
+# 页面每次焦点移动都会写一行 "focus …"(见 web/dist/app.js 的 focusin 监听),是判断遥控器到底走到哪一项的唯一依据。
+# 它走的是 WebView 的 console.log,落在 chromium 的 I 级 —— 上面那条只取 E 级,把它全滤掉了。
+echo "-- 遥控器焦点轨迹:"; a logcat -d -s chromium:I | grep -a "focus " | tail -20
+# 内核起没起来、以及起不来的原因(2026-09-18 索尼电视那次就是卡在这儿)
+echo "-- 连接与规则集:"; a logcat -d -s godusevpn:* | grep -aE "状态 →|规则集|内核|闸" | tail -20

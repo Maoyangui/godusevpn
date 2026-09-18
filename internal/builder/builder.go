@@ -8,13 +8,13 @@ import (
 	"encoding/json"
 	"errors"
 	"net/netip"
-	"os"
 	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
 
 	"github.com/Maoyangui/godusevpn/internal/profile"
+	"github.com/Maoyangui/godusevpn/internal/ruleset"
 	"github.com/Maoyangui/godusevpn/internal/settings"
 )
 
@@ -23,7 +23,11 @@ type Input struct {
 	Settings    settings.Settings
 	DataDir     string // cache.db 放这里
 	ClashSecret string // Clash API 密钥,服务每次启动随机生成
-	RuleSetDir  string // 内置离线规则集目录:有 <tag>.srs 就用本地文件,没有走远程
+	// RuleSetDir 规则集根目录(见 internal/ruleset:用户放的 / 下载来的 / 内置的三层)。
+	// 规则集**只用本地文件**:内核启动阶段要把它们全读进来,读不到就整个起不来,
+	// 所以这里找不到的规则集不会写成 type: remote 让内核去现下,而是连同用到它的那条规则一起摘掉,
+	// 由 Report.Missing 报出去,守护进程连上之后再补下来。
+	RuleSetDir string
 	// NodeIPs 用域名写的节点服务器解析出来的地址(域名 → 地址列表)。
 	// 域名节点在隧道里靠嗅探到的 SNI 命中直连规则,但不带 TLS 的协议嗅不出域名,这份是兜底。
 	// 拿不到就留空,退回只按域名匹配。
@@ -71,8 +75,34 @@ func SettingMode(clash string) string {
 	}
 }
 
+// MissingRuleSet 本地没有、配置里因此摘掉了的规则集。
+type MissingRuleSet struct {
+	Tag string `json:"tag"`
+	URL string `json:"url"`
+}
+
+// Report 生成配置时顺带报出来的情况。
+type Report struct {
+	// Missing 本地找不到的规则集。用到它们的规则已经从配置里摘掉,内核照样起得来,
+	// 只是那几条规则这一轮不生效;守护进程会在连上之后把它们补下来,下次连接就有了。
+	Missing []MissingRuleSet
+}
+
 // Build 渲染配置(带缩进的 JSON,便于放进诊断包看)。
+// 规则集缺失这类"能降级继续"的情况不算错误,要看的话用 BuildEx。
 func Build(in Input) ([]byte, error) {
+	cfg, _, err := BuildEx(in)
+	return cfg, err
+}
+
+// BuildEx 同 Build,另外返回这一轮的降级情况。
+func BuildEx(in Input) ([]byte, Report, error) {
+	var rep Report
+	cfg, err := buildConfig(in, &rep)
+	return cfg, rep, err
+}
+
+func buildConfig(in Input, rep *Report) ([]byte, error) {
 	android := in.Android || runtime.GOOS == "android"
 	darwin := in.Darwin || runtime.GOOS == "darwin"
 	procKey := "process_name" // 桌面按进程名分流;Android 没有进程名,按应用包名
@@ -104,6 +134,17 @@ func Build(in Input) ([]byte, error) {
 	}
 	outbounds = append(outbounds, obj("type", "direct", "tag", "direct"))
 
+	// ---- 规则集 ----
+	// 只认本地文件,找不到就摘掉(见 Input.RuleSetDir 上面那段)。这三个随安装包内置,
+	// 正常情况下一个都不会缺 —— 缺了也只是少几条规则,连接本身照样建得起来。
+	// 放在 DNS 之前挑:DNS 分流里也要用 geosite-cn,引用一个配置里不存在的规则集同样会让内核起不来。
+	rs := &ruleSetPicker{root: in.RuleSetDir, rep: rep}
+	cnSets := rs.pick("geosite-cn", ruleSetBase+"geosite-cn.srs", "geoip-cn", ruleSetIPBase+"geoip-cn.srs")
+	var adSets []string
+	if s.AdBlock {
+		adSets = rs.pick("geosite-category-ads-all", ruleSetBase+"geosite-category-ads-all.srs")
+	}
+
 	// ---- DNS ----
 	strategy := "ipv4_only"
 	if s.IPv6 {
@@ -134,7 +175,9 @@ func Build(in Input) ([]byte, error) {
 	dnsRules := []any{
 		obj("outbound", "any", "server", "local"), // 节点自己的域名:直连解析,不能绕圈
 		obj("clash_mode", "Direct", "server", "local"),
-		obj("clash_mode", "Rule", "rule_set", []string{"geosite-cn"}, "server", "local"),
+	}
+	if rs.has("geosite-cn") {
+		dnsRules = append(dnsRules, obj("clash_mode", "Rule", "rule_set", []string{"geosite-cn"}, "server", "local"))
 	}
 	if s.FakeIP {
 		qt := []string{"A"}
@@ -179,18 +222,18 @@ func Build(in Input) ([]byte, error) {
 		}
 		inbounds = append(inbounds, tun)
 	}
-	if s.MixedPort > 0 {
+	// 混合端口在 Android 上**开着 TUN 时**不生成:手机 / 电视上所有流量都走 TUN,没有任何程序会去连
+	// 这个本地端口,它却是一个**启动期硬依赖** —— 端口被别的代理应用占着,整个内核就起不来,
+	// 而电视上界面里连改端口的地方都没有。用不上的东西不该有让连接失败的权力。
+	//
+	// 但 TUN 关掉时必须留着:settings.Validate 有一条不变量是「TUN 关了就必须开混合端口,否则没有任何入口」,
+	// 这里要是也不生成,渲染出来的就是一份**一个入站都没有**的配置 —— 内核起得来、通知栏也在,
+	// 一点流量都不过,而且没有任何报错。
+	if s.MixedPort > 0 && (!android || !s.TUN) {
 		inbounds = append(inbounds, obj("type", "mixed", "tag", "mixed-in", "listen", "127.0.0.1", "listen_port", s.MixedPort))
 	}
 
 	// ---- 路由 ----
-	ruleSets := []any{
-		ruleSet("geosite-cn", ruleSetBase+"geosite-cn.srs", in.RuleSetDir),
-		ruleSet("geoip-cn", ruleSetIPBase+"geoip-cn.srs", in.RuleSetDir),
-	}
-	if s.AdBlock {
-		ruleSets = append(ruleSets, ruleSet("geosite-category-ads-all", ruleSetBase+"geosite-category-ads-all.srs", in.RuleSetDir))
-	}
 	rules := []any{
 		obj("action", "sniff"),
 		obj("protocol", "dns", "action", "hijack-dns"),
@@ -257,21 +300,24 @@ func Build(in Input) ([]byte, error) {
 	)
 	// 用户规则组:只在规则模式下走到这里(上面两条 clash_mode 已把全局 / 直连截走)
 	findProcess := len(s.BypassApps) > 0
-	haveSet := map[string]bool{"geosite-cn": true, "geoip-cn": true, "geosite-category-ads-all": s.AdBlock}
 	for _, g := range s.RuleGroups {
 		if !g.Enabled || len(g.Rules) == 0 {
 			continue
 		}
-		r, sets, proc := groupRule(g, tags, in.RuleSetDir, haveSet, procKey)
-		ruleSets = append(ruleSets, sets...)
+		r, proc := groupRule(g, tags, rs, procKey)
 		findProcess = findProcess || proc
+		if r == nil {
+			continue // 整条规则只靠规则集匹配,而那些规则集本地一个都没有:这一轮跳过它
+		}
 		rules = append(rules, r)
 	}
-	if s.AdBlock {
-		rules = append(rules, obj("rule_set", []string{"geosite-category-ads-all"}, "action", "reject"))
+	if len(adSets) > 0 {
+		rules = append(rules, obj("rule_set", adSets, "action", "reject"))
 	}
-	rules = append(rules, withOutbound(obj("rule_set", []string{"geosite-cn", "geoip-cn"}), dr.CN))
-	route := obj("rules", rules, "rule_set", ruleSets, "final", dr.Final, "auto_detect_interface", true, "default_domain_resolver", "local")
+	if len(cnSets) > 0 {
+		rules = append(rules, withOutbound(obj("rule_set", cnSets), dr.CN))
+	}
+	route := obj("rules", rules, "rule_set", rs.sets, "final", dr.Final, "auto_detect_interface", true, "default_domain_resolver", "local")
 	if findProcess {
 		route["find_process"] = true
 	}
@@ -283,7 +329,10 @@ func Build(in Input) ([]byte, error) {
 		"outbounds", outbounds,
 		"route", route,
 		"experimental", obj(
-			"clash_api", obj("external_controller", "127.0.0.1:"+itoa(s.ClashPort), "secret", in.ClashSecret, "default_mode", ModeName(s.Mode)),
+			// Android 上不开监听口(留空就完全不 listen)。守护进程是直接从内核上下文里拿 ClashServer 用的
+			// (见 internal/core 的 clash()),模式切换、选节点、流量统计一个都不少;而监听 9090 是个启动期硬依赖,
+			// 电视上只要装了别的 Clash 系应用占着这个端口,整个内核就起不来。桌面端保留,外部面板要连。
+			"clash_api", obj("external_controller", clashListen(android, s.ClashPort), "secret", in.ClashSecret, "default_mode", ModeName(s.Mode)),
 			"cache_file", obj("enabled", true, "path", filepath.Join(in.DataDir, "cache.db"), "store_fakeip", true),
 		),
 	)
@@ -292,11 +341,10 @@ func Build(in Input) ([]byte, error) {
 
 // groupRule 把一个规则组渲染成一条路由规则:同类型的值合成一个列表,多种类型用 logical/or 组起来(单条规则里不同字段是"且")。
 // 返回规则、需要新增的规则集、是否用到了进程名。
-func groupRule(g settings.RuleGroup, tags []string, dir string, haveSet map[string]bool, procKey string) (map[string]any, []any, bool) {
+func groupRule(g settings.RuleGroup, tags []string, rs *ruleSetPicker, procKey string) (map[string]any, bool) {
 	lists := map[string][]string{}
 	var ports []int
 	var portRanges, sets []string
-	var newSets []any
 	for _, r := range g.Rules {
 		switch r.Type {
 		case settings.RulePort:
@@ -311,11 +359,7 @@ func groupRule(g settings.RuleGroup, tags []string, dir string, haveSet map[stri
 			if r.Type == settings.RuleGeoIP {
 				tag, url = "geoip-"+r.Value, ruleSetIPBase+"geoip-"+r.Value+".srs"
 			}
-			if !haveSet[tag] {
-				haveSet[tag] = true
-				newSets = append(newSets, ruleSet(tag, url, dir))
-			}
-			sets = append(sets, tag)
+			sets = append(sets, rs.pick(tag, url)...)
 		default:
 			lists[r.Type] = append(lists[r.Type], r.Value)
 		}
@@ -340,9 +384,14 @@ func groupRule(g settings.RuleGroup, tags []string, dir string, haveSet map[stri
 		parts = append(parts, obj("rule_set", sets))
 	}
 	var rule map[string]any
-	if len(parts) == 1 {
+	switch len(parts) {
+	case 0:
+		// 这条规则组只写了 geosite / geoip,而那些规则集本地一个都没有 —— 没有任何可匹配的条件了。
+		// 硬塞一条空的 logical/or 进去会匹配不到东西还让配置变得可疑,直接告诉调用方"这条别要"。
+		return nil, len(lists[settings.RuleProcess]) > 0
+	case 1:
 		rule = parts[0].(map[string]any)
-	} else {
+	default:
 		rule = obj("type", "logical", "mode", "or", "rules", parts)
 	}
 	switch out := g.Outbound; out {
@@ -358,18 +407,66 @@ func groupRule(g settings.RuleGroup, tags []string, dir string, haveSet map[stri
 			}
 		}
 	}
-	return rule, newSets, len(lists[settings.RuleProcess]) > 0
+	return rule, len(lists[settings.RuleProcess]) > 0
 }
 
-// ruleSet 本地有离线副本就用本地(安装包内置),否则经代理从官方仓库拉,一周更新一次。
-func ruleSet(tag, url, dir string) map[string]any {
-	if dir != "" {
-		local := filepath.Join(dir, tag+".srs")
-		if st, err := os.Stat(local); err == nil && !st.IsDir() {
-			return obj("tag", tag, "type", "local", "format", "binary", "path", local)
+// clashListen Clash API 的监听地址;Android 上留空 = 不监听。
+func clashListen(android bool, port int) string {
+	if android {
+		return ""
+	}
+	return "127.0.0.1:" + itoa(port)
+}
+
+// ruleSetPicker 挑规则集:本地有就写进配置,没有就记一笔缺失,**绝不写成 type: remote**。
+//
+// 为什么这么绝:sing-box 的远程规则集在没有缓存时是在 box.Start() 里同步下载的,
+// 一条下不到就整个内核起不来(route/router.go 那组是 FastFail)。客户端因此变成
+// "能不能连,取决于此刻能不能访问 GitHub" —— 全新设备第一次装上就可能永远连不上。
+// 现在改成:规则集齐了就用,不齐就少几条规则,连接本身一定能建起来。
+type ruleSetPicker struct {
+	root string
+	rep  *Report
+	sets []any           // 配置里 route.rule_set 那一段,按加入顺序
+	seen map[string]bool // 标签去重:同一个规则集被多条规则用到时只写一次
+}
+
+// pick 接受若干组 (tag, url),返回其中本地找得到的那些标签,顺带把它们登记进 sets。
+func (p *ruleSetPicker) pick(tagURL ...string) []string {
+	if p.seen == nil {
+		p.seen = map[string]bool{}
+	}
+	var out []string
+	for i := 0; i+1 < len(tagURL); i += 2 {
+		tag, url := tagURL[i], tagURL[i+1]
+		if p.seen[tag] {
+			out = append(out, tag) // 已经登记过了,直接引用
+			continue
+		}
+		path, ok := ruleset.Find(p.root, tag)
+		if !ok {
+			if p.rep != nil && !p.missed(tag) {
+				p.rep.Missing = append(p.rep.Missing, MissingRuleSet{Tag: tag, URL: url})
+			}
+			continue
+		}
+		p.seen[tag] = true
+		p.sets = append(p.sets, obj("tag", tag, "type", "local", "format", "binary", "path", path))
+		out = append(out, tag)
+	}
+	return out
+}
+
+// has 这个规则集本地有没有、已经写进配置了没有。
+func (p *ruleSetPicker) has(tag string) bool { return p.seen[tag] }
+
+func (p *ruleSetPicker) missed(tag string) bool {
+	for _, m := range p.rep.Missing {
+		if m.Tag == tag {
+			return true
 		}
 	}
-	return obj("tag", tag, "type", "remote", "format", "binary", "url", url, "download_detour", "proxy", "update_interval", "7d")
+	return false
 }
 
 func obj(kv ...any) map[string]any {
