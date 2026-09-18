@@ -29,7 +29,9 @@ func UIPrefs() string { return filepath.Join(ConfDir(), "ui.json") }
 
 // Ensure 建好设置目录、数据目录与子目录。建不出来是致命的。
 func Ensure() error {
-	for _, d := range []string{ConfDir(), DataDir(), Logs(), RuleSets(), filepath.Join(DataDir(), "profiles")} {
+	// diag 也先建出来:数据目录会被收紧成只有管理员能进(见 Harden),而 diag 要单独放开只读给界面复制诊断包。
+	// 等用到时才建的话,它会继承到收紧后的权限上,界面就再也拿不到诊断包了。
+	for _, d := range []string{ConfDir(), DataDir(), Logs(), RuleSets(), Diag(), filepath.Join(DataDir(), "profiles")} {
 		if err := os.MkdirAll(d, 0o700); err != nil {
 			return err
 		}
