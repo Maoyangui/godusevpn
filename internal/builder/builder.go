@@ -23,6 +23,10 @@ type Input struct {
 	Settings    settings.Settings
 	DataDir     string // cache.db 放这里
 	ClashSecret string // Clash API 密钥,服务每次启动随机生成
+	// ClashPort 这一轮 Clash API 实际要监听的端口;0 = 用设置里的。
+	// 设置里那个被别的程序占着时,守护进程会挑一个空闲的填进来(见 daemon.pickClashPort)——
+	// 端口被占会让内核整个起不来,而电视上界面里连改端口的地方都没有。
+	ClashPort int
 	// RuleSetDir 规则集根目录(见 internal/ruleset:用户放的 / 下载来的 / 内置的三层)。
 	// 规则集**只用本地文件**:内核启动阶段要把它们全读进来,读不到就整个起不来,
 	// 所以这里找不到的规则集不会写成 type: remote 让内核去现下,而是连同用到它的那条规则一起摘掉,
@@ -329,10 +333,12 @@ func buildConfig(in Input, rep *Report) ([]byte, error) {
 		"outbounds", outbounds,
 		"route", route,
 		"experimental", obj(
-			// Android 上不开监听口(留空就完全不 listen)。守护进程是直接从内核上下文里拿 ClashServer 用的
-			// (见 internal/core 的 clash()),模式切换、选节点、流量统计一个都不少;而监听 9090 是个启动期硬依赖,
-			// 电视上只要装了别的 Clash 系应用占着这个端口,整个内核就起不来。桌面端保留,外部面板要连。
-			"clash_api", obj("external_controller", clashListen(android, s.ClashPort), "secret", in.ClashSecret, "default_mode", ModeName(s.Mode)),
+			// 各端都要监听:界面服务层(internal/uiapi,Android 与 Linux 面板共用)的实时网速、连接列表、
+			// 断开连接、连着时测延迟,全是经这个 HTTP 口取的。v0.6.23-m26 在 Android 上把它关了,
+			// 结果连接页直接报 connection refused、网速恒为 0 —— 只核对了进程内那几样(切模式、选节点)就下了结论。
+			// 端口被别的程序占着的问题由守护进程在 prepare 里解决(换一个空闲端口,见 daemon.pickClashPort),
+			// 而不是不监听。
+			"clash_api", obj("external_controller", "127.0.0.1:"+itoa(clashPort(in)), "secret", in.ClashSecret, "default_mode", ModeName(s.Mode)),
 			"cache_file", obj("enabled", true, "path", filepath.Join(in.DataDir, "cache.db"), "store_fakeip", true),
 		),
 	)
@@ -410,12 +416,13 @@ func groupRule(g settings.RuleGroup, tags []string, rs *ruleSetPicker, procKey s
 	return rule, len(lists[settings.RuleProcess]) > 0
 }
 
-// clashListen Clash API 的监听地址;Android 上留空 = 不监听。
-func clashListen(android bool, port int) string {
-	if android {
-		return ""
+// clashPort 这一轮 Clash API 实际监听的端口:守护进程挑过的优先(设置里那个被占着时它会换一个),
+// 没挑就用设置里的。
+func clashPort(in Input) int {
+	if in.ClashPort > 0 {
+		return in.ClashPort
 	}
-	return "127.0.0.1:" + itoa(port)
+	return in.Settings.ClashPort
 }
 
 // ruleSetPicker 挑规则集:本地有就写进配置,没有就记一笔缺失,**绝不写成 type: remote**。

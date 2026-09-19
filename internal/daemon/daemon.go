@@ -59,23 +59,28 @@ type Daemon struct {
 	// guardApplied 闸现在实际按哪份规格装着。设置里改了「局域网直通」/ 网关模式之后要据此重装 ——
 	// 闸是持久的,只看"在不在"的话,连着的时候改这两项永远不生效。
 	guardApplied netmode.GuardSpec
-	guardMu      sync.Mutex // syncGuard 整段串行:判断 + 开 / 撤要一气呵成
-	releaseTun   func()     // 见 Options.ReleaseTun
-	machine      *state.Machine
-	server       *ipc.Server
-	secret       string
-	http         *http.Client
-	delays       map[string]int // 最近一次全节点测速结果
-	ping         int            // 当前节点最近一次测得的延迟(毫秒):健康检查本来就要测一次,顺手记下来给界面用
-	exitIP       string         // 经当前节点出去时对外露出的地址
-	exitLoc      string         // 出口所在国家的两位代码
-	exitCity     string         // 出口所在城市
-	exitRegion   string         // 出口所在一级行政区
-	exitISP      string         // 出口那条线路的运营商 / 机房
-	exitNode     string         // 上面那些是哪个节点测出来的:自动选择在后台换了节点就得重测
-	exitAt       time.Time      // 上次测出口的时间:节点没变也隔一阵子复查一次
-	exitGen      uint64         // 出口查询的代数:换节点 / 重连就加一,慢的旧查询回来发现代数变了就丢弃,不会把旧节点的出口盖到新节点上
-	noListen     bool
+	// Clash API 的端口:设置里那个被别的程序占着时会换一个(见 pickClashPort)。
+	// preparedClashPort 是 prepare 挑的、clashPort 是正在跑的内核真正监听的 —— 和 prepared / running 同一个道理,
+	// Restart 是先备后停再起,备的时候旧内核还占着旧端口,不能提前把界面指到新端口上去。
+	preparedClashPort int
+	clashPort         atomic.Int32
+	guardMu           sync.Mutex // syncGuard 整段串行:判断 + 开 / 撤要一气呵成
+	releaseTun        func()     // 见 Options.ReleaseTun
+	machine           *state.Machine
+	server            *ipc.Server
+	secret            string
+	http              *http.Client
+	delays            map[string]int // 最近一次全节点测速结果
+	ping              int            // 当前节点最近一次测得的延迟(毫秒):健康检查本来就要测一次,顺手记下来给界面用
+	exitIP            string         // 经当前节点出去时对外露出的地址
+	exitLoc           string         // 出口所在国家的两位代码
+	exitCity          string         // 出口所在城市
+	exitRegion        string         // 出口所在一级行政区
+	exitISP           string         // 出口那条线路的运营商 / 机房
+	exitNode          string         // 上面那些是哪个节点测出来的:自动选择在后台换了节点就得重测
+	exitAt            time.Time      // 上次测出口的时间:节点没变也隔一阵子复查一次
+	exitGen           uint64         // 出口查询的代数:换节点 / 重连就加一,慢的旧查询回来发现代数变了就丢弃,不会把旧节点的出口盖到新节点上
+	noListen          bool
 
 	missingSets []builder.MissingRuleSet // 上一次生成配置时本地没有、因此摘掉了的规则集(界面要提示,连上之后要去补)
 	fillingSets bool                     // 补规则集的活正在跑,别叠第二份
@@ -443,8 +448,9 @@ func (d *Daemon) prepare(ctx context.Context) ([]byte, error) {
 	if s.NetMode == settings.NetGateway {
 		d.resolveDeviceIPs(&s) // 设备策略按当前 IP 生效
 	}
+	clashPort := d.pickClashPort(s.ClashPort)
 	cfg, rep, err := builder.BuildEx(builder.Input{Profile: p, Settings: s, DataDir: paths.DataDir(), ClashSecret: d.secret, RuleSetDir: paths.RuleSets(),
-		NodeIPs: resolveNodeHosts(ctx, p)})
+		ClashPort: clashPort, NodeIPs: resolveNodeHosts(ctx, p)})
 	if err != nil {
 		return nil, state.Errf(state.CodeConfig, "生成配置: %v", err)
 	}
@@ -458,6 +464,7 @@ func (d *Daemon) prepare(ctx context.Context) ([]byte, error) {
 	// 被删也不会重连、选到参数变了的节点也不会重建(m14 到 m19 都有这毛病)。
 	d.mu.Lock()
 	d.prepared = p
+	d.preparedClashPort = clashPort
 	d.mu.Unlock()
 	return cfg, nil
 }
@@ -473,7 +480,8 @@ func (d *Daemon) start(cfg []byte) error {
 	d.mu.Lock()
 	d.running = d.prepared // 起来了,这份订阅才是内核在用的
 	d.mu.Unlock()
-	d.markProbed() // sing-box 启动时(PostStart)自己会把 auto 组全测一轮,定时测速从这时候起算
+	d.clashPort.Store(int32(d.preparedClashPortValue())) // 界面按它连 Clash API;同理要等真起来了才算数
+	d.markProbed()                                       // sing-box 启动时(PostStart)自己会把 auto 组全测一轮,定时测速从这时候起算
 	d.guardTunUp()
 	s := d.getSettings()
 	if s.Selected != "" {
@@ -1060,7 +1068,7 @@ func (d *Daemon) registerHandlers() {
 	})
 	h(ipc.MGetState, func(json.RawMessage) (any, error) { return d.stateView(), nil })
 	h(ipc.MGetClashInfo, func(json.RawMessage) (any, error) {
-		return ipc.ClashInfo{Port: d.getSettings().ClashPort, Secret: d.secret, Running: d.core.Running()}, nil
+		return ipc.ClashInfo{Port: d.activeClashPort(), Secret: d.secret, Running: d.core.Running()}, nil
 	})
 	h(ipc.MExportDiag, func(json.RawMessage) (any, error) {
 		p, err := d.exportDiag()

@@ -1,14 +1,17 @@
 package core
 
 import (
+	"context"
 	"encoding/json"
 	"net"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Maoyangui/godusevpn/internal/builder"
+	"github.com/Maoyangui/godusevpn/internal/clash"
 	"github.com/Maoyangui/godusevpn/internal/profile"
 	"github.com/Maoyangui/godusevpn/internal/ruleset"
 	"github.com/Maoyangui/godusevpn/internal/settings"
@@ -120,13 +123,15 @@ func TestCoreBootsWithNoRuleSetsAtAll(t *testing.T) {
 	_ = c.Stop()
 }
 
-// Android 上 Clash API 不监听端口(用不上,却是启动期硬依赖):去掉监听之后内核照样要起得来,
-// 模式切换、选节点这些也还在(守护进程是直接从内核上下文里取 ClashServer 用的)。
+// Android 那份配置起得来,而且 **Clash API 真的能经 HTTP 用** —— 这是 v0.6.23-m26 回归的端到端闸门。
 //
-// 这里 TUN 关着,所以混合入站会保留 —— 那是 TUN 关掉时唯一的入口,不能一起省掉。
-// 「开着 TUN 的 Android 不生成混合入站」由 builder 那边的 TestAndroidHasNoLocalListeners 管:
-// 那条只看生成出来的 JSON,不会真建 TUN。
-func TestAndroidConfigBootsWithoutLocalListeners(t *testing.T) {
+// 那一版在 Android 上把 Clash API 的监听关了,以为守护进程只在进程内取用它;可界面服务层
+// (internal/uiapi)的实时网速、连接列表、断开连接、连着时测延迟全是经 HTTP 取的。用户手机上
+// 「连接」页报 get http://127.0.0.1:9090/connections: connection refused,网速恒为 0。
+// 光看生成出来的 JSON 挡不住这种事,所以这里真起一个内核,再用界面用的同一个客户端去问。
+//
+// TUN 关着(不碰这台机器的网络),所以混合入站会保留 —— 那是 TUN 关掉时唯一的入口。
+func TestAndroidConfigServesClashAPI(t *testing.T) {
 	root := t.TempDir()
 	if err := ruleset.Install(root); err != nil {
 		t.Fatal(err)
@@ -134,7 +139,7 @@ func TestAndroidConfigBootsWithoutLocalListeners(t *testing.T) {
 	s := settings.Default()
 	s.LogLevel = "error" // 别让内核的 info 日志把 go test 的输出刷屏
 	s.TUN = false
-	s.MixedPort = freePort(t) // 设置里填着,但 Android 分支不该把它写进配置
+	s.MixedPort = freePort(t)
 	s.ClashPort = freePort(t)
 
 	cfg, _, err := builder.BuildEx(builder.Input{
@@ -144,25 +149,42 @@ func TestAndroidConfigBootsWithoutLocalListeners(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var parsed struct {
-		Experimental struct {
-			ClashAPI map[string]any `json:"clash_api"`
-		} `json:"experimental"`
-	}
-	if err := json.Unmarshal(cfg, &parsed); err != nil {
-		t.Fatal(err)
-	}
-	if got := parsed.Experimental.ClashAPI["external_controller"]; got != "" {
-		t.Fatalf("Android 上 Clash API 不该监听端口,实际 %q", got)
-	}
-	if parsed.Experimental.ClashAPI["default_mode"] == nil {
-		t.Fatal("clash_api 整节被删了,模式切换会失效")
-	}
 	c := New(nil)
 	if err := c.Start(cfg); err != nil {
 		t.Fatalf("Android 那份配置起不来: %v", err)
 	}
-	_ = c.Stop()
+	defer func() { _ = c.Stop() }()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	api := clash.New(s.ClashPort, "x")
+	if _, err := api.Connections(ctx); err != nil {
+		t.Fatalf("「连接」页取不到数据(用户手机上就是这句): %v", err)
+	}
+	proxies, err := api.Proxies(ctx)
+	if err != nil {
+		t.Fatalf("节点列表取不到: %v", err)
+	}
+	if _, ok := proxies["proxy"]; !ok {
+		t.Fatalf("节点列表里没有 proxy 组: %v", proxies)
+	}
+	// 实时网速是一条长连接流,能收到第一条就算通
+	got := make(chan struct{}, 1)
+	tctx, tcancel := context.WithTimeout(ctx, 5*time.Second)
+	defer tcancel()
+	go func() {
+		_ = api.Traffic(tctx, func(up, down int64) {
+			select {
+			case got <- struct{}{}:
+			default:
+			}
+		})
+	}()
+	select {
+	case <-got:
+	case <-tctx.Done():
+		t.Fatal("实时网速流一条都收不到 —— 首页网速会恒为 0")
+	}
 }
 
 // testProfile 两个节点,地址用 RFC 5737 的文档保留段,连出去也不会碰到真实主机。

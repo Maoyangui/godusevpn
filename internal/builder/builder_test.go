@@ -632,10 +632,14 @@ func TestProbeOnlyWhenAuto(t *testing.T) {
 	}
 }
 
-// Android 上那两个本地监听口都不该生成。它们是**启动期硬依赖**:端口被别人占着内核就整个起不来,
-// 而手机 / 电视上根本没人会去连它们 —— 混合端口的流量全走 TUN,Clash API 由守护进程在进程内直接取用。
-// 电视上界面里既改不了端口、也看不懂英文报错,一个用不上的监听口不该有让连接失败的权力。
-func TestAndroidHasNoLocalListeners(t *testing.T) {
+// Android(开着 TUN)上不生成混合入站:流量全走 TUN,没人会去连它,它却是启动期硬依赖。
+//
+// 但 **Clash API 必须照样监听**。v0.6.23-m26 在 Android 上把它也关了,理由是「守护进程在进程内取用」——
+// 那只对切模式、选节点成立;界面服务层(internal/uiapi)的实时网速、连接列表、断开连接、连着时测延迟
+// 全是经这个 HTTP 口取的,用户手机上「连接」页直接报
+// get http://127.0.0.1:9090/connections: connection refused,网速恒为 0。
+// 端口被占的问题改由守护进程挑一个空闲端口解决(Input.ClashPort),而不是不监听。
+func TestAndroidListeners(t *testing.T) {
 	s := settings.Default()
 	raw, err := Build(Input{Profile: sampleProfile(), Settings: s, DataDir: t.TempDir(), ClashSecret: "sec", RuleSetDir: ruleSetRoot(t), Android: true})
 	if err != nil {
@@ -647,26 +651,22 @@ func TestAndroidHasNoLocalListeners(t *testing.T) {
 	}
 	for _, in := range c.Inbounds {
 		if in["type"] == "mixed" {
-			t.Fatalf("Android 上不该有混合入站: %v", in)
+			t.Fatalf("开着 TUN 的 Android 上不该有混合入站: %v", in)
 		}
 	}
-	if got := c.Experimental.ClashAPI["external_controller"]; got != "" {
-		t.Fatalf("Android 上 Clash API 不该监听端口,实际 %q", got)
-	}
-	// 但 clash_api 这一节本身要留着:模式切换、选节点、流量统计都靠它注册进内核
-	if c.Experimental.ClashAPI["default_mode"] == nil {
-		t.Fatal("clash_api 整节被删了,模式切换会失效")
+	if got, _ := c.Experimental.ClashAPI["external_controller"].(string); got != "127.0.0.1:9090" {
+		t.Fatalf("Android 上 Clash API 必须监听(连接页、网速、测延迟都靠它),实际 %q", got)
 	}
 
-	// 桌面端照旧监听,外部面板要连
-	raw, err = Build(Input{Profile: sampleProfile(), Settings: s, DataDir: t.TempDir(), ClashSecret: "sec", RuleSetDir: ruleSetRoot(t)})
+	// 守护进程挑了别的端口(设置里那个被占着)时,配置要跟着它走
+	raw, err = Build(Input{Profile: sampleProfile(), Settings: s, DataDir: t.TempDir(), ClashSecret: "sec", RuleSetDir: ruleSetRoot(t), Android: true, ClashPort: 51234})
 	if err != nil {
 		t.Fatal(err)
 	}
 	var d cfg
 	_ = json.Unmarshal(raw, &d)
-	if got, _ := d.Experimental.ClashAPI["external_controller"].(string); !strings.HasPrefix(got, "127.0.0.1:") {
-		t.Fatalf("桌面端应该继续监听,实际 %q", got)
+	if got, _ := d.Experimental.ClashAPI["external_controller"].(string); got != "127.0.0.1:51234" {
+		t.Fatalf("应该监听守护进程挑的端口,实际 %q", got)
 	}
 }
 
