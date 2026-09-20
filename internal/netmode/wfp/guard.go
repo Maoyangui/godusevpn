@@ -137,6 +137,15 @@ func installSet(session uintptr, spec Spec, withSelf bool) error {
 	if err := permitNdp(session, base, 12); err != nil {
 		return err
 	}
+	// 转发层(热点共享):默认全拦;局域网直通开着就放行去往私网的转发;经隧道的那组在 TunUp 里按接口号装
+	if spec.LAN {
+		if err := permitForwardLAN(session, base, 12); err != nil {
+			return err
+		}
+	}
+	if err := blockForward(session, base, 0); err != nil {
+		return err
+	}
 	return blockAll(session, base, 0)
 }
 

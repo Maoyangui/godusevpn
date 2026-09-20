@@ -67,15 +67,19 @@ func ApplyGuard(spec GuardSpec) error {
 func GuardTunUp(GuardSpec) error { return nil }
 
 // ClearGuard 撤闸。规则不随进程死(上次强杀留下的也要清),所以不管本进程有没有装过,锚点一律清空。
-func ClearGuard() {
+// 清完锚点里还有规则才算失败。
+func ClearGuard() error {
 	pfMu.Lock()
 	defer pfMu.Unlock()
-	_ = exec.Command("pfctl", "-a", pfAnchor, "-F", "all").Run()
+	if out, err := exec.Command("pfctl", "-a", pfAnchor, "-F", "all").CombinedOutput(); err != nil {
+		return fmt.Errorf("pfctl 清锚点: %v: %s", err, strings.TrimSpace(string(out)))
+	}
 	if pfToken != "" {
 		_ = exec.Command("pfctl", "-X", pfToken).Run()
 		pfToken = ""
 	}
 	pfOn = false
+	return nil
 }
 
 // GuardStatus 锚点里现在有多少条规则;0 = 没开。

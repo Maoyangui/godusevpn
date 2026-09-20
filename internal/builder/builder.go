@@ -53,6 +53,8 @@ const (
 	fakeIP6       = "fc00::/18"
 	ruleSetBase   = "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/"
 	ruleSetIPBase = "https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/"
+	// sealedBootstrapDoH 全局禁直连下「本地 DNS」若被设成 system,给节点域名解析用的加密替身(按地址连,不用再解析它自己)。
+	sealedBootstrapDoH = "223.5.5.5"
 )
 
 // ModeName 设置里的模式 → 内核 Clash API 里的模式名。
@@ -160,11 +162,18 @@ func buildConfig(in Input, rep *Report) ([]byte, error) {
 		remote["domain_resolver"] = "system"
 	}
 	servers = append(servers, remote)
-	if s.LocalDNS == "system" {
+	// 「本地 DNS」在全局模式下只剩一个用处:给节点服务器自己的域名做解析(default_domain_resolver)。
+	// 设成 system 就是明文 53 发到路由器 / 运营商 —— 全局禁直连开着的时候不能这么干,
+	// 换成加密的公共 DoH(按地址连,不再需要任何别的解析)。规则 / 直连模式不改,那本来就不承诺不直连。
+	localDNS := s.LocalDNS
+	if localDNS == "system" && s.NoDirect && s.Mode == settings.ModeGlobal {
+		localDNS = sealedBootstrapDoH
+	}
+	if localDNS == "system" {
 		servers = append(servers, obj("type", "local", "tag", "local"))
 	} else {
-		local := obj("type", "https", "tag", "local", "server", s.LocalDNS)
-		if !settings.IsIP(s.LocalDNS) {
+		local := obj("type", "https", "tag", "local", "server", localDNS)
+		if !settings.IsIP(localDNS) {
 			local["domain_resolver"] = "system"
 		}
 		servers = append(servers, local)

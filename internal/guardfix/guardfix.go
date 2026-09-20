@@ -29,11 +29,15 @@ func Clear() (text string, ok bool) {
 		return "闸本来就没开,直连不受限;「全局禁直连」开关没动。", true
 	}
 	switchedOff := switchOff()
-	netmode.ClearGuard()
+	clearErr := netmode.ClearGuard()
 	netmode.RestoreNICIPv6() // 网卡 IPv6 和闸一样是持久的,恢复网络就该一并还原,不然用户以为好了、v6 还是没有
 	n, _ := netmode.GuardStatus()
-	if n != 0 {
-		return fmt.Sprintf("过滤器还剩 %d 条,没删干净(是不是没用管理员身份跑?)", n), false
+	if n != 0 || clearErr != nil {
+		why := "是不是没用管理员身份跑?"
+		if clearErr != nil {
+			why = clearErr.Error()
+		}
+		return fmt.Sprintf("过滤器还剩 %d 条,没删干净(%s)", n, why), false
 	}
 	if switchedOff {
 		return "禁直连闸已解除,网卡 IPv6 也还原了,网络恢复。已顺手关掉「全局禁直连」与「连接时停用网卡 IPv6」两个开关,免得服务一重连又装回来;要再用,去设置 → 隐私打开。", true

@@ -70,9 +70,11 @@ func fwpmProviderDeleteByKey0(engine uintptr, key *windows.GUID) error {
 	return callProc(procFwpmProviderDeleteByKey0, engine, uintptr(unsafe.Pointer(key)))
 }
 
-// ourLayers 我们放过滤器的四个层:出站 / 入站 × IPv4 / IPv6。
+// ourLayers 我们放过滤器的六个层:出站 / 入站 × IPv4 / IPv6,外加 IP 转发 × IPv4 / IPv6(热点共享经本机转发的流量)。
+// 少列一层就会漏删:撤闸、卸载之后那一层的过滤器永远留着。
 func ourLayers() []windows.GUID {
-	return []windows.GUID{cFWPM_LAYER_ALE_AUTH_CONNECT_V4, cFWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V4, cFWPM_LAYER_ALE_AUTH_CONNECT_V6, cFWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V6}
+	return []windows.GUID{cFWPM_LAYER_ALE_AUTH_CONNECT_V4, cFWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V4, cFWPM_LAYER_ALE_AUTH_CONNECT_V6, cFWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V6,
+		cFWPM_LAYER_IPFORWARD_V4, cFWPM_LAYER_IPFORWARD_V6}
 }
 
 // filterInfo 枚举到的一条我们的过滤器。

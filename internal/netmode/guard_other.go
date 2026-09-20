@@ -6,6 +6,6 @@ package netmode
 // 别的平台没有实现。
 func ApplyGuard(GuardSpec) error { return nil }
 func GuardTunUp(GuardSpec) error { return nil }
-func ClearGuard()                {}
+func ClearGuard() error          { return nil }
 func GuardStatus() (int, error)  { return 0, nil }
 func GuardWarning() string       { return "" }

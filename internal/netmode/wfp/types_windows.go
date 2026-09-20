@@ -412,3 +412,48 @@ const (
 const (
 	cFWP_ACTRL_MATCH_FILTER = 1
 )
+
+// ---- IP 转发层(热点共享 / ICS 经本机转发的流量)----
+//
+// 下面这几个 GUID 不是抄的头文件:2026-09-21 用 FwpmLayerGetById0 在本机 WFP 引擎上按 layerId 8(IPv4)/ 10(IPv6)
+// 取出层定义,逐字段核对过 GUID 与数据类型(地址 v4 = UINT32、v6 = 16 字节;接口号 = UINT32)。
+
+// FWPM_LAYER_IPFORWARD_V4 (a82acc24-4ee1-4ee1-b465-fd1d25cb10a4)
+var cFWPM_LAYER_IPFORWARD_V4 = windows.GUID{
+	Data1: 0xa82acc24,
+	Data2: 0x4ee1,
+	Data3: 0x4ee1,
+	Data4: [8]byte{0xb4, 0x65, 0xfd, 0x1d, 0x25, 0xcb, 0x10, 0xa4},
+}
+
+// FWPM_LAYER_IPFORWARD_V6 (7b964818-19c7-493a-b71f-832c3684d28c)
+var cFWPM_LAYER_IPFORWARD_V6 = windows.GUID{
+	Data1: 0x7b964818,
+	Data2: 0x19c7,
+	Data3: 0x493a,
+	Data4: [8]byte{0xb7, 0x1f, 0x83, 0x2c, 0x36, 0x84, 0xd2, 0x8c},
+}
+
+// FWPM_CONDITION_IP_DESTINATION_ADDRESS (2d79133b-b390-45c6-8699-acaceaafed33):转发层的目的地址
+var cFWPM_CONDITION_IP_DESTINATION_ADDRESS = windows.GUID{
+	Data1: 0x2d79133b,
+	Data2: 0xb390,
+	Data3: 0x45c6,
+	Data4: [8]byte{0x86, 0x99, 0xac, 0xac, 0xea, 0xaf, 0xed, 0x33},
+}
+
+// FWPM_CONDITION_SOURCE_INTERFACE_INDEX (2311334d-c92d-45bf-9496-edf447820e2d):包从哪个接口进来(UINT32)
+var cFWPM_CONDITION_SOURCE_INTERFACE_INDEX = windows.GUID{
+	Data1: 0x2311334d,
+	Data2: 0xc92d,
+	Data3: 0x45bf,
+	Data4: [8]byte{0x94, 0x96, 0xed, 0xf4, 0x47, 0x82, 0x0e, 0x2d},
+}
+
+// FWPM_CONDITION_DESTINATION_INTERFACE_INDEX (35cf6522-4139-45ee-a0d5-67b80949d879):包要从哪个接口出去(UINT32)
+var cFWPM_CONDITION_DESTINATION_INTERFACE_INDEX = windows.GUID{
+	Data1: 0x35cf6522,
+	Data2: 0x4139,
+	Data3: 0x45ee,
+	Data4: [8]byte{0xa0, 0xd5, 0x67, 0xb8, 0x09, 0x49, 0xd8, 0x79},
+}

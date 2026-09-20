@@ -110,6 +110,9 @@ type Machine struct {
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
 	pre    []byte // Restart 提前备好的配置:下一轮 run 直接用它,不再 Prepare 一遍
+	// kick 让 watch 立刻做一次健康检查,不等定时器。会话看护判定当前节点的会话已废时会敲一下:
+	// 三分钟一次的常规检查对"整机断网"来说太慢,而看护那边已经有证据了。容量 1,敲多少下都只算一次。
+	kick chan struct{}
 }
 
 func New(d Deps) *Machine {
@@ -128,7 +131,15 @@ func New(d Deps) *Machine {
 	if d.Logf == nil {
 		d.Logf = func(string, ...any) {}
 	}
-	return &Machine{d: d, snap: Snapshot{Status: Disconnected, Since: time.Now().Unix()}}
+	return &Machine{d: d, snap: Snapshot{Status: Disconnected, Since: time.Now().Unix()}, kick: make(chan struct{}, 1)}
+}
+
+// CheckNow 请求立刻做一次健康检查(连接期间才有意义;没在连就丢掉)。不阻塞。
+func (m *Machine) CheckNow() {
+	select {
+	case m.kick <- struct{}{}:
+	default:
+	}
 }
 
 func (m *Machine) Snapshot() Snapshot {
@@ -335,6 +346,52 @@ func (m *Machine) watch(ctx context.Context) bool {
 	defer health.Stop()
 	fails := 0
 	tried := false // 这一轮不健康期间已经叫过一次自救了
+	// 断开期间攒下的 kick 作废:那是对上一条连接的判定,新连接刚起来不该平白多查一次
+	select {
+	case <-m.kick:
+	default:
+	}
+	// 一次健康检查。返回 true = 该重建连接了(内核死了、或这条线路救不回来)。
+	check := func() bool {
+		if m.d.Health == nil {
+			return false
+		}
+		err := m.d.Health(ctx)
+		cur := m.Snapshot().Status
+		if err == nil {
+			if fails > 0 {
+				health.Reset(m.d.HealthEvery) // 好了,回到正常节奏
+			}
+			fails, tried = 0, false
+			if cur == Degraded {
+				m.set(Connected, nil)
+			}
+			return false
+		}
+		if CodeOf(err) == CodeCoreCrash {
+			return true
+		}
+		fails++
+		// 第一次不通就把节奏收紧:确认"真的不对劲"只要再等一个短周期,而不是再等三分钟。
+		// 以前是第二次失败才收紧,于是从出事到进 Degraded 至少六分钟,到自救要七分钟。
+		health.Reset(m.d.DegradedEvery)
+		if fails >= 2 && cur != Degraded {
+			m.set(Degraded, err)
+		}
+		if fails < degradedGiveUp {
+			return false
+		}
+		// 先给守护进程一次自救的机会(换一个测得通的节点),换过就重新给一轮观察期
+		if m.d.Recover != nil && !tried {
+			tried = true
+			if m.d.Recover(ctx) {
+				fails = 1
+				return false
+			}
+		}
+		m.d.Logf("连续 %d 次健康检查都不通,重建连接: %v", fails, err)
+		return true
+	}
 	for {
 		select {
 		case <-ctx.Done():
@@ -344,42 +401,13 @@ func (m *Machine) watch(ctx context.Context) bool {
 				return true
 			}
 		case <-health.C:
-			if m.d.Health == nil {
-				continue
-			}
-			err := m.d.Health(ctx)
-			cur := m.Snapshot().Status
-			if err == nil {
-				if fails > 0 {
-					health.Reset(m.d.HealthEvery) // 好了,回到正常节奏
-				}
-				fails, tried = 0, false
-				if cur == Degraded {
-					m.set(Connected, nil)
-				}
-				continue
-			}
-			if CodeOf(err) == CodeCoreCrash {
+			if check() {
 				return true
 			}
-			fails++
-			if fails >= 2 && cur != Degraded {
-				m.set(Degraded, err)
-				health.Reset(m.d.DegradedEvery)
+		case <-m.kick:
+			if check() {
+				return true
 			}
-			if fails < degradedGiveUp {
-				continue
-			}
-			// 先给守护进程一次自救的机会(换一个测得通的节点),换过就重新给一轮观察期
-			if m.d.Recover != nil && !tried {
-				tried = true
-				if m.d.Recover(ctx) {
-					fails = 1
-					continue
-				}
-			}
-			m.d.Logf("连续 %d 次健康检查都不通,重建连接: %v", fails, err)
-			return true
 		}
 	}
 }

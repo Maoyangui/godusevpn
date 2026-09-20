@@ -74,12 +74,16 @@ func ApplyGuard(spec GuardSpec) error {
 // GuardTunUp nft 按网卡名和地址放行,隧道起不起来无所谓。
 func GuardTunUp(GuardSpec) error { return nil }
 
-// ClearGuard 撤闸。表不随进程死(上次强杀留下的也要清),不存在也无妨。
-func ClearGuard() {
+// ClearGuard 撤闸。表不随进程死(上次强杀留下的也要清),不存在也无妨;删了之后表还在才算失败。
+func ClearGuard() error {
 	nftMu.Lock()
 	defer nftMu.Unlock()
 	_ = exec.Command("nft", "delete", "table", "inet", guardTable).Run()
 	nftOn = false
+	if err := exec.Command("nft", "list", "table", "inet", guardTable).Run(); err == nil {
+		return fmt.Errorf("nft 表 %s 删不掉,闸还在", guardTable)
+	}
+	return nil
 }
 
 // GuardStatus 表里现在有多少条规则;0 = 没开。

@@ -65,4 +65,16 @@ type StateView struct {
 	// MissingRuleSets 本地还没有、因此这一轮被摘掉的规则集标签。用到它们的规则组暂时不生效,
 	// 界面要照实说一句 —— 规则开着却不起作用,用户是看不出来的。连上之后守护进程会自动补下来。
 	MissingRuleSets []string `json:"missingRuleSets,omitempty"`
+	// Tunnel 隧道会话的看护记录(hysteria2 / tuic 这类一条 QUIC 会话承载全部流量的节点)。
+	// 出事时凭它一眼分清是"会话废了被重建"还是别的:以前这些事一点痕迹都不留。
+	Tunnel *TunnelView `json:"tunnel,omitempty"`
+}
+
+// TunnelView 隧道会话的看护记录,本次服务运行期间累计。
+type TunnelView struct {
+	Rebuilds   int    `json:"rebuilds"`             // 会话被拆掉重建了几次(网络变化 + 判废)
+	Sick       int    `json:"sick"`                 // 其中被看护判定为"活着却不投递"而拆掉的次数
+	LastAt     int64  `json:"lastAt,omitempty"`     // 最近一次重建的时间
+	LastNode   string `json:"lastNode,omitempty"`   // 最近一次重建的是哪个节点
+	LastReason string `json:"lastReason,omitempty"` // 最近一次重建的原因
 }

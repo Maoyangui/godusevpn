@@ -312,6 +312,14 @@ func status(ctx context.Context) error {
 		fmt.Println("面板:   http://" + s.WebListen + "/")
 	}
 	printProfile(v.Profile)
+	if tv := v.Tunnel; tv != nil && (tv.Rebuilds > 0 || tv.Sick > 0) {
+		// 会话看护的账:sick 在涨说明会话在坏、看护在修;一直不涨而网页打不开就不是这一层的事
+		last := ""
+		if tv.LastAt > 0 {
+			last = fmt.Sprintf("  最近 %s %s:%s", time.Unix(tv.LastAt, 0).Format("01-02 15:04:05"), tv.LastNode, tv.LastReason)
+		}
+		fmt.Printf("隧道:   判废 %d 次,重建 %d 次%s\n", tv.Sick, tv.Rebuilds, last)
+	}
 	return nil
 }
 

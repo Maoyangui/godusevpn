@@ -35,6 +35,7 @@ type Core struct {
 	logw     log.PlatformWriter
 	started  time.Time
 	platform adapter.PlatformInterface // Android:TUN 与网络接口由宿主提供
+	policy   SessionPolicy             // 会话看护的策略(守护进程);nil = 只记账
 }
 
 // New logw 收内核日志(nil = 丢弃)。
@@ -53,8 +54,10 @@ func (c *Core) SetPlatform(p adapter.PlatformInterface) {
 }
 
 // newContext 调用方可能已持有 c.mu(Start),这里不加锁;platform 只在启动前设一次。
+// 会话看护的策略按需取(c.sessionPolicy 自己加锁,但这里可能已持有 c.mu,所以直接读字段)。
 func (c *Core) newContext() (context.Context, context.CancelFunc) {
-	ctx, cancel := newContext()
+	policy := c.policy
+	ctx, cancel := newContext(func() SessionPolicy { return policy })
 	if c.platform != nil {
 		ctx = service.ContextWith[adapter.PlatformInterface](ctx, c.platform)
 	}
@@ -92,15 +95,27 @@ func LevelOf(name string) int32 {
 }
 
 // 大坑:sing-box 的 New 会把注册表放进 ctx;要在 New 之前就把注册表建好,之后才能从同一个 ctx 拿到 Clash 服务等对象。
-func newContext() (context.Context, context.CancelFunc) {
+//
+// 出站注册表不用 sing-box 自带的那份,而是把 hysteria2 / tuic 换成带会话看护的(见 session_watch.go)。
+// policy 为 nil 时看护只记账不动作 —— 干跑与测速用的临时实例就是这样。
+func newContext(policy func() SessionPolicy) (context.Context, context.CancelFunc) {
 	ctx, cancel := context.WithCancel(context.Background())
-	ctx = service.ContextWithDefaultRegistry(include.Context(ctx))
+	ctx = sb.Context(ctx, include.InboundRegistry(), outboundRegistry(policy), include.EndpointRegistry(),
+		include.DNSTransportRegistry(), include.ServiceRegistry(), include.CertificateProviderRegistry())
+	ctx = service.ContextWithDefaultRegistry(ctx)
 	return ctx, cancel
+}
+
+// SetSessionPolicy 挂上会话看护的策略(守护进程实现)。启动前设一次;为 nil 则看护只记账。
+func (c *Core) SetSessionPolicy(p SessionPolicy) {
+	c.mu.Lock()
+	c.policy = p
+	c.mu.Unlock()
 }
 
 // dryContext 干跑用的上下文:平台接口套一层只读壳,别让临时实例改到正在跑的那个内核的东西。
 func (c *Core) dryContext() (context.Context, context.CancelFunc) {
-	ctx, cancel := newContext()
+	ctx, cancel := newContext(nil)
 	c.mu.Lock()
 	p := c.platform
 	c.mu.Unlock()
@@ -385,7 +400,7 @@ func Probe(ctx context.Context, outbounds []json.RawMessage, tags []string, link
 	for _, t := range tags {
 		want[t] = true
 	}
-	bctx, cancel := newContext()
+	bctx, cancel := newContext(nil)
 	defer cancel()
 
 	list := make([]any, 0, len(tags)+1)

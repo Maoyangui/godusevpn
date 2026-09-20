@@ -4,6 +4,7 @@ package netmode
 
 import (
 	"fmt"
+	"net"
 	"net/netip"
 	"sync"
 
@@ -40,10 +41,19 @@ func ApplyGuard(spec GuardSpec) error {
 	return nil
 }
 
-// GuardTunUp 按隧道地址放行,网卡起不起来无所谓。
-func GuardTunUp(GuardSpec) error { return nil }
+// GuardTunUp 隧道网卡起来之后:本机 socket 那四层按隧道地址放行,网卡起不起来无所谓;
+// 但**经本机转发**的流量(热点共享、ICS)不走 socket,只在 IP 转发层能拦 —— 那一层按网卡放行,
+// 得等网卡真的在了才知道它的接口号。查不到网卡就报错,守护进程会记进状态并在下一次同步时重试。
+func GuardTunUp(spec GuardSpec) error {
+	ifi, err := net.InterfaceByName(spec.TunName)
+	if err != nil {
+		return fmt.Errorf("找不到隧道网卡 %q: %w", spec.TunName, err)
+	}
+	return wfp.TunUp(uint32(ifi.Index))
+}
 
-func ClearGuard() { _ = wfp.Disable() }
+// ClearGuard 撤闸。失败要报出来:守护进程据此把状态记成"闸还在",不能记成"没开"。
+func ClearGuard() error { return wfp.Disable() }
 
 // GuardStatus 闸里现在有多少条过滤器;0 = 没开。
 func GuardStatus() (int, error) { return wfp.Count() }

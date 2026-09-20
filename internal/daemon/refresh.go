@@ -189,13 +189,26 @@ func (d *Daemon) syncGuard() {
 			d.applyGuard(msg)
 		}
 	case !want && on:
-		netmode.ClearGuard()
+		// 撤闸失败要如实记着"闸还在":以前这里不看返回值,失败了也记成"没开",于是界面说直连恢复了、
+		// 其实过滤器一条没少,托盘的「恢复网络」看到"没开"直接返回 —— 用户在界面里怎么点都救不回来。
+		if err := netmode.ClearGuard(); err != nil {
+			d.setGuard(true, "撤闸失败: "+err.Error())
+			d.logf("全局禁直连:撤闸失败,过滤器还在,直连仍被拦: %v", err)
+			return
+		}
 		d.setGuard(false, "")
 		d.logf("全局禁直连:已撤闸")
 		if d.releaseTun != nil && !d.core.Running() {
 			d.releaseTun() // Android:内核没在跑时留着的 VPN 接口是个黑洞,撤闸就得关掉
 		}
 	}
+}
+
+// guardArmed 闸此刻开着(按守护进程自己的记录)。
+func (d *Daemon) guardArmed() bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.guardOn
 }
 
 // guardRedoReason 闸已经开着时,要不要重装、为什么。返回空串 = 不用动。
@@ -255,7 +268,10 @@ func (d *Daemon) applyGuard(okMsg string) {
 func (d *Daemon) reconcileGuard() {
 	s := d.getSettings()
 	if !d.loadPersisted().Wanted || !s.NoDirect || s.Mode != settings.ModeGlobal {
-		netmode.ClearGuard()
+		if err := netmode.ClearGuard(); err != nil {
+			d.setGuard(true, "撤闸失败: "+err.Error())
+			d.logf("全局禁直连:上次残留的闸清不掉,直连仍被拦: %v", err)
+		}
 		return
 	}
 	if n, err := netmode.GuardStatus(); err == nil && n > 0 {

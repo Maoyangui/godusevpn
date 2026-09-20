@@ -10,7 +10,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -84,6 +83,7 @@ type Daemon struct {
 
 	missingSets []builder.MissingRuleSet // 上一次生成配置时本地没有、因此摘掉了的规则集(界面要提示,连上之后要去补)
 	fillingSets bool                     // 补规则集的活正在跑,别叠第二份
+	tunnel      ipc.TunnelView           // 会话看护的记录(见 session_policy.go)
 }
 
 type persisted struct {
@@ -158,6 +158,7 @@ func NewWithOptions(o Options) (*Daemon, error) {
 		},
 		Logf: d.logf,
 	})
+	d.core.SetSessionPolicy(d) // 会话看护:判废 / 重建时回到这里问"还想连着吗",并记账
 	d.server = ipc.NewServer(d.logf)
 	d.registerHandlers()
 	return d, nil
@@ -450,7 +451,7 @@ func (d *Daemon) prepare(ctx context.Context) ([]byte, error) {
 	}
 	clashPort := d.pickClashPort(s.ClashPort)
 	cfg, rep, err := builder.BuildEx(builder.Input{Profile: p, Settings: s, DataDir: paths.DataDir(), ClashSecret: d.secret, RuleSetDir: paths.RuleSets(),
-		ClashPort: clashPort, NodeIPs: resolveNodeHosts(ctx, p)})
+		ClashPort: clashPort, NodeIPs: resolveNodeHosts(ctx, p, d.bootResolver(s))})
 	if err != nil {
 		return nil, state.Errf(state.CodeConfig, "生成配置: %v", err)
 	}
@@ -929,8 +930,9 @@ func (d *Daemon) maybeRefresh(ctx context.Context) {
 //
 // 用域名写的节点,在隧道里是靠嗅探到的 SNI 命中直连规则的;不带 TLS 的协议嗅不出域名,那时就只能按地址认。
 // 解析不出来不算错(退回只按域名匹配),所以整体给一个短超时,不让它拖慢连接。
-func resolveNodeHosts(ctx context.Context, p *profile.Profile) map[string][]string {
-	if p == nil {
+// lookup 是解析函数(见 bootResolver:禁直连下只用加密 DoH);为 nil 表示这一轮不解析。
+func resolveNodeHosts(ctx context.Context, p *profile.Profile, lookup func(context.Context, string) ([]string, error)) map[string][]string {
+	if p == nil || lookup == nil {
 		return nil
 	}
 	hosts := map[string]bool{}
@@ -956,7 +958,7 @@ func resolveNodeHosts(ctx context.Context, p *profile.Profile) map[string][]stri
 		wg.Add(1)
 		go func(h string) {
 			defer wg.Done()
-			addrs, err := net.DefaultResolver.LookupHost(ctx, h)
+			addrs, err := lookup(ctx, h)
 			if err != nil || len(addrs) == 0 {
 				return
 			}
@@ -1039,6 +1041,7 @@ func (d *Daemon) stateView() ipc.StateView {
 	for _, m := range d.MissingRuleSets() {
 		v.MissingRuleSets = append(v.MissingRuleSets, m.Tag)
 	}
+	v.Tunnel = d.tunnelView()
 	if v.Nodes == nil {
 		v.Nodes = []string{}
 	}
@@ -1196,7 +1199,13 @@ func (d *Daemon) registerHandlers() {
 			in, _ := d.splitByCore(p)
 			res = d.core.ProbeRunning(ctx, in.Tags, builder.TestURL, set)
 		} else {
-			res = probeDirect(ctx, p, set, d.logf) // 未连接:直连量到节点服务器的往返
+			// 未连接:直连量到节点服务器的往返。但「全局禁直连」的闸还开着的时候不做 —— 那说明用户想连着、
+			// 内核只是暂时没起来(在重启 / 在退避),这时从本机直接发 DNS 查询、ICMP、TCP 握手出去,
+			// 正是闸要挡的那种东西;闸只按进程放行本服务,拦不住自己。等隧道起来经出站测,或者用户断开后再测。
+			if d.guardArmed() {
+				return nil, errors.New("全局禁直连的闸还开着、隧道还没起来:这时候不做直连测速(会从本机直接发探测包)。等连上后再测,或先断开连接")
+			}
+			res = probeDirect(ctx, p, set, d.logf)
 		}
 		d.mu.Lock()
 		d.delays = res
