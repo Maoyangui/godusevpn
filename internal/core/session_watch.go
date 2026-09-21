@@ -82,8 +82,8 @@ type sessionWatch struct {
 	firstFail time.Time // 这一串失败从什么时候开始
 	lastOK    time.Time // 最近一次有流收到数据
 	lastSick  time.Time // 最近一次判废
-	// touched 最近一次有流收到数据的时刻(UnixNano)。长流持续收数据时由 Read 不抢锁地刷新,
-	// 否则一条一直在传的下载对"最近有没有流收到数据"没有贡献,并发的失败就能把活着的会话判废。
+	// touched 上一次 touch 的墙钟纳秒,只做每秒一次的节流:长流每收一次数据都想刷新 lastOK,不能每次都抢锁。
+	// 判废用的时刻始终是 lastOK(带单调读数的 time.Time),墙钟被拨动也不受影响。
 	touched atomic.Int64
 	warming atomic.Bool
 	now     func() time.Time // 测试用
@@ -180,28 +180,30 @@ func (w *sessionWatch) noteOK() {
 	w.mu.Unlock()
 }
 
-// touch 一条已经收到过数据的流又收到了数据:刷新"最近有流收到数据"的时刻。每秒最多写一次,不抢锁。
+// touch 一条已经收到过数据的流又收到了数据:刷新"最近有流收到数据"的时刻,长流持续收数据也算会话活着。
+// 每秒最多抢一次锁。
 func (w *sessionWatch) touch() {
-	now := w.now().UnixNano()
-	if now-w.touched.Load() < int64(time.Second) {
+	now := w.now()
+	if now.UnixNano()-w.touched.Load() < int64(time.Second) {
 		return
 	}
-	w.touched.Store(now)
+	w.touched.Store(now.UnixNano())
+	w.mu.Lock()
+	if now.After(w.lastOK) {
+		w.lastOK = now
+	}
+	w.mu.Unlock()
 }
 
 // noteFail 记一次失败;攒够了就判废。
 func (w *sessionWatch) noteFail(reason string) {
 	now := w.now()
 	w.mu.Lock()
-	lastOK := w.lastOK
-	if t := time.Unix(0, w.touched.Load()); t.After(lastOK) {
-		lastOK = t
-	}
 	if w.fails == 0 || now.Sub(w.firstFail) > sickWindow {
 		w.fails, w.firstFail = 0, now
 	}
 	w.fails++
-	sick := w.fails >= sickFailures && now.Sub(lastOK) >= sickWindow/2 && now.Sub(w.lastSick) >= sickCooldown
+	sick := w.fails >= sickFailures && now.Sub(w.lastOK) >= sickWindow/2 && now.Sub(w.lastSick) >= sickCooldown
 	if sick {
 		w.lastSick = now
 		w.fails, w.firstFail = 0, time.Time{}

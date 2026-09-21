@@ -72,8 +72,8 @@ type StateView struct {
 
 // TunnelView 隧道会话的看护记录,本次服务运行期间累计。
 type TunnelView struct {
-	Rebuilds   int    `json:"rebuilds"`             // 会话被拆掉重建了几次(网络变化 + 判废)
-	Sick       int    `json:"sick"`                 // 其中被看护判定为"活着却不投递"而拆掉的次数
+	Rebuilds   int    `json:"rebuilds"`             // 当前在用的节点的会话被拆掉重建了几次(网络变化 + 判废);别的出站不计
+	Sick       int    `json:"sick"`                 // 其中被看护判定为"活着却不投递"而拆掉的次数(同样只计在用的节点)
 	LastAt     int64  `json:"lastAt,omitempty"`     // 最近一次重建的时间
 	LastNode   string `json:"lastNode,omitempty"`   // 最近一次重建的是哪个节点
 	LastReason string `json:"lastReason,omitempty"` // 最近一次重建的原因

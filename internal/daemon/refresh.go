@@ -276,6 +276,8 @@ func (d *Daemon) reconcileGuard() {
 		if err := netmode.ClearGuard(); err != nil {
 			d.setGuard(true, "撤闸失败: "+err.Error())
 			d.logf("全局禁直连:上次残留的闸清不掉,直连仍被拦: %v", err)
+		} else if w := netmode.GuardWarning(); w != "" {
+			d.logf("全局禁直连:%s", w)
 		}
 		return
 	}
@@ -295,14 +297,16 @@ func (d *Daemon) guardTunUp() {
 		return
 	}
 	if !d.getSettings().TUN {
-		// 没开 TUN 就没有隧道网卡:转发层没有可放行的接口,经本机转发的流量只许去局域网 —— 这是对的,不是故障
+		// 没开 TUN 就没有隧道网卡:转发层没有可放行的接口,经本机转发的流量只有「局域网直通」开着时才放行去局域网的,
+		// 否则全拦 —— 这是对的,不是故障
 		d.tunUpPending.Store(false)
+		d.setGuard(true, "")
 		return
 	}
 	if err := netmode.GuardTunUp(d.guardSpec()); err != nil {
-		d.tunUpPending.Store(true) // 网卡可能晚几秒才注册好:下一次同步再试
-		d.setGuard(true, "隧道网卡放行失败: "+err.Error())
-		d.logf("全局禁直连:隧道网卡放行失败(经本机转发的流量进不了隧道,本机自己的不受影响): %v", err)
+		d.tunUpPending.Store(true) // 网卡可能晚几秒才注册好:下一次同步、或半分钟一次的巡检再试
+		d.setGuard(true, "转发层没放行隧道网卡(只影响热点 / 网络共享,本机自己的流量不受影响): "+err.Error())
+		d.logf("全局禁直连:转发层没放行隧道网卡(只影响热点 / 网络共享,本机自己的流量不受影响): %v", err)
 		return
 	}
 	d.tunUpPending.Store(false)

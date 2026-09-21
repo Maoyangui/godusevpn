@@ -39,10 +39,14 @@ func Clear() (text string, ok bool) {
 		}
 		return fmt.Sprintf("过滤器还剩 %d 条,没删干净(%s)", n, why), false
 	}
-	if switchedOff {
-		return "禁直连闸已解除,网卡 IPv6 也还原了,网络恢复。已顺手关掉「全局禁直连」与「连接时停用网卡 IPv6」两个开关,免得服务一重连又装回来;要再用,去设置 → 隐私打开。", true
+	note := ""
+	if w := netmode.GuardWarning(); w != "" {
+		note = "(" + w + ")"
 	}
-	return "禁直连闸已解除,直连恢复。要再开闸,启动服务并连接即可。", true
+	if switchedOff {
+		return "禁直连闸已解除,网卡 IPv6 也还原了,网络恢复。已顺手关掉「全局禁直连」与「连接时停用网卡 IPv6」两个开关,免得服务一重连又装回来;要再用,去设置 → 隐私打开。" + note, true
+	}
+	return "禁直连闸已解除,直连恢复。要再开闸,启动服务并连接即可。" + note, true
 }
 
 // switchOff 服务活着就把两个开关都关掉;服务不在、或者两个本来就都关着,返回 false。

@@ -35,7 +35,7 @@ type Core struct {
 	logw     log.PlatformWriter
 	started  time.Time
 	platform adapter.PlatformInterface // Android:TUN 与网络接口由宿主提供
-	policy   SessionPolicy             // 会话看护的策略(守护进程);nil = 只记账
+	policy   SessionPolicy             // 会话看护的策略(守护进程);nil = 判废照样拆会话,但不预热、不通知
 }
 
 // New logw 收内核日志(nil = 丢弃)。
@@ -97,7 +97,7 @@ func LevelOf(name string) int32 {
 // 大坑:sing-box 的 New 会把注册表放进 ctx;要在 New 之前就把注册表建好,之后才能从同一个 ctx 拿到 Clash 服务等对象。
 //
 // 出站注册表不用 sing-box 自带的那份,而是把 hysteria2 / tuic 换成带会话看护的(见 session_watch.go)。
-// policy 为 nil 时看护只记账不动作 —— 干跑与测速用的临时实例就是这样。
+// policy 为 nil 时看护判废照样拆会话,只是不预热、也不通知守护进程 —— 干跑与测速用的临时实例就是这样。
 func newContext(policy func() SessionPolicy) (context.Context, context.CancelFunc) {
 	ctx, cancel := context.WithCancel(context.Background())
 	ctx = sb.Context(ctx, include.InboundRegistry(), outboundRegistry(policy), include.EndpointRegistry(),
@@ -106,7 +106,7 @@ func newContext(policy func() SessionPolicy) (context.Context, context.CancelFun
 	return ctx, cancel
 }
 
-// SetSessionPolicy 挂上会话看护的策略(守护进程实现)。启动前设一次;为 nil 则看护只记账。
+// SetSessionPolicy 挂上会话看护的策略(守护进程实现)。启动前设一次;为 nil 则判废仍拆会话,但不预热、不通知。
 func (c *Core) SetSessionPolicy(p SessionPolicy) {
 	c.mu.Lock()
 	c.policy = p

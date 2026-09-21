@@ -729,6 +729,10 @@ func (d *Daemon) nicIPv6Loop(ctx context.Context) {
 			return
 		case <-t.C:
 		}
+		// 顺带:隧道网卡的转发层放行上次没成功(网卡晚注册),这里每半分钟补一次,不用等用户动手
+		if d.tunUpPending.Load() && d.core.Running() {
+			d.guardTunUp()
+		}
 		if !d.nicIPv6Wanted() {
 			fails, quiet = 0, false
 			continue
