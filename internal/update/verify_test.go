@@ -2,7 +2,9 @@ package update
 
 import (
 	"context"
+	"crypto/ed25519"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"net/http"
 	"net/http/httptest"
@@ -22,7 +24,19 @@ func TestDownloadRefusesWithoutGoodChecksum(t *testing.T) {
 
 	var sumsBody string
 	var sumsCode int
+	pub, priv, _ := ed25519.GenerateKey(nil)
+	oldPublicKey := releasePublicKey
+	releasePublicKey = pub
+	t.Cleanup(func() { releasePublicKey = oldPublicKey })
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/SHA256SUMS.sig") {
+			if sumsCode != http.StatusOK {
+				w.WriteHeader(sumsCode)
+				return
+			}
+			_, _ = w.Write([]byte(base64.StdEncoding.EncodeToString(ed25519.Sign(priv, []byte(sumsBody)))))
+			return
+		}
 		if strings.HasSuffix(r.URL.Path, "/SHA256SUMS") {
 			if sumsCode != 0 && sumsCode != http.StatusOK {
 				w.WriteHeader(sumsCode)
@@ -41,7 +55,7 @@ func TestDownloadRefusesWithoutGoodChecksum(t *testing.T) {
 		t.Helper()
 		sumsBody, sumsCode = body, code
 		dir := t.TempDir()
-		rel := &Release{Version: "9.9.9", InstallerURL: srv.URL + "/" + name, SumsURL: sumsURL}
+		rel := &Release{Version: "9.9.9", InstallerURL: srv.URL + "/" + name, SumsURL: sumsURL, SumsSigURL: srv.URL + "/SHA256SUMS.sig"}
 		return Download(context.Background(), rel, dir, srv.Client(), nil)
 	}
 	gone := func(t *testing.T, dir string) {
@@ -75,7 +89,7 @@ func TestDownloadRefusesWithoutGoodChecksum(t *testing.T) {
 	t.Run("SHA256SUMS 取不到就拒装", func(t *testing.T) {
 		dir := t.TempDir()
 		sumsBody, sumsCode = "", http.StatusNotFound
-		rel := &Release{Version: "9.9.9", InstallerURL: srv.URL + "/" + name, SumsURL: srv.URL + "/SHA256SUMS"}
+		rel := &Release{Version: "9.9.9", InstallerURL: srv.URL + "/" + name, SumsURL: srv.URL + "/SHA256SUMS", SumsSigURL: srv.URL + "/SHA256SUMS.sig"}
 		if _, err := Download(context.Background(), rel, dir, srv.Client(), nil); err == nil {
 			t.Fatal("404 的 SHA256SUMS 被当成了「没有校验和」,照装了")
 		} else if !strings.Contains(err.Error(), "404") {
@@ -87,7 +101,7 @@ func TestDownloadRefusesWithoutGoodChecksum(t *testing.T) {
 	t.Run("列表里没有这个文件名就拒装", func(t *testing.T) {
 		dir := t.TempDir()
 		sumsBody, sumsCode = good+"  某个别的文件.exe\n", 200
-		rel := &Release{Version: "9.9.9", InstallerURL: srv.URL + "/" + name, SumsURL: srv.URL + "/SHA256SUMS"}
+		rel := &Release{Version: "9.9.9", InstallerURL: srv.URL + "/" + name, SumsURL: srv.URL + "/SHA256SUMS", SumsSigURL: srv.URL + "/SHA256SUMS.sig"}
 		if _, err := Download(context.Background(), rel, dir, srv.Client(), nil); err == nil {
 			t.Fatal("文件名不在列表里被当成了「不需要校验」,照装了")
 		}
@@ -102,4 +116,27 @@ func TestDownloadRefusesWithoutGoodChecksum(t *testing.T) {
 		}
 		gone(t, dir)
 	})
+
+	t.Run("旧版本没有签名清单仍按 SHA256 校验", func(t *testing.T) {
+		sumsBody, sumsCode = good+"  "+name+"\n", 200
+		dir := t.TempDir()
+		rel := &Release{Version: "9.9.9", InstallerURL: srv.URL + "/" + name, SumsURL: srv.URL + "/SHA256SUMS"}
+		p, err := Download(context.Background(), rel, dir, srv.Client(), nil)
+		if err != nil {
+			t.Fatalf("旧版本兼容路径不该失败: %v", err)
+		}
+		if _, err := os.Stat(p); err != nil {
+			t.Fatalf("旧版本下载文件不存在: %v", err)
+		}
+	})
+}
+
+func TestReleasePublicKeyIsEd25519TrustRoot(t *testing.T) {
+	if len(releasePublicKey) != ed25519.PublicKeySize {
+		t.Fatalf("发布公钥长度错误: got %d want %d", len(releasePublicKey), ed25519.PublicKeySize)
+	}
+	const want = "Cm9y5DPCEThof6VYSKwphCcowlFayLVniJ13cMWwKu4="
+	if got := base64.StdEncoding.EncodeToString(releasePublicKey); got != want {
+		t.Fatalf("发布公钥与 CI 信任根不一致: got %s want %s", got, want)
+	}
 }

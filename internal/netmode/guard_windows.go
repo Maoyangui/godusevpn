@@ -36,6 +36,11 @@ func ApplyGuard(spec GuardSpec) error {
 	if err != nil {
 		return err
 	}
+	if ready, err := wfp.BootGuardReady(); err != nil {
+		return fmt.Errorf("确认 WFP 开机过滤器: %w", err)
+	} else if !ready {
+		return fmt.Errorf("WFP 开机过滤器未就绪")
+	}
 	warnMu.Lock()
 	guardWarn = warn
 	warnMu.Unlock()
@@ -75,9 +80,18 @@ func ClearGuard() error {
 // GuardStatus 闸里现在有多少条过滤器;0 = 没开。
 func GuardStatus() (int, error) { return wfp.Count() }
 
+// BootGuardReady checks the persisted BOOTTIME filters.  A normal runtime
+// filter is not sufficient for the fail-closed privacy contract.
+func BootGuardReady() (bool, error) { return wfp.BootGuardReady() }
+
 // GuardWarning 上次开闸时没装全的那部分(比如开机那组),给日志用;空 = 全装上了。
 func GuardWarning() string {
 	warnMu.Lock()
 	defer warnMu.Unlock()
 	return guardWarn
 }
+
+// WFP installs persistent and boot-time filters.
+func GuardPersistentSupported() bool { return true }
+
+func GuardPersistentReady() (bool, error) { return wfp.BootGuardReady() }

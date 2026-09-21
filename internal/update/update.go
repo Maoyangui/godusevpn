@@ -7,7 +7,9 @@ package update
 import (
 	"bufio"
 	"context"
+	"crypto/ed25519"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"encoding/xml"
@@ -39,8 +41,13 @@ type Release struct {
 	Prerelease   bool   `json:"prerelease"`
 	InstallerURL string `json:"installerUrl"`
 	SumsURL      string `json:"sumsUrl"`
+	SumsSigURL   string `json:"sumsSigUrl"`
 	Size         int64  `json:"size"`
 }
+
+// releasePublicKey 是发布者固定的 Ed25519 信任根。对应私钥只应保存在
+// 发布 CI Secret / 离线发布机，绝不能放进仓库或安装包。
+var releasePublicKey = ed25519.PublicKey{0x0a, 0x6f, 0x72, 0xe4, 0x33, 0xc2, 0x11, 0x38, 0x68, 0x7f, 0xa5, 0x58, 0x48, 0xac, 0x29, 0x84, 0x27, 0x28, 0xc2, 0x51, 0x5a, 0xc8, 0xb5, 0x67, 0x88, 0x9d, 0x77, 0x70, 0xc5, 0xb0, 0x2a, 0xee}
 
 // parse "1.2.3" / "1.2.3-m1" → 数字三段 + 是否带后缀
 // parse 拆成三段数字 + 预发布后缀(a3 / m3 / l1 / rc.2 这类,没有就是空串)。
@@ -240,6 +247,8 @@ func checkAPI(ctx context.Context, current string, includePre bool, client *http
 				rel.InstallerURL, rel.Size = a.URL, a.Size
 			case "SHA256SUMS":
 				rel.SumsURL = a.URL
+			case "SHA256SUMS.sig":
+				rel.SumsSigURL = a.URL
 			}
 		}
 		if rel.InstallerURL == "" {
@@ -288,11 +297,18 @@ func checkAtom(ctx context.Context, current string, includePre bool, client *htt
 			Notes:        strings.TrimSpace(html.UnescapeString(htmlTag.ReplaceAllString(e.Content, ""))),
 			InstallerURL: downloadBase + tag + "/" + assetName(ver),
 			SumsURL:      downloadBase + tag + "/SHA256SUMS",
+			SumsSigURL:   downloadBase + tag + "/SHA256SUMS.sig",
 		}
 		if size, ok := head(ctx, client, rel.InstallerURL); !ok {
 			continue // 没有本机架构的安装包,看下一个
 		} else {
 			rel.Size = size
+		}
+		// Releases made before the signing workflow do not have the optional
+		// signature asset.  Keep the old in-app update path usable after the
+		// updater itself is upgraded; new workflow releases always expose it.
+		if _, ok := head(ctx, client, rel.SumsSigURL); !ok {
+			rel.SumsSigURL = ""
 		}
 		return rel, nil
 	}
@@ -370,7 +386,7 @@ func Download(ctx context.Context, rel *Release, dir string, client *http.Client
 		os.Remove(path)
 		return "", errors.New("这个版本没有发布校验和文件,不装")
 	}
-	want, err := fetchSum(ctx, client, rel.SumsURL, filepath.Base(path))
+	want, sums, err := fetchSum(ctx, client, rel.SumsURL, filepath.Base(path))
 	if err != nil {
 		os.Remove(path)
 		return "", fmt.Errorf("读取校验和: %w", err)
@@ -379,34 +395,81 @@ func Download(ctx context.Context, rel *Release, dir string, client *http.Client
 		os.Remove(path)
 		return "", errors.New("安装包校验失败,已删除")
 	}
+	if rel.SumsSigURL == "" {
+		// Compatibility with releases created before signed manifests were
+		// introduced.  SHA256SUMS was already verified above.  All releases
+		// produced by the current workflow carry SumsSigURL and therefore take
+		// the Ed25519 verification path below.
+		return path, nil
+	}
+	sig, err := fetchSignature(ctx, client, rel.SumsSigURL)
+	if err != nil || !ed25519.Verify(releasePublicKey, sums, sig) {
+		os.Remove(path)
+		if err != nil {
+			return "", fmt.Errorf("读取校验清单签名: %w", err)
+		}
+		return "", errors.New("校验清单签名无效,已删除")
+	}
 	return path, nil
 }
 
-func fetchSum(ctx context.Context, client *http.Client, url, name string) (string, error) {
+func fetchSum(ctx context.Context, client *http.Client, url, name string) (string, []byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	req.Header.Set("User-Agent", "godusevpn-updater")
 	resp, err := client.Do(req)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	defer resp.Body.Close()
 	// 不看状态码的话,404 那个 HTML 页面也会被拿去逐行扫,扫不出东西就成了"没有校验和"
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("SHA256SUMS HTTP %d", resp.StatusCode)
+		return "", nil, fmt.Errorf("SHA256SUMS HTTP %d", resp.StatusCode)
 	}
-	sc := bufio.NewScanner(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return "", nil, err
+	}
+	sc := bufio.NewScanner(strings.NewReader(string(body)))
 	for sc.Scan() {
 		fields := strings.Fields(sc.Text())
 		if len(fields) == 2 && strings.TrimPrefix(fields[1], "*") == name {
-			return strings.ToLower(fields[0]), nil
+			return strings.ToLower(fields[0]), body, nil
 		}
 	}
 	if err := sc.Err(); err != nil {
-		return "", err
+		return "", nil, err
 	}
 	// 找不到也是错:返回空串会让调用方以为"这个文件不需要校验"
-	return "", fmt.Errorf("SHA256SUMS 里没有 %s", name)
+	return "", nil, fmt.Errorf("SHA256SUMS 里没有 %s", name)
+}
+
+func fetchSignature(ctx context.Context, client *http.Client, rawURL string) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("User-Agent", "godusevpn-updater")
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("SHA256SUMS.sig HTTP %d", resp.StatusCode)
+	}
+	b, err := io.ReadAll(io.LimitReader(resp.Body, 8<<10))
+	if err != nil {
+		return nil, err
+	}
+	sig, err := base64.StdEncoding.DecodeString(strings.TrimSpace(string(b)))
+	if err != nil || len(sig) != ed25519.SignatureSize {
+		if err == nil {
+			err = errors.New("签名长度不正确")
+		}
+		return nil, err
+	}
+	return sig, nil
 }

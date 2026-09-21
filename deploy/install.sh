@@ -43,7 +43,7 @@ else
   SRC="$TMP/godusevpn"
 fi
 
-if [ -x "$BIN_DIR/godusevpn" ]; then "$BIN_DIR/godusevpn" stop >/dev/null 2>&1 || true; fi
+if [ -x "$BIN_DIR/godusevpn" ]; then "$BIN_DIR/godusevpn" stop >/dev/null 2>&1; fi
 install -m 755 "$SRC" "$BIN_DIR/godusevpn"
 "$BIN_DIR/godusevpn" install
 echo

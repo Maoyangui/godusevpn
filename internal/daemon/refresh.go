@@ -176,7 +176,12 @@ func (d *Daemon) syncGuard() {
 	want := d.GuardWanted()
 	d.mu.Lock()
 	on := d.guardOn
+	hold := d.guardHold
 	d.mu.Unlock()
+	if hold && on {
+		// 放宽模式 / 禁直连设置的事务尚未完成:旧数据面仍在使用,旧闸必须保留。
+		return
+	}
 	switch {
 	case want && !on:
 		d.applyGuard("已开闸,隧道以外的流量一律拦下")
@@ -243,15 +248,21 @@ func (d *Daemon) appliedGuardSpec() netmode.GuardSpec {
 	return d.guardApplied
 }
 
-// applyGuard 装闸并把结果记进状态与日志;开机那组装不上只是警告。
+// applyGuard 装闸并把结果记进状态与日志;持久闸或开机闸任一失败都保持未就绪，
+// 由 prepare/start 的隐私前置检查拒绝启动数据面。
 func (d *Daemon) applyGuard(okMsg string) {
 	spec := d.guardSpec()
+	d.mu.Lock()
+	previousOn, previousSpec := d.guardOn, d.guardApplied
+	d.mu.Unlock()
 	if err := netmode.ApplyGuard(spec); err != nil {
 		d.mu.Lock()
-		d.guardApplied = netmode.GuardSpec{}
+		// 重装失败时不能把仍可能存在的旧闸伪装成“已撤销”。保留旧状态，
+		// 让数据面检查拒绝使用未确认的新规格，并继续重试。
+		d.guardApplied = previousSpec
 		d.mu.Unlock()
-		d.setGuard(false, err.Error())
-		d.logf("全局禁直连:开闸失败,这段时间直连不会被拦: %v", err)
+		d.setGuard(previousOn, err.Error())
+		d.logf("全局禁直连:开闸失败,拒绝启动数据面: %v", err)
 		return
 	}
 	d.mu.Lock()
@@ -272,7 +283,13 @@ func (d *Daemon) applyGuard(okMsg string) {
 // 别让"服务起来 → 连上"这几秒漏出去(重启的话开机那组过滤器已经挡到这里了)。
 func (d *Daemon) reconcileGuard() {
 	s := d.getSettings()
-	if !d.loadPersisted().Wanted || !s.NoDirect || s.Mode != settings.ModeGlobal {
+	p := d.loadPersisted()
+	if !d.persistedStateOK() {
+		d.setGuard(true, "连接状态不可读,保留全局禁直连保护")
+		d.logf("全局禁直连:连接状态不可读,不撤闸")
+		return
+	}
+	if !p.Wanted || !s.NoDirect || s.Mode != settings.ModeGlobal {
 		if err := netmode.ClearGuard(); err != nil {
 			d.setGuard(true, "撤闸失败: "+err.Error())
 			d.logf("全局禁直连:上次残留的闸清不掉,直连仍被拦: %v", err)

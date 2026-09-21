@@ -118,6 +118,28 @@ func TestCoreDeathReconnects(t *testing.T) {
 	m.Disconnect()
 }
 
+func TestPrivacyFailureStopsImmediatelyAndKeepsCode(t *testing.T) {
+	f := &fake{}
+	m := New(f.deps())
+	m.Connect()
+	waitFor(t, m, Connected)
+	f.mu.Lock()
+	f.health = Errf(CodePrivacyNIC, "网卡 IPv6 保护丢失")
+	f.mu.Unlock()
+	waitFor(t, m, Failed)
+	if got := m.Snapshot(); got.Code != CodePrivacyNIC {
+		t.Fatalf("隐私保护失败不能被改记成内核崩溃: %+v", got)
+	}
+	if atomic.LoadInt32(&f.stops) == 0 {
+		t.Fatal("隐私保护失败应立即停止数据面")
+	}
+	f.mu.Lock()
+	f.health = nil
+	f.mu.Unlock()
+	waitFor(t, m, Connected)
+	m.Disconnect()
+}
+
 func TestDegradedAndRecover(t *testing.T) {
 	f := &fake{}
 	m := New(f.deps())

@@ -85,8 +85,10 @@ func applyUpdatePackage(path string) error {
 	if _, err := os.Stat(newDaemon); err != nil {
 		return errors.New("更新包里没有守护进程,可能下错了架构")
 	}
-	// 顺序:先停服务再换文件,换完重新装一遍(launchd 的 plist 里记着路径,重装才会重新加载)
-	script := fmt.Sprintf("%s uninstall; /usr/bin/install -m755 %s %s", sh(daemonPath), sh(newDaemon), sh(daemonPath))
+	// 顺序:只停服务再换文件,换完重新注册并启动。不能调用 uninstall:
+	// 卸载路径会按用户明确的“卸载”语义撤掉持久禁直连闸并恢复网卡 IPv6,
+	// 更新期间若新进程启动失败就会留下直连泄漏窗口。
+	script := fmt.Sprintf("set -e; %s stop; /usr/bin/install -m755 %s %s", sh(daemonPath), sh(newDaemon), sh(daemonPath))
 	if newApp := filepath.Join(dir, appBundleName); dirExists(newApp) {
 		script += fmt.Sprintf("; /bin/rm -rf %s; /bin/cp -R %s %s", sh(appPath), sh(newApp), sh(appPath))
 	}

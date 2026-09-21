@@ -25,6 +25,7 @@ import (
 	"github.com/Maoyangui/godusevpn/internal/cli"
 	"github.com/Maoyangui/godusevpn/internal/daemon"
 	"github.com/Maoyangui/godusevpn/internal/ipc"
+	"github.com/Maoyangui/godusevpn/internal/netmode"
 	"github.com/Maoyangui/godusevpn/internal/paths"
 	"github.com/Maoyangui/godusevpn/internal/settings"
 	"github.com/Maoyangui/godusevpn/internal/svc"
@@ -73,6 +74,19 @@ func main() {
 		fmt.Printf("%s 已安装并启动(%s)\n", svc.DisplayName, svc.Kind())
 		printPanel(s, pw)
 	case "uninstall":
+		// 先停服务，再确认持久闸和网卡 IPv6 都已成功清理；任何失败都保留
+		// 保护状态并中止卸载，避免用户得到“已卸载但机器仍被锁住/状态不明”的结果。
+		if svc.Kind() != "none" {
+			if err := svc.Stop(); err != nil {
+				fail(fmt.Errorf("停止服务以清理隐私保护: %w", err))
+			}
+		}
+		if err := netmode.ClearGuard(); err != nil {
+			fail(fmt.Errorf("撤销全局禁直连失败,未执行卸载: %w", err))
+		}
+		if err := netmode.RestoreNICIPv6(); err != nil {
+			fail(fmt.Errorf("还原网卡 IPv6 失败,未执行卸载: %w", err))
+		}
 		if err := svc.Uninstall(); err != nil {
 			fail(err)
 		}

@@ -11,14 +11,17 @@ package mobile
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime/debug"
+	"strings"
 	"time"
 
 	"github.com/Maoyangui/godusevpn/internal/buildinfo"
 	"github.com/Maoyangui/godusevpn/internal/daemon"
 	"github.com/Maoyangui/godusevpn/internal/ipc"
+	"github.com/Maoyangui/godusevpn/internal/netmode"
 	"github.com/Maoyangui/godusevpn/internal/uiapi"
 )
 
@@ -43,6 +46,24 @@ func NewEngine(dataDir, cacheDir string, host Host, listener EventListener) (*En
 	if cacheDir != "" {
 		_ = os.Setenv("TMPDIR", cacheDir) // Android 上 os.TempDir() 默认是 /data/local/tmp,应用写不了
 	}
+	// The callback is read-only and is installed before daemon construction so
+	// the first strict-global connect cannot observe a fake "ready" state.
+	netmode.SetAndroidVPNProtectionProbe(func() (netmode.AndroidVPNProtectionStatus, error) {
+		raw := strings.TrimSpace(host.VPNProtectionStatus())
+		if raw == "" {
+			return netmode.AndroidVPNProtectionStatus{}, fmt.Errorf("Android 宿主返回空的系统 VPN 保护状态")
+		}
+		var v struct {
+			Queried  bool   `json:"queried"`
+			AlwaysOn bool   `json:"alwaysOn"`
+			Lockdown bool   `json:"lockdown"`
+			Error    string `json:"error"`
+		}
+		if err := json.Unmarshal([]byte(raw), &v); err != nil {
+			return netmode.AndroidVPNProtectionStatus{}, fmt.Errorf("解析 Android 系统 VPN 保护状态: %w", err)
+		}
+		return netmode.AndroidVPNProtectionStatus{Queried: v.Queried, AlwaysOn: v.AlwaysOn, Lockdown: v.Lockdown, ErrorText: strings.TrimSpace(v.Error)}, nil
+	})
 	// Go 侧崩溃(panic / fatal)默认只进 logcat,真机拿不到;另写一份到 logs/crash.log,诊断包会带上
 	logDir := filepath.Join(dataDir, "data", "logs")
 	if err := os.MkdirAll(logDir, 0o700); err == nil {
@@ -61,7 +82,9 @@ func NewEngine(dataDir, cacheDir string, host Host, listener EventListener) (*En
 		PrefsPath: filepath.Join(dataDir, "conf", "ui.json"),
 		InstallUpdate: func(path string) error { // 下载好 APK 交给宿主装
 			host.Log("INFO", "update downloaded: "+path)
-			listener.OnEvent("install-update", jsonString(path))
+			if listener != nil {
+				listener.OnEvent("install-update", jsonString(path))
+			}
 			return nil
 		},
 	})

@@ -29,15 +29,20 @@ type Server struct {
 	logf func(string, ...any)
 	mu   sync.Mutex
 
-	sessions map[string]time.Time   // 会话 → 到期
+	sessions map[string]webSession  // 会话 → 到期与创建时的密码版本
 	fails    map[string][]time.Time // 登录失败时间(按来源 IP)
+}
+
+type webSession struct {
+	expires      time.Time
+	passwordHash string
 }
 
 func New(ui *uiapi.Service, logf func(string, ...any)) *Server {
 	if logf == nil {
 		logf = func(string, ...any) {}
 	}
-	return &Server{ui: ui, logf: logf, sessions: map[string]time.Time{}, fails: map[string][]time.Time{}}
+	return &Server{ui: ui, logf: logf, sessions: map[string]webSession{}, fails: map[string][]time.Time{}}
 }
 
 // Serve 跑到 ctx 结束;设置里的监听地址改了(比如从只听本机改成 0.0.0.0)就换地址重开,不用重启服务。
@@ -179,11 +184,17 @@ func (s *Server) authed(r *http.Request) bool {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	exp, ok := s.sessions[c.Value]
+	sess, ok := s.sessions[c.Value]
 	if !ok {
 		return false
 	}
-	if time.Now().After(exp) {
+	// 密码哈希变化即视为全量撤销旧会话。这样 UI、CLI 或服务重启路径
+	// 通过 MSetSettings 修改密码后，不需要依赖另一个异步回调才能失效旧 cookie。
+	if sess.passwordHash != s.ui.Settings().WebPassword {
+		delete(s.sessions, c.Value)
+		return false
+	}
+	if time.Now().After(sess.expires) {
 		delete(s.sessions, c.Value)
 		return false
 	}
@@ -231,12 +242,12 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	id := hex.EncodeToString(tok)
 	s.mu.Lock()
 	// 顺手扫掉过期会话:表原来只增不减,长期开着的面板会一直攒。登录本身很少发生,扫一遍不值钱。
-	for k, exp := range s.sessions {
-		if now.After(exp) {
+	for k, sess := range s.sessions {
+		if now.After(sess.expires) {
 			delete(s.sessions, k)
 		}
 	}
-	s.sessions[id] = now.Add(30 * 24 * time.Hour)
+	s.sessions[id] = webSession{expires: now.Add(30 * 24 * time.Hour), passwordHash: s.ui.Settings().WebPassword}
 	delete(s.fails, ip)
 	s.mu.Unlock()
 	http.SetCookie(w, &http.Cookie{Name: "gvsid", Value: id, Path: "/", HttpOnly: true, SameSite: http.SameSiteLaxMode, MaxAge: 30 * 24 * 3600})

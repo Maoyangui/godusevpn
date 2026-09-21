@@ -79,10 +79,11 @@ func ourLayers() []windows.GUID {
 
 // filterInfo 枚举到的一条我们的过滤器。
 type filterInfo struct {
-	key   windows.GUID
-	name  string
-	flags wtFwpmFilterFlags
-	layer windows.GUID
+	key    windows.GUID
+	name   string
+	flags  wtFwpmFilterFlags
+	layer  windows.GUID
+	action wtFwpActionType
 }
 
 // ourFilters 枚举我们的全部过滤器(持久的、开机的、禁用的都算)。不按提供者做模板,而是把四个层里
@@ -114,7 +115,7 @@ func ourFilters(session uintptr) ([]filterInfo, error) {
 				if !ours {
 					continue
 				}
-				out = append(out, filterInfo{key: f.filterKey, name: windows.UTF16PtrToString(f.displayData.name), flags: f.flags, layer: f.layerKey})
+				out = append(out, filterInfo{key: f.filterKey, name: windows.UTF16PtrToString(f.displayData.name), flags: f.flags, layer: f.layerKey, action: f.action._type})
 			}
 			fwpmFreeMemory0(unsafe.Pointer(&entries))
 			if n < enumBatch {

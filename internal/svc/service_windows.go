@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
+	"syscall"
 	"time"
 
 	"golang.org/x/sys/windows"
@@ -74,8 +75,20 @@ func Install(exe string) error {
 	}
 	defer m.Disconnect()
 	if s, err := m.OpenService(Name); err == nil {
-		s.Close()
-		return errors.New("服务已存在,先卸载再安装")
+		// 升级会先 stop 但必须保留服务对象:删除服务会触发卸载语义,
+		// 可能撤销持久闸并恢复网卡 IPv6。更新现有二进制路径后复用同一
+		// 服务对象,再由调用方 Start,整个替换期间保护保持不变。
+		defer s.Close()
+		cfg, err := s.Config()
+		if err != nil {
+			return fmt.Errorf("读取已有服务配置: %w", err)
+		}
+		cfg.BinaryPathName = syscall.EscapeArg(exe) + " service"
+		if err := s.UpdateConfig(cfg); err != nil {
+			return fmt.Errorf("更新已有服务配置: %w", err)
+		}
+		_ = exec.Command("sc.exe", "sdset", Name, userStartStopSDDL).Run()
+		return nil
 	}
 	s, err := m.CreateService(Name, exe, mgr.Config{
 		DisplayName: DisplayName, Description: Description, StartType: mgr.StartAutomatic,
@@ -142,10 +155,13 @@ func Stop() error {
 	defer m.Disconnect()
 	s, err := m.OpenService(Name)
 	if err != nil {
+		if errors.Is(err, windows.ERROR_SERVICE_DOES_NOT_EXIST) {
+			return nil // 幂等:服务本来就没有可停
+		}
 		return errors.New("服务未安装")
 	}
 	defer s.Close()
-	if _, err := s.Control(svc.Stop); err != nil {
+	if _, err := s.Control(svc.Stop); err != nil && !errors.Is(err, windows.ERROR_SERVICE_NOT_ACTIVE) {
 		return err
 	}
 	if !waitState(s, svc.Stopped, 20*time.Second) {
@@ -202,6 +218,9 @@ func StopUser() error {
 		return nil
 	}
 	if err := windows.ControlService(s, windows.SERVICE_CONTROL_STOP, &st); err != nil {
+		if errors.Is(err, windows.ERROR_SERVICE_NOT_ACTIVE) {
+			return nil
+		}
 		return fmt.Errorf("停止服务: %w", err)
 	}
 	deadline := time.Now().Add(15 * time.Second)

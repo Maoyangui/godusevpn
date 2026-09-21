@@ -16,26 +16,28 @@ import (
 
 	"github.com/Maoyangui/godusevpn/internal/ipc"
 	"github.com/Maoyangui/godusevpn/internal/netmode"
+	"github.com/Maoyangui/godusevpn/internal/paths"
 	"github.com/Maoyangui/godusevpn/internal/settings"
+	"github.com/Maoyangui/godusevpn/internal/svc"
 )
 
 // Clear 撤闸。返回给用户看的一句话,以及是否真的撤干净了(没撤干净多半是没有管理员 / root 身份)。
 func Clear() (text string, ok bool) {
-	if n, err := netmode.GuardStatus(); err == nil && n == 0 {
-		if netmode.NICIPv6Off() {
-			netmode.RestoreNICIPv6()
-			return "闸本来就没开;网卡上被停用的 IPv6 已还原。「全局禁直连」开关没动。", true
-		}
-		return "闸本来就没开,直连不受限;「全局禁直连」开关没动。", true
+	switchedOff, switchErr := switchOff()
+	// 守护进程仍然可能在运行,而且下一轮巡检会按设置重新装闸。
+	// 关闭设置失败时不能先删闸,否则会在重连竞态中短暂放行直连。
+	if switchErr != nil {
+		return "无法先关闭全局禁直连/网卡 IPv6 设置,为保护隐私保留现有闸: " + switchErr.Error(), false
 	}
-	switchedOff := switchOff()
 	clearErr := netmode.ClearGuard()
-	netmode.RestoreNICIPv6() // 网卡 IPv6 和闸一样是持久的,恢复网络就该一并还原,不然用户以为好了、v6 还是没有
+	restoreErr := netmode.RestoreNICIPv6() // 网卡 IPv6 和闸一样是持久的,恢复网络就该一并还原,不然用户以为好了、v6 还是没有
 	n, _ := netmode.GuardStatus()
-	if n != 0 || clearErr != nil {
+	if n != 0 || clearErr != nil || restoreErr != nil {
 		why := "是不是没用管理员身份跑?"
 		if clearErr != nil {
 			why = clearErr.Error()
+		} else if restoreErr != nil {
+			why = restoreErr.Error()
 		}
 		return fmt.Sprintf("过滤器还剩 %d 条,没删干净(%s)", n, why), false
 	}
@@ -50,19 +52,48 @@ func Clear() (text string, ok bool) {
 }
 
 // switchOff 服务活着就把两个开关都关掉;服务不在、或者两个本来就都关着,返回 false。
-func switchOff() bool {
+func switchOff() (bool, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	var s settings.Settings
 	if err := ipc.Call(ctx, ipc.MGetSettings, nil, &s); err != nil {
-		return false
+		// 服务已明确停止时，恢复网络不能依赖服务控制口；把“用户已明确
+		// 放宽保护”的意愿安全落盘，再由本进程清理持久系统状态。服务仍在
+		// 跑但控制口暂时不可用则拒绝离线改写，避免它下一轮按旧设置重新上闸。
+		// Only a definitively stopped or uninstalled service may be edited
+		// offline.  Starting/stopping/unknown are treated as live states: the
+		// service may still reconcile the old settings and race the cleanup.
+		status := svc.QueryStatus()
+		if !errors.Is(err, ipc.ErrNoService) || (status != "stopped" && status != "not-installed") {
+			return false, fmt.Errorf("读取服务隐私设置失败: %w", err)
+		}
+		if err := paths.Ensure(); err != nil {
+			return false, fmt.Errorf("准备离线设置目录失败: %w", err)
+		}
+		var offline settings.Settings
+		offline, err = settings.Load(paths.Settings())
+		if err != nil {
+			return false, fmt.Errorf("读取离线隐私设置失败: %w", err)
+		}
+		if !offline.NoDirect && !offline.DisableNICIPv6 {
+			return false, nil
+		}
+		offline.NoDirect = false
+		offline.DisableNICIPv6 = false
+		if err := offline.Save(paths.Settings()); err != nil {
+			return false, fmt.Errorf("保存离线隐私设置失败: %w", err)
+		}
+		return true, nil
 	}
 	if !s.NoDirect && !s.DisableNICIPv6 {
-		return false
+		return false, nil
 	}
 	s.NoDirect = false
 	s.DisableNICIPv6 = false // 不关掉的话守护进程下一轮巡检又把网卡 IPv6 关回去
-	return ipc.Call(ctx, ipc.MSetSettings, s, nil) == nil
+	if err := ipc.Call(ctx, ipc.MSetSettings, s, nil); err != nil {
+		return false, fmt.Errorf("关闭服务隐私设置失败: %w", err)
+	}
+	return true, nil
 }
 
 // Status 闸开着没有:返回规则条数。普通用户身份看不了 Windows 的过滤器,把那句难看的系统错误换成人话。

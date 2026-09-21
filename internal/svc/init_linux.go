@@ -220,7 +220,20 @@ func ctl(action string) error {
 }
 
 func Start() error { return ctl("start") }
-func Stop() error  { return ctl("stop") }
+
+// Stop is idempotent so a first install can safely run the same fail-closed
+// upgrade path even when a binary was copied into place without a unit yet.
+// Once a unit exists, every real control error is still returned to the
+// caller; update scripts must never continue past an uncertain stop.
+func Stop() error {
+	if err := needRoot(); err != nil {
+		return err
+	}
+	if unitPath() == "" || !exists(unitPath()) {
+		return nil
+	}
+	return ctl("stop")
+}
 
 // StartUser / StopUser Windows 上给非管理员用;Linux 上同样需要 root。
 func StartUser() error { return Start() }

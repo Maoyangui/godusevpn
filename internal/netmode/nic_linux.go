@@ -22,12 +22,39 @@ import (
 
 func nicBackup() string { return filepath.Join(paths.DataDir(), "nic-ipv6-backup.json") }
 
+func writeNICBackup(record map[string]string) error {
+	b, err := json.Marshal(record)
+	if err != nil {
+		return err
+	}
+	tmp := nicBackup() + ".tmp"
+	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		return err
+	}
+	if _, err = f.Write(b); err == nil {
+		err = f.Sync()
+	}
+	if closeErr := f.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	if err := os.Rename(tmp, nicBackup()); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return nil
+}
+
 const v6ConfDir = "/proc/sys/net/ipv6/conf"
 
 func DisableNICIPv6(tunName string) error {
 	names, err := os.ReadDir(v6ConfDir)
 	if err != nil {
-		return nil // 内核根本没编 IPv6,没什么可关的
+		return fmt.Errorf("枚举 IPv6 网卡: %w", err)
 	}
 	saved := map[string]string{}
 	var errs []string
@@ -40,12 +67,20 @@ func DisableNICIPv6(tunName string) error {
 		p := filepath.Join(v6ConfDir, n, "disable_ipv6")
 		cur, err := os.ReadFile(p)
 		if err != nil {
+			errs = append(errs, n+": "+err.Error())
 			continue
 		}
 		if strings.TrimSpace(string(cur)) == "1" {
 			continue // 本来就关着,别记也别动
 		}
+		if strings.TrimSpace(string(cur)) != "0" {
+			errs = append(errs, n+": 无法识别 disable_ipv6 值")
+			continue
+		}
 		saved[n] = strings.TrimSpace(string(cur))
+	}
+	if len(errs) > 0 {
+		return fmt.Errorf("读取网卡 IPv6 状态: %s", strings.Join(errs, "; "))
 	}
 	if len(saved) == 0 {
 		return nil
@@ -54,15 +89,22 @@ func DisableNICIPv6(tunName string) error {
 	// 覆盖的话原来记的那些网卡就丢了,最后还原时开不回来。
 	record := map[string]string{}
 	if old, err := os.ReadFile(nicBackup()); err == nil {
-		_ = json.Unmarshal(old, &record)
+		if err := json.Unmarshal(old, &record); err != nil {
+			return fmt.Errorf("读取 IPv6 备份: %w", err)
+		}
+		if record == nil {
+			return fmt.Errorf("读取 IPv6 备份: 内容为空")
+		}
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("读取 IPv6 备份: %w", err)
 	}
 	for n, v := range saved {
 		if _, dup := record[n]; !dup {
 			record[n] = v
 		}
 	}
-	if b, err := json.Marshal(record); err == nil {
-		_ = os.WriteFile(nicBackup(), b, 0o600)
+	if err := writeNICBackup(record); err != nil {
+		return fmt.Errorf("保存 IPv6 备份: %w", err)
 	}
 	for n := range saved {
 		if err := os.WriteFile(filepath.Join(v6ConfDir, n, "disable_ipv6"), []byte("1\n"), 0o644); err != nil {
@@ -72,21 +114,55 @@ func DisableNICIPv6(tunName string) error {
 	if len(errs) > 0 {
 		return fmt.Errorf("停用网卡 IPv6: %s", strings.Join(errs, "; "))
 	}
+	for n := range saved {
+		cur, err := os.ReadFile(filepath.Join(v6ConfDir, n, "disable_ipv6"))
+		if err != nil || strings.TrimSpace(string(cur)) != "1" {
+			if err == nil {
+				err = fmt.Errorf("写入后值为 %q", strings.TrimSpace(string(cur)))
+			}
+			return fmt.Errorf("校验网卡 %s IPv6 状态: %w", n, err)
+		}
+	}
 	return nil
 }
 
-func RestoreNICIPv6() {
+func RestoreNICIPv6() error {
 	b, err := os.ReadFile(nicBackup())
 	if err != nil {
-		return
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
 	}
 	var saved map[string]string
-	if json.Unmarshal(b, &saved) == nil {
-		for n, v := range saved {
-			_ = os.WriteFile(filepath.Join(v6ConfDir, n, "disable_ipv6"), []byte(v+"\n"), 0o644)
+	if err := json.Unmarshal(b, &saved); err != nil {
+		return fmt.Errorf("解析 IPv6 备份: %w", err)
+	}
+	if saved == nil {
+		return fmt.Errorf("解析 IPv6 备份: 内容为空")
+	}
+	var errs []string
+	for n, v := range saved {
+		p := filepath.Join(v6ConfDir, n, "disable_ipv6")
+		if err := os.WriteFile(p, []byte(v+"\n"), 0o644); err != nil {
+			errs = append(errs, n+": "+err.Error())
+			continue
+		}
+		cur, err := os.ReadFile(p)
+		if err != nil || strings.TrimSpace(string(cur)) != v {
+			if err == nil {
+				err = fmt.Errorf("写入后值为 %q", strings.TrimSpace(string(cur)))
+			}
+			errs = append(errs, n+": "+err.Error())
 		}
 	}
-	_ = os.Remove(nicBackup())
+	if len(errs) > 0 {
+		return fmt.Errorf("还原网卡 IPv6: %s", strings.Join(errs, "; "))
+	}
+	if err := os.Remove(nicBackup()); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("删除 IPv6 备份: %w", err)
+	}
+	return nil
 }
 
 // NICIPv6Off 网卡的 IPv6 此刻是不是被我们关着的(有备份 = 关过还没还原)。

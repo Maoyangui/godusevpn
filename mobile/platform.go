@@ -42,6 +42,11 @@ type Host interface {
 	StopDefaultInterfaceMonitor()
 	// Log 内核与引擎日志(级别 + 一行)
 	Log(level string, message string)
+	// VPNProtectionStatus 只读查询 Android 系统 VPN 的 Always-on 与
+	// lockdown 状态。返回 JSON:{"queried":true,"alwaysOn":true,
+	// "lockdown":true}；查询失败必须返回 queried=false 和 error，不能
+	// 把应用自己的 TUN fd 当成重启级保护。
+	VPNProtectionStatus() string
 }
 
 // InterfaceListener 宿主在默认网络变化时回调。index 为 -1 表示没有网络。

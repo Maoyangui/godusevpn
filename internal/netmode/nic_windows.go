@@ -32,20 +32,36 @@ func nicBackup() string { return filepath.Join(paths.DataDir(), "nic-ipv6-backup
 // 最后什么都开不回来;而整份跳过又会漏掉新网卡的原始状态,那张就被永久关着了。只补没记过的那些才两头都对。
 func DisableNICIPv6(tunName string) error {
 	script := `
-$ErrorActionPreference = 'SilentlyContinue'
+$ErrorActionPreference = 'Stop'
 $tun = '` + psQuote(tunName) + `'
 $all = @(Get-NetAdapterBinding -ComponentID ms_tcpip6 | Where-Object { $_.Name -ne $tun })
 $b = '` + psQuote(nicBackup()) + `'
 $known = @{}
+$old = @()
 if (Test-Path -LiteralPath $b) {
-  foreach ($line in @(Get-Content -Encoding utf8 -LiteralPath $b)) {
-    $p = $line -split "` + "\t" + `"
-    if ($p.Count -ge 2 -and $p[0].Trim()) { $known[$p[0]] = $true }
+  $old = @(Get-Content -Encoding utf8 -LiteralPath $b)
+  foreach ($line in $old) {
+    $p = $line -split "` + "\t" + `", -1
+    if ($p.Count -ne 2 -or [string]::IsNullOrWhiteSpace($p[0]) -or $p[1] -notmatch '^(True|False)$' -or $known.ContainsKey($p[0])) { throw 'IPv6 备份格式无效' }
+    $known[$p[0]] = $true
   }
 }
 $new = @($all | Where-Object { -not $known.ContainsKey($_.Name) } | ForEach-Object { $_.Name + "` + "\t" + `" + $_.Enabled })
-if ($new.Count -gt 0) { $new | Add-Content -Encoding utf8 -LiteralPath $b }
-foreach ($a in $all) { if ($a.Enabled) { Disable-NetAdapterBinding -Name $a.Name -ComponentID ms_tcpip6 -ErrorAction SilentlyContinue } }
+if ($new.Count -gt 0) {
+  $tmp = $b + '.tmp'
+  $utf8 = New-Object System.Text.UTF8Encoding($false)
+  $fs = New-Object System.IO.FileStream($tmp, [System.IO.FileMode]::Create, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+  $sw = New-Object System.IO.StreamWriter($fs, $utf8)
+  foreach ($line in @($old + $new)) { $sw.WriteLine($line) }
+  $sw.Flush(); $fs.Flush($true); $sw.Dispose()
+  Move-Item -LiteralPath $tmp -Destination $b -Force
+  $check = @(Get-Content -Encoding utf8 -LiteralPath $b)
+  if ($check.Count -ne @($old + $new).Count) { throw 'IPv6 备份落盘校验失败' }
+  for ($i = 0; $i -lt $check.Count; $i++) { if ($check[$i] -ne @($old + $new)[$i]) { throw 'IPv6 备份内容校验失败' } }
+}
+foreach ($a in $all) { if ($a.Enabled) { Disable-NetAdapterBinding -Name $a.Name -ComponentID ms_tcpip6 -ErrorAction Stop } }
+$remaining = @($all | ForEach-Object { Get-NetAdapterBinding -Name $_.Name -ComponentID ms_tcpip6 -ErrorAction Stop } | Where-Object { $_.Enabled })
+if ($remaining.Count -gt 0) { throw ('IPv6 绑定停用校验失败: ' + (($remaining | ForEach-Object Name) -join ', ')) }
 `
 	if out, err := runPS(script); err != nil {
 		return fmt.Errorf("停用网卡 IPv6: %w(%s)", err, out)
@@ -54,23 +70,39 @@ foreach ($a in $all) { if ($a.Enabled) { Disable-NetAdapterBinding -Name $a.Name
 }
 
 // RestoreNICIPv6 按备份把 IPv6 绑定装回原样。没有备份就什么都不做(没动过,别去碰用户自己的设置)。
-func RestoreNICIPv6() {
+func RestoreNICIPv6() error {
 	if _, err := os.Stat(nicBackup()); err != nil {
-		return
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
 	}
 	script := `
-$ErrorActionPreference = 'SilentlyContinue'
+$ErrorActionPreference = 'Stop'
 $f = '` + psQuote(nicBackup()) + `'
+$seen = @{}
 foreach ($line in @(Get-Content -Encoding utf8 -LiteralPath $f)) {
-  $p = $line -split "` + "\t" + `"
-  if ($p.Count -ge 2 -and $p[1] -eq 'True' -and $p[0].Trim()) {
-    Enable-NetAdapterBinding -Name $p[0] -ComponentID ms_tcpip6 -ErrorAction SilentlyContinue
+  $p = $line -split "` + "\t" + `", -1
+  if ($p.Count -ne 2 -or [string]::IsNullOrWhiteSpace($p[0]) -or $p[1] -notmatch '^(True|False)$' -or $seen.ContainsKey($p[0])) { throw 'IPv6 备份格式无效' }
+  $seen[$p[0]] = $true
+  if ($p[1] -eq 'True') {
+    Enable-NetAdapterBinding -Name $p[0] -ComponentID ms_tcpip6 -ErrorAction Stop
+    $state = Get-NetAdapterBinding -Name $p[0] -ComponentID ms_tcpip6 -ErrorAction Stop
+    if (-not $state.Enabled) { throw "IPv6 binding restore verification failed: $($p[0])" }
+  } else {
+    Disable-NetAdapterBinding -Name $p[0] -ComponentID ms_tcpip6 -ErrorAction Stop
+    $state = Get-NetAdapterBinding -Name $p[0] -ComponentID ms_tcpip6 -ErrorAction Stop
+    if ($state.Enabled) { throw "IPv6 binding restore verification failed: $($p[0])" }
   }
 }
-Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue
 `
-	_, _ = runPS(script)
-	_ = os.Remove(nicBackup()) // 脚本没删成也兜一下,免得下次启动反复还原
+	if out, err := runPS(script); err != nil {
+		return fmt.Errorf("还原网卡 IPv6: %w(%s)", err, out)
+	}
+	if err := os.Remove(nicBackup()); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("删除 IPv6 备份: %w", err)
+	}
+	return nil
 }
 
 func runPS(script string) (string, error) {
@@ -82,6 +114,24 @@ func runPS(script string) (string, error) {
 // psQuote PowerShell 单引号字符串里的转义:单引号写两遍。网卡名里有中文、空格和星号(比如「本地连接* 12」),
 // 全程用 -LiteralPath / -Name 传,不让它当通配符解释。
 func psQuote(s string) string { return strings.ReplaceAll(s, "'", "''") }
+
+// validNICBackupLines is the non-platform validation mirrored by the PowerShell
+// script. Keeping this logic pure gives us deterministic tests without touching
+// adapter bindings or the host firewall.
+func validNICBackupLines(lines []string) bool {
+	seen := make(map[string]struct{}, len(lines))
+	for _, line := range lines {
+		p := strings.Split(line, "\t")
+		if len(p) != 2 || strings.TrimSpace(p[0]) == "" || (p[1] != "True" && p[1] != "False") {
+			return false
+		}
+		if _, ok := seen[p[0]]; ok {
+			return false
+		}
+		seen[p[0]] = struct{}{}
+	}
+	return true
+}
 
 // NICIPv6Off 网卡的 IPv6 此刻是不是被我们关着的(有备份 = 关过还没还原)。
 func NICIPv6Off() bool {

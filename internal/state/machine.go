@@ -44,7 +44,10 @@ const (
 	CodeCoreStart = "E_CORE_START"
 	CodeCoreCrash = "E_CORE_CRASH"
 	CodeNodeDown  = "E_NODE_DOWN"
-	CodeUnknown   = "E_UNKNOWN"
+	// 隐私保护前置条件未满足时必须退避重试，不能继续启动数据面。
+	CodePrivacyGuard = "E_PRIVACY_GUARD"
+	CodePrivacyNIC   = "E_PRIVACY_NIC"
+	CodeUnknown      = "E_UNKNOWN"
 )
 
 // Error 带码的错误。
@@ -189,7 +192,7 @@ func (m *Machine) connect() {
 	m.snap.Retries = 0
 	m.wg.Add(1)
 	m.mu.Unlock()
-	go m.run(ctx)
+	go m.run(ctx, false)
 }
 
 // Disconnect 用户主动断开:记下"不想连",停循环,停内核。
@@ -234,6 +237,48 @@ func (m *Machine) Restart() error {
 	return nil
 }
 
+// RestartChecked is used for privacy-setting transitions. Unlike Restart, it
+// returns only after Start has succeeded. rollback runs before retries whenever
+// validation or startup fails, so the retry loop cannot observe rejected settings.
+func (m *Machine) RestartChecked(rollback func() error) error {
+	if !m.Wanted() {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+	cfg, err := m.d.Prepare(ctx)
+	if err != nil {
+		if rollback != nil {
+			err = errors.Join(err, rollback())
+		}
+		return err
+	}
+	m.opMu.Lock()
+	defer m.opMu.Unlock()
+	if !m.Wanted() {
+		return nil
+	}
+	m.stopLoop()
+	m.set(Starting, nil)
+	if err = m.d.Start(cfg); err != nil {
+		_ = m.d.Stop()
+		if rollback != nil {
+			err = errors.Join(err, rollback())
+		}
+		m.set(Failed, err)
+		m.connect() // retry only after the previous settings are restored
+		return err
+	}
+	m.mu.Lock()
+	runCtx, runCancel := context.WithCancel(context.Background())
+	m.cancel = runCancel
+	m.snap.Retries = 0
+	m.wg.Add(1)
+	m.mu.Unlock()
+	go m.run(runCtx, true)
+	return nil
+}
+
 // stopLoop 停掉当前这一轮 run 并停内核。**调用方必须持有 opMu** —— 不然两个人同时进来,
 // 后到的那个会发现 cancel 已被取走而直接返回,于是旧的 stop() 和新的 start() 交错着跑。
 func (m *Machine) stopLoop() {
@@ -273,51 +318,58 @@ func sleepCtx(ctx context.Context, d time.Duration) bool {
 	}
 }
 
-func (m *Machine) run(ctx context.Context) {
+func (m *Machine) run(ctx context.Context, started bool) {
 	defer m.wg.Done()
 	attempt := 0
 	for ctx.Err() == nil {
-		m.set(Preparing, nil)
-		m.mu.Lock()
-		cfg := m.pre // Restart 备好的,只用一次
-		m.pre = nil
-		m.mu.Unlock()
-		var err error
-		if cfg == nil {
-			cfg, err = m.d.Prepare(ctx)
-		}
-		if err == nil {
-			m.set(Starting, nil)
-			err = m.d.Start(cfg)
-		}
-		if err != nil {
-			if ctx.Err() != nil {
-				return
-			}
-			_ = m.d.Stop()
-			attempt++
+		if !started {
+			m.set(Preparing, nil)
 			m.mu.Lock()
-			m.snap.Retries = attempt
+			cfg := m.pre // Restart 备好的,只用一次
+			m.pre = nil
 			m.mu.Unlock()
-			m.set(Failed, err)
-			m.d.Logf("连接失败(第 %d 次,%s 后重试): %v", attempt, m.backoff(attempt), err)
-			if !sleepCtx(ctx, m.backoff(attempt)) {
-				return
+			var err error
+			if cfg == nil {
+				cfg, err = m.d.Prepare(ctx)
 			}
-			continue
+			if err == nil {
+				m.set(Starting, nil)
+				err = m.d.Start(cfg)
+			}
+			if err != nil {
+				if ctx.Err() != nil {
+					return
+				}
+				_ = m.d.Stop()
+				attempt++
+				m.mu.Lock()
+				m.snap.Retries = attempt
+				m.mu.Unlock()
+				m.set(Failed, err)
+				m.d.Logf("连接失败(第 %d 次,%s 后重试): %v", attempt, m.backoff(attempt), err)
+				if !sleepCtx(ctx, m.backoff(attempt)) {
+					return
+				}
+				continue
+			}
 		}
+		started = false
 		attempt = 0
 		m.mu.Lock()
 		m.snap.Retries = 0
 		m.mu.Unlock()
 		m.set(Connected, nil)
-		if !m.watch(ctx) {
+		rebuild, cause := m.watch(ctx)
+		if !rebuild {
 			return // 用户断开
 		}
 		// 内核死了:停干净,退避后从头来
 		_ = m.d.Stop()
 		attempt++
-		m.set(Failed, Errf(CodeCoreCrash, "内核异常退出,正在重连"))
+		if cause == nil {
+			cause = Errf(CodeCoreCrash, "内核异常退出,正在重连")
+		}
+		m.set(Failed, cause)
 		if !sleepCtx(ctx, m.backoff(attempt)) {
 			return
 		}
@@ -339,7 +391,7 @@ const degradedGiveUp = 4
 // 调用方(run)两种情况的处理本来就一样:停干净、退避、从头 Prepare + Start。
 // 早先没有这条出路 —— 手动选定节点的用户夜里节点被墙,界面就永久停在「已连接 · 节点不稳」,
 // 既不会自己换线也不会重连,开着「全局禁直连」时连直连都没有,只能人去点断开再连。
-func (m *Machine) watch(ctx context.Context) bool {
+func (m *Machine) watch(ctx context.Context) (bool, error) {
 	alive := time.NewTicker(m.d.AliveEvery)
 	health := time.NewTicker(m.d.HealthEvery)
 	defer alive.Stop()
@@ -352,9 +404,9 @@ func (m *Machine) watch(ctx context.Context) bool {
 	default:
 	}
 	// 一次健康检查。返回 true = 该重建连接了(内核死了、或这条线路救不回来)。
-	check := func() bool {
+	check := func() (bool, error) {
 		if m.d.Health == nil {
-			return false
+			return false, nil
 		}
 		err := m.d.Health(ctx)
 		cur := m.Snapshot().Status
@@ -366,10 +418,16 @@ func (m *Machine) watch(ctx context.Context) bool {
 			if cur == Degraded {
 				m.set(Connected, nil)
 			}
-			return false
+			return false, nil
 		}
 		if CodeOf(err) == CodeCoreCrash {
-			return true
+			return true, err
+		}
+		// Privacy protection is a hard runtime invariant. Do not leave a
+		// working data plane up while the guard or managed IPv6 state is
+		// missing; stop and rebuild only after the next attempt verifies it.
+		if code := CodeOf(err); code == CodePrivacyGuard || code == CodePrivacyNIC {
+			return true, err
 		}
 		fails++
 		// 第一次不通就把节奏收紧:确认"真的不对劲"只要再等一个短周期,而不是再等三分钟。
@@ -379,34 +437,34 @@ func (m *Machine) watch(ctx context.Context) bool {
 			m.set(Degraded, err)
 		}
 		if fails < degradedGiveUp {
-			return false
+			return false, nil
 		}
 		// 先给守护进程一次自救的机会(换一个测得通的节点),换过就重新给一轮观察期
 		if m.d.Recover != nil && !tried {
 			tried = true
 			if m.d.Recover(ctx) {
 				fails = 1
-				return false
+				return false, nil
 			}
 		}
 		m.d.Logf("连续 %d 次健康检查都不通,重建连接: %v", fails, err)
-		return true
+		return true, err
 	}
 	for {
 		select {
 		case <-ctx.Done():
-			return false
+			return false, nil
 		case <-alive.C:
 			if m.d.Alive != nil && !m.d.Alive() {
-				return true
+				return true, Errf(CodeCoreCrash, "内核异常退出,正在重连")
 			}
 		case <-health.C:
-			if check() {
-				return true
+			if rebuild, cause := check(); rebuild {
+				return true, cause
 			}
 		case <-m.kick:
-			if check() {
-				return true
+			if rebuild, cause := check(); rebuild {
+				return true, cause
 			}
 		}
 	}

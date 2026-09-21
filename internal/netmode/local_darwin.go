@@ -35,12 +35,51 @@ func Protect(_ string, _ bool) error {
 		return err
 	}
 	saved := map[string][]string{}
-	for _, s := range svcs {
-		saved[s] = currentDNS(s)
+	haveBackup := false
+	backupChanged := false
+	if b, readErr := os.ReadFile(dnsBackup()); readErr == nil {
+		if err := json.Unmarshal(b, &saved); err != nil {
+			return fmt.Errorf("读取已有 DNS 备份失败: %w", err)
+		}
+		if saved == nil {
+			return fmt.Errorf("读取已有 DNS 备份失败:内容不是对象")
+		}
+		haveBackup = true
+	} else if !os.IsNotExist(readErr) {
+		return fmt.Errorf("读取已有 DNS 备份失败: %w", readErr)
 	}
-	// 先落盘再改:万一改到一半进程没了,下次启动还能照着还原
-	if b, err := json.Marshal(saved); err == nil {
-		_ = os.WriteFile(dnsBackup(), b, 0o600)
+	// 已经密封时保留首次接管前的原值;新出现的网络服务才从当前状态补一条,
+	// 避免重复重连把原始 DNS 覆盖成隧道地址/空值。
+	for _, s := range svcs {
+		if _, ok := saved[s]; !ok {
+			saved[s] = currentDNS(s)
+			backupChanged = true
+		}
+	}
+	if !haveBackup || backupChanged {
+		// 先落盘再改:万一改到一半进程没了,下次启动还能照着还原。
+		b, err := json.Marshal(saved)
+		if err != nil {
+			return fmt.Errorf("序列化 DNS 备份: %w", err)
+		}
+		tmp := dnsBackup() + ".tmp"
+		f, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+		if err != nil {
+			return fmt.Errorf("打开 DNS 备份: %w", err)
+		}
+		if _, err = f.Write(b); err == nil {
+			err = f.Sync()
+		}
+		if closeErr := f.Close(); err == nil {
+			err = closeErr
+		}
+		if err == nil {
+			err = os.Rename(tmp, dnsBackup())
+		}
+		if err != nil {
+			_ = os.Remove(tmp)
+			return fmt.Errorf("保存 DNS 备份: %w", err)
+		}
 	}
 	var errs []string
 	for _, s := range svcs {
@@ -64,9 +103,9 @@ func Unprotect() {
 	}
 	var saved map[string][]string
 	if json.Unmarshal(b, &saved) != nil {
-		_ = os.Remove(dnsBackup())
 		return
 	}
+	var errs []string
 	for s, addrs := range saved {
 		args := []string{"-setdnsservers", s}
 		if len(addrs) == 0 {
@@ -74,7 +113,12 @@ func Unprotect() {
 		} else {
 			args = append(args, addrs...)
 		}
-		_ = exec.Command("networksetup", args...).Run()
+		if out, err := exec.Command("networksetup", args...).CombinedOutput(); err != nil {
+			errs = append(errs, fmt.Sprintf("%s: %s", s, strings.TrimSpace(string(out))))
+		}
+	}
+	if len(errs) > 0 {
+		return
 	}
 	flushDNS()
 	_ = os.Remove(dnsBackup())

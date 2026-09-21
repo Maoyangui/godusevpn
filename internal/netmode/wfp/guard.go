@@ -31,6 +31,8 @@ type baseObjects struct {
 	filters  windows.GUID
 }
 
+const providerServiceName = "godusevpn"
+
 // 固定 GUID:换进程、换版本都不变,恢复命令与卸载程序靠它找对象。
 var (
 	providerKey = windows.GUID{Data1: 0x6f6d9e2c, Data2: 0x3a41, Data3: 0x4b8e, Data4: [8]byte{0x9d, 0x55, 0x67, 0x6f, 0x64, 0x75, 0x73, 0x65}}
@@ -91,6 +93,11 @@ func ensureBase(session uintptr) error {
 		return wrapErr(err)
 	}
 	provider := wtFwpmProvider0{providerKey: providerKey, displayData: *dd, flags: fwpProviderFlagPersistent}
+	serviceName, err := windows.UTF16PtrFromString(providerServiceName)
+	if err != nil {
+		return err
+	}
+	provider.serviceName = serviceName
 	if err := fwpmProviderAdd0(session, &provider, 0); err != nil && !errors.Is(err, fwpEAlreadyExists) {
 		return wrapErr(err)
 	}
@@ -157,8 +164,8 @@ func installForward(session uintptr, spec Spec) error {
 	return blockForward(session, base, 0)
 }
 
-// Enable 开闸(幂等):先删掉我们已有的过滤器,再装一遍持久那组;开机那组另起一个事务装,
-// 装不上只当警告(返回 warn),不影响持久那组。
+// Enable 开闸(幂等):删除旧过滤器并安装持久/开机/转发三组过滤器必须在同一
+// WFP 事务中完成。任一组失败都会回滚，旧闸继续存在，绝不留下半套保护。
 func Enable(spec Spec) (warn string, err error) {
 	mu.Lock()
 	defer mu.Unlock()
@@ -167,7 +174,7 @@ func Enable(spec Spec) (warn string, err error) {
 		return "", err
 	}
 	defer fwpmEngineClose0(s)
-	err = runTransaction(s, func(s uintptr) error {
+	if err = runTransaction(s, func(s uintptr) error {
 		if err := ensureBase(s); err != nil {
 			return err
 		}
@@ -175,28 +182,59 @@ func Enable(spec Spec) (warn string, err error) {
 			return err
 		}
 		curFlags = cFWPM_FILTER_FLAG_PERSISTENT
-		return installSet(s, spec, true, true)
-	})
-	if err != nil {
-		return "", err
-	}
-	if err := runTransaction(s, func(s uintptr) error {
-		curFlags = cFWPM_FILTER_FLAG_BOOTTIME
-		return installSet(s, spec, false, false)
-	}); err != nil {
-		warn = fmt.Sprintf("开机那组过滤器没装上(开机到 BFE 启动之间那几秒不受保护): %v", err)
-	}
-	// 转发层的开机过滤器另起一个事务:它装不上只影响开机那几秒经本机转发的流量,别连累上面那组
-	if err := runTransaction(s, func(s uintptr) error {
-		curFlags = cFWPM_FILTER_FLAG_BOOTTIME
-		return installForward(s, spec)
-	}); err != nil {
-		if warn != "" {
-			warn += ";"
+		if err := installSet(s, spec, true, true); err != nil {
+			return err
 		}
-		warn += fmt.Sprintf("开机那组的转发层过滤器没装上(开机到 BFE 启动之间经本机转发的流量不受保护): %v", err)
+		curFlags = cFWPM_FILTER_FLAG_BOOTTIME
+		if err := installSet(s, spec, false, false); err != nil {
+			return fmt.Errorf("开机保护过滤器安装失败: %w", err)
+		}
+		if err := installForward(s, spec); err != nil {
+			return fmt.Errorf("开机转发保护过滤器安装失败: %w", err)
+		}
+		return nil
+	}); err != nil {
+		return "", fmt.Errorf("全局禁直连过滤器事务回滚,保留旧保护: %w", err)
 	}
 	return warn, nil
+}
+
+// BootGuardReady verifies that at least one enabled BOOTTIME filter owned by
+// this product is present.  The check is intentionally made against BFE's
+// persisted objects rather than process memory so a restarted daemon cannot
+// mistake a stale in-memory flag for boot protection.
+func BootGuardReady() (bool, error) {
+	mu.Lock()
+	defer mu.Unlock()
+	s, err := openSession()
+	if err != nil {
+		return false, err
+	}
+	defer fwpmEngineClose0(s)
+	fs, err := ourFilters(s)
+	if err != nil {
+		return false, err
+	}
+	// A single surviving boot filter is not sufficient: the guard covers
+	// outbound/connect, inbound/accept, and forwarding on both address
+	// families.  Require every layer to have an enabled BOOTTIME filter so a
+	// partially corrupted persistent store cannot be mistaken for protection.
+	return bootGuardCovers(fs), nil
+}
+
+func bootGuardCovers(fs []filterInfo) bool {
+	covered := make(map[windows.GUID]bool, len(ourLayers()))
+	for _, f := range fs {
+		if f.flags&cFWPM_FILTER_FLAG_BOOTTIME != 0 && f.flags&cFWPM_FILTER_FLAG_DISABLED == 0 && f.action == cFWP_ACTION_BLOCK {
+			covered[f.layer] = true
+		}
+	}
+	for _, layer := range ourLayers() {
+		if !covered[layer] {
+			return false
+		}
+	}
+	return len(covered) == len(ourLayers())
 }
 
 // Disable 撤闸:删过滤器、子层、提供者。不存在也不算错。

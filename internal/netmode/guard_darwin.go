@@ -99,3 +99,12 @@ func GuardStatus() (int, error) {
 
 // GuardWarning macOS 一步装完,没有"装了一半"的情况。
 func GuardWarning() string { return "" }
+
+// pf anchor rules are runtime state and this application does not own a
+// pre-network launchd hook.  Treat boot protection as unavailable rather than
+// claiming that a normal runtime anchor covers the reboot window.
+func BootGuardReady() (bool, error) { return false, nil }
+
+// pf is installed by the running daemon and has no boot-time anchor guarantee.
+func GuardPersistentSupported() bool      { return false }
+func GuardPersistentReady() (bool, error) { return false, nil }

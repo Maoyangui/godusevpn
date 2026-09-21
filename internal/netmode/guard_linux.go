@@ -41,7 +41,8 @@ func guardRuleset(spec GuardSpec) string {
 		fmt.Fprintf(&b, "\t\tip daddr { %s } accept\n", strings.Join(privateV4, ", "))
 		fmt.Fprintf(&b, "\t\tip6 daddr { %s } accept\n", strings.Join(privateV6, ", "))
 	}
-	b.WriteString("\t\tudp dport 67 accept\n") // DHCP 续租
+	// 只放行 DHCP 客户端的源端口，并限制到广播目的，避免把任意 UDP/67 当成直连例外。
+	b.WriteString("\t\tudp sport 68 udp dport 67 ip daddr 255.255.255.255 accept\n") // DHCP 续租
 	b.WriteString("\t\ticmpv6 type { nd-neighbor-solicit, nd-neighbor-advert, nd-router-solicit, nd-router-advert } accept\n")
 	b.WriteString("\t\tdrop\n\t}\n")
 	if spec.Gateway {
@@ -78,19 +79,28 @@ func GuardTunUp(GuardSpec) error { return nil }
 func ClearGuard() error {
 	nftMu.Lock()
 	defer nftMu.Unlock()
-	_ = exec.Command("nft", "delete", "table", "inet", guardTable).Run()
-	nftOn = false
-	if err := exec.Command("nft", "list", "table", "inet", guardTable).Run(); err == nil {
+	if out, err := exec.Command("nft", "delete", "table", "inet", guardTable).CombinedOutput(); err != nil && !nftMissing(out) {
+		return fmt.Errorf("nft 删除闸: %v: %s", err, strings.TrimSpace(string(out)))
+	}
+	out, err := exec.Command("nft", "list", "table", "inet", guardTable).CombinedOutput()
+	if err == nil {
 		return fmt.Errorf("nft 表 %s 删不掉,闸还在", guardTable)
 	}
+	if !nftMissing(out) {
+		return fmt.Errorf("nft 确认闸状态失败: %v: %s", err, strings.TrimSpace(string(out)))
+	}
+	nftOn = false
 	return nil
 }
 
 // GuardStatus 表里现在有多少条规则;0 = 没开。
 func GuardStatus() (int, error) {
-	out, err := exec.Command("nft", "list", "table", "inet", guardTable).Output()
+	out, err := exec.Command("nft", "list", "table", "inet", guardTable).CombinedOutput()
 	if err != nil {
-		return 0, nil // 表不存在
+		if nftMissing(out) {
+			return 0, nil // 表不存在
+		}
+		return 0, fmt.Errorf("nft 查询闸状态: %v: %s", err, strings.TrimSpace(string(out)))
 	}
 	n := 0
 	for _, l := range strings.Split(string(out), "\n") {
@@ -102,5 +112,19 @@ func GuardStatus() (int, error) {
 	return n, nil
 }
 
+func nftMissing(out []byte) bool {
+	s := strings.ToLower(string(out))
+	return strings.Contains(s, "no such file") || strings.Contains(s, "does not exist") || strings.Contains(s, "not found")
+}
+
 // GuardWarning Linux 一步装完,没有"装了一半"的情况。
 func GuardWarning() string { return "" }
+
+// Linux nftables rules are runtime state.  They are not restored before the
+// network stack can emit traffic after a reboot, so strict global mode must
+// refuse to start until a boot-time firewall integration is installed.
+func BootGuardReady() (bool, error) { return false, nil }
+
+// Linux currently has no daemon-independent boot-time guard.
+func GuardPersistentSupported() bool      { return false }
+func GuardPersistentReady() (bool, error) { return false, nil }

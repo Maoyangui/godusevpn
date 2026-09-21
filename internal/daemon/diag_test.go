@@ -2,6 +2,8 @@ package daemon
 
 import (
 	"encoding/json"
+	"reflect"
+	"strings"
 	"time"
 
 	"github.com/Maoyangui/godusevpn/internal/paths"
@@ -10,6 +12,42 @@ import (
 
 	"github.com/Maoyangui/godusevpn/internal/settings"
 )
+
+func TestRedactURLKeepsOnlyEndpoint(t *testing.T) {
+	cases := map[string]string{
+		"https://alice:pw@panel.example/sub/secret-token?access_token=x#frag": "https://panel.example",
+		"https://panel.example/path/to/sub/abc?x=y":                           "https://panel.example",
+		"vmess://eyJ2IjoiMiIsInBzcyI6InNlY3JldCJ9":                            "***",
+		"not a url /sub/secret":                                               "***",
+	}
+	for in, want := range cases {
+		if got := redactURL(in); got != want {
+			t.Errorf("redactURL(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestRedactTextRemovesEmbeddedCredentials(t *testing.T) {
+	in := `url=https://u:p@example.test/sub/abc?q=1 Authorization: Bearer abc123 token=xyz password: "pw"`
+	got := redactText(in)
+	for _, forbidden := range []string{"abc123", "xyz", "pw", "/sub/abc", "?q=1", "u:p"} {
+		if strings.Contains(got, forbidden) {
+			t.Errorf("redacted text still contains %q: %s", forbidden, got)
+		}
+	}
+	if !strings.Contains(got, "https://example.test") || !strings.Contains(got, "Authorization: ***") {
+		t.Fatalf("endpoint or authorization marker missing: %s", got)
+	}
+}
+
+func TestRedactDoesNotMutateInput(t *testing.T) {
+	in := map[string]any{"nested": map[string]any{"url": "https://x.test/sub/token", "password": "pw"}, "list": []any{"Bearer abc"}}
+	original := map[string]any{"nested": map[string]any{"url": "https://x.test/sub/token", "password": "pw"}, "list": []any{"Bearer abc"}}
+	_ = redact(in)
+	if !reflect.DeepEqual(in, original) {
+		t.Fatalf("redact mutated input: %#v", in)
+	}
+}
 
 // 导出诊断包会把订阅链接脱敏成 /sub/***;它拿到的必须是副本,真实设置不能跟着变(曾经因共享切片把链接改坏,之后刷新全是 404)。
 func TestExportDiagKeepsSettingsIntact(t *testing.T) {

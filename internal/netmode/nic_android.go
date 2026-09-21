@@ -5,7 +5,7 @@ package netmode
 // 别的应用只要枚举一遍网卡仍然读得到 —— 这是 Android 的平台限制,不是配置问题。
 func DisableNICIPv6(string) error { return nil }
 
-func RestoreNICIPv6() {}
+func RestoreNICIPv6() error { return nil }
 
 // NICIPv6Off 安卓上动不了物理网卡,永远是"没关"。
 func NICIPv6Off() bool { return false }

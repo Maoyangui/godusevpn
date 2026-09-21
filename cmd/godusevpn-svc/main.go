@@ -15,11 +15,13 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 
 	"github.com/Maoyangui/godusevpn/internal/buildinfo"
 	"github.com/Maoyangui/godusevpn/internal/daemon"
 	"github.com/Maoyangui/godusevpn/internal/guardfix"
+	"github.com/Maoyangui/godusevpn/internal/ipc"
 	"github.com/Maoyangui/godusevpn/internal/netmode"
 	"github.com/Maoyangui/godusevpn/internal/svc"
 )
@@ -53,6 +55,27 @@ func main() {
 			fail(err)
 		}
 		exe, _ = filepath.Abs(exe)
+		// Inno Setup runs this command elevated. On a UAC prompt supplied by a
+		// different administrator, the current token is not the tray owner's
+		// token; accept the installer-provided original interactive name only on
+		// first install and preserve the stored owner on upgrades.
+		owner := ""
+		for _, arg := range os.Args[2:] {
+			if strings.HasPrefix(arg, "--controller-user=") {
+				owner = strings.Trim(strings.TrimPrefix(arg, "--controller-user="), "\"")
+			}
+		}
+		if !ipc.ControllerOwnerRegistered() {
+			var ownerErr error
+			if owner != "" {
+				ownerErr = ipc.RegisterControllerOwnerName(owner)
+			} else {
+				ownerErr = ipc.RegisterControllerOwner()
+			}
+			if ownerErr != nil {
+				fail(fmt.Errorf("登记控制管道用户失败: %w", ownerErr))
+			}
+		}
 		if err := svc.Install(exe); err != nil {
 			fail(err)
 		}
@@ -61,19 +84,19 @@ func main() {
 		}
 		fmt.Println("服务已安装并启动:", svc.DisplayName)
 	case "uninstall":
-		// 闸是持久的,卸载要撤掉,不然文件删了闸还在、机器一直断网。先停服务再撤:服务活着时撤,
-		// 它一有动静(重连、切节点)又会装回来。不走 guard clear:那条会把「全局禁直连」开关关掉,
-		// 卸载时留着数据的话,下次重装闸就默认是关的。
-		uerr := svc.Uninstall()
-		if err := netmode.ClearGuard(); err != nil {
-			// 卸载程序是 runhidden 跑的,stderr 没人看:弹个框,不然文件删了闸还在、机器断网却没人知道为什么
-			msg := "撤闸失败(过滤器可能还在;卸载后要是断网,重装一次再点「恢复网络」):" + err.Error()
-			fmt.Fprintln(os.Stderr, msg)
-			notify(msg)
+		// 闸是持久的,卸载要撤掉,不然文件删了闸还在、机器一直断网。先停服务再撤,
+		// 并且只有确认闸和 IPv6 都清理成功后才删除服务对象；失败时保留保护与可重试状态。
+		if err := svc.Stop(); err != nil {
+			fail(fmt.Errorf("停止服务以清理隐私保护失败: %w", err))
 		}
-		netmode.RestoreNICIPv6() // 网卡 IPv6 同样是持久的,卸载不还原的话用户的 v6 就永远没了
-		if uerr != nil {
-			fail(uerr)
+		if err := netmode.ClearGuard(); err != nil {
+			fail(fmt.Errorf("撤销全局禁直连失败,未执行卸载: %w", err))
+		}
+		if err := netmode.RestoreNICIPv6(); err != nil {
+			fail(fmt.Errorf("还原网卡 IPv6 失败,未执行卸载: %w", err))
+		}
+		if err := svc.Uninstall(); err != nil {
+			fail(err)
 		}
 		fmt.Println("服务已卸载")
 	// guard clear:「恢复网络」——服务起不来、闸还在,手动把过滤器删掉。开始菜单的快捷方式、托盘菜单、卸载程序都走这里。

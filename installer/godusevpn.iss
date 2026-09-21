@@ -101,17 +101,36 @@ Filename: "{tmp}\MicrosoftEdgeWebView2RuntimeInstallerX64.exe"; Parameters: "/si
 #else
 Filename: "{tmp}\MicrosoftEdgeWebview2Setup.exe"; Parameters: "/silent /install"; StatusMsg: "{cm:InstallingWebView2}"; Check: not WebView2Installed; Flags: waituntilterminated
 #endif
-Filename: "{app}\godusevpn-svc.exe"; Parameters: "install"; StatusMsg: "{cm:InstallingService}"; Flags: runhidden waituntilterminated
+; sysuserinfoname is the account that started the elevated installer, not a
+; different administrator entered at the UAC prompt. The service keeps an
+; existing controller SID on upgrades and uses this only on first install.
+Filename: "{app}\godusevpn-svc.exe"; Parameters: "install /controller-user=\"{sysuserinfoname}\""; StatusMsg: "{cm:InstallingService}"; Flags: runhidden waituntilterminated
 Filename: "{app}\godusevpn.exe"; Description: "{cm:Launch}"; Flags: nowait postinstall skipifsilent runasoriginaluser
 ; 应用内升级(/VERYSILENT /RELAUNCH=1):装完以原始用户身份重新拉起客户端。客户端以普通身份启动安装包,由安装包自己弹 UAC,
 ; 这样 Inno 才有未提权的"原始用户"进程来执行这一条
 Filename: "{app}\godusevpn.exe"; Flags: nowait runasoriginaluser; Check: WantRelaunch
 
 [UninstallRun]
-Filename: "{app}\godusevpn-svc.exe"; Parameters: "uninstall"; RunOnceId: "svc-uninstall"; Flags: runhidden waituntilterminated
 Filename: "taskkill.exe"; Parameters: "/F /IM godusevpn.exe"; RunOnceId: "kill-ui"; Flags: runhidden waituntilterminated
 
 [Code]
+// 清理持久闸 / 网卡 IPv6 必须成功后才能让卸载程序删除服务与工具文件。
+// 不能只放在 [UninstallRun]:Inno 会忽略子进程的非零退出码,导致“闸还在但
+// godusevpn-svc.exe 已被删”,用户既不能恢复网络也不能重试。
+function InitializeUninstall(): Boolean;
+var rc: Integer;
+begin
+  Result := True;
+  if FileExists(ExpandConstant('{app}\godusevpn-svc.exe')) then
+  begin
+    if (not Exec(ExpandConstant('{app}\godusevpn-svc.exe'), 'uninstall', '', SW_SHOWNORMAL, ewWaitUntilTerminated, rc)) or (rc <> 0) then
+    begin
+      MsgBox('无法安全清理佛跳墙的全局禁直连闸或网卡 IPv6 设置。卸载已中止，原程序与恢复网络工具会保留；请以管理员身份重试。', mbError, MB_OK);
+      Result := False;
+    end;
+  end;
+end;
+
 // 应用内升级:安装包带 /RELAUNCH=1,静默装完后由 [Run] 里的 runasoriginaluser 条目重新拉起客户端
 function WantRelaunch: Boolean;
 begin
@@ -137,7 +156,13 @@ begin
   if FileExists(ExpandConstant('{app}\godusevpn-svc.exe')) then
   begin
     Exec('taskkill.exe', '/F /IM godusevpn.exe', '', SW_HIDE, ewWaitUntilTerminated, rc);
-    Exec(ExpandConstant('{app}\godusevpn-svc.exe'), 'uninstall', '', SW_HIDE, ewWaitUntilTerminated, rc);
+    // 升级只停止服务,不能走 uninstall:卸载命令按用户明确请求会撤闸并恢复网卡 IPv6,
+    // 那会在替换文件期间制造直连泄漏窗口。新版本安装后由 SCM 重新启动并接管现有闸。
+    if (not Exec(ExpandConstant('{app}\godusevpn-svc.exe'), 'stop', '', SW_HIDE, ewWaitUntilTerminated, rc)) or (rc <> 0) then
+    begin
+      Result := '无法安全停止后台服务,升级已中止以保留全局禁直连保护。';
+      exit;
+    end;
   end;
 end;
 

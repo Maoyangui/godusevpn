@@ -314,6 +314,9 @@ jobs:
     needs: [version, windows, linux, macos, android]
     runs-on: ubuntu-latest
     steps:
+      # 签名器使用仓库 go.mod 中已锁定的 x/crypto/ssh;没有源码 checkout
+      # 时,在 out/ 里运行 go run 会落到模块外并无法解析依赖。
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           path: art
@@ -323,10 +326,46 @@ jobs:
           find art -type f -exec cp {} out/ \;
           # 没有签名密钥时 android 作业出的是 debug 包(见那边的注释)。那种包对已装用户等于
           # "再也升不了级",绝不能混进发布。名字里带着记号,这里当场拦下。
-          if ls out/ | grep -q "DO-NOT-SHIP"; then
+          if [[ "$GITHUB_REF" == refs/tags/v* ]] && ls out/ | grep -q "DO-NOT-SHIP"; then
             echo "::error::产物里有未签名的 debug 包,不能发布:"; ls out/ | grep "DO-NOT-SHIP"; exit 1
           fi
           cd out && sha256sum * > SHA256SUMS && cat SHA256SUMS
+      - name: Sign checksums
+        env:
+          RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REF" != refs/tags/v* && -z "$RELEASE_SIGNING_KEY" ]]; then
+            echo "非发布构建没有 RELEASE_SIGNING_KEY,跳过签名"
+            exit 0
+          fi
+          test -n "$RELEASE_SIGNING_KEY" || { echo "::error::缺少 RELEASE_SIGNING_KEY,拒绝发布"; exit 1; }
+          printf '%s\n' "$RELEASE_SIGNING_KEY" > /tmp/godusevpn-release.key
+          cat > sign-sums.go <<'EOF'
+          package main
+
+          import (
+            "crypto/rand"
+            "encoding/base64"
+            "fmt"
+            "os"
+            "golang.org/x/crypto/ssh"
+          )
+
+          func main() {
+            key, err := os.ReadFile(os.Args[1]); if err != nil { panic(err) }
+            signer, err := ssh.ParsePrivateKey(key); if err != nil { panic(err) }
+            msg, err := os.ReadFile(os.Args[2]); if err != nil { panic(err) }
+            sig, err := signer.Sign(rand.Reader, msg); if err != nil { panic(err) }
+            if sig.Format != "ssh-ed25519" || len(sig.Blob) != 64 { panic(fmt.Sprintf("unexpected signature format %q", sig.Format)) }
+            fmt.Print(base64.StdEncoding.EncodeToString(sig.Blob))
+          }
+          EOF
+          cd out && go run ../sign-sums.go /tmp/godusevpn-release.key SHA256SUMS > SHA256SUMS.sig
+          cd ..
+          rm -f /tmp/godusevpn-release.key sign-sums.go
+          test "$(wc -c < out/SHA256SUMS.sig)" -gt 80
+          cat out/SHA256SUMS.sig
       - uses: actions/upload-artifact@v4
         with:
           name: godusevpn-${{ needs.version.outputs.version }}

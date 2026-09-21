@@ -15,12 +15,13 @@ import (
 func NICIPv6Leaking(tunName string) bool {
 	ifs, err := net.Interfaces()
 	if err != nil {
-		return false
+		// 无法枚举网卡时不能把“未知”当成安全；调用方会保持 IPv6 保护并重试。
+		return true
 	}
 	for _, in := range ifs {
 		addrs, err := in.Addrs()
 		if err != nil {
-			continue
+			return true
 		}
 		if ifaceLeaksIPv6(in.Name, in.Flags, addrs, tunName) {
 			return true

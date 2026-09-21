@@ -41,8 +41,9 @@ fi
 
 [ -f "$SRC/godusevpn" ] || { echo "包里没有 godusevpn,可能下错了架构"; exit 1; }
 
-# 先停旧服务再换文件:正在跑的二进制被覆盖会出怪事
-if [ -x /usr/local/bin/godusevpn ]; then /usr/local/bin/godusevpn uninstall >/dev/null 2>&1 || true; fi
+# 先停旧服务再换文件:升级不能走 uninstall,那是用户明确“卸载”语义,
+# 会撤持久禁直连闸并恢复网卡 IPv6,在替换文件期间制造直连泄漏窗口。
+if [ -x /usr/local/bin/godusevpn ]; then /usr/local/bin/godusevpn stop >/dev/null 2>&1; fi
 mkdir -p /usr/local/bin
 install -m 755 "$SRC/godusevpn" /usr/local/bin/godusevpn
 
