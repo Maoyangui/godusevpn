@@ -21,7 +21,9 @@ const rulePref = "5000"
 
 // Protect 给本机所有非 TUN 的全局地址加"回包走主表"规则。可重复调用(先清再加)。
 func Protect(tunName string, ipv6 bool) error {
-	Unprotect()
+	if err := UnprotectChecked(); err != nil {
+		return fmt.Errorf("清理旧路由保护失败: %w", err)
+	}
 	var errs []string
 	for _, fam := range families(ipv6) {
 		for _, addr := range localAddrs(fam, tunName) {
@@ -36,16 +38,42 @@ func Protect(tunName string, ipv6 bool) error {
 	return nil
 }
 
-// Unprotect 删掉 Protect 加的规则(按优先级反复删到没有为止)。
-func Unprotect() {
+// UnprotectChecked 删掉 Protect 加的规则(按优先级反复删到没有为止)。
+// 查询失败或删除失败都返回错误，调用方不能把未知状态当成已恢复。
+func UnprotectChecked() error {
 	for _, fam := range []string{"-4", "-6"} {
+		out, err := exec.Command("ip", fam, "rule", "list", "pref", rulePref).CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("ip %s rule list pref %s: %s", fam, rulePref, strings.TrimSpace(string(out)))
+		}
+		if len(strings.TrimSpace(string(out))) == 0 {
+			continue
+		}
 		for i := 0; i < 64; i++ {
-			if err := exec.Command("ip", fam, "rule", "del", "pref", rulePref).Run(); err != nil {
+			left, err := exec.Command("ip", fam, "rule", "list", "pref", rulePref).CombinedOutput()
+			if err != nil {
+				return fmt.Errorf("ip %s rule list pref %s: %s", fam, rulePref, strings.TrimSpace(string(left)))
+			}
+			if len(strings.TrimSpace(string(left))) == 0 {
 				break
 			}
+			out, err := exec.Command("ip", fam, "rule", "del", "pref", rulePref).CombinedOutput()
+			if err != nil {
+				return fmt.Errorf("ip %s rule del pref %s: %s", fam, rulePref, strings.TrimSpace(string(out)))
+			}
+		}
+		left, err := exec.Command("ip", fam, "rule", "list", "pref", rulePref).CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("ip %s rule list pref %s: %s", fam, rulePref, strings.TrimSpace(string(left)))
+		}
+		if len(strings.TrimSpace(string(left))) != 0 {
+			return fmt.Errorf("ip %s rule del pref %s: 超过最大重试次数", fam, rulePref)
 		}
 	}
+	return nil
 }
+
+func Unprotect() { _ = UnprotectChecked() }
 
 func families(ipv6 bool) []string {
 	if ipv6 {

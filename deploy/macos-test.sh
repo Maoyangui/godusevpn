@@ -116,29 +116,20 @@ if [ -n "$np" ]; then
   check "朝节点服务器发起的连接判给了直连" "$hit" "$np(试了 $i 次)"
 fi
 
-echo "== 3.7 全局禁直连(全局模式下闸要在:普通用户绑物理网卡直连被拦,经隧道照常;切回规则模式锚点清空)"
-if "$BIN" mode global >/dev/null 2>&1; then
-  sleep 2
-  rules=$(pfctl -a com.apple/godusevpn -sr 2>/dev/null)
-  check "pf 锚点里有规则" "$(echo "$rules" | grep -c 'block drop out quick all')" "$(echo "$rules" | grep -c . ) 条"
-  # root 是守护进程的身份、本来就放行,所以要用普通用户去试;绑物理网卡是为了绕开隧道路由,模拟"漏出去"
-  if [ -n "$U" ] && [ -n "$defif" ]; then
-    dip=$(ipconfig getifaddr "$defif" 2>/dev/null)
-    d=$(sudo -u "$U" curl -s --interface "$dip" -m 6 -o /dev/null -w '%{http_code}' http://1.1.1.1/cdn-cgi/trace 2>/dev/null || true)
-    check "普通用户绑物理网卡的直连被拦" "$([ "$d" != "200" ] && echo 1 || echo 0)" "http=${d:-000}(网卡 $defif $dip)"
+echo "== 3.7 严格全局模式缺少启动期保护时必须拒绝切换"
+# 只把明确的隐私拒绝视为通过；IPC断连、超时、崩溃不能冒充安全拒绝。
+reject_global() {
+  expected=$1
+  if result=$("$BIN" mode global 2>&1); then
+    check "缺少启动期保护时拒绝严格全局模式" 0 "意外接受了全局模式"
   else
-    echo "  (跳过直连探测:U=$U defif=$defif)"
+    check "明确说明启动期隐私保护不足" "$(printf '%s\n' "$result" | grep 'E_PRIVACY_GUARD' | grep -c '启动期')" "$result"
   fi
-  t=$(curl -s -m 15 -o /dev/null -w '%{http_code}' https://1.1.1.1/cdn-cgi/trace 2>/dev/null || true) # 明文 http 会被 301 到 https,拿 https 直接要 200
-  check "经隧道照常" "$([ "$t" = "200" ] && echo 1 || echo 0)" "http=${t:-000}"
-  "$BIN" mode rule >/dev/null 2>&1
-  sleep 2
-  check "切回规则模式后锚点清空" "$([ -z "$(pfctl -a com.apple/godusevpn -sr 2>/dev/null)" ] && echo 1 || echo 0)" ""
-else
-  # 严格全局模式必须有独立的启动期闸。当前 macOS 没有守护进程之外的
-  # 可证明启动保护，所以拒绝启动数据面是预期的保守隐私行为。
-  check "macOS 严格全局模式在缺少启动闸时拒绝" 1 "已拒绝连接并保留旧配置"
-fi
+  current=$("$BIN" status 2>/dev/null | awk '/^模式:/{print $2; exit}')
+  check "拒绝后保持原模式" "$([ "$current" = "$expected" ] && echo 1 || echo 0)" "mode=$current expected=$expected"
+  check "拒绝后原连接仍可用" "$(wait_status connected 15 && echo 1 || echo 0)" ""
+}
+reject_global rule
 
 echo "== 4. IPv6:关闭时必须是真拒绝,且不能绕过隧道出去"
 a6=$(resolve6 www.google.com); check "AAAA 为空" "$([ -z "$a6" ] && echo 1 || echo 0)" "${a6:-(空)}"
@@ -173,9 +164,11 @@ lat=$("$BIN" test 2>&1); check "延迟测试" "$(echo "$lat" | grep -c ' ms')" "
 echo "== 6. 模式切换"
 # 出口 IP 比的是"还是不是节点的",不是"等不等于连接前":云主机的出网地址来自一个地址池,
 # 前后两次拿到的末段可能不同(跑机上实测 .161 变 .160),拿它当相等条件会无谓地红。
-"$BIN" mode direct >/dev/null; sleep 3; d=$(pub4); check "直连模式不再走节点" "$([ -n "$d" ] && [ "$d" != "$now" ] && echo 1 || echo 0)" "direct=$d 节点出口=$now 连接前=$before"
-"$BIN" mode global >/dev/null; sleep 3; gl=$(pub4); check "全局模式出口是节点" "$([ -n "$gl" ] && [ "$gl" != "$before" ] && echo 1 || echo 0)" "global=$gl"
-"$BIN" mode rule >/dev/null
+check "切换直连模式成功" "$("$BIN" mode direct >/dev/null 2>&1 && echo 1 || echo 0)" ""
+sleep 3; d=$(pub4); check "直连模式不再走节点" "$([ -n "$d" ] && [ "$d" != "$now" ] && echo 1 || echo 0)" "direct=$d 节点出口=$now 连接前=$before"
+reject_global direct
+check "切回规则模式成功" "$("$BIN" mode rule >/dev/null 2>&1 && echo 1 || echo 0)" ""
+check "规则模式恢复连接" "$(wait_status connected 15 && echo 1 || echo 0)" ""
 check "节点列表" "$("$BIN" nodes | grep -c '^\*')" "$("$BIN" nodes | tr '\n' ' ' | cut -c1-80)"
 
 echo "== 7. 各功能页面的数据接口"

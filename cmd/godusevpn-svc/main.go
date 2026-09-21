@@ -55,10 +55,9 @@ func main() {
 			fail(err)
 		}
 		exe, _ = filepath.Abs(exe)
-		// Inno Setup runs this command elevated. On a UAC prompt supplied by a
-		// different administrator, the current token is not the tray owner's
-		// token; accept the installer-provided original interactive name only on
-		// first install and preserve the stored owner on upgrades.
+		// Resolve the current desktop/session owner independently of a UAC
+		// administrator's token. Manual installs may explicitly supply an owner;
+		// upgrades always preserve the already registered controller.
 		owner := ""
 		for _, arg := range os.Args[2:] {
 			if strings.HasPrefix(arg, "--controller-user=") {

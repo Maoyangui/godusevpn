@@ -332,6 +332,12 @@ func (m *Machine) run(ctx context.Context, started bool) {
 			if cfg == nil {
 				cfg, err = m.d.Prepare(ctx)
 			}
+			// Disconnect may cancel while Prepare is finishing. Do not start a
+			// data plane after that cancellation; the next explicit Connect will
+			// create a fresh protected attempt.
+			if err == nil && ctx.Err() != nil {
+				return
+			}
 			if err == nil {
 				m.set(Starting, nil)
 				err = m.d.Start(cfg)

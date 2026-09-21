@@ -101,10 +101,7 @@ Filename: "{tmp}\MicrosoftEdgeWebView2RuntimeInstallerX64.exe"; Parameters: "/si
 #else
 Filename: "{tmp}\MicrosoftEdgeWebview2Setup.exe"; Parameters: "/silent /install"; StatusMsg: "{cm:InstallingWebView2}"; Check: not WebView2Installed; Flags: waituntilterminated
 #endif
-; sysuserinfoname is the account that started the elevated installer, not a
-; different administrator entered at the UAC prompt. The service keeps an
-; existing controller SID on upgrades and uses this only on first install.
-Filename: "{app}\godusevpn-svc.exe"; Parameters: "install /controller-user=""{sysuserinfoname}"""; StatusMsg: "{cm:InstallingService}"; Flags: runhidden waituntilterminated
+; Service registration is checked in CurStepChanged; [Run] ignores exit codes.
 Filename: "{app}\godusevpn.exe"; Description: "{cm:Launch}"; Flags: nowait postinstall skipifsilent runasoriginaluser
 ; 应用内升级(/VERYSILENT /RELAUNCH=1):装完以原始用户身份重新拉起客户端。客户端以普通身份启动安装包,由安装包自己弹 UAC,
 ; 这样 Inno 才有未提权的"原始用户"进程来执行这一条
@@ -114,6 +111,19 @@ Filename: "{app}\godusevpn.exe"; Flags: nowait runasoriginaluser; Check: WantRel
 Filename: "taskkill.exe"; Parameters: "/F /IM godusevpn.exe"; RunOnceId: "kill-ui"; Flags: runhidden waituntilterminated
 
 [Code]
+// The service resolves the logged-on desktop/session SID itself. Inno's
+// sysuserinfoname is Windows RegisteredOwner, not the original UAC user.
+// A failed registration must not appear as a successful installation.
+procedure CurStepChanged(CurStep: TSetupStep);
+var rc: Integer;
+begin
+  if CurStep = ssPostInstall then
+  begin
+    if (not Exec(ExpandConstant('{app}\godusevpn-svc.exe'), 'install', '', SW_HIDE, ewWaitUntilTerminated, rc)) or (rc <> 0) then
+      RaiseException('无法注册或启动佛跳墙后台服务。安装尚未完成，请以管理员身份重试；现有隐私保护不会被撤销。');
+  end;
+end;
+
 // 清理持久闸 / 网卡 IPv6 必须成功后才能让卸载程序删除服务与工具文件。
 // 不能只放在 [UninstallRun]:Inno 会忽略子进程的非零退出码,导致“闸还在但
 // godusevpn-svc.exe 已被删”,用户既不能恢复网络也不能重试。

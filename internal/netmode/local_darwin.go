@@ -94,16 +94,22 @@ func Protect(_ string, _ bool) error {
 	return nil
 }
 
-// Unprotect 还原系统 DNS。没有备份就什么都不做(没接管过,别去动用户的设置)。
-// 守护进程启动时也会调一次:上次异常退出留下的隧道 DNS 会在这里被还原,不至于开不了网页。
-func Unprotect() {
+// UnprotectChecked 还原系统 DNS。没有备份就什么都不做(没接管过,别去动用户的设置)。
+// 失败时保留备份，调用方可以继续重试，避免把恢复依据删掉。
+func UnprotectChecked() error {
 	b, err := os.ReadFile(dnsBackup())
 	if err != nil {
-		return
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("读取 DNS 备份失败: %w", err)
 	}
 	var saved map[string][]string
-	if json.Unmarshal(b, &saved) != nil {
-		return
+	if err := json.Unmarshal(b, &saved); err != nil || saved == nil {
+		if err == nil {
+			err = fmt.Errorf("内容不是对象")
+		}
+		return fmt.Errorf("解析 DNS 备份失败: %w", err)
 	}
 	var errs []string
 	for s, addrs := range saved {
@@ -118,11 +124,18 @@ func Unprotect() {
 		}
 	}
 	if len(errs) > 0 {
-		return
+		return fmt.Errorf("还原系统 DNS 失败: %s", strings.Join(errs, "; "))
 	}
 	flushDNS()
-	_ = os.Remove(dnsBackup())
+	if err := os.Remove(dnsBackup()); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("删除 DNS 备份失败: %w", err)
+	}
+	return nil
 }
+
+// Unprotect 保持历史调用方的幂等接口；需要向用户报告结果的路径使用
+// UnprotectChecked，失败时备份仍会保留。
+func Unprotect() { _ = UnprotectChecked() }
 
 // networkServices 所有网络服务名(Wi-Fi、Ethernet…)。首行是说明文字,停用的服务前面带 *。
 func networkServices() ([]string, error) {

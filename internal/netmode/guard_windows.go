@@ -94,4 +94,4 @@ func GuardWarning() string {
 // WFP installs persistent and boot-time filters.
 func GuardPersistentSupported() bool { return true }
 
-func GuardPersistentReady() (bool, error) { return wfp.BootGuardReady() }
+func GuardPersistentReady() (bool, error) { return wfp.PersistentGuardReady() }

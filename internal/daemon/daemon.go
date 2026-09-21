@@ -5,6 +5,7 @@ package daemon
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -38,22 +39,32 @@ import (
 const DisplayName = buildinfo.DisplayName
 
 type Daemon struct {
-	mu        sync.Mutex
-	log       *logx.Rotator
-	coreLog   *logx.Rotator
-	coreLevel atomic.Int32 // 内核日志记到哪一级(core.Writer 按它过滤)
-	nicOff    atomic.Bool  // 各网卡的 IPv6 绑定已由我们停掉、还没还原(和闸一样,跨内核重启 / 服务重启一直有效)
-	nicMu     sync.Mutex   // syncNICIPv6 串行化:停用那一步要起 PowerShell,不能两个一起跑
-	probeMu   sync.Mutex
-	probeAt   time.Time // auto 组上次测完一轮全部节点的时间,autoProbeLoop 按它算下一次
-	core      *core.Core
-	settings  settings.Settings
-	profiles  map[string]*profile.Profile // 订阅 id → 节点缓存
-	fetchErr  map[string]string           // 订阅 id → 最近一次拉取失败原因
-	fetchLink map[string]string           // 订阅 id → 拉取失败(404)时面板随响应给的「选购 / 续费」地址
-	running   *profile.Profile            // 正在跑的内核是按哪份订阅生成的;刷新后拿它和缓存比,决定动不动隧道
-	prepared  *profile.Profile            // prepare 刚按它生成了配置、内核还没起:start 成功后转成 running
-	guardOn   bool                        // 「全局禁直连」的闸此刻开着
+	mu                sync.Mutex
+	log               *logx.Rotator
+	coreLog           *logx.Rotator
+	coreLevel         atomic.Int32 // 内核日志记到哪一级(core.Writer 按它过滤)
+	nicOff            atomic.Bool  // 各网卡的 IPv6 绑定已由我们停掉、还没还原(和闸一样,跨内核重启 / 服务重启一直有效)
+	nicDisablePending atomic.Bool  // partial disable must be retried even before a public address appears
+	nicMu             sync.Mutex   // syncNICIPv6 串行化:停用那一步要起 PowerShell,不能两个一起跑
+	probeMu           sync.Mutex
+	probeAt           time.Time // auto 组上次测完一轮全部节点的时间,autoProbeLoop 按它算下一次
+	core              *core.Core
+	settings          settings.Settings
+	// settingsGeneration changes on every persisted settings update. A prepare
+	// can run for minutes while the user edits settings; the generation binds a
+	// rendered config to the exact settings snapshot that produced it.
+	configPublishMu            sync.RWMutex // publish settings vs. starting a rendered config
+	preparedMu                 sync.Mutex   // bind cfg bytes and metadata through start
+	settingsGeneration         uint64
+	preparedSettingsGeneration uint64
+	preparedSettingsValid      bool
+	preparedConfigHash         [sha256.Size]byte
+	profiles                   map[string]*profile.Profile // 订阅 id → 节点缓存
+	fetchErr                   map[string]string           // 订阅 id → 最近一次拉取失败原因
+	fetchLink                  map[string]string           // 订阅 id → 拉取失败(404)时面板随响应给的「选购 / 续费」地址
+	running                    *profile.Profile            // 正在跑的内核是按哪份订阅生成的;刷新后拿它和缓存比,决定动不动隧道
+	prepared                   *profile.Profile            // prepare 刚按它生成了配置、内核还没起:start 成功后转成 running
+	guardOn                    bool                        // 「全局禁直连」的闸此刻开着
 	// tunUpPending 隧道网卡的转发层放行没成功(网卡还没注册好之类),下一次同步再试
 	tunUpPending atomic.Bool
 	guardErr     string // 闸该开却没开成的原因
@@ -146,6 +157,7 @@ func NewWithOptions(o Options) (*Daemon, error) {
 		return nil, fmt.Errorf("设置加载失败,为保持隐私保护拒绝启动: %w", err)
 	}
 	d.settings = s
+	d.settingsGeneration = 1
 	d.persistedOK = true
 	d.applyLogRetention()
 	d.loadProfileCaches()
@@ -154,9 +166,11 @@ func NewWithOptions(o Options) (*Daemon, error) {
 	// 前还原成物理网卡解析；状态文件不可读时同样保留现状，待后续明确操作处理。
 	prev := d.loadPersisted()
 	persistedTrusted := d.persistedStateOK()
-	strictPending := persistedTrusted && prev.Wanted && s.NoDirect && s.Mode == settings.ModeGlobal
+	strictPending := persistedTrusted && prev.Wanted && s.TUN && s.NoDirect && s.Mode == settings.ModeGlobal
 	if persistedTrusted && !strictPending {
-		netmode.Unprotect()
+		if err := netmode.UnprotectChecked(); err != nil {
+			d.logf("上次 DNS/路由保护尚未成功恢复,保留恢复依据并继续重试: %v", err)
+		}
 	}
 	// 网卡上被停用的 IPv6 不在这里无条件还原:它和「全局禁直连」的闸一样是持久的,上次连着关的机就该一直关着
 	// (见 reconcileNICIPv6)。在这儿还原的话,开机到服务重新关上它之间,公网 v6 地址就白白露了几十秒。
@@ -359,13 +373,34 @@ func (d *Daemon) setSettings(s settings.Settings) error {
 	if err := s.Validate(); err != nil {
 		return err
 	}
+	d.configPublishMu.Lock()
+	defer d.configPublishMu.Unlock()
 	if err := s.Save(paths.Settings()); err != nil {
 		return err
 	}
 	d.mu.Lock()
 	d.settings = s
+	d.settingsGeneration++
 	d.mu.Unlock()
 	d.applyLogRetention()
+	return nil
+}
+
+func (d *Daemon) settingsSnapshot() (settings.Settings, uint64) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.settings.Clone(), d.settingsGeneration
+}
+
+// preparedMatchesCurrent prevents a config rendered before a settings change
+// from being started under the new privacy policy. The second check in start
+// closes the race where settings change while core.Start is being prepared.
+func (d *Daemon) preparedMatchesCurrent(cfg []byte) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if !d.preparedSettingsValid || d.settingsGeneration != d.preparedSettingsGeneration || d.preparedConfigHash != sha256.Sum256(cfg) {
+		return state.Errf(state.CodeConfig, "设置在配置启动前发生变化,丢弃旧配置并重新生成")
+	}
 	return nil
 }
 
@@ -500,7 +535,7 @@ func (d *Daemon) refreshProfile(ctx context.Context, id string) (changed bool, e
 
 // prepare 状态机的第一步:当前订阅过期就刷新(失败用缓存),生成配置,干跑。
 func (d *Daemon) prepare(ctx context.Context) ([]byte, error) {
-	s := d.getSettings()
+	s, settingsGeneration := d.settingsSnapshot()
 	d.coreLevel.Store(core.LevelOf(s.LogLevel)) // 内核日志按设置的级别写,改了设置下次连接生效
 	// 订阅刷新和启动解析本身也会联网，必须在任何网络准备前建立保护。
 	d.syncGuard()
@@ -538,19 +573,43 @@ func (d *Daemon) prepare(ctx context.Context) ([]byte, error) {
 	if err := d.core.Validate(cfg); err != nil {
 		return nil, state.Errf(state.CodeConfig, "配置校验失败: %v", err)
 	}
+	// Do not publish a rendered config if a concurrent settings update raced
+	// with the long subscription/build phase. The state machine will retry with
+	// the current policy, keeping DNS/route/privacy settings coherent.
+	d.mu.Lock()
+	if d.settingsGeneration != settingsGeneration {
+		d.mu.Unlock()
+		return nil, state.Errf(state.CodeConfig, "设置在配置生成期间发生变化,重新生成")
+	}
+	d.mu.Unlock()
 	_ = os.WriteFile(paths.Config(), cfg, 0o600)
 	// 只记"这份配置是按哪份订阅备的";要等 start 成功才算"内核在用"。Restart 是先备后停再起,
 	// 停那一步会把 running 清掉,这里直接写 running 的话起来之后就是 nil —— 之后刷新发现当前节点
 	// 被删也不会重连、选到参数变了的节点也不会重建(m14 到 m19 都有这毛病)。
+	d.preparedMu.Lock()
+	defer d.preparedMu.Unlock()
 	d.mu.Lock()
 	d.prepared = p
 	d.preparedClashPort = clashPort
+	d.preparedSettingsGeneration = settingsGeneration
+	d.preparedSettingsValid = true
+	d.preparedConfigHash = sha256.Sum256(cfg)
 	d.mu.Unlock()
 	return cfg, nil
 }
 
 // start 启动内核;失败按原因归类。
 func (d *Daemon) start(cfg []byte) error {
+	// A settings publish and a core start must not interleave. This independent
+	// lock is deliberately separate from settingsOpMu: RestartChecked starts
+	// while its caller owns settingsOpMu, and must not deadlock on that mutex.
+	d.configPublishMu.RLock()
+	defer d.configPublishMu.RUnlock()
+	d.preparedMu.Lock()
+	defer d.preparedMu.Unlock()
+	if err := d.preparedMatchesCurrent(cfg); err != nil {
+		return err
+	}
 	// 网卡 IPv6 的停用不在这里做:它跟的是"用户想不想连着"而不是"内核在不在跑"(见 syncNICIPv6),
 	// prepare() 里已经对齐过了 —— 那也正好在内核启动之前,改协议绑定会让网卡重新走一遍协议栈,不该去抖刚建好的隧道。
 	if err := d.ensurePrivacyReady(); err != nil {
@@ -571,6 +630,10 @@ func (d *Daemon) start(cfg []byte) error {
 	// 最后一次检查覆盖“配置验证后闸被外部清掉/网卡状态变化”的竞态。
 	// 失败立即停掉刚启动的内核；stop() 在仍想连接时会保留保护状态。
 	if err := d.ensurePrivacyReady(); err != nil {
+		_ = d.core.Stop()
+		return err
+	}
+	if err := d.preparedMatchesCurrent(cfg); err != nil {
 		_ = d.core.Stop()
 		return err
 	}
@@ -624,9 +687,11 @@ func (d *Daemon) stop() error {
 	// 严格全局模式的密封 DNS 必须保留；否则普通 stop 会在重启窗口恢复系统 DNS。
 	persisted := d.loadPersisted()
 	s := d.getSettings()
-	keepSealed := !d.persistedStateOK() || (persisted.Wanted && s.NoDirect && s.Mode == settings.ModeGlobal)
+	keepSealed := !d.persistedStateOK() || (persisted.Wanted && s.TUN && s.NoDirect && s.Mode == settings.ModeGlobal)
 	if !keepSealed && !d.GuardWanted() && !guardHold {
-		netmode.Unprotect()
+		if restoreErr := netmode.UnprotectChecked(); restoreErr != nil {
+			err = errors.Join(err, state.Errf(state.CodePrivacyGuard, "恢复系统 DNS/路由失败,保护仍保留: %v", restoreErr))
+		}
 	}
 	netmode.ClearGateway()
 	return err
@@ -695,6 +760,13 @@ func (d *Daemon) restartForPrivacySettings(prev settings.Settings) error {
 	if nicErr := d.syncNICIPv6(); err == nil {
 		err = nicErr
 	}
+	// TUN 关闭后不再需要把系统解析器密封到隧道；只有这条显式设置路径
+	// 才允许恢复原 DNS。恢复失败时保留备份，让下一次设置/启动继续重试。
+	if err == nil && !current.TUN {
+		if restoreErr := netmode.UnprotectChecked(); restoreErr != nil {
+			err = state.Errf(state.CodePrivacyGuard, "恢复系统 DNS 失败,保护仍保留: %v", restoreErr)
+		}
+	}
 	return err
 }
 
@@ -745,22 +817,63 @@ func (d *Daemon) syncNICIPv6() error {
 	d.mu.Lock()
 	hold := d.nicHold
 	d.mu.Unlock()
-	if hold && d.nicOff.Load() {
+	// A durable backup means a previous attempt may have changed at least one
+	// adapter even if the process never reached the success flag. Treat that as
+	// protected/unknown so an explicit disconnect cannot skip restoration.
+	on := d.nicOff.Load() || netmode.NICIPv6Off()
+	if on {
+		d.nicOff.Store(true)
+	}
+	want := d.nicIPv6Wanted()
+	// During a privacy-policy transaction the old data plane is still live.
+	// Keep its IPv6 protection until the replacement starts successfully; the
+	// final sync after RestartChecked then performs the requested restore.
+	if hold && on {
+		if want && (d.nicDisablePending.Load() || netmode.NICIPv6Leaking(builder.TunName)) {
+			if err := netmode.DisableNICIPv6(builder.TunName); err != nil {
+				d.nicDisablePending.Store(true)
+				d.nicOff.Store(netmode.NICIPv6Off())
+				return state.Errf(state.CodePrivacyNIC, "停用网卡 IPv6 失败: %v", err)
+			}
+			d.nicOff.Store(true)
+			d.nicDisablePending.Store(false)
+		}
 		return nil
 	}
-	switch nicIPv6Action(d.nicIPv6Wanted(), d.nicOff.Load()) {
+	if want && on {
+		// Partial adapter failure leaves a backup and may leave a public address.
+		// Retry the disable operation while connecting instead of treating the
+		// backup as proof that every adapter is protected.
+		if d.nicDisablePending.Load() || netmode.NICIPv6Leaking(builder.TunName) {
+			if err := netmode.DisableNICIPv6(builder.TunName); err != nil {
+				d.nicDisablePending.Store(true)
+				d.nicOff.Store(netmode.NICIPv6Off())
+				return state.Errf(state.CodePrivacyNIC, "停用网卡 IPv6 失败: %v", err)
+			}
+			d.nicOff.Store(true)
+			d.nicDisablePending.Store(false)
+		}
+		return nil
+	}
+	switch nicIPv6Action(want, on) {
 	case nicDisable:
 		if err := netmode.DisableNICIPv6(builder.TunName); err != nil {
+			d.nicDisablePending.Store(true)
+			// Disable writes its recovery backup before changing adapters. Keep
+			// the state marked as potentially changed when it fails midway.
+			d.nicOff.Store(netmode.NICIPv6Off())
 			d.logf("停用网卡 IPv6 失败,拒绝启动数据面: %v", err)
 			return state.Errf(state.CodePrivacyNIC, "停用网卡 IPv6 失败: %v", err)
 		}
 		d.nicOff.Store(true)
+		d.nicDisablePending.Store(false)
 	case nicRestore:
 		if err := netmode.RestoreNICIPv6(); err != nil {
 			d.logf("还原网卡 IPv6 失败,保护状态保留: %v", err)
 			return state.Errf(state.CodePrivacyNIC, "还原网卡 IPv6 失败: %v", err)
 		}
 		d.nicOff.Store(false)
+		d.nicDisablePending.Store(false)
 		d.logf("网卡 IPv6:已按动手前的状态还原")
 	}
 	return nil
@@ -800,10 +913,13 @@ func (d *Daemon) reconcileNICIPv6() {
 		}
 	}
 	if err := netmode.DisableNICIPv6(builder.TunName); err != nil {
+		d.nicDisablePending.Store(true)
+		d.nicOff.Store(netmode.NICIPv6Off())
 		d.logf("停用网卡 IPv6 失败,连接不会启动: %v", err)
 		return
 	}
 	d.nicOff.Store(true)
+	d.nicDisablePending.Store(false)
 	d.logf("网卡 IPv6:已停用(上次连着关的机)")
 }
 
@@ -815,10 +931,10 @@ func (d *Daemon) ensurePrivacyReady() error {
 		if !netmode.GuardPersistentSupported() {
 			return state.Errf(state.CodePrivacyGuard, "当前平台没有可证明的启动期全局禁直连保护,拒绝启动数据面")
 		}
-		if ready, err := netmode.BootGuardReady(); err != nil {
+		if ready, err := netmode.GuardPersistentReady(); err != nil {
 			return state.Errf(state.CodePrivacyGuard, "无法确认启动期全局禁直连保护: %v", err)
 		} else if !ready {
-			return state.Errf(state.CodePrivacyGuard, "启动期全局禁直连保护未就绪,拒绝启动数据面")
+			return state.Errf(state.CodePrivacyGuard, "全局禁直连持久/启动期保护未完整就绪,拒绝启动数据面")
 		}
 		d.mu.Lock()
 		on, guardErr := d.guardOn, d.guardErr
@@ -843,6 +959,9 @@ func (d *Daemon) ensurePrivacyReady() error {
 		}
 	}
 	if d.nicIPv6Wanted() {
+		if d.nicDisablePending.Load() {
+			return state.Errf(state.CodePrivacyNIC, "网卡 IPv6 停用操作尚未完整成功")
+		}
 		if !d.nicOff.Load() {
 			return state.Errf(state.CodePrivacyNIC, "网卡 IPv6 未成功停用")
 		}
@@ -954,9 +1073,12 @@ func (d *Daemon) nicIPv6Loop(ctx context.Context) {
 		err := netmode.DisableNICIPv6(builder.TunName)
 		d.nicMu.Unlock()
 		if err != nil {
+			d.nicDisablePending.Store(true)
+			d.nicOff.Store(netmode.NICIPv6Off())
 			d.logf("停用新网卡的 IPv6 失败: %v", err)
 		} else {
 			d.nicOff.Store(true)
+			d.nicDisablePending.Store(false)
 		}
 		// Force the running state machine to validate privacy immediately;
 		// a failed adapter operation must not leave the data plane serving
@@ -1769,6 +1891,11 @@ func (d *Daemon) registerHandlers() {
 		d.syncGuard()
 		if err := d.syncNICIPv6(); err != nil { // 关掉「连接时停用网卡 IPv6」或打开 IPv6 时,这里把绑定还原回去
 			return nil, err
+		}
+		if !next.TUN {
+			if err := netmode.UnprotectChecked(); err != nil {
+				return nil, &ipc.CallError{Code: state.CodePrivacyGuard, Msg: "恢复系统 DNS/路由失败,保护仍保留: " + err.Error()}
+			}
 		}
 		if d.core.Running() {
 			live := prev // 模式、节点、禁直连开关、定时测速间隔是运行时可改的,别的都要重新生成配置

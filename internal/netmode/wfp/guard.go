@@ -303,6 +303,39 @@ func Count() (int, error) {
 	return len(keys), nil
 }
 
+func guardCovers(fs []filterInfo, required wtFwpmFilterFlags) bool {
+	covered := make(map[windows.GUID]bool, len(ourLayers()))
+	for _, f := range fs {
+		if f.flags&required != 0 && f.flags&cFWPM_FILTER_FLAG_DISABLED == 0 && f.action == cFWP_ACTION_BLOCK {
+			covered[f.layer] = true
+		}
+	}
+	for _, layer := range ourLayers() {
+		if !covered[layer] {
+			return false
+		}
+	}
+	return len(covered) == len(ourLayers())
+}
+
+// PersistentGuardReady requires both the runtime and boot-time block sets to
+// cover every protected layer. Count intentionally remains a raw count for
+// diagnostics and cleanup callers.
+func PersistentGuardReady() (bool, error) {
+	mu.Lock()
+	defer mu.Unlock()
+	s, err := openSession()
+	if err != nil {
+		return false, err
+	}
+	defer fwpmEngineClose0(s)
+	fs, err := ourFilters(s)
+	if err != nil {
+		return false, err
+	}
+	return guardCovers(fs, cFWPM_FILTER_FLAG_PERSISTENT) && guardCovers(fs, cFWPM_FILTER_FLAG_BOOTTIME), nil
+}
+
 // deleteOurFilters 删掉提供者名下的全部过滤器(四个 ALE 层,含开机那组)。
 func deleteOurFilters(session uintptr) error {
 	keys, err := ourFilterKeys(session)

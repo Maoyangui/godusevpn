@@ -117,17 +117,24 @@ func TestDownloadRefusesWithoutGoodChecksum(t *testing.T) {
 		gone(t, dir)
 	})
 
-	t.Run("旧版本没有签名清单仍按 SHA256 校验", func(t *testing.T) {
+	t.Run("缺少签名清单一律拒装", func(t *testing.T) {
 		sumsBody, sumsCode = good+"  "+name+"\n", 200
 		dir := t.TempDir()
 		rel := &Release{Version: "9.9.9", InstallerURL: srv.URL + "/" + name, SumsURL: srv.URL + "/SHA256SUMS"}
-		p, err := Download(context.Background(), rel, dir, srv.Client(), nil)
-		if err != nil {
-			t.Fatalf("旧版本兼容路径不该失败: %v", err)
+		if _, err := Download(context.Background(), rel, dir, srv.Client(), nil); err == nil {
+			t.Fatal("缺少签名清单的发布不应按 SHA256 降级安装")
 		}
-		if _, err := os.Stat(p); err != nil {
-			t.Fatalf("旧版本下载文件不存在: %v", err)
+		gone(t, dir)
+	})
+
+	t.Run("未知版本即使 SHA256 正确也拒绝无签名", func(t *testing.T) {
+		sumsBody, sumsCode = good+"  "+name+"\n", 200
+		dir := t.TempDir()
+		rel := &Release{Version: "0.6.25-m29", InstallerURL: srv.URL + "/" + name, SumsURL: srv.URL + "/SHA256SUMS"}
+		if _, err := Download(context.Background(), rel, dir, srv.Client(), nil); err == nil {
+			t.Fatal("未知版本不能用正确 SHA256 绕过签名")
 		}
+		gone(t, dir)
 	})
 }
 

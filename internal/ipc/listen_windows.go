@@ -32,10 +32,31 @@ var sidPattern = regexp.MustCompile(`^S-\d-\d+(?:-\d+)+$`)
 
 func controllerSIDPath() string { return filepath.Join(paths.DataDir(), "controller.sid") }
 
-// RegisterControllerOwner 在安装时登记发起安装的 Windows 用户。文件只由
+// RegisterControllerOwner 在安装时登记当前交互会话的 Windows 用户。UAC
+// 可能使用另一位管理员的令牌，不能把安装进程令牌误当成托盘用户。文件只由
 // SYSTEM/Administrators 可读,守护进程用它生成命名管道 ACL;普通交互用户
 // 即使能发现管道名也不能修改全局禁直连或网卡 IPv6 设置。
 func RegisterControllerOwner() error {
+	var session uint32
+	if err := windows.ProcessIdToSessionId(uint32(os.Getpid()), &session); err != nil {
+		return fmt.Errorf("读取安装会话: %w", err)
+	}
+	if session != 0 {
+		// The desktop shell keeps the logged-on user's token across an
+		// over-the-shoulder UAC prompt. Also works with Remote Desktop disabled.
+		if sid, err := desktopOwnerSID(session); err == nil {
+			return RegisterControllerOwnerSID(sid)
+		}
+		// RDP/kiosk sessions may not have explorer; ask WTS for that exact
+		// session rather than selecting an unrelated active-console user.
+		name, err := sessionAccountName(session)
+		if err != nil {
+			return fmt.Errorf("无法确定当前会话的控制用户,请使用 --controller-user 指定: %w", err)
+		}
+		return RegisterControllerOwnerName(name)
+	}
+	// Unattended service-session installs have no interactive owner. Keep the
+	// installing principal (normally SYSTEM) and the existing admin-only ACL.
 	proc, err := windows.GetCurrentProcess()
 	if err != nil {
 		return fmt.Errorf("获取当前进程令牌: %w", err)
@@ -50,6 +71,69 @@ func RegisterControllerOwner() error {
 		return fmt.Errorf("读取安装用户 SID: %w", err)
 	}
 	return RegisterControllerOwnerSID(tu.User.Sid.String())
+}
+
+func desktopOwnerSID(session uint32) (string, error) {
+	user32 := windows.NewLazySystemDLL("user32.dll")
+	hwnd, _, _ := user32.NewProc("GetShellWindow").Call()
+	if hwnd == 0 {
+		return "", errors.New("当前会话没有桌面外壳")
+	}
+	var pid uint32
+	user32.NewProc("GetWindowThreadProcessId").Call(hwnd, uintptr(unsafe.Pointer(&pid)))
+	var shellSession uint32
+	if pid == 0 || windows.ProcessIdToSessionId(pid, &shellSession) != nil || shellSession != session {
+		return "", errors.New("桌面外壳会话不匹配")
+	}
+	proc, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
+	if err != nil {
+		return "", err
+	}
+	defer windows.CloseHandle(proc)
+	var token windows.Token
+	if err := windows.OpenProcessToken(proc, windows.TOKEN_QUERY, &token); err != nil {
+		return "", err
+	}
+	defer token.Close()
+	user, err := token.GetTokenUser()
+	if err != nil {
+		return "", err
+	}
+	return user.User.Sid.String(), nil
+}
+
+func sessionAccountName(session uint32) (string, error) {
+	wts := windows.NewLazySystemDLL("wtsapi32.dll")
+	query := wts.NewProc("WTSQuerySessionInformationW")
+	free := wts.NewProc("WTSFreeMemory")
+	read := func(class uintptr) (string, error) {
+		var buf *uint16
+		var size uint32
+		ok, _, err := query.Call(0, uintptr(session), class, uintptr(unsafe.Pointer(&buf)), uintptr(unsafe.Pointer(&size)))
+		if ok == 0 {
+			return "", err
+		}
+		defer free.Call(uintptr(unsafe.Pointer(buf)))
+		if buf == nil || size < 2 {
+			return "", nil
+		}
+		return windows.UTF16ToString(unsafe.Slice(buf, int(size/2))), nil
+	}
+	name, err := read(5) // WTSUserName
+	if err != nil {
+		return "", err
+	}
+	if name == "" {
+		return "", errors.New("当前会话没有登录用户")
+	}
+	domain, err := read(7) // WTSDomainName
+	if err != nil {
+		return "", err
+	}
+	if domain != "" {
+		name = domain + `\` + name
+	}
+	return name, nil
 }
 
 // RegisterControllerOwnerSID writes an already resolved interactive-user SID.

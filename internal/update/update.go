@@ -1,4 +1,4 @@
-// Package update 自更新:查 GitHub Releases,下载对应架构的安装包,校验 SHA256SUMS,交给调用方以管理员身份静默安装。
+// Package update 自更新:查 GitHub Releases,下载对应架构的安装包,校验签名清单和 SHA256SUMS,交给调用方以管理员身份静默安装。
 //
 // 查版本先走 REST 接口;接口对未登录调用按出口 IP 限流(经代理时出口是共享 IP,常见 403 / 429),
 // 不通就改读发布页的 Atom 订阅(普通网页,不受接口限流),下载地址按 tag 拼出来。
@@ -304,12 +304,8 @@ func checkAtom(ctx context.Context, current string, includePre bool, client *htt
 		} else {
 			rel.Size = size
 		}
-		// Releases made before the signing workflow do not have the optional
-		// signature asset.  Keep the old in-app update path usable after the
-		// updater itself is upgraded; new workflow releases always expose it.
-		if _, ok := head(ctx, client, rel.SumsSigURL); !ok {
-			rel.SumsSigURL = ""
-		}
+		// Keep the signature URL even when it is unavailable. A missing asset or
+		// transient HTTP failure must never select unsigned installation.
 		return rel, nil
 	}
 	return nil, nil
@@ -329,8 +325,14 @@ func head(ctx context.Context, client *http.Client, url string) (int64, bool) {
 	return resp.ContentLength, resp.StatusCode == http.StatusOK
 }
 
-// Download 下载安装包到 dir,按 SHA256SUMS 校验;progress 每读一块回调一次。
+// Download 下载安装包到 dir,按签名清单和 SHA256SUMS 校验;progress 每读一块回调一次。
 func Download(ctx context.Context, rel *Release, dir string, client *http.Client, progress func(done, total int64)) (string, error) {
+	if rel.SumsSigURL == "" {
+		// Do not trust release metadata to select a weaker verification policy.
+		// Old installed clients still read the unchanged SHA256SUMS and assets
+		// when upgrading to this build; this updater always verifies signatures.
+		return "", errors.New("这个版本没有发布校验清单签名,不装")
+	}
 	if client == nil {
 		client = &http.Client{Timeout: 30 * time.Minute}
 	}
@@ -394,13 +396,6 @@ func Download(ctx context.Context, rel *Release, dir string, client *http.Client
 	if got := hex.EncodeToString(h.Sum(nil)); got != want {
 		os.Remove(path)
 		return "", errors.New("安装包校验失败,已删除")
-	}
-	if rel.SumsSigURL == "" {
-		// Compatibility with releases created before signed manifests were
-		// introduced.  SHA256SUMS was already verified above.  All releases
-		// produced by the current workflow carry SumsSigURL and therefore take
-		// the Ed25519 verification path below.
-		return path, nil
 	}
 	sig, err := fetchSignature(ctx, client, rel.SumsSigURL)
 	if err != nil || !ed25519.Verify(releasePublicKey, sums, sig) {

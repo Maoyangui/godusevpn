@@ -190,7 +190,15 @@ func (d *Daemon) syncGuard() {
 		if err != nil {
 			break // 查不到就别乱动:重装一次的代价比"以为没装"高
 		}
-		if msg := guardRedoReason(n, d.appliedGuardSpec(), d.guardSpec()); msg != "" {
+		ready, readyErr := netmode.GuardPersistentReady()
+		if readyErr != nil {
+			d.setGuard(true, "无法确认持久保护: "+readyErr.Error())
+			return
+		}
+		if msg := guardRedoReason(n, d.appliedGuardSpec(), d.guardSpec()); msg != "" || !ready {
+			if msg == "" {
+				msg = "持久/启动期保护不完整,已重新装上"
+			}
 			d.applyGuard(msg)
 		} else if d.tunUpPending.Load() && d.core.Running() {
 			d.guardTunUp() // 上次隧道网卡还没注册好,现在补放行
