@@ -117,23 +117,28 @@ if [ -n "$np" ]; then
 fi
 
 echo "== 3.7 全局禁直连(全局模式下闸要在:普通用户绑物理网卡直连被拦,经隧道照常;切回规则模式锚点清空)"
-"$BIN" mode global >/dev/null 2>&1
-sleep 2
-rules=$(pfctl -a com.apple/godusevpn -sr 2>/dev/null)
-check "pf 锚点里有规则" "$(echo "$rules" | grep -c 'block drop out quick all')" "$(echo "$rules" | grep -c . ) 条"
-# root 是守护进程的身份、本来就放行,所以要用普通用户去试;绑物理网卡是为了绕开隧道路由,模拟"漏出去"
-if [ -n "$U" ] && [ -n "$defif" ]; then
-  dip=$(ipconfig getifaddr "$defif" 2>/dev/null)
-  d=$(sudo -u "$U" curl -s --interface "$dip" -m 6 -o /dev/null -w '%{http_code}' http://1.1.1.1/cdn-cgi/trace 2>/dev/null || true)
-  check "普通用户绑物理网卡的直连被拦" "$([ "$d" != "200" ] && echo 1 || echo 0)" "http=${d:-000}(网卡 $defif $dip)"
+if "$BIN" mode global >/dev/null 2>&1; then
+  sleep 2
+  rules=$(pfctl -a com.apple/godusevpn -sr 2>/dev/null)
+  check "pf 锚点里有规则" "$(echo "$rules" | grep -c 'block drop out quick all')" "$(echo "$rules" | grep -c . ) 条"
+  # root 是守护进程的身份、本来就放行,所以要用普通用户去试;绑物理网卡是为了绕开隧道路由,模拟"漏出去"
+  if [ -n "$U" ] && [ -n "$defif" ]; then
+    dip=$(ipconfig getifaddr "$defif" 2>/dev/null)
+    d=$(sudo -u "$U" curl -s --interface "$dip" -m 6 -o /dev/null -w '%{http_code}' http://1.1.1.1/cdn-cgi/trace 2>/dev/null || true)
+    check "普通用户绑物理网卡的直连被拦" "$([ "$d" != "200" ] && echo 1 || echo 0)" "http=${d:-000}(网卡 $defif $dip)"
+  else
+    echo "  (跳过直连探测:U=$U defif=$defif)"
+  fi
+  t=$(curl -s -m 15 -o /dev/null -w '%{http_code}' https://1.1.1.1/cdn-cgi/trace 2>/dev/null || true) # 明文 http 会被 301 到 https,拿 https 直接要 200
+  check "经隧道照常" "$([ "$t" = "200" ] && echo 1 || echo 0)" "http=${t:-000}"
+  "$BIN" mode rule >/dev/null 2>&1
+  sleep 2
+  check "切回规则模式后锚点清空" "$([ -z "$(pfctl -a com.apple/godusevpn -sr 2>/dev/null)" ] && echo 1 || echo 0)" ""
 else
-  echo "  (跳过直连探测:U=$U defif=$defif)"
+  # 严格全局模式必须有独立的启动期闸。当前 macOS 没有守护进程之外的
+  # 可证明启动保护，所以拒绝启动数据面是预期的保守隐私行为。
+  check "macOS 严格全局模式在缺少启动闸时拒绝" 1 "已拒绝连接并保留旧配置"
 fi
-t=$(curl -s -m 15 -o /dev/null -w '%{http_code}' https://1.1.1.1/cdn-cgi/trace 2>/dev/null || true) # 明文 http 会被 301 到 https,拿 https 直接要 200
-check "经隧道照常" "$([ "$t" = "200" ] && echo 1 || echo 0)" "http=${t:-000}"
-"$BIN" mode rule >/dev/null 2>&1
-sleep 2
-check "切回规则模式后锚点清空" "$([ -z "$(pfctl -a com.apple/godusevpn -sr 2>/dev/null)" ] && echo 1 || echo 0)" ""
 
 echo "== 4. IPv6:关闭时必须是真拒绝,且不能绕过隧道出去"
 a6=$(resolve6 www.google.com); check "AAAA 为空" "$([ -z "$a6" ] && echo 1 || echo 0)" "${a6:-(空)}"

@@ -104,7 +104,7 @@ Filename: "{tmp}\MicrosoftEdgeWebview2Setup.exe"; Parameters: "/silent /install"
 ; sysuserinfoname is the account that started the elevated installer, not a
 ; different administrator entered at the UAC prompt. The service keeps an
 ; existing controller SID on upgrades and uses this only on first install.
-Filename: "{app}\godusevpn-svc.exe"; Parameters: "install /controller-user=\"{sysuserinfoname}\""; StatusMsg: "{cm:InstallingService}"; Flags: runhidden waituntilterminated
+Filename: "{app}\godusevpn-svc.exe"; Parameters: "install /controller-user=""{sysuserinfoname}"""; StatusMsg: "{cm:InstallingService}"; Flags: runhidden waituntilterminated
 Filename: "{app}\godusevpn.exe"; Description: "{cm:Launch}"; Flags: nowait postinstall skipifsilent runasoriginaluser
 ; 应用内升级(/VERYSILENT /RELAUNCH=1):装完以原始用户身份重新拉起客户端。客户端以普通身份启动安装包,由安装包自己弹 UAC,
 ; 这样 Inno 才有未提权的"原始用户"进程来执行这一条
