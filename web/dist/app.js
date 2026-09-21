@@ -568,7 +568,8 @@ function updateHome() {
   $('#status-sub').textContent = err;
   // 全局禁直连的闸:开着就亮一颗小盾;该开却没开成(防火墙不可用之类)标成警告
   const gp = $('#guard-pill');
-  if (v.guardError) { gp.hidden = false; gp.className = 'guard-pill warn'; gp.innerHTML = ICON_WARN + `<span>${t('home.guardErr')} · ${esc(v.guardError)}</span>`; }
+  // 闸开着但有异常(比如转发层没放行隧道网卡)和闸根本没开成是两回事,标题要分开说
+  if (v.guardError) { gp.hidden = false; gp.className = 'guard-pill warn'; gp.innerHTML = ICON_WARN + `<span>${t(v.guard === 'on' ? 'home.guardWarn' : 'home.guardErr')} · ${esc(v.guardError)}</span>`; }
   else if (v.guard === 'on') { gp.hidden = false; gp.className = 'guard-pill'; gp.innerHTML = ICON_SHIELD + `<span>${t('home.guard')}</span>`; }
   else gp.hidden = true;
 

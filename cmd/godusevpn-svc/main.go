@@ -66,7 +66,10 @@ func main() {
 		// 卸载时留着数据的话,下次重装闸就默认是关的。
 		uerr := svc.Uninstall()
 		if err := netmode.ClearGuard(); err != nil {
-			fmt.Fprintln(os.Stderr, "撤闸失败(过滤器可能还在;卸载后要是断网,重装一次再点「恢复网络」):", err)
+			// 卸载程序是 runhidden 跑的,stderr 没人看:弹个框,不然文件删了闸还在、机器断网却没人知道为什么
+			msg := "撤闸失败(过滤器可能还在;卸载后要是断网,重装一次再点「恢复网络」):" + err.Error()
+			fmt.Fprintln(os.Stderr, msg)
+			notify(msg)
 		}
 		netmode.RestoreNICIPv6() // 网卡 IPv6 同样是持久的,卸载不还原的话用户的 v6 就永远没了
 		if uerr != nil {

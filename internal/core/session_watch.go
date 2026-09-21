@@ -184,8 +184,8 @@ func (w *sessionWatch) noteOK() {
 // 每秒最多抢一次锁。
 func (w *sessionWatch) touch() {
 	now := w.now()
-	if now.UnixNano()-w.touched.Load() < int64(time.Second) {
-		return
+	if d := now.UnixNano() - w.touched.Load(); d >= 0 && d < int64(time.Second) {
+		return // 墙钟被向后拨时 d 为负:不节流,照常刷新
 	}
 	w.touched.Store(now.UnixNano())
 	w.mu.Lock()
