@@ -5,11 +5,13 @@ import (
 	"errors"
 	"io"
 	"net"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	quic "github.com/sagernet/quic-go"
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/adapter/outbound"
 	C "github.com/sagernet/sing-box/constant"
@@ -18,7 +20,9 @@ import (
 	"github.com/sagernet/sing-box/option"
 	"github.com/sagernet/sing-box/protocol/hysteria2"
 	"github.com/sagernet/sing-box/protocol/tuic"
+	"github.com/sagernet/sing/common"
 	M "github.com/sagernet/sing/common/metadata"
+	N "github.com/sagernet/sing/common/network"
 )
 
 // 会话看护:给 hysteria2 / tuic 这两种出站套一层。
@@ -42,7 +46,7 @@ import (
 // 只看护 hysteria2 与 tuic:anytls 是 TCP 连接池、vless / vmess / trojan 每条连接各自握手,
 // 它们没有"一条会话承载一切"的问题,也没有实现"网络变化即拆会话"。
 
-// SessionPolicy 守护进程给会话看护的几个回答与回调。可以为 nil(干跑、测速用的临时实例):那时只记账不动作。
+// SessionPolicy 守护进程给会话看护的几个回答与回调。可以为 nil(干跑、测速用的临时实例):那时判废照样拆会话,但不预热、也不通知守护进程。
 type SessionPolicy interface {
 	// Wanted 用户此刻想连着(没点断开)且内核在跑。拆掉会话后要不要预热,以它为准。
 	Wanted() bool
@@ -62,9 +66,8 @@ const (
 	sickWindow       = 40 * time.Second // 连败要发生在这么长时间内,更早的失败不算
 	sickCooldown     = 45 * time.Second // 两次判废之间至少隔这么久,免得会话刚重建又被判
 	handshakeWindow  = 20 * time.Second // 一条流建立后这么久之内出错、或一个字节没收到就被关,算握手失败
-	warmBackoffFirst = time.Second
-	warmBackoffMax   = 8 * time.Second
-	warmTries        = 3
+	warmBackoffFirst = time.Second      // 预热失败后先等这么久再试,之后翻倍(1 秒、2 秒)
+	warmTries        = 3                // 预热最多试这么多次,最后一次失败就不再等
 )
 
 // sessionWatch 一个被看护的出站。嵌入原出站:Type / Tag / Network / Dependencies 原样透出。
@@ -79,8 +82,11 @@ type sessionWatch struct {
 	firstFail time.Time // 这一串失败从什么时候开始
 	lastOK    time.Time // 最近一次有流收到数据
 	lastSick  time.Time // 最近一次判废
-	warming   atomic.Bool
-	now       func() time.Time // 测试用
+	// touched 最近一次有流收到数据的时刻(UnixNano)。长流持续收数据时由 Read 不抢锁地刷新,
+	// 否则一条一直在传的下载对"最近有没有流收到数据"没有贡献,并发的失败就能把活着的会话判废。
+	touched atomic.Int64
+	warming atomic.Bool
+	now     func() time.Time // 测试用
 }
 
 var (
@@ -166,21 +172,36 @@ func (w *sessionWatch) resetLocked() {
 
 // noteOK 有一条流收到数据了:这条会话活着,清掉失败计数。
 func (w *sessionWatch) noteOK() {
+	now := w.now()
+	w.touched.Store(now.UnixNano())
 	w.mu.Lock()
 	w.fails, w.firstFail = 0, time.Time{}
-	w.lastOK = w.now()
+	w.lastOK = now
 	w.mu.Unlock()
+}
+
+// touch 一条已经收到过数据的流又收到了数据:刷新"最近有流收到数据"的时刻。每秒最多写一次,不抢锁。
+func (w *sessionWatch) touch() {
+	now := w.now().UnixNano()
+	if now-w.touched.Load() < int64(time.Second) {
+		return
+	}
+	w.touched.Store(now)
 }
 
 // noteFail 记一次失败;攒够了就判废。
 func (w *sessionWatch) noteFail(reason string) {
 	now := w.now()
 	w.mu.Lock()
+	lastOK := w.lastOK
+	if t := time.Unix(0, w.touched.Load()); t.After(lastOK) {
+		lastOK = t
+	}
 	if w.fails == 0 || now.Sub(w.firstFail) > sickWindow {
 		w.fails, w.firstFail = 0, now
 	}
 	w.fails++
-	sick := w.fails >= sickFailures && now.Sub(w.lastOK) >= sickWindow/2 && now.Sub(w.lastSick) >= sickCooldown
+	sick := w.fails >= sickFailures && now.Sub(lastOK) >= sickWindow/2 && now.Sub(w.lastSick) >= sickCooldown
 	if sick {
 		w.lastSick = now
 		w.fails, w.firstFail = 0, time.Time{}
@@ -192,7 +213,10 @@ func (w *sessionWatch) noteFail(reason string) {
 	p := w.pol()
 	if p != nil {
 		p.Logf("节点「%s」的会话已废(连续 %d 次失败,最近一次: %s),拆掉重建", w.tag, sickFailures, reason)
-		p.OnSick(w.tag, reason)
+		// 只有当前在用的节点才记数、才催健康检查:自动模式下别的出站的会话废了,与用户此刻的网络无关
+		if p.Wanted() && p.InUse(w.tag) {
+			p.OnSick(w.tag, reason)
+		}
 	}
 	// 和"网络变化"走同一条路拆掉会话:下一次拨号就对同一个节点重新握手。
 	w.inner.InterfaceUpdated(context.Background())
@@ -230,14 +254,14 @@ func (w *sessionWatch) warm(p SessionPolicy) {
 			p.Logf("节点「%s」的会话已重新握好", w.tag)
 			return
 		}
-		if strings.Contains(err.Error(), "UDP disabled") {
-			return // 服务端不给 UDP:预热不了,等真实请求去握手
+		if errors.Is(err, os.ErrInvalid) || strings.Contains(err.Error(), "UDP disabled") {
+			return // 服务端不给 UDP、或这条出站根本没开 UDP:预热不了,等真实请求去握手
+		}
+		if i == warmTries-1 {
+			return // 最后一次也失败了,不再白等
 		}
 		time.Sleep(delay)
 		delay *= 2
-		if delay > warmBackoffMax {
-			delay = warmBackoffMax
-		}
 	}
 }
 
@@ -252,24 +276,66 @@ type watchedConn struct {
 
 // Read / Write 出错只在握手窗口内当场记失败;窗口之后出的错不在这里"占坑",留给 Close 按"无回应即被关闭"记,
 // 否则一条等了半分钟才报错、随后被关掉的流一次都不会被数到。
+// 对端明确答复过的错误(hysteria2 的 remote error = 服务端说目标连不上;被服务端重置的流)不算失败 ——
+// 那恰恰证明会话活着,只是这个目标不通;连着打开几个不通的网站不该把整条隧道判废。
 func (c *watchedConn) Read(p []byte) (int, error) {
 	n, err := c.Conn.Read(p)
-	if n > 0 && !c.got.Swap(true) {
-		c.done.Store(true)
-		c.w.noteOK()
+	if n > 0 {
+		if !c.got.Swap(true) {
+			c.done.Store(true)
+			c.w.noteOK()
+		} else {
+			c.w.touch()
+		}
 	}
-	if err != nil && !c.got.Load() && !errors.Is(err, io.EOF) && c.w.now().Sub(c.born) <= handshakeWindow && c.done.CompareAndSwap(false, true) {
-		c.w.noteFail("读: " + err.Error())
+	if err != nil && !c.got.Load() {
+		c.noteErr("读", err)
 	}
 	return n, err
 }
 
 func (c *watchedConn) Write(p []byte) (int, error) {
 	n, err := c.Conn.Write(p)
-	if err != nil && !c.got.Load() && c.w.now().Sub(c.born) <= handshakeWindow && c.done.CompareAndSwap(false, true) {
-		c.w.noteFail("写: " + err.Error())
+	if err != nil && !c.got.Load() {
+		c.noteErr("写", err)
 	}
 	return n, err
+}
+
+// noteErr 一条还没收到过数据的流出错了:对端答复过的算"活着",别的只在握手窗口内记失败。
+func (c *watchedConn) noteErr(op string, err error) {
+	if serverReplied(err) {
+		if c.done.CompareAndSwap(false, true) {
+			c.w.noteOK()
+		}
+		return
+	}
+	if errors.Is(err, io.EOF) {
+		return
+	}
+	if c.w.now().Sub(c.born) <= handshakeWindow && c.done.CompareAndSwap(false, true) {
+		c.w.noteFail(op + ": " + err.Error())
+	}
+}
+
+// NeedHandshake 透传给内核的握手催促。hysteria2 的流要到第一次 Write 才把请求发出去,
+// 对端先说话的协议(SSH、SMTP 之类)靠内核看到这个方法后先写一个空包把请求送出去;
+// 包了一层内核就看不到它,不催,那些协议就挂死 —— 而且挂死的流还会被记成会话失败。
+func (c *watchedConn) NeedHandshake() bool {
+	if ec, ok := common.Cast[N.EarlyConn](c.Conn); ok {
+		return ec.NeedHandshake()
+	}
+	return false
+}
+
+// serverReplied 错误是不是对端明确答复的结果:hysteria2 的 "remote error: …"(服务端拨目标失败后回的状态),
+// 或被对端重置的 QUIC 流。这两种只可能来自活着的会话。
+func serverReplied(err error) bool {
+	var se *quic.StreamError
+	if errors.As(err, &se) && se.Remote {
+		return true
+	}
+	return strings.Contains(err.Error(), "remote error")
 }
 
 // Close 一个字节都没收到就被关掉、又活过了握手窗口:多半是应用等不到回应自己放弃了 —— 会话"活着却不投递"的典型。

@@ -804,7 +804,7 @@ async function testNodes(force) {
       await drawNodes(true);
     }
   })();
-  try { await App().TestAll(); } catch (e) { /* 内核没跑时没法测 */ }
+  try { await App().TestAll(); } catch (e) { toast(errText(e), 'err'); } // 闸开着、隧道没起来时后端会拒绝直连测速,要让人看见原因
   live = false;
   await poll;
   nodeTesting = false;

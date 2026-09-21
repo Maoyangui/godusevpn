@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -299,9 +300,11 @@ func waitFor(t *testing.T, what string, cond func() bool) {
 // 连续 sickFailures 次拨号失败才判废,且只判一次:原出站的"网络变化"被调一次、OnSick 一次。
 // 差一次都不能判 —— 误判一次就是一次重连。
 func TestSessionWatchSickAfterConsecutiveFailures(t *testing.T) {
-	p := &fakePolicy{} // 用户没想连着:判废后不预热,本测试只看判废本身
+	// 当前在用这个节点、用户也想连着:判废才会通知守护进程。预热让它立刻失败(出站没开 UDP),免得它的 noteOK 干扰计数
+	p := &fakePolicy{wanted: true, inUseTag: "hk"}
 	w, fo, _ := newTestWatch(t, p)
 	fo.setDialErr(errors.New("拒绝"))
+	fo.setListenErr(os.ErrInvalid)
 
 	failDial(t, w, sickFailures-1)
 	if fo.updated.Load() != 0 || len(p.sickCalls()) != 0 {
@@ -318,8 +321,8 @@ func TestSessionWatchSickAfterConsecutiveFailures(t *testing.T) {
 	if !p.hasLog("已废") {
 		t.Fatalf("判废要写日志,得到 %v", p.logs)
 	}
-	if got := p.rebuildCalls(); len(got) != 0 {
-		t.Fatalf("用户没想连着,不该开始重建: %v", got)
+	if got := p.rebuildCalls(); len(got) != 1 || got[0] != "hk|判废" {
+		t.Fatalf("在用的节点判废后应记一次重建: %v", got)
 	}
 	if failsOf(w) != 0 {
 		t.Fatal("判废之后失败计数该清零")
@@ -403,9 +406,10 @@ func TestSessionWatchStaleFailuresExpire(t *testing.T) {
 
 // 判废后 sickCooldown 内再连败不重复判(会话刚重建又被判就是自己制造的抖动);冷却期过了可以再判。
 func TestSessionWatchSickCooldown(t *testing.T) {
-	p := &fakePolicy{}
+	p := &fakePolicy{wanted: true, inUseTag: "hk"}
 	w, fo, clk := newTestWatch(t, p)
 	fo.setDialErr(errors.New("拒绝"))
+	fo.setListenErr(os.ErrInvalid) // 预热立刻失败,它的 noteOK 不会干扰计数
 	failDial(t, w, sickFailures)
 	if fo.updated.Load() != 1 {
 		t.Fatal("第一次应判废")
@@ -554,8 +558,9 @@ func TestWatchedConnFailureRules(t *testing.T) {
 	})
 
 	t.Run("流失败也能攒到判废", func(t *testing.T) {
-		p := &fakePolicy{}
+		p := &fakePolicy{wanted: true, inUseTag: "hk"}
 		w, fo, clk := newTestWatch(t, p)
+		fo.setListenErr(os.ErrInvalid)
 		// 几条流同时开、活过窗口后一起被关:失败要落在同一个 sickWindow 里才连得成一串
 		var conns, peers []net.Conn
 		for i := 0; i < sickFailures; i++ {

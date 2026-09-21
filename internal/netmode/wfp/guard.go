@@ -111,7 +111,7 @@ func ensureBase(session uintptr) error {
 
 // installSet 装一组过滤器。withSelf 是持久那组(放行本进程);开机那组没有进程可放行,
 // ALE_APP_ID 条件在 BFE 起来之前也不受支持,所以不带。
-func installSet(session uintptr, spec Spec, withSelf bool) error {
+func installSet(session uintptr, spec Spec, withSelf, withForward bool) error {
 	if withSelf {
 		if err := permitSelf(session, base, 15, spec.SelfPath); err != nil {
 			return err
@@ -137,16 +137,24 @@ func installSet(session uintptr, spec Spec, withSelf bool) error {
 	if err := permitNdp(session, base, 12); err != nil {
 		return err
 	}
-	// 转发层(热点共享):默认全拦;局域网直通开着就放行去往私网的转发;经隧道的那组在 TunUp 里按接口号装
+	if withForward {
+		if err := installForward(session, spec); err != nil {
+			return err
+		}
+	}
+	return blockAll(session, base, 0)
+}
+
+// installForward 转发层(热点共享 / ICS)那组:默认全拦;局域网直通开着就放行去往私网的转发;
+// 经隧道的那组在 TunUp 里按接口号装。单独一个函数:开机那组把它放在自己的事务里装,
+// BFE 万一不收转发层的开机过滤器,也不能把四个 ALE 层的开机保护一起拖没。
+func installForward(session uintptr, spec Spec) error {
 	if spec.LAN {
 		if err := permitForwardLAN(session, base, 12); err != nil {
 			return err
 		}
 	}
-	if err := blockForward(session, base, 0); err != nil {
-		return err
-	}
-	return blockAll(session, base, 0)
+	return blockForward(session, base, 0)
 }
 
 // Enable 开闸(幂等):先删掉我们已有的过滤器,再装一遍持久那组;开机那组另起一个事务装,
@@ -167,16 +175,26 @@ func Enable(spec Spec) (warn string, err error) {
 			return err
 		}
 		curFlags = cFWPM_FILTER_FLAG_PERSISTENT
-		return installSet(s, spec, true)
+		return installSet(s, spec, true, true)
 	})
 	if err != nil {
 		return "", err
 	}
 	if err := runTransaction(s, func(s uintptr) error {
 		curFlags = cFWPM_FILTER_FLAG_BOOTTIME
-		return installSet(s, spec, false)
+		return installSet(s, spec, false, false)
 	}); err != nil {
 		warn = fmt.Sprintf("开机那组过滤器没装上(开机到 BFE 启动之间那几秒不受保护): %v", err)
+	}
+	// 转发层的开机过滤器另起一个事务:它装不上只影响开机那几秒经本机转发的流量,别连累上面那组
+	if err := runTransaction(s, func(s uintptr) error {
+		curFlags = cFWPM_FILTER_FLAG_BOOTTIME
+		return installForward(s, spec)
+	}); err != nil {
+		if warn != "" {
+			warn += ";"
+		}
+		warn += fmt.Sprintf("开机那组的转发层过滤器没装上(开机到 BFE 启动之间经本机转发的流量不受保护): %v", err)
 	}
 	return warn, nil
 }
@@ -204,7 +222,7 @@ func Disable() error {
 	if len(left) != 0 {
 		return fmt.Errorf("撤闸后仍有 %d 条过滤器", len(left))
 	}
-	return runTransaction(s, func(s uintptr) error {
+	if err := runTransaction(s, func(s uintptr) error {
 		if err := fwpmSubLayerDeleteByKey0(s, &sublayerKey); err != nil && !notFound(err) {
 			if inUse(err) {
 				return fmt.Errorf("过滤器已全部删除(闸已撤),但子层还被别的对象引用,删不掉: %w", err)
@@ -218,8 +236,18 @@ func Disable() error {
 			return wrapErr(err)
 		}
 		return nil
-	})
+	}); err != nil {
+		return &CleanupError{Err: err}
+	}
+	return nil
 }
+
+// CleanupError 撤闸时过滤器已经全部删掉(闸已撤、联网正常),只是子层 / 提供者的收尾没做完。
+// 调用方应当作警告而不是"闸还在":记成撤闸失败的话界面会一直说直连被拦,而实际上一条过滤器都没有。
+type CleanupError struct{ Err error }
+
+func (e *CleanupError) Error() string { return e.Err.Error() }
+func (e *CleanupError) Unwrap() error { return e.Err }
 
 // Count 我们的过滤器数量(含开机那组);0 = 闸没开。
 func Count() (int, error) {

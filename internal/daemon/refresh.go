@@ -187,6 +187,8 @@ func (d *Daemon) syncGuard() {
 		}
 		if msg := guardRedoReason(n, d.appliedGuardSpec(), d.guardSpec()); msg != "" {
 			d.applyGuard(msg)
+		} else if d.tunUpPending.Load() && d.core.Running() {
+			d.guardTunUp() // 上次隧道网卡还没注册好,现在补放行
 		}
 	case !want && on:
 		// 撤闸失败要如实记着"闸还在":以前这里不看返回值,失败了也记成"没开",于是界面说直连恢复了、
@@ -198,6 +200,9 @@ func (d *Daemon) syncGuard() {
 		}
 		d.setGuard(false, "")
 		d.logf("全局禁直连:已撤闸")
+		if w := netmode.GuardWarning(); w != "" {
+			d.logf("全局禁直连:%s", w)
+		}
 		if d.releaseTun != nil && !d.core.Running() {
 			d.releaseTun() // Android:内核没在跑时留着的 VPN 接口是个黑洞,撤闸就得关掉
 		}
@@ -289,11 +294,18 @@ func (d *Daemon) guardTunUp() {
 	if !on {
 		return
 	}
-	if err := netmode.GuardTunUp(d.guardSpec()); err != nil {
-		d.setGuard(true, "隧道网卡放行失败: "+err.Error())
-		d.logf("全局禁直连:隧道网卡放行失败(经隧道的流量也会被拦): %v", err)
+	if !d.getSettings().TUN {
+		// 没开 TUN 就没有隧道网卡:转发层没有可放行的接口,经本机转发的流量只许去局域网 —— 这是对的,不是故障
+		d.tunUpPending.Store(false)
 		return
 	}
+	if err := netmode.GuardTunUp(d.guardSpec()); err != nil {
+		d.tunUpPending.Store(true) // 网卡可能晚几秒才注册好:下一次同步再试
+		d.setGuard(true, "隧道网卡放行失败: "+err.Error())
+		d.logf("全局禁直连:隧道网卡放行失败(经本机转发的流量进不了隧道,本机自己的不受影响): %v", err)
+		return
+	}
+	d.tunUpPending.Store(false)
 	d.setGuard(true, "")
 }
 

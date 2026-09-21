@@ -69,10 +69,13 @@ func lookupDoH(ctx context.Context, server, host string) ([]string, error) {
 	}
 	req.Header.Set("Content-Type", "application/dns-message")
 	req.Header.Set("Accept", "application/dns-message")
-	client := &http.Client{Timeout: 4 * time.Second, Transport: &http.Transport{
-		TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12},
-		Proxy:           nil, // 绝不走环境变量里的代理
-	}}
+	tr := &http.Transport{
+		TLSClientConfig:   &tls.Config{MinVersion: tls.VersionTLS12},
+		Proxy:             nil,  // 绝不走环境变量里的代理
+		DisableKeepAlives: true, // 一问一答就完:不留一条空闲连接在隧道外挂着发 keepalive
+	}
+	defer tr.CloseIdleConnections()
+	client := &http.Client{Timeout: 4 * time.Second, Transport: tr}
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err

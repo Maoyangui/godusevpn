@@ -54,7 +54,9 @@ type Daemon struct {
 	running   *profile.Profile            // 正在跑的内核是按哪份订阅生成的;刷新后拿它和缓存比,决定动不动隧道
 	prepared  *profile.Profile            // prepare 刚按它生成了配置、内核还没起:start 成功后转成 running
 	guardOn   bool                        // 「全局禁直连」的闸此刻开着
-	guardErr  string                      // 闸该开却没开成的原因
+	// tunUpPending 隧道网卡的转发层放行没成功(网卡还没注册好之类),下一次同步再试
+	tunUpPending atomic.Bool
+	guardErr     string // 闸该开却没开成的原因
 	// guardApplied 闸现在实际按哪份规格装着。设置里改了「局域网直通」/ 网关模式之后要据此重装 ——
 	// 闸是持久的,只看"在不在"的话,连着的时候改这两项永远不生效。
 	guardApplied netmode.GuardSpec

@@ -3,6 +3,7 @@
 package netmode
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"net/netip"
@@ -53,7 +54,23 @@ func GuardTunUp(spec GuardSpec) error {
 }
 
 // ClearGuard 撤闸。失败要报出来:守护进程据此把状态记成"闸还在",不能记成"没开"。
-func ClearGuard() error { return wfp.Disable() }
+// 过滤器已经删干净、只是子层 / 提供者收尾没做完的不算失败(联网已经恢复),记成警告给日志看。
+func ClearGuard() error {
+	err := wfp.Disable()
+	var ce *wfp.CleanupError
+	if errors.As(err, &ce) {
+		warnMu.Lock()
+		guardWarn = "撤闸收尾没做完(不影响联网,下次开闸接着用): " + ce.Error()
+		warnMu.Unlock()
+		return nil
+	}
+	if err == nil {
+		warnMu.Lock()
+		guardWarn = ""
+		warnMu.Unlock()
+	}
+	return err
+}
 
 // GuardStatus 闸里现在有多少条过滤器;0 = 没开。
 func GuardStatus() (int, error) { return wfp.Count() }

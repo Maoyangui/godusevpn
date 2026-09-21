@@ -156,7 +156,13 @@ func buildConfig(in Input, rep *Report) ([]byte, error) {
 	if s.IPv6 {
 		strategy = "prefer_ipv4"
 	}
-	servers := []any{obj("type", "local", "tag", "system")} // 系统 DNS:只用来解析 DoH 服务器自己的域名
+	// tag=system 只用来解析 DoH 服务器自己的域名(远程 / 本地 DNS 填的是域名时)。
+	// 全局禁直连开着时这一步也不能走明文 53:换成按地址连的加密公共 DoH,和下面 localDNS 的替身是同一台。
+	systemDNS := obj("type", "local", "tag", "system")
+	if s.NoDirect && s.Mode == settings.ModeGlobal {
+		systemDNS = obj("type", "https", "tag", "system", "server", sealedBootstrapDoH)
+	}
+	servers := []any{systemDNS}
 	remote := obj("type", "https", "tag", "remote", "server", s.RemoteDNS, "detour", "proxy")
 	if !settings.IsIP(s.RemoteDNS) {
 		remote["domain_resolver"] = "system"

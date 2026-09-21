@@ -65,7 +65,9 @@ func main() {
 		// 它一有动静(重连、切节点)又会装回来。不走 guard clear:那条会把「全局禁直连」开关关掉,
 		// 卸载时留着数据的话,下次重装闸就默认是关的。
 		uerr := svc.Uninstall()
-		netmode.ClearGuard()
+		if err := netmode.ClearGuard(); err != nil {
+			fmt.Fprintln(os.Stderr, "撤闸失败(过滤器可能还在;卸载后要是断网,重装一次再点「恢复网络」):", err)
+		}
 		netmode.RestoreNICIPv6() // 网卡 IPv6 同样是持久的,卸载不还原的话用户的 v6 就永远没了
 		if uerr != nil {
 			fail(uerr)
