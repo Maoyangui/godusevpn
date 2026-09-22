@@ -43,3 +43,78 @@ func TestGuardCoversRequiresEveryLayerAndFlag(t *testing.T) {
 		t.Fatal("disabled blocking layer must fail")
 	}
 }
+
+// 提供者绝不能绑 Windows 服务名。FWPM_PROVIDER0.serviceName 一旦非空,服务不在 Running 时
+// BFE 就把该提供者名下的全部过滤器标成 DISABLED —— 持久闸不再持久,而且服务 ACL 是有意开放给
+// 已登录用户启停的(托盘「退出」要用),于是任何普通用户一句 sc stop godusevpn 就能关掉
+// 「全局禁直连」,不弹 UAC。m29 的 f183df1 绑过一次,这条钉住。
+func TestBaseProviderIsNotBoundToAService(t *testing.T) {
+	p := baseProvider(&wtFwpmDisplayData0{})
+	if p.serviceName != nil {
+		t.Fatal("WFP 提供者绑上了服务名:服务一停,它名下的过滤器会被 BFE 置为 DISABLED,闸等于没了")
+	}
+	if p.flags&fwpProviderFlagPersistent == 0 {
+		t.Fatal("WFP 提供者不是持久的:进程退出 / 崩溃 / 重启之后闸就没了")
+	}
+	if p.providerKey != providerKey {
+		t.Fatal("提供者 GUID 变了:恢复命令与卸载程序都靠这个固定 GUID 找对象")
+	}
+}
+
+func TestJoinWarn(t *testing.T) {
+	for _, c := range []struct{ a, b, want string }{
+		{"", "", ""},
+		{"甲", "", "甲"},
+		{"", "乙", "乙"},
+		{"甲", "乙", "甲;乙"},
+	} {
+		if got := joinWarn(c.a, c.b); got != c.want {
+			t.Fatalf("joinWarn(%q, %q) = %q,想要 %q", c.a, c.b, got, c.want)
+		}
+	}
+}
+
+// PersistentGuardReady 查的是**运行期**那组(PERSISTENT)覆盖全不全 —— 那一组就是闸本身。
+// 开机那组(BOOTTIME)只覆盖开机到 BFE 启动之间那几秒,装不上只该告警,不该让 Windows 上
+// 整个进不了全局模式。m29 把两组 AND 在一起,结果"开机组少一条"= 完全连不上;
+// 而修这个问题时又极容易只改注释不改函数体(第一版就是这么漏的),所以这条必须钉死。
+func TestPersistentGuardReadyIgnoresBootTimeSet(t *testing.T) {
+	layers := ourLayers()
+
+	full := func(flag wtFwpmFilterFlags) []filterInfo {
+		fs := make([]filterInfo, 0, len(layers))
+		for _, l := range layers {
+			fs = append(fs, filterInfo{layer: l, action: cFWP_ACTION_BLOCK, flags: flag})
+		}
+		return fs
+	}
+
+	t.Run("运行期那组齐了、开机那组一条都没有:算就绪", func(t *testing.T) {
+		if !persistentGuardReady(full(cFWPM_FILTER_FLAG_PERSISTENT)) {
+			t.Fatal("开机那组不齐不该影响持久保护的判定 —— 否则 Windows 上全局模式完全连不上")
+		}
+	})
+
+	t.Run("运行期那组缺一层:不算就绪", func(t *testing.T) {
+		fs := full(cFWPM_FILTER_FLAG_PERSISTENT)
+		if persistentGuardReady(fs[1:]) {
+			t.Fatal("运行期那组缺层却判成就绪:那是真的没保护")
+		}
+	})
+
+	t.Run("只有开机那组:不算就绪", func(t *testing.T) {
+		if persistentGuardReady(full(cFWPM_FILTER_FLAG_BOOTTIME)) {
+			t.Fatal("只有开机过滤器不等于运行期有保护")
+		}
+	})
+
+	t.Run("运行期那组被标成 DISABLED:不算就绪", func(t *testing.T) {
+		fs := full(cFWPM_FILTER_FLAG_PERSISTENT)
+		for i := range fs {
+			fs[i].flags |= cFWPM_FILTER_FLAG_DISABLED
+		}
+		if persistentGuardReady(fs) {
+			t.Fatal("被 BFE 标成 DISABLED 的过滤器不拦任何包,不能算保护")
+		}
+	})
+}

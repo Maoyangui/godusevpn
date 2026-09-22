@@ -36,10 +36,13 @@ func ApplyGuard(spec GuardSpec) error {
 	if err != nil {
 		return err
 	}
-	if ready, err := wfp.BootGuardReady(); err != nil {
-		return fmt.Errorf("确认 WFP 开机过滤器: %w", err)
+	// 开机那组只覆盖开机到 BFE 启动之间那几秒。查不到 / 没装全都只记成警告,不拿它挡住开闸:
+	// 挡住了用户就只能去关「全局禁直连」,一道以隐私为名的检查反而把人推向更不私密的配置。
+	// 运行期那组是闸本身,它的失败在 wfp.Enable 里已经是硬错误了。
+	if ready, berr := wfp.BootGuardReady(); berr != nil {
+		warn = joinWarn(warn, "确认开机那组过滤器时出错(开机那几秒是否受保护未知): "+berr.Error())
 	} else if !ready {
-		return fmt.Errorf("WFP 开机过滤器未就绪")
+		warn = joinWarn(warn, "开机那组过滤器没装全:开机到防火墙引擎启动之间那几秒不受保护")
 	}
 	warnMu.Lock()
 	guardWarn = warn
@@ -77,11 +80,24 @@ func ClearGuard() error {
 	return err
 }
 
+func joinWarn(a, b string) string {
+	switch {
+	case a == "":
+		return b
+	case b == "":
+		return a
+	default:
+		return a + ";" + b
+	}
+}
+
 // GuardStatus 闸里现在有多少条过滤器;0 = 没开。
 func GuardStatus() (int, error) { return wfp.Count() }
 
-// BootGuardReady checks the persisted BOOTTIME filters.  A normal runtime
-// filter is not sufficient for the fail-closed privacy contract.
+// BootGuardReady 查开机那组(BOOTTIME)装齐了没有。它覆盖的只是"内核网络起来到 BFE 启动"那几秒,
+// **不是**启动前的硬条件 —— 拿它挡住开闸的话,一台装不上开机过滤器的机器就永远进不了全局模式,
+// 而用户唯一的绕法是去关掉「全局禁直连」,反倒更不私密。结果经 ApplyGuard 折进 GuardWarning 如实报出来。
+// 运行期那组(PERSISTENT)才是闸本身,它的就绪由 GuardPersistentReady 硬查。
 func BootGuardReady() (bool, error) { return wfp.BootGuardReady() }
 
 // GuardWarning 上次开闸时没装全的那部分(比如开机那组),给日志用;空 = 全装上了。
@@ -97,7 +113,9 @@ func GuardWarning() string {
 // 硬核查只会把连接整个挡死,而用户挡不住就会去把「全局禁直连」关掉,反倒更不私密。
 func GuardInstallable() bool { return true }
 
-// WFP installs persistent and boot-time filters.
+// GuardPersistentSupported WFP 的对象是持久的:进程退出、被强杀、崩溃、升级换文件、重启,闸都还在。
 func GuardPersistentSupported() bool { return true }
 
+// GuardPersistentReady 查的是**运行期**那组过滤器覆盖全不全 —— 也就是"守护进程之外也在"的那道闸。
+// 开机那组不在这条里(见 BootGuardReady)。
 func GuardPersistentReady() (bool, error) { return wfp.PersistentGuardReady() }

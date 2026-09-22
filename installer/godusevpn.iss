@@ -119,14 +119,23 @@ var rc: Integer;
 begin
   if CurStep = ssPostInstall then
   begin
+    // 装不上服务时**不要** RaiseException:那会让 Inno 回滚、把刚装好的文件(包括「恢复网络」
+    // 那个快捷方式和 godusevpn-svc.exe)一起删掉,而闸是持久的、还留在机器上 —— 用户就停在
+    // "没网 + 没有任何工具能撤闸"的死局里。而且这个安装包本来就是 PrivilegesRequired=admin,
+    // 提示里那句"以管理员身份重试"根本无从执行。
+    // 改成:文件留下,把话说清楚,让用户还能用「恢复网络」或者手动启动服务。
     if (not Exec(ExpandConstant('{app}\godusevpn-svc.exe'), 'install', '', SW_HIDE, ewWaitUntilTerminated, rc)) or (rc <> 0) then
-      RaiseException('无法注册或启动佛跳墙后台服务。安装尚未完成，请以管理员身份重试；现有隐私保护不会被撤销。');
+      MsgBox('后台服务没能注册或启动(错误码 ' + IntToStr(rc) + ')。程序文件已经装好，现有隐私保护也没有被撤销。'#13#10#13#10'如果现在上不了网，用开始菜单里的「恢复网络」把全局禁直连闸解除；之后可以再打开客户端重试。', mbError, MB_OK);
   end;
 end;
 
-// 清理持久闸 / 网卡 IPv6 必须成功后才能让卸载程序删除服务与工具文件。
-// 不能只放在 [UninstallRun]:Inno 会忽略子进程的非零退出码,导致“闸还在但
-// godusevpn-svc.exe 已被删”,用户既不能恢复网络也不能重试。
+// 撤闸必须成功后才能让卸载程序删除服务与工具文件。
+// 不能只放在 [UninstallRun]:Inno 会忽略子进程的非零退出码,导致"闸还在但
+// godusevpn-svc.exe 已被删",用户既不能恢复网络也不能重试。
+//
+// 注意这道门守的**只有闸**:闸还在 = 机器断网,删掉工具等于把人锁死,拦住卸载是对的。
+// 网卡 IPv6 没还原不属于这一类(顶多是某几张网卡没有 v6,网照样能上),
+// godusevpn-svc.exe 那边已经改成"报出来但照常卸载",不会再把卸载永久挡住。
 function InitializeUninstall(): Boolean;
 var rc: Integer;
 begin
@@ -135,7 +144,7 @@ begin
   begin
     if (not Exec(ExpandConstant('{app}\godusevpn-svc.exe'), 'uninstall', '', SW_SHOWNORMAL, ewWaitUntilTerminated, rc)) or (rc <> 0) then
     begin
-      MsgBox('无法安全清理佛跳墙的全局禁直连闸或网卡 IPv6 设置。卸载已中止，原程序与恢复网络工具会保留；请以管理员身份重试。', mbError, MB_OK);
+      MsgBox('无法解除佛跳墙的全局禁直连闸,卸载已中止 —— 现在删掉程序的话机器会一直断网且无法恢复。'#13#10#13#10'原程序与「恢复网络」工具都保留着:先用开始菜单里的「恢复网络」(右键以管理员身份运行)把闸解除,再来卸载。', mbError, MB_OK);
       Result := False;
     end;
   end;
@@ -168,10 +177,23 @@ begin
     Exec('taskkill.exe', '/F /IM godusevpn.exe', '', SW_HIDE, ewWaitUntilTerminated, rc);
     // 升级只停止服务,不能走 uninstall:卸载命令按用户明确请求会撤闸并恢复网卡 IPv6,
     // 那会在替换文件期间制造直连泄漏窗口。新版本安装后由 SCM 重新启动并接管现有闸。
+    //
+    // 这里跑的是**旧版**的 godusevpn-svc.exe。0.6.25-m28 及更早的 Stop() 里是
+    // "if _, err := s.Control(svc.Stop); err != nil { return err }",没有容忍
+    // ERROR_SERVICE_NOT_ACTIVE —— 服务本来就停着(比如用户刚从托盘退出过)时它返回非零,
+    // 于是 m29 新加的这道门会把从 m28 升级的路整个挡死,还给一句"无法安全停止后台服务"。
+    // 停不掉就再用 sc.exe 停一次:真的没有服务在跑就照常升级,别拿它挡住用户。
     if (not Exec(ExpandConstant('{app}\godusevpn-svc.exe'), 'stop', '', SW_HIDE, ewWaitUntilTerminated, rc)) or (rc <> 0) then
     begin
-      Result := '无法安全停止后台服务,升级已中止以保留全局禁直连保护。';
-      exit;
+      Exec(ExpandConstant('{sys}\sc.exe'), 'stop godusevpn', '', SW_HIDE, ewWaitUntilTerminated, rc);
+      // sc stop 的退出码:0 = 停止请求已发出,1062 = 服务本来就没启动,1060 = 服务不存在。
+      // 这三种都说明没有正在跑的服务挡着文件;别的才是真停不掉。
+      if (rc <> 0) and (rc <> 1062) and (rc <> 1060) then
+      begin
+        Result := '无法安全停止后台服务,升级已中止以保留全局禁直连保护。';
+        exit;
+      end;
+      Sleep(3000); // sc stop 是异步的,给它几秒真正退出,免得文件还被占着
     end;
   end;
 end;

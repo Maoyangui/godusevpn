@@ -21,25 +21,64 @@ import (
 	"github.com/Maoyangui/godusevpn/internal/svc"
 )
 
-// Clear 撤闸。返回给用户看的一句话,以及是否真的撤干净了(没撤干净多半是没有管理员 / root 身份)。
+// Clear 撤闸。返回给用户看的一句话,以及网络是不是真的恢复了。
+//
+// 这是用户没网时的**最后一条自救路**:托盘菜单、开始菜单快捷方式、CLI 的 guard clear 都走这里。
+// 所以它自己绝不能因为某一步没做成就整个放弃 —— m29 在"关不掉隐私开关"时直接 return、什么都不做,
+// 等于把唯一的逃生口堵死:用户既没网,也没有任何办法把闸撤掉。
 func Clear() (text string, ok bool) {
+	// 闸没开着就不该去动用户的隐私开关 —— 关开关唯一的理由是"不关的话守护进程下一轮又把闸装回来",
+	// 闸都没装,这个理由不成立。
+	//
+	// 这里的判断必须只看闸。出厂默认是**规则模式**(settings.go:77 Mode=ModeRule),规则模式不装闸
+	// (refresh.go 的 GuardWanted 要求 Mode==Global),但「连接时停用网卡 IPv6」默认开着、连一次就会
+	// 落下备份文件。所以"闸没开 + 有网卡备份"恰恰是默认装机连过一次之后的常态 ——
+	// 要是把这两个条件用 && 连起来当早退条件,这一路就会落到 switchOff(),
+	// 把 NoDirect 和 DisableNICIPv6 一起写成 false 并落盘,而用户只是想把 IPv6 还原回去。
+	// m28 在这里是分开处理的,本版照它来。
+	if n, err := netmode.GuardStatus(); err == nil && n == 0 {
+		if !netmode.NICIPv6Off() {
+			return "闸没有开着,网卡 IPv6 也没被改过 —— 网络本来就是通的,没有改动任何设置。", true
+		}
+		if err := netmode.RestoreNICIPv6(); err != nil {
+			return "闸本来就没开;网卡 IPv6 没能还原回去(" + err.Error() + ")。两个隐私开关都没动。", false
+		}
+		return "闸本来就没开;网卡上被停用的 IPv6 已还原。「全局禁直连」与「连接时停用网卡 IPv6」两个开关都没动。", true
+	}
+
 	switchedOff, switchErr := switchOff()
-	// 守护进程仍然可能在运行,而且下一轮巡检会按设置重新装闸。
-	// 关闭设置失败时不能先删闸,否则会在重连竞态中短暂放行直连。
 	if switchErr != nil {
-		return "无法先关闭全局禁直连/网卡 IPv6 设置,为保护隐私保留现有闸: " + switchErr.Error(), false
+		// 开关关不掉(控制口超时、服务正在崩溃重启)。仍然要往下走把闸撤掉:用户点这个菜单的时候
+		// 多半已经没网了。顺手让它先断开,能少一次"服务重连又把闸装回来"的竞态;断不断得掉都继续。
+		disconnectQuietly()
 	}
 	clearErr := netmode.ClearGuard()
 	restoreErr := netmode.RestoreNICIPv6() // 网卡 IPv6 和闸一样是持久的,恢复网络就该一并还原,不然用户以为好了、v6 还是没有
 	n, _ := netmode.GuardStatus()
-	if n != 0 || clearErr != nil || restoreErr != nil {
+
+	// 三件事分开说。m29 不管哪件失败都统一报成"过滤器还剩 N 条,没删干净",于是只有网卡 IPv6
+	// 没还原时,用户看到的是"过滤器还剩 0 条,没删干净"这种自相矛盾的话,还连累 guard clear 退出码。
+	netOK := clearErr == nil && n == 0
+	var bad []string
+	if !netOK {
 		why := "是不是没用管理员身份跑?"
 		if clearErr != nil {
 			why = clearErr.Error()
-		} else if restoreErr != nil {
-			why = restoreErr.Error()
 		}
-		return fmt.Sprintf("过滤器还剩 %d 条,没删干净(%s)", n, why), false
+		bad = append(bad, fmt.Sprintf("禁直连闸没撤干净,过滤器还剩 %d 条(%s)", n, why))
+	}
+	if restoreErr != nil {
+		bad = append(bad, "网卡 IPv6 没能还原回去("+restoreErr.Error()+"),下次启动服务时会自动再试")
+	}
+	if switchErr != nil {
+		bad = append(bad, "没能关掉「全局禁直连」/「连接时停用网卡 IPv6」两个开关("+switchErr.Error()+"),服务下一次重连可能又把闸装回来;真装回来就去设置 → 隐私里手动关掉")
+	}
+	if len(bad) > 0 {
+		lead := "网络已恢复,但有没做完的:"
+		if !netOK {
+			lead = "没能完全恢复:"
+		}
+		return lead + strings.Join(bad, ";"), netOK && restoreErr == nil
 	}
 	note := ""
 	if w := netmode.GuardWarning(); w != "" {
@@ -49,6 +88,14 @@ func Clear() (text string, ok bool) {
 		return "禁直连闸已解除,网卡 IPv6 也还原了,网络恢复。已顺手关掉「全局禁直连」与「连接时停用网卡 IPv6」两个开关,免得服务一重连又装回来;要再用,去设置 → 隐私打开。" + note, true
 	}
 	return "禁直连闸已解除,直连恢复。要再开闸,启动服务并连接即可。" + note, true
+}
+
+// disconnectQuietly 尽力让守护进程先断开,好让它不再按旧设置重新上闸。连不上控制口就算了 ——
+// 走到这一步本来就是因为控制口有问题,失败不影响下面真正的撤闸动作。
+func disconnectQuietly() {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_ = ipc.Call(ctx, ipc.MDisconnect, nil, nil)
 }
 
 // switchOff 服务活着就把两个开关都关掉;服务不在、或者两个本来就都关着,返回 false。
@@ -63,9 +110,16 @@ func switchOff() (bool, error) {
 		// Only a definitively stopped or uninstalled service may be edited
 		// offline.  Starting/stopping/unknown are treated as live states: the
 		// service may still reconcile the old settings and race the cleanup.
-		status := svc.QueryStatus()
-		if !errors.Is(err, ipc.ErrNoService) || (status != "stopped" && status != "not-installed") {
-			return false, fmt.Errorf("读取服务隐私设置失败: %w", err)
+		// 控制口不在(ErrNoService)就说明此刻没有守护进程在应答。m29 还额外要求服务状态必须是
+		// stopped / not-installed,而崩溃重启窗口里的 START_PENDING、Windows 那种"已报 Running 但
+		// 控制口还没起来"、launchctl 有 pid 但进程卡死,统统被判成"活着"→ 拒绝离线改写 →
+		// 「恢复网络」整个失败。而这恰恰是最需要它管用的时刻。
+		//
+		// 离线改写改的是设置**文件**:守护进程下次起来读的就是新值,所以"正在启动"反而是最该改的状态。
+		// 真正剩下的风险只有"进程还活着、内存里揣着旧设置、之后又按旧设置上闸",这一条由上面的
+		// disconnectQuietly 和返回文案里的提醒兜住,不值得拿整条逃生路去换。
+		if !errors.Is(err, ipc.ErrNoService) {
+			return false, fmt.Errorf("读取服务隐私设置失败(服务状态: %s): %w", svc.QueryStatus(), err)
 		}
 		if err := paths.Ensure(); err != nil {
 			return false, fmt.Errorf("准备离线设置目录失败: %w", err)
@@ -73,6 +127,8 @@ func switchOff() (bool, error) {
 		var offline settings.Settings
 		offline, err = settings.Load(paths.Settings())
 		if err != nil {
+			// 设置文件坏了就没法安全地"只改两项"(写回去会把别的都抹掉)。但这不该拦住撤闸:
+			// Clear 现在会带着这个错误继续往下走,先把网还给用户。
 			return false, fmt.Errorf("读取离线隐私设置失败: %w", err)
 		}
 		if !offline.NoDirect && !offline.DisableNICIPv6 {

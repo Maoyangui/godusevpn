@@ -19,7 +19,8 @@ import (
 //
 // 备份记的是"动手之前每张网卡各是什么状态",不是"我关掉了哪几张" —— 本机实测发现关掉某张网卡会连带
 // 让 Hyper-V 的虚拟网卡也变成关闭,只记自己动过的那几张,还原时会漏掉被连累的。按全量状态还原就不会漏。
-// 断开时按备份还原;守护进程启动时也无条件还原一次,上次崩溃退出也不会把用户的 IPv6 永久关掉。
+// 断开时按备份还原;守护进程启动时对账一次:上次不是连着关的机(或者设置已关掉这一项)就还原回去,
+// 上次是连着关的机就接着关着 —— 它和「全局禁直连」的闸一样是持久的。连接状态读不出来时改看闸还在不在。
 // 本来就是关闭状态的网卡记下来但不动,还原时也不去开它 —— 那是用户自己关的。
 
 func nicBackup() string { return filepath.Join(paths.DataDir(), "nic-ipv6-backup.txt") }
@@ -37,14 +38,20 @@ $tun = '` + psQuote(tunName) + `'
 $all = @(Get-NetAdapterBinding -ComponentID ms_tcpip6 | Where-Object { $_.Name -ne $tun })
 $b = '` + psQuote(nicBackup()) + `'
 $known = @{}
+$bad = $false
 $old = @()
 if (Test-Path -LiteralPath $b) {
   $old = @(Get-Content -Encoding utf8 -LiteralPath $b)
   foreach ($line in $old) {
     $p = $line -split "` + "\t" + `", -1
-    if ($p.Count -ne 2 -or [string]::IsNullOrWhiteSpace($p[0]) -or $p[1] -notmatch '^(True|False)$' -or $known.ContainsKey($p[0])) { throw 'IPv6 备份格式无效' }
+    if ($p.Count -ne 2 -or [string]::IsNullOrWhiteSpace($p[0]) -or $p[1] -notmatch '^(True|False)$' -or $known.ContainsKey($p[0])) { $bad = $true; break }
     $known[$p[0]] = $true
   }
+}
+if ($bad) {
+  Move-Item -LiteralPath $b -Destination ($b + '.bad') -Force -ErrorAction SilentlyContinue
+  Write-Output 'GODUSEVPN-PARTIAL: 网卡 IPv6 备份文件已损坏,已挪到 nic-ipv6-backup.txt.bad。里面记的原始状态没了 —— 如果某些网卡的 IPv6 现在是关着的,需要手动在「网络适配器属性」里把「Internet 协议版本 6」勾回来。这一轮不动任何网卡。'
+  exit 0
 }
 $new = @($all | Where-Object { -not $known.ContainsKey($_.Name) } | ForEach-Object { $_.Name + "` + "\t" + `" + $_.Enabled })
 if ($new.Count -gt 0) {
@@ -59,14 +66,48 @@ if ($new.Count -gt 0) {
   if ($check.Count -ne @($old + $new).Count) { throw 'IPv6 备份落盘校验失败' }
   for ($i = 0; $i -lt $check.Count; $i++) { if ($check[$i] -ne @($old + $new)[$i]) { throw 'IPv6 备份内容校验失败' } }
 }
-foreach ($a in $all) { if ($a.Enabled) { Disable-NetAdapterBinding -Name $a.Name -ComponentID ms_tcpip6 -ErrorAction Stop } }
-$remaining = @($all | ForEach-Object { Get-NetAdapterBinding -Name $_.Name -ComponentID ms_tcpip6 -ErrorAction Stop } | Where-Object { $_.Enabled })
-if ($remaining.Count -gt 0) { throw ('IPv6 绑定停用校验失败: ' + (($remaining | ForEach-Object Name) -join ', ')) }
+$failed = @()
+foreach ($a in $all) {
+  if (-not $a.Enabled) { continue }
+  try { Disable-NetAdapterBinding -Name $a.Name -ComponentID ms_tcpip6 -ErrorAction Stop }
+  catch { $failed += ($a.Name + ': ' + $_.Exception.Message) }
+}
+foreach ($a in $all) {
+  try { $st = Get-NetAdapterBinding -Name $a.Name -ComponentID ms_tcpip6 -ErrorAction Stop } catch { continue }
+  if ($st.Enabled) { $failed += ($a.Name + ': 停用后仍是启用状态') }
+}
+if ($failed.Count -gt 0) { Write-Output ('GODUSEVPN-PARTIAL: ' + ($failed -join '; ')) }
 `
-	if out, err := runPS(script); err != nil {
-		return fmt.Errorf("停用网卡 IPv6: %w(%s)", err, out)
+	out, err := runPS(script)
+	if err != nil {
+		return nicResult(tunName, []string{fmt.Sprintf("%v(%s)", err, out)})
 	}
+	if p := psMark(out, markPartial); p != "" {
+		// 有网卡没停成(在脚本跑的这几秒里被拔掉 / 被系统销毁,或者驱动不让改绑定)。
+		// m29 在这里整体抛错,而 prepare 拿它当连接前置 —— 于是一张 Wi-Fi Direct 虚拟网卡的生灭
+		// 就能让人连不上。交给 nicResult:真有公网 v6 露在外面才算失败。
+		return nicResult(tunName, []string{p})
+	}
+	setNICWarning("")
 	return nil
+}
+
+// runPS 脚本里用这两个记号把"部分失败"和"网卡已消失"带回来 —— PowerShell 的退出码只有一个,
+// 区分不了"整件事崩了"和"有几张网卡没动成",而这两者在这里的处理完全不同。
+const (
+	markPartial = "GODUSEVPN-PARTIAL: "
+	markFailed  = "GODUSEVPN-FAILED: "
+	markGone    = "GODUSEVPN-GONE: "
+)
+
+// psMark 从脚本输出里取出某个记号后面的内容;没有就返回空串。
+func psMark(out, mark string) string {
+	for _, ln := range strings.Split(out, "\n") {
+		if v, ok := strings.CutPrefix(strings.TrimSpace(ln), mark); ok {
+			return strings.TrimSpace(v)
+		}
+	}
+	return ""
 }
 
 // RestoreNICIPv6 按备份把 IPv6 绑定装回原样。没有备份就什么都不做(没动过,别去碰用户自己的设置)。
@@ -77,28 +118,71 @@ func RestoreNICIPv6() error {
 		}
 		return err
 	}
+	// 只把记成 True 的网卡开回去。记成 False 的是"动手之前它本来就是关的"——
+	// 停用那一步压根没碰过它们(只 Disable 了 Enabled 的),还原时更不该去动:
+	// 文件开头写的就是"本来就是关闭状态的网卡记下来但不动,还原时也不去开它"。
+	// m29 给 False 行加了主动 Disable,除了凭空多出一堆失败点,没有任何作用。
+	//
+	// 备份里的网卡消失是常事:拔掉 USB 网卡、Wi-Fi Direct 虚拟网卡被系统销毁、Wintun 被删、网卡改名。
+	// m29 在 $ErrorActionPreference='Stop' 下让它中断整个循环,于是**排在它后面的网卡一张都不还原**,
+	// 而且 Go 侧提前 return 让备份永远删不掉 —— 用户的 IPv6 被永久关着,产品也永远卸不干净。
+	// 这里逐张 try/catch:网卡已经不在了就当无需还原,只有"网卡在、但还原失败"才留在备份里下次重试。
 	script := `
 $ErrorActionPreference = 'Stop'
 $f = '` + psQuote(nicBackup()) + `'
+$lines = @(Get-Content -Encoding utf8 -LiteralPath $f)
 $seen = @{}
-foreach ($line in @(Get-Content -Encoding utf8 -LiteralPath $f)) {
+$left = @()
+$failed = @()
+$gone = @()
+foreach ($line in $lines) {
+  if ([string]::IsNullOrWhiteSpace($line)) { continue }
   $p = $line -split "` + "\t" + `", -1
-  if ($p.Count -ne 2 -or [string]::IsNullOrWhiteSpace($p[0]) -or $p[1] -notmatch '^(True|False)$' -or $seen.ContainsKey($p[0])) { throw 'IPv6 备份格式无效' }
+  if ($p.Count -ne 2 -or [string]::IsNullOrWhiteSpace($p[0]) -or $p[1] -notmatch '^(True|False)$' -or $seen.ContainsKey($p[0])) {
+    $failed += ('备份行无效: ' + $line)
+    $left += $line
+    continue
+  }
   $seen[$p[0]] = $true
-  if ($p[1] -eq 'True') {
+  if ($p[1] -ne 'True') { continue }
+  try {
     Enable-NetAdapterBinding -Name $p[0] -ComponentID ms_tcpip6 -ErrorAction Stop
-    $state = Get-NetAdapterBinding -Name $p[0] -ComponentID ms_tcpip6 -ErrorAction Stop
-    if (-not $state.Enabled) { throw "IPv6 binding restore verification failed: $($p[0])" }
-  } else {
-    Disable-NetAdapterBinding -Name $p[0] -ComponentID ms_tcpip6 -ErrorAction Stop
-    $state = Get-NetAdapterBinding -Name $p[0] -ComponentID ms_tcpip6 -ErrorAction Stop
-    if ($state.Enabled) { throw "IPv6 binding restore verification failed: $($p[0])" }
+    $st = Get-NetAdapterBinding -Name $p[0] -ComponentID ms_tcpip6 -ErrorAction Stop
+    if (-not $st.Enabled) { $failed += ($p[0] + ': 还原后仍是停用状态'); $left += $line }
+  } catch {
+    if (Get-NetAdapter -Name $p[0] -ErrorAction SilentlyContinue) {
+      $failed += ($p[0] + ': ' + $_.Exception.Message)
+      $left += $line
+    } else {
+      $gone += $p[0]
+    }
   }
 }
+if ($left.Count -gt 0) {
+  $tmp = $f + '.tmp'
+  $utf8 = New-Object System.Text.UTF8Encoding($false)
+  $fs = New-Object System.IO.FileStream($tmp, [System.IO.FileMode]::Create, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+  $sw = New-Object System.IO.StreamWriter($fs, $utf8)
+  foreach ($line in $left) { $sw.WriteLine($line) }
+  $sw.Flush(); $fs.Flush($true); $sw.Dispose()
+  Move-Item -LiteralPath $tmp -Destination $f -Force
+} else {
+  Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue
+}
+if ($failed.Count -gt 0) { Write-Output ('GODUSEVPN-FAILED: ' + ($failed -join '; ')) }
+if ($gone.Count -gt 0) { Write-Output ('GODUSEVPN-GONE: ' + ($gone -join ', ')) }
 `
-	if out, err := runPS(script); err != nil {
+	out, err := runPS(script)
+	if err != nil {
 		return fmt.Errorf("还原网卡 IPv6: %w(%s)", err, out)
 	}
+	if f := psMark(out, markFailed); f != "" {
+		return fmt.Errorf("还原网卡 IPv6: %s", f)
+	}
+	if g := psMark(out, markGone); g != "" {
+		setNICWarning("这些网卡已经不在了,当作无需还原: " + g)
+	}
+	// 脚本里已经删过一次;这里兜一下,免得脚本那步被杀掉之后下次启动反复还原。
 	if err := os.Remove(nicBackup()); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("删除 IPv6 备份: %w", err)
 	}

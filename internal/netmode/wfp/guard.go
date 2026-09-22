@@ -31,8 +31,6 @@ type baseObjects struct {
 	filters  windows.GUID
 }
 
-const providerServiceName = "godusevpn"
-
 // 固定 GUID:换进程、换版本都不变,恢复命令与卸载程序靠它找对象。
 var (
 	providerKey = windows.GUID{Data1: 0x6f6d9e2c, Data2: 0x3a41, Data3: 0x4b8e, Data4: [8]byte{0x9d, 0x55, 0x67, 0x6f, 0x64, 0x75, 0x73, 0x65}}
@@ -86,18 +84,60 @@ func openSession() (uintptr, error) {
 	return h, nil
 }
 
+// baseProvider 造我们的 WFP 提供者。
+//
+// **绝对不要给它填 serviceName。** FWPM_PROVIDER0.serviceName 的语义是"这套策略只在这个
+// Windows 服务运行时有效":服务一不在 Running,BFE 就把该提供者名下的**全部**过滤器标成
+// FWPM_FILTER_FLAG_DISABLED。而本包存在的全部意义就是闸要在进程之外活着(见包注释)——
+// 服务停止、崩溃待重启、升级换文件、开机后 BFE 起来到服务被 SCM 拉起来那一段,恰恰是闸唯一
+// 有用的时刻。更要命的是服务 ACL 有意开放给已登录用户启停(internal/svc.userStartStopSDDL,
+// 托盘「退出」要用),绑上服务名等于任何普通用户一句 sc stop godusevpn 就能关掉「全局禁直连」,
+// 全程不弹 UAC。m29 的 f183df1 绑过一次,这里钉死:serviceName 必须是 nil。
+func baseProvider(dd *wtFwpmDisplayData0) wtFwpmProvider0 {
+	return wtFwpmProvider0{providerKey: providerKey, displayData: *dd, flags: fwpProviderFlagPersistent}
+}
+
+// dropLegacyServiceBoundProvider 把升级前遗留的、绑了服务名的提供者删掉,好让 ensureBase 重建一个不绑的。
+//
+// 只在此刻一条过滤器都没有时才做。原因见 Disable 的注释:换提供者必须"先删过滤器并提交、
+// 再删子层与提供者",同一个事务里删子层会被 BFE 判成还被引用。两个事务之间是没有闸的 ——
+// 闸本来就没开的时候做,才不会凭空制造一个直连窗口。闸开着就原样留下并告警,等用户下次断开
+// (Disable 会连提供者一起删)自然换掉。
+//
+// 任何一步失败都只返回警告:开闸这件事绝不能因为收拾旧账而失败,否则用户只能去关「全局禁直连」。
+func dropLegacyServiceBoundProvider(s uintptr) string {
+	bound, known := providerServiceBound(s, &providerKey)
+	if !known || !bound {
+		return ""
+	}
+	keys, err := ourFilterKeys(s)
+	if err != nil {
+		return "旧版遗留的提供者绑着服务名(服务一停闸就失效),这次没换掉: " + err.Error()
+	}
+	if len(keys) != 0 {
+		return "旧版遗留的提供者绑着服务名(服务一停闸就失效);闸正开着,换它会有一瞬没有保护,已留到下次断开时处理"
+	}
+	if err := runTransaction(s, func(s uintptr) error {
+		if err := fwpmSubLayerDeleteByKey0(s, &sublayerKey); err != nil && !notFound(err) {
+			return wrapErr(err)
+		}
+		if err := fwpmProviderDeleteByKey0(s, &providerKey); err != nil && !notFound(err) {
+			return wrapErr(err)
+		}
+		return nil
+	}); err != nil {
+		return "旧版遗留的提供者绑着服务名(服务一停闸就失效),这次没换掉: " + err.Error()
+	}
+	return ""
+}
+
 // ensureBase 提供者与子层:没有就建(持久),已有就沿用。
 func ensureBase(session uintptr) error {
 	dd, err := createWtFwpmDisplayData0("godusevpn", "godusevpn provider")
 	if err != nil {
 		return wrapErr(err)
 	}
-	provider := wtFwpmProvider0{providerKey: providerKey, displayData: *dd, flags: fwpProviderFlagPersistent}
-	serviceName, err := windows.UTF16PtrFromString(providerServiceName)
-	if err != nil {
-		return err
-	}
-	provider.serviceName = serviceName
+	provider := baseProvider(dd)
 	if err := fwpmProviderAdd0(session, &provider, 0); err != nil && !errors.Is(err, fwpEAlreadyExists) {
 		return wrapErr(err)
 	}
@@ -164,8 +204,15 @@ func installForward(session uintptr, spec Spec) error {
 	return blockForward(session, base, 0)
 }
 
-// Enable 开闸(幂等):删除旧过滤器并安装持久/开机/转发三组过滤器必须在同一
-// WFP 事务中完成。任一组失败都会回滚，旧闸继续存在，绝不留下半套保护。
+// Enable 开闸(幂等)。
+//
+// 运行期那组(PERSISTENT)是闸本身:删旧的与装新的必须在同一个事务里,失败就回滚、旧闸原样留着,
+// 绝不留下半套保护 —— 这一组装不上就是真的没保护,报错是对的。
+//
+// 开机那两组(BOOTTIME)只覆盖"内核网络起来到 BFE 启动"那几秒,装不上不等于此刻在漏。
+// 把它们并进同一个事务、失败即整体回滚(m29 的 f183df1 就是这么改的),等于让一个只影响开机
+// 几秒的问题把用户整个挡在门外 —— 而用户挡不住就会去关掉「全局禁直连」,反倒更不私密。
+// 所以各自一个事务,失败记成警告,由界面与日志如实报出来。
 func Enable(spec Spec) (warn string, err error) {
 	mu.Lock()
 	defer mu.Unlock()
@@ -174,6 +221,7 @@ func Enable(spec Spec) (warn string, err error) {
 		return "", err
 	}
 	defer fwpmEngineClose0(s)
+	legacyWarn := dropLegacyServiceBoundProvider(s)
 	if err = runTransaction(s, func(s uintptr) error {
 		if err := ensureBase(s); err != nil {
 			return err
@@ -182,21 +230,36 @@ func Enable(spec Spec) (warn string, err error) {
 			return err
 		}
 		curFlags = cFWPM_FILTER_FLAG_PERSISTENT
-		if err := installSet(s, spec, true, true); err != nil {
-			return err
-		}
-		curFlags = cFWPM_FILTER_FLAG_BOOTTIME
-		if err := installSet(s, spec, false, false); err != nil {
-			return fmt.Errorf("开机保护过滤器安装失败: %w", err)
-		}
-		if err := installForward(s, spec); err != nil {
-			return fmt.Errorf("开机转发保护过滤器安装失败: %w", err)
-		}
-		return nil
+		return installSet(s, spec, true, true)
 	}); err != nil {
 		return "", fmt.Errorf("全局禁直连过滤器事务回滚,保留旧保护: %w", err)
 	}
-	return warn, nil
+	if err := runTransaction(s, func(s uintptr) error {
+		curFlags = cFWPM_FILTER_FLAG_BOOTTIME
+		return installSet(s, spec, false, false)
+	}); err != nil {
+		warn = fmt.Sprintf("开机那组过滤器没装上(开机到 BFE 启动之间那几秒不受保护): %v", err)
+	}
+	// 转发层的开机过滤器另起一个事务:它装不上只影响开机那几秒经本机转发的流量(热点共享),
+	// 别连累上面那组。
+	if err := runTransaction(s, func(s uintptr) error {
+		curFlags = cFWPM_FILTER_FLAG_BOOTTIME
+		return installForward(s, spec)
+	}); err != nil {
+		warn = joinWarn(warn, fmt.Sprintf("开机转发那组过滤器没装上(开机那几秒经本机转发的流量不受保护): %v", err))
+	}
+	return joinWarn(warn, legacyWarn), nil
+}
+
+func joinWarn(a, b string) string {
+	switch {
+	case a == "":
+		return b
+	case b == "":
+		return a
+	default:
+		return a + ";" + b
+	}
 }
 
 // BootGuardReady verifies that at least one enabled BOOTTIME filter owned by
@@ -318,22 +381,38 @@ func guardCovers(fs []filterInfo, required wtFwpmFilterFlags) bool {
 	return len(covered) == len(ourLayers())
 }
 
-// PersistentGuardReady requires both the runtime and boot-time block sets to
-// cover every protected layer. Count intentionally remains a raw count for
-// diagnostics and cleanup callers.
+// PersistentGuardReady 核查的是**运行期**那组(PERSISTENT):它要覆盖我们保护的每一层。
+// 这一组是闸本身 —— 它在,进程死了、崩了、换文件了、重启了,闸都还在;它不在就是真的没保护,
+// 所以守护进程拿它当启动前的硬条件是合理的、而且在 Windows 上一定满足得了。
+//
+// 开机那组(BOOTTIME)**不**在这里要求:它只覆盖开机到 BFE 启动之间那几秒,装不上不代表此刻在漏。
+// m29 曾把它也并进来,于是"开机组少一条"就等于 Windows 上全局模式完全连不上。它的状态由
+// BootGuardReady 单独报,并经 GuardWarning 如实告诉用户。
+// Count 仍然是给诊断和收尾用的原始条数。
 func PersistentGuardReady() (bool, error) {
+	fs, err := currentFilters()
+	if err != nil {
+		return false, err
+	}
+	return persistentGuardReady(fs), nil
+}
+
+// persistentGuardReady 拆出来只为可测:真机上没法造一组过滤器,但这条判据正是"Windows 上能不能连"
+// 的开关,必须钉住 —— 上一版就是只改了这里的注释、函数体原样留着 AND BOOTTIME,等于什么都没改。
+func persistentGuardReady(fs []filterInfo) bool {
+	return guardCovers(fs, cFWPM_FILTER_FLAG_PERSISTENT)
+}
+
+// currentFilters 开一次会话把我们名下的过滤器全取出来。
+func currentFilters() ([]filterInfo, error) {
 	mu.Lock()
 	defer mu.Unlock()
 	s, err := openSession()
 	if err != nil {
-		return false, err
+		return nil, err
 	}
 	defer fwpmEngineClose0(s)
-	fs, err := ourFilters(s)
-	if err != nil {
-		return false, err
-	}
-	return guardCovers(fs, cFWPM_FILTER_FLAG_PERSISTENT) && guardCovers(fs, cFWPM_FILTER_FLAG_BOOTTIME), nil
+	return ourFilters(s)
 }
 
 // deleteOurFilters 删掉提供者名下的全部过滤器(四个 ALE 层,含开机那组)。

@@ -84,8 +84,17 @@ func main() {
 		if err := netmode.ClearGuard(); err != nil {
 			fail(fmt.Errorf("撤销全局禁直连失败,未执行卸载: %w", err))
 		}
+		// 网卡 IPv6 没还原**不能**挡住卸载。它和闸不是一回事:闸还在等于机器断网、删掉工具就锁死,
+		// 所以上面那道门必须守住;而网卡 IPv6 关着顶多是某几张网卡没有 v6,网照常能上。
+		// m29 把这两件事同等对待,于是一张早就拔掉的 USB 网卡就能让产品永远卸不掉。
+		// 这里改成:如实报出来、告诉用户怎么手动开回去,然后照常卸载。
 		if err := netmode.RestoreNICIPv6(); err != nil {
-			fail(fmt.Errorf("还原网卡 IPv6 失败,未执行卸载: %w", err))
+			fmt.Println("注意:网卡 IPv6 没能还原回去:", err)
+			if runtime.GOOS == "darwin" {
+				fmt.Println("卸载继续。要手动开回去:系统设置 → 网络 → 详细信息 → TCP/IP,把「配置 IPv6」改回「自动」。")
+			} else {
+				fmt.Println("卸载继续。要手动开回去:sysctl -w net.ipv6.conf.<网卡>.disable_ipv6=0")
+			}
 		}
 		if err := svc.Uninstall(); err != nil {
 			fail(err)

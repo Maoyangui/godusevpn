@@ -41,11 +41,20 @@ fi
 
 [ -f "$SRC/godusevpn" ] || { echo "包里没有 godusevpn,可能下错了架构"; exit 1; }
 
-# 先停旧服务再换文件:升级不能走 uninstall,那是用户明确“卸载”语义,
+# 先停旧服务再换文件:升级不能走 uninstall,那是用户明确"卸载"语义,
 # 会撤持久禁直连闸并恢复网卡 IPv6,在替换文件期间制造直连泄漏窗口。
-if [ -x /usr/local/bin/godusevpn ]; then /usr/local/bin/godusevpn stop >/dev/null 2>&1; fi
+# macOS 这边 Stop() 是先 needRoot 再 launchctl bootout:作业正在退出、或者 launchd 拒绝时会返回非零。
+# 这里是 set -e —— m29 去掉 || true 之后,这一下就能让整个升级脚本无声退出,
+# 用户看到的只是"跑完了但版本没变"。(m28 这一行本来是 uninstall,不是 stop。)
+# 至于"还在不在跑",不用 status 去猜:覆盖正在运行的可执行文件时系统会返回 ETXTBSY,那才是真的还占着。
+if [ -x /usr/local/bin/godusevpn ]; then /usr/local/bin/godusevpn stop >/dev/null 2>&1 || true; fi
 mkdir -p /usr/local/bin
-install -m 755 "$SRC/godusevpn" /usr/local/bin/godusevpn
+if ! install -m 755 "$SRC/godusevpn" /usr/local/bin/godusevpn; then
+  echo "写不进 /usr/local/bin/godusevpn,升级中止。"
+  echo "提示 Text file busy 的话说明旧的后台服务还占着这个文件,先手动停掉再重跑:"
+  echo "  sudo /usr/local/bin/godusevpn stop"
+  exit 1
+fi
 
 if [ -d "$SRC/godusevpn.app" ]; then
   rm -rf /Applications/godusevpn.app

@@ -38,13 +38,16 @@ func Protect(_ string, _ bool) error {
 	haveBackup := false
 	backupChanged := false
 	if b, readErr := os.ReadFile(dnsBackup()); readErr == nil {
-		if err := json.Unmarshal(b, &saved); err != nil {
-			return fmt.Errorf("读取已有 DNS 备份失败: %w", err)
+		if err := json.Unmarshal(b, &saved); err != nil || saved == nil {
+			// 备份坏了(0 字节、被截断、手工改过)不能两头堵死:Protect 因此拒绝连接、
+			// UnprotectChecked 因此永远还不了 DNS,用户既上不了网也修不好,而且没有任何自愈路径。
+			// 挪到 .bad 留证,然后按"没有备份"重建 —— currentDNS 会把我们自己的隧道地址滤掉,
+			// 所以重建出来的要么是用户真正的 DNS,要么是空(跟随 DHCP),后者正是 macOS 的出厂状态。
+			_ = os.Rename(dnsBackup(), dnsBackup()+".bad")
+			saved = map[string][]string{}
+		} else {
+			haveBackup = true
 		}
-		if saved == nil {
-			return fmt.Errorf("读取已有 DNS 备份失败:内容不是对象")
-		}
-		haveBackup = true
 	} else if !os.IsNotExist(readErr) {
 		return fmt.Errorf("读取已有 DNS 备份失败: %w", readErr)
 	}
@@ -106,10 +109,10 @@ func UnprotectChecked() error {
 	}
 	var saved map[string][]string
 	if err := json.Unmarshal(b, &saved); err != nil || saved == nil {
-		if err == nil {
-			err = fmt.Errorf("内容不是对象")
-		}
-		return fmt.Errorf("解析 DNS 备份失败: %w", err)
+		// 备份坏了就再也还不了 DNS,用户断开之后解析器指着隧道地址、而隧道已经没了 —— 等于没网,
+		// 且怎么点都修不好。原值是找不回来了,但至少要把解析恢复成能用的:凡是此刻还指着我们
+		// 隧道 DNS 的服务,一律改回"跟随 DHCP"(macOS 的出厂状态),然后把坏备份挪走让它自愈。
+		return restoreHijackedDNSBlind()
 	}
 	var errs []string
 	for s, addrs := range saved {
@@ -131,6 +134,53 @@ func UnprotectChecked() error {
 		return fmt.Errorf("删除 DNS 备份失败: %w", err)
 	}
 	return nil
+}
+
+// restoreHijackedDNSBlind 没有可用备份时的兜底还原:把 DNS 仍指着隧道地址的网络服务改回跟随 DHCP。
+// 只动"确实是我们改过的"那些(当前值就是 builder.HijackDNS),绝不碰用户自己配的 DNS。
+func restoreHijackedDNSBlind() error {
+	svcs, err := networkServices()
+	if err != nil {
+		return fmt.Errorf("DNS 备份已损坏,且列不出网络服务: %w", err)
+	}
+	var errs []string
+	for _, s := range svcs {
+		out, err := exec.Command("networksetup", "-getdnsservers", s).Output()
+		// builder.HijackDNS 是 223.5.5.5 —— 一个真实存在的公共 DNS,用户完全可能自己就填了它。
+		// 所以不能用 Contains 去猜"这是我们改的":只有整份列表**恰好就这一条**才算数。
+		// 我们接管时写的就是单独一条(Protect 里的 -setdnsservers <svc> <HijackDNS>),
+		// 而用户自己填 223.5.5.5 时几乎总会再配一条备用,不会只有一条。
+		if err != nil || !onlyHijackDNS(string(out)) {
+			continue
+		}
+		if out, err := exec.Command("networksetup", "-setdnsservers", s, "Empty").CombinedOutput(); err != nil {
+			errs = append(errs, fmt.Sprintf("%s: %s", s, strings.TrimSpace(string(out))))
+		}
+	}
+	flushDNS()
+	if len(errs) > 0 {
+		return fmt.Errorf("DNS 备份已损坏,兜底还原也没做完: %s", strings.Join(errs, "; "))
+	}
+	// 坏备份挪走,下一次接管就是干净的一轮。
+	_ = os.Rename(dnsBackup(), dnsBackup()+".bad")
+	return nil
+}
+
+// onlyHijackDNS networksetup -getdnsservers 的输出是不是"只有我们那一条隧道 DNS"。
+// 没配 DNS 时它回的是一句带空格的提示(There aren't any DNS Servers set on ...),不会被误判。
+func onlyHijackDNS(out string) bool {
+	n := 0
+	for _, ln := range strings.Split(strings.TrimSpace(out), "\n") {
+		ln = strings.TrimSpace(ln)
+		if ln == "" || strings.ContainsAny(ln, " ") {
+			continue
+		}
+		if ln != builder.HijackDNS {
+			return false
+		}
+		n++
+	}
+	return n == 1
 }
 
 // Unprotect 保持历史调用方的幂等接口；需要向用户报告结果的路径使用

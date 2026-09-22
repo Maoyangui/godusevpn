@@ -171,6 +171,11 @@ func (d *Daemon) guardSpec() netmode.GuardSpec {
 
 // syncGuard 把闸的状态和"该不该开"对齐。连接意愿、模式、设置变了都要调一次;幂等。
 func (d *Daemon) syncGuard() {
+	if !d.settingsTrusted() {
+		// 设置读不出来时手上是默认值(模式=规则),据此判出来的"不该有闸"是猜的,不是用户的意思。
+		// 保持现状:该有的闸留着,不该有的也不去装。用户保存一次设置就恢复正常。
+		return
+	}
 	d.guardMu.Lock()
 	defer d.guardMu.Unlock()
 	want := d.GuardWanted()
@@ -285,6 +290,12 @@ func (d *Daemon) applyGuard(okMsg string) {
 	if w := netmode.GuardWarning(); w != "" {
 		d.logf("全局禁直连:%s", w)
 	}
+	if w := netmode.NICWarning(); w != "" {
+		d.logf("网卡 IPv6:%s", w)
+	}
+	if w := netmode.RouteWarning(); w != "" {
+		d.logf("回包路由:%s", w)
+	}
 	if d.core.Running() {
 		d.guardTunUp()
 	}
@@ -294,9 +305,20 @@ func (d *Daemon) applyGuard(okMsg string) {
 // 上次是断开状态、或不是全局、或开关关了,就把残留的清掉;该在的立刻装上(幂等)——
 // 别让"服务起来 → 连上"这几秒漏出去(重启的话开机那组过滤器已经挡到这里了)。
 func (d *Daemon) reconcileGuard() {
+	if !d.settingsTrusted() {
+		d.logf("全局禁直连:设置读不出来,保持现状(不撤闸也不开闸)")
+		return
+	}
 	s := d.getSettings()
 	p := d.loadPersisted()
 	if !d.persistedStateOK() {
+		// 全新安装、或者刚清过数据的机器根本没有状态文件,这是最正常不过的事。
+		// m29 在这里无条件 setGuard(true, "连接状态不可读…"),于是第一次打开客户端,
+		// 首页就挂着一条"禁直连有异常 · 连接状态不可读"的橙色告警 —— 什么毛病都没有。
+		// 只有闸确实还在、真有东西要保留的时候,才值得说这一句。
+		if n, err := netmode.GuardStatus(); err == nil && n == 0 {
+			return
+		}
 		d.setGuard(true, "连接状态不可读,保留全局禁直连保护")
 		d.logf("全局禁直连:连接状态不可读,不撤闸")
 		return

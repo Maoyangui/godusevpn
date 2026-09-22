@@ -43,8 +43,22 @@ else
   SRC="$TMP/godusevpn"
 fi
 
-if [ -x "$BIN_DIR/godusevpn" ]; then "$BIN_DIR/godusevpn" stop >/dev/null 2>&1; fi
-install -m 755 "$SRC" "$BIN_DIR/godusevpn"
+# 旧版二进制的 stop 在"服务本来就没跑"时未必返回 0:0.6.25-m28 及更早的 Linux 版 Stop() 就是
+# 一句 systemctl / init.d stop 的原样透传,OpenWrt 的 init 脚本、systemd 里 unit 已不存在,都会非零。
+# 这里是 set -e —— m29 去掉 || true 之后,这种完全正常的情况会让整个升级脚本无声退出,
+# 用户看到的只是"跑完了但版本没变"。
+#
+# 也不要拿 `godusevpn status` 去判"还在不在跑":Entware(梅林这类路由器)那边的 QueryStatus 是
+# `pidof godusevpn`,而此刻正在跑这条命令的**就是** godusevpn 自己 —— 它永远报 running,
+# 升级会被永久挡死。改用一个不会自指的判据:直接写文件,Linux / macOS 在覆盖正在运行的可执行文件时
+# 会返回 ETXTBSY(Text file busy),那才是真的"还占着"。
+if [ -x "$BIN_DIR/godusevpn" ]; then "$BIN_DIR/godusevpn" stop >/dev/null 2>&1 || true; fi
+if ! install -m 755 "$SRC" "$BIN_DIR/godusevpn"; then
+  echo "写不进 $BIN_DIR/godusevpn,升级中止。"
+  echo "提示 Text file busy 的话说明旧的后台服务还占着这个文件,先手动停掉再重跑:"
+  echo "  $BIN_DIR/godusevpn stop"
+  exit 1
+fi
 "$BIN_DIR/godusevpn" install
 echo
 echo "常用命令: godusevpn status | connect | disconnect | mode rule|global|direct | nodes | passwd | logs"

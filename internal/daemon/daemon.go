@@ -46,10 +46,13 @@ type Daemon struct {
 	nicOff            atomic.Bool  // 各网卡的 IPv6 绑定已由我们停掉、还没还原(和闸一样,跨内核重启 / 服务重启一直有效)
 	nicDisablePending atomic.Bool  // partial disable must be retried even before a public address appears
 	nicMu             sync.Mutex   // syncNICIPv6 串行化:停用那一步要起 PowerShell,不能两个一起跑
-	probeMu           sync.Mutex
-	probeAt           time.Time // auto 组上次测完一轮全部节点的时间,autoProbeLoop 按它算下一次
-	core              *core.Core
-	settings          settings.Settings
+	// lastNICWarn 上一次打过的网卡 IPv6 告警。巡检每 30 秒跑一次,同一句话不重复刷日志;
+	// 但产生了就必须有人读到 —— 不然 setNICWarning 等于写进黑洞。
+	lastNICWarn string
+	probeMu     sync.Mutex
+	probeAt     time.Time // auto 组上次测完一轮全部节点的时间,autoProbeLoop 按它算下一次
+	core        *core.Core
+	settings    settings.Settings
 	// settingsGeneration changes on every persisted settings update. A prepare
 	// can run for minutes while the user edits settings; the generation binds a
 	// rendered config to the exact settings snapshot that produced it.
@@ -69,6 +72,10 @@ type Daemon struct {
 	tunUpPending atomic.Bool
 	guardErr     string // 闸该开却没开成的原因
 	persistedOK  bool   // persisted 状态文件可被可靠读取;未知时不撤保护、不自动连接
+	// settingsOK 设置文件读出来了。读不出来时用的是默认值,而默认值(模式=规则)会让
+	// syncGuard 判定"不该有闸"、syncNICIPv6 判定"该还原" —— 等于拿一份猜出来的设置去放宽用户的保护。
+	// 所以未知时一律保持现状:不撤闸、不还原网卡 IPv6、不自动连接。用户在界面里保存一次设置就恢复正常。
+	settingsOK bool
 	// guardApplied 闸现在实际按哪份规格装着。设置里改了「局域网直通」/ 网关模式之后要据此重装 ——
 	// 闸是持久的,只看"在不在"的话,连着的时候改这两项永远不生效。
 	guardApplied netmode.GuardSpec
@@ -151,10 +158,15 @@ func NewWithOptions(o Options) (*Daemon, error) {
 		d.core.SetPlatform(o.Platform)
 	}
 	s, err := settings.Load(paths.Settings())
+	d.settingsOK = err == nil
 	if err != nil {
-		// 设置决定全局禁直连与网卡 IPv6 策略。损坏 / 不可读时不能用默认值
-		// 覆盖并撤保护，直接让服务失败并保留已有系统保护。
-		return nil, fmt.Errorf("设置加载失败,为保持隐私保护拒绝启动: %w", err)
+		// 设置决定「全局禁直连」与网卡 IPv6 策略,损坏 / 不可读时确实不能拿默认值去覆盖并撤保护。
+		// 但 m29 的做法是整个服务拒绝启动 —— 那把用户关在了门外:Windows 上托盘只剩一句"服务未运行",
+		// Android 上开机 / 升级广播直接崩进程,而「恢复网络」的离线兜底同样依赖 settings.Load,闸也解不掉。
+		// 改成:照常起来(settings.Load 失败时返回的就是默认值),但把 settingsOK 记成 false ——
+		// 凡是会**放宽**保护的动作(撤闸、还原网卡 IPv6、还原 DNS/路由、自动连接)一律不做,
+		// 现状原样保留。用户在界面里保存一次设置,文件就被覆盖修好,一切恢复正常。
+		d.logf("设置读不出来,先用默认值起来,但不会动现有的隐私保护(去设置页保存一次即可修复): %v", err)
 	}
 	d.settings = s
 	d.settingsGeneration = 1
@@ -167,7 +179,7 @@ func NewWithOptions(o Options) (*Daemon, error) {
 	prev := d.loadPersisted()
 	persistedTrusted := d.persistedStateOK()
 	strictPending := persistedTrusted && prev.Wanted && s.TUN && s.NoDirect && s.Mode == settings.ModeGlobal
-	if persistedTrusted && !strictPending {
+	if persistedTrusted && !strictPending && d.settingsTrusted() {
 		if err := netmode.UnprotectChecked(); err != nil {
 			d.logf("上次 DNS/路由保护尚未成功恢复,保留恢复依据并继续重试: %v", err)
 		}
@@ -214,7 +226,8 @@ func (d *Daemon) loadProfileCaches() {
 			d.logf("订阅「%s」的链接曾被脱敏写坏,已按缓存恢复", p.Name)
 		}
 	}
-	if healed {
+	if healed && d.settingsOK {
+		// 设置读不出来时手上这份是默认值,写回去等于把用户损坏但仍有救的文件抹成空白。
 		if err := d.settings.Save(paths.Settings()); err != nil {
 			d.logf("恢复订阅链接后写设置失败: %v", err)
 		}
@@ -252,7 +265,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 		go d.nicIPv6Loop(ctx)
 	}
 	persisted := d.loadPersisted()
-	if d.persistedStateOK() && persisted.Wanted {
+	if d.persistedStateOK() && d.settingsTrusted() && persisted.Wanted {
 		d.logf("上次是已连接状态,自动连接")
 		d.machine.Connect()
 	}
@@ -312,6 +325,13 @@ func (d *Daemon) loadPersisted() persisted {
 	d.persistedOK = true
 	d.mu.Unlock()
 	return p
+}
+
+// settingsTrusted 设置文件是不是真读出来了(而不是退回默认值)。见 settingsOK 的说明。
+func (d *Daemon) settingsTrusted() bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.settingsOK
 }
 
 func (d *Daemon) persistedStateOK() bool {
@@ -381,6 +401,7 @@ func (d *Daemon) setSettings(s settings.Settings) error {
 	d.mu.Lock()
 	d.settings = s
 	d.settingsGeneration++
+	d.settingsOK = true // 刚刚整份写成功了,文件从此可信 —— 之前读不出来的那次到此为止
 	d.mu.Unlock()
 	d.applyLogRetention()
 	return nil
@@ -738,34 +759,66 @@ func (d *Daemon) restart() error {
 // restartForPrivacySettings 用新设置重建数据面。放宽全局禁直连时，旧闸在新配置
 // 验证并成功启动前始终保留；失败则恢复旧设置和旧闸，避免出现“设置已切换但旧数据面
 // 没有对应保护”的窗口。
+// privacyRelaxes 从 prev 到 next 是不是在**放宽**保护。
+//
+// 方向是这里唯一要紧的事。收紧失败可以整份回滚 —— 用户没拿到更松的配置,不吃亏。
+// 放宽失败要是也回滚,用户就再也关不掉「全局禁直连」了 —— 而他去关它,十有八九正是因为
+// 此刻连不上、想把网先拿回来。m29 让两个方向都必须"重启成功"才算数,于是节点一连不上,
+// 逃生口自己就锁死了:关不掉开关 → 闸不撤 → 没网 → 还是关不掉。
+func privacyRelaxes(prev, next settings.Settings) bool {
+	switch {
+	case prev.NoDirect && !next.NoDirect:
+		return true
+	case prev.Mode == settings.ModeGlobal && next.Mode != settings.ModeGlobal:
+		return true
+	case !prev.IPv6 && next.IPv6:
+		return true
+	case prev.DisableNICIPv6 && !next.DisableNICIPv6:
+		return true
+	case prev.TUN && !next.TUN:
+		return true
+	}
+	return false
+}
+
 func (d *Daemon) restartForPrivacySettings(prev settings.Settings) error {
+	next := d.getSettings()
+	relax := privacyRelaxes(prev, next)
 	hold := prev.NoDirect && prev.Mode == settings.ModeGlobal && d.machine.Wanted()
 	nicHold := wantNICOff(prev) && d.machine.Wanted()
 	d.mu.Lock()
 	d.guardHold, d.nicHold = hold, nicHold
 	d.mu.Unlock()
-	err := d.machine.RestartChecked(func() error { return d.setSettings(prev) })
+	var rollback func() error
+	if !relax {
+		rollback = func() error { return d.setSettings(prev) }
+	}
+	err := d.machine.RestartChecked(rollback)
 	current := d.getSettings()
-	if err != nil && !reflect.DeepEqual(current, prev) {
-		// 回滚设置本身失败时不能放开 hold；下一次重试前仍要保持旧闸/IPv6
-		// 状态，避免“设置不确定 + 保护已撤销”的组合。
+	if err != nil && !relax && !reflect.DeepEqual(current, prev) {
+		// 收紧方向:回滚设置本身也失败时不能放开 hold;下一次重试前仍要保持旧闸 / IPv6 状态,
+		// 避免"设置不确定 + 保护已撤销"的组合。
 		d.logf("隐私设置回滚未完成,继续保持保护: %v", err)
 		return err
 	}
 	d.mu.Lock()
 	d.guardHold, d.nicHold = false, false
 	d.mu.Unlock()
-	// 新数据面已成功启动，现在才按新设置撤闸或调整规格。
+	// 收紧方向:新数据面已成功启动,现在才按新设置调整规格。
+	// 放宽方向:哪怕隧道没重建起来也要在这里撤闸 —— 用户要的就是把保护放开,闸留着等于网还是没有。
 	d.syncGuard()
 	if nicErr := d.syncNICIPv6(); err == nil {
 		err = nicErr
 	}
-	// TUN 关闭后不再需要把系统解析器密封到隧道；只有这条显式设置路径
-	// 才允许恢复原 DNS。恢复失败时保留备份，让下一次设置/启动继续重试。
-	if err == nil && !current.TUN {
-		if restoreErr := netmode.UnprotectChecked(); restoreErr != nil {
+	// TUN 关闭后不再需要把系统解析器密封到隧道;只有这条显式设置路径才允许恢复原 DNS。
+	// 恢复失败时保留备份,让下一次设置 / 启动继续重试。
+	if !current.TUN && (err == nil || relax) {
+		if restoreErr := netmode.UnprotectChecked(); restoreErr != nil && err == nil {
 			err = state.Errf(state.CodePrivacyGuard, "恢复系统 DNS 失败,保护仍保留: %v", restoreErr)
 		}
+	}
+	if relax && err != nil {
+		return state.Errf(state.CodeOf(err), "新的隐私设置已保存、保护已按要求解除,但连接没能重建: %v", err)
 	}
 	return err
 }
@@ -812,8 +865,12 @@ func nicIPv6Action(want, on bool) nicAction {
 // syncNICIPv6 把网卡 IPv6 的状态和"该不该关"对齐;幂等。连接意愿、设置变了都要调一次。
 // 停用 / 还原都要起 PowerShell(Windows)或改 sysctl,挺慢,所以用 nicOff 记着当前状态,状态没变就什么都不做。
 func (d *Daemon) syncNICIPv6() error {
+	if !d.settingsTrusted() {
+		return nil // 同 syncGuard:设置不可信时不拿默认值去放宽保护
+	}
 	d.nicMu.Lock()
 	defer d.nicMu.Unlock()
+	defer d.logNICWarning()
 	d.mu.Lock()
 	hold := d.nicHold
 	d.mu.Unlock()
@@ -879,6 +936,18 @@ func (d *Daemon) syncNICIPv6() error {
 	return nil
 }
 
+// logNICWarning 把 netmode 那边记下的"哪几张网卡没动成"打出来。变了才打,免得 30 秒一条刷满日志。
+func (d *Daemon) logNICWarning() {
+	w := netmode.NICWarning()
+	d.mu.Lock()
+	changed := w != d.lastNICWarn
+	d.lastNICWarn = w
+	d.mu.Unlock()
+	if changed && w != "" {
+		d.logf("网卡 IPv6:%s", w)
+	}
+}
+
 // reconcileNICIPv6 启动时核对一次,和 reconcileGuard 对称:上次连着关的机就接着关着,否则还原。
 // 机器刚启动时状态机还没 Connect,所以这里看的是落盘的连接意愿而不是 machine.Wanted()。
 func (d *Daemon) reconcileNICIPv6() {
@@ -888,11 +957,27 @@ func (d *Daemon) reconcileNICIPv6() {
 	on := d.nicOff.Load()
 	// 机器刚启动时状态机还没 Connect,所以这里用落盘的连接意愿代替 machine.Wanted()
 	persisted := d.loadPersisted()
-	if !d.persistedStateOK() {
-		d.logf("网卡 IPv6:连接状态不可读,保留现有保护,不执行还原")
+	if !d.settingsTrusted() {
+		d.logf("网卡 IPv6:设置读不出来,保留现有状态,不执行还原")
 		return
 	}
 	want := persisted.Wanted && wantNICOff(d.getSettings())
+	if !d.persistedStateOK() {
+		// 状态文件读不出来(首次启动、被清理、上次崩溃留下 0 字节 —— m28 的 savePersisted 不是原子写,
+		// 这很常见)。m29 在这里直接 return,于是 netmode/nic_windows.go 开头那句
+		// "守护进程启动时也无条件还原一次,上次崩溃退出也不会把用户的 IPv6 永久关掉"不再成立:
+		// 备份还在,网卡就一直关着,而且没有任何自愈路径。
+		//
+		// 改用一个总是拿得到、而且比状态文件更能说明问题的信号:闸还在不在。闸是持久的,
+		// 它还在就说明上次是连着走的(严格全局模式),那就接着关着;闸不在就按文档还原回去 ——
+		// 下次连接时 syncNICIPv6 会重新关掉,不会因此漏。
+		if n, err := netmode.GuardStatus(); err == nil && n > 0 {
+			d.logf("网卡 IPv6:连接状态不可读,但闸还在,按上次连着关机处理,保持关闭")
+			return
+		}
+		d.logf("网卡 IPv6:连接状态不可读且闸不在,按文档还原回去(下次连接会重新停用)")
+		want = false
+	}
 	switch nicIPv6Action(want, on) {
 	case nicRestore:
 		if err := netmode.RestoreNICIPv6(); err != nil {
@@ -941,9 +1026,11 @@ func (d *Daemon) ensurePrivacyReady() error {
 	if s.NoDirect && s.Mode == settings.ModeGlobal && d.machine.Wanted() && checkGuard {
 		if checkBoot {
 			if ready, err := netmode.GuardPersistentReady(); err != nil {
-				return state.Errf(state.CodePrivacyGuard, "无法确认启动期全局禁直连保护: %v", err)
+				return state.Errf(state.CodePrivacyGuard, "无法确认持久全局禁直连保护: %v", err)
 			} else if !ready {
-				return state.Errf(state.CodePrivacyGuard, "全局禁直连持久/启动期保护未完整就绪,拒绝启动数据面")
+				// 查的是运行期那组(守护进程之外也在的那道闸)。开机那几秒的覆盖不在这条里 ——
+				// 它装不上只经 GuardWarning 告警,不挡连接。
+				return state.Errf(state.CodePrivacyGuard, "全局禁直连的持久保护未完整就绪,拒绝启动数据面")
 			}
 		}
 		d.mu.Lock()
@@ -975,8 +1062,11 @@ func (d *Daemon) ensurePrivacyReady() error {
 		if !d.nicOff.Load() {
 			return state.Errf(state.CodePrivacyNIC, "网卡 IPv6 未成功停用")
 		}
-		if netmode.NICIPv6Leaking(builder.TunName) {
-			return state.Errf(state.CodePrivacyNIC, "检测到物理网卡仍有公网 IPv6 地址")
+		// 这里是**拒绝连接**的门,必须用确证谓词:NICIPv6Leaking 把"枚举失败 / 某张网卡读不到地址"
+		// 也算成在漏,一次瞬时的系统调用失败就能让人连不上,而且没有自愈路径。
+		// 别处那几个 NICIPv6Leaking 是"要不要再跑一遍昂贵的停用脚本",宁可多跑,保持不变。
+		if netmode.NICIPv6LeakConfirmed(builder.TunName) {
+			return state.Errf(state.CodePrivacyNIC, "确认物理网卡上仍挂着公网 IPv6 地址")
 		}
 	}
 	return nil
@@ -1890,7 +1980,12 @@ func (d *Daemon) registerHandlers() {
 		// 不能通过 Clash SetMode 只改内核运行标志。
 		if d.core.Running() && (next.Mode != prev.Mode || next.NoDirect != prev.NoDirect || next.IPv6 != prev.IPv6 || next.DisableNICIPv6 != prev.DisableNICIPv6 || next.TUN != prev.TUN) {
 			if err := d.restartForPrivacySettings(prev); err != nil {
-				return nil, &ipc.CallError{Code: state.CodeOf(err), Msg: "隐私设置切换失败,已保持旧配置与隐私保护: " + err.Error()}
+				msg := "隐私设置切换失败,已保持旧配置与隐私保护: " + err.Error()
+				if privacyRelaxes(prev, next) {
+					// 放宽方向不回滚,所以别再说"已保持旧配置" —— 那是假话。
+					msg = err.Error()
+				}
+				return nil, &ipc.CallError{Code: state.CodeOf(err), Msg: msg}
 			}
 			return d.getSettings(), nil
 		}

@@ -1,0 +1,90 @@
+package netmode
+
+import (
+	"fmt"
+	"os"
+	"strings"
+	"sync"
+)
+
+// osRename 抽一层只为让 nicBackupCorrupt 在测试里不碰真实文件系统。
+var osRename = os.Rename
+
+// 这一层解决的是同一个问题:动网卡 IPv6 的时候,总有些对象是我们够不着的 ——
+// 内核根本没编 IPv6、网卡在脚本跑到一半被拔掉、某个网络服务的 IPv6 是用户手工配的、
+// 容器的 veth 生灭得比我们读它还快。
+//
+// m29 把这些一律改成了硬错误,而 daemon.prepare 里紧挨着 syncGuard 的那次 syncNICIPv6 又是连接前置,
+// 于是"有一张网卡没动成"= 整台机器连不上。用户唯一的绕法是去**关掉**「全局禁直连」——
+// 一道以隐私为名的检查,实际把人推向了更不私密的配置。m28 则是另一个极端:全部吞掉,
+// 真漏了也不说。
+//
+// 这里取中间:**只有确证此刻真有网卡挂着公网 IPv6 地址,才算失败。** 那种情况是可满足的 ——
+// 用户能自己去关掉那张网卡的 v6;查下来没有暴露、或者查不出来,就照常连着并如实告警。
+
+var (
+	nicWarnMu sync.Mutex
+	nicWarn   string
+	routeWarn string
+)
+
+func setNICWarning(s string) {
+	nicWarnMu.Lock()
+	nicWarn = s
+	nicWarnMu.Unlock()
+}
+
+// NICWarning 上次动网卡 IPv6 时没做成的那部分;空 = 全做到了。和 GuardWarning 一个路数:
+// 做不到的事如实报出来,而不是把连接挡死。
+func NICWarning() string {
+	nicWarnMu.Lock()
+	defer nicWarnMu.Unlock()
+	return nicWarn
+}
+
+// setRouteWarning / RouteWarning 是另一个槽:Linux 的"回包走主表"策略路由和网卡 IPv6 是两件事,
+// 共用一个格子的话后写的会把先写的盖掉,用户只看得见其中一条。
+func setRouteWarning(s string) {
+	nicWarnMu.Lock()
+	routeWarn = s
+	nicWarnMu.Unlock()
+}
+
+// RouteWarning 上次清理 / 添加回包路由规则时没做成的那部分;空 = 没问题。
+func RouteWarning() string {
+	nicWarnMu.Lock()
+	defer nicWarnMu.Unlock()
+	return routeWarn
+}
+
+// nicBackupCorrupt 备份文件坏了(0 字节、被截断、手工改过)时统一这么处理:挪到 .bad 留证,
+// 如实告警,然后**返回 nil**。
+//
+// 为什么不报错:报错的唯一后果是把人卡死。停用那一路报错 = 连不上(而且关掉「连接时停用网卡 IPv6」
+// 也救不回来,因为那条开关只影响"要不要关",不影响"要不要先读备份");还原那一路报错 = 备份永远删不掉、
+// 卸载永远跑不完。而原值本来就已经随文件一起丢了,继续硬失败一分钱也换不回来。
+// 代价是那几张网卡的原始状态确实丢了,所以这里把话说清楚,让用户知道要手动开回去。
+func nicBackupCorrupt(path, why string) error {
+	_ = osRename(path, path+".bad")
+	setNICWarning("网卡 IPv6 备份文件已损坏(" + why + "),已挪到 " + path + ".bad。" +
+		"里面记的原始状态没了 —— 如果某些网卡的 IPv6 现在是关着的,需要手动开回去。")
+	return nil
+}
+
+// nicLeakConfirmed 抽成变量只为可测:真机上就是 NICIPv6LeakConfirmed。
+var nicLeakConfirmed = NICIPv6LeakConfirmed
+
+// nicResult 各平台 DisableNICIPv6 的统一收尾:errs 是"没动成的那些网卡"。
+func nicResult(tunName string, errs []string) error {
+	if len(errs) == 0 {
+		setNICWarning("")
+		return nil
+	}
+	detail := strings.Join(errs, "; ")
+	if nicLeakConfirmed(tunName) {
+		setNICWarning("")
+		return fmt.Errorf("停用网卡 IPv6 没做完,而且确有网卡还挂着公网 IPv6 地址: %s", detail)
+	}
+	setNICWarning("这些网卡的 IPv6 没能停用(此刻查下来没有哪张网卡暴露公网 v6 地址,先照常连着): " + detail)
+	return nil
+}

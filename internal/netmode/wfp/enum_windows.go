@@ -15,6 +15,7 @@ var (
 	procFwpmFilterDeleteByKey0       = modfwpuclnt.NewProc("FwpmFilterDeleteByKey0")
 	procFwpmSubLayerDeleteByKey0     = modfwpuclnt.NewProc("FwpmSubLayerDeleteByKey0")
 	procFwpmProviderDeleteByKey0     = modfwpuclnt.NewProc("FwpmProviderDeleteByKey0")
+	procFwpmProviderGetByKey0        = modfwpuclnt.NewProc("FwpmProviderGetByKey0")
 )
 
 // windows_GUID 给本包自己写的文件用的别名,免得每处都写全名。
@@ -68,6 +69,23 @@ func fwpmSubLayerDeleteByKey0(engine uintptr, key *windows.GUID) error {
 
 func fwpmProviderDeleteByKey0(engine uintptr, key *windows.GUID) error {
 	return callProc(procFwpmProviderDeleteByKey0, engine, uintptr(unsafe.Pointer(key)))
+}
+
+// providerServiceBound 现存的提供者是不是绑在某个 Windows 服务上(FWPM_PROVIDER0.serviceName 非空)。
+// 绑了的话,服务一不运行,BFE 就把它名下的全部过滤器标成 DISABLED —— 为什么绝不能绑见 baseProvider。
+//
+// 返回 (绑着吗, 问出来了吗)。导出找不到、提供者不存在、调用失败,一律报 false, false:
+// 拿不准就当没绑。这个查询只用来决定要不要收拾旧账,绝不能因为查不清楚就去动用户已经生效的闸。
+func providerServiceBound(engine uintptr, key *windows.GUID) (bound, known bool) {
+	if err := procFwpmProviderGetByKey0.Find(); err != nil {
+		return false, false
+	}
+	var p *wtFwpmProvider0
+	if err := callProc(procFwpmProviderGetByKey0, engine, uintptr(unsafe.Pointer(key)), uintptr(unsafe.Pointer(&p))); err != nil || p == nil {
+		return false, false
+	}
+	defer fwpmFreeMemory0(unsafe.Pointer(&p))
+	return p.serviceName != nil, true
 }
 
 // ourLayers 我们放过滤器的六个层:出站 / 入站 × IPv4 / IPv6,外加 IP 转发 × IPv4 / IPv6(热点共享经本机转发的流量)。
