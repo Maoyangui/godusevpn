@@ -91,6 +91,12 @@ func GuardWarning() string {
 	return guardWarn
 }
 
+// GuardInstallable 这个平台的闸是不是由我们自己装、并且装完能核查。
+// Windows(WFP)、Linux(nftables)、macOS(pf)都是;Android 不是 —— 那边的闸就是宿主
+// VpnService 的接口本身,由系统持有,我们既装不了也数不出条数。对这种平台做"闸装没装"的
+// 硬核查只会把连接整个挡死,而用户挡不住就会去把「全局禁直连」关掉,反倒更不私密。
+func GuardInstallable() bool { return true }
+
 // WFP installs persistent and boot-time filters.
 func GuardPersistentSupported() bool { return true }
 

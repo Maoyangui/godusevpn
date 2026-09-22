@@ -190,10 +190,14 @@ func (d *Daemon) syncGuard() {
 		if err != nil {
 			break // 查不到就别乱动:重装一次的代价比"以为没装"高
 		}
-		ready, readyErr := netmode.GuardPersistentReady()
-		if readyErr != nil {
-			d.setGuard(true, "无法确认持久保护: "+readyErr.Error())
-			return
+		ready := true
+		if netmode.GuardPersistentSupported() { // 没有持久闸的平台不存在"装了一半",别每次同步都重装一遍
+			var readyErr error
+			ready, readyErr = netmode.GuardPersistentReady()
+			if readyErr != nil {
+				d.setGuard(true, "无法确认持久保护: "+readyErr.Error())
+				return
+			}
 		}
 		if msg := guardRedoReason(n, d.appliedGuardSpec(), d.guardSpec()); msg != "" || !ready {
 			if msg == "" {

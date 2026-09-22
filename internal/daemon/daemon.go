@@ -923,18 +923,28 @@ func (d *Daemon) reconcileNICIPv6() {
 	d.logf("网卡 IPv6:已停用(上次连着关的机)")
 }
 
+// privacyChecks 决定启动前要核查哪些闸相关的不变量。
+//
+// installable=false 的平台(Android:闸就是宿主 VpnService 的接口,由系统持有)没有可核查的对象;
+// 硬要核查只会把连接整个挡死 —— 而用户挡不住就会去关掉「全局禁直连」,反倒更不私密。那种平台上
+// 跨进程 / 重启的覆盖靠系统的 Always-on + lockdown,状态由 netmode.GuardWarning 如实报出来。
+// boot 只在平台真的有"守护进程之外也在"的闸时才查(目前只有 Windows 的 WFP 持久 + 开机过滤器)。
+func privacyChecks(installable, persistent bool) (guard, boot bool) {
+	return installable, installable && persistent
+}
+
 // ensurePrivacyReady 是数据面启动前的最后一道硬检查。保护状态未知、闸状态查不到、
 // 网卡 IPv6 仍有公网地址时，宁可连接失败并退避，也不能让数据面以不完整的隐私保护运行。
 func (d *Daemon) ensurePrivacyReady() error {
 	s := d.getSettings()
-	if s.NoDirect && s.Mode == settings.ModeGlobal && d.machine.Wanted() {
-		if !netmode.GuardPersistentSupported() {
-			return state.Errf(state.CodePrivacyGuard, "当前平台没有可证明的启动期全局禁直连保护,拒绝启动数据面")
-		}
-		if ready, err := netmode.GuardPersistentReady(); err != nil {
-			return state.Errf(state.CodePrivacyGuard, "无法确认启动期全局禁直连保护: %v", err)
-		} else if !ready {
-			return state.Errf(state.CodePrivacyGuard, "全局禁直连持久/启动期保护未完整就绪,拒绝启动数据面")
+	checkGuard, checkBoot := privacyChecks(netmode.GuardInstallable(), netmode.GuardPersistentSupported())
+	if s.NoDirect && s.Mode == settings.ModeGlobal && d.machine.Wanted() && checkGuard {
+		if checkBoot {
+			if ready, err := netmode.GuardPersistentReady(); err != nil {
+				return state.Errf(state.CodePrivacyGuard, "无法确认启动期全局禁直连保护: %v", err)
+			} else if !ready {
+				return state.Errf(state.CodePrivacyGuard, "全局禁直连持久/启动期保护未完整就绪,拒绝启动数据面")
+			}
 		}
 		d.mu.Lock()
 		on, guardErr := d.guardOn, d.guardErr
@@ -1412,12 +1422,8 @@ func (d *Daemon) registerHandlers() {
 		return map[string]string{"path": p}, nil
 	})
 	h(ipc.MConnect, func(json.RawMessage) (any, error) {
-		s := d.getSettings()
 		if a, _ := d.activeProfile(); a == nil {
 			return nil, &ipc.CallError{Code: state.CodeProfileMissing, Msg: "还没有添加订阅"}
-		}
-		if s.NoDirect && s.Mode == settings.ModeGlobal && !netmode.GuardPersistentSupported() {
-			return nil, &ipc.CallError{Code: state.CodePrivacyGuard, Msg: "当前平台没有可证明的启动期全局禁直连保护,已拒绝连接;请改用规则模式或先安装启动期防火墙保护"}
 		}
 		if err := d.savePersisted(persisted{Wanted: true}); err != nil {
 			return nil, fmt.Errorf("保存连接意愿失败,拒绝启动: %w", err)
