@@ -116,20 +116,32 @@ if [ -n "$np" ]; then
   check "朝节点服务器发起的连接判给了直连" "$hit" "$np(试了 $i 次)"
 fi
 
-echo "== 3.7 严格全局模式缺少启动期保护时必须拒绝切换"
-# 只把明确的隐私拒绝视为通过；IPC断连、超时、崩溃不能冒充安全拒绝。
-reject_global() {
-  expected=$1
-  if result=$("$BIN" mode global 2>&1); then
-    check "缺少启动期保护时拒绝严格全局模式" 0 "意外接受了全局模式"
-  else
-    check "明确说明启动期隐私保护不足" "$(printf '%s\n' "$result" | grep 'E_PRIVACY_GUARD' | grep -c '启动期')" "$result"
-  fi
-  current=$("$BIN" status 2>/dev/null | awk '/^模式:/{print $2; exit}')
-  check "拒绝后保持原模式" "$([ "$current" = "$expected" ] && echo 1 || echo 0)" "mode=$current expected=$expected"
-  check "拒绝后原连接仍可用" "$(wait_status connected 15 && echo 1 || echo 0)" ""
-}
-reject_global rule
+echo "== 3.7 全局禁直连(全局模式下闸要在:普通用户绑物理网卡直连被拦,经隧道照常;切回规则模式锚点清空)"
+# macOS 的闸是守护进程自己装的 pf 锚点,没有"守护进程之外也在"的开机期覆盖 —— 这是平台限制,README 写明的,
+# 不是拒绝连接的理由。m29 曾把"没有开机期保护就不许进严格全局模式"做成硬门,结果除 Windows 外的平台一律连不上,
+# 用户唯一的绕法是去关掉「全局禁直连」—— 一道以隐私为名的检查,实际把人推向更不私密的配置。
+# 所以这里验的是运行期的闸真的拦得住:拿普通用户绑物理网卡实打实地打一次,而不是验"它拒绝服务"。
+gres=$("$BIN" mode global 2>&1); grc=$?
+check "切到严格全局模式被接受" "$([ "$grc" = 0 ] && echo 1 || echo 0)" "$gres"
+sleep 2
+check "全局模式下连接仍在" "$(wait_status connected 15 && echo 1 || echo 0)" "$("$BIN" status | sed -n 2p)"
+rules=$(pfctl -a com.apple/godusevpn -sr 2>/dev/null)
+check "pf 锚点里有规则" "$(echo "$rules" | grep -c 'block drop out quick all')" "$(echo "$rules" | grep -c . ) 条"
+# root 是守护进程的身份、本来就放行,所以要用普通用户去试;绑物理网卡是为了绕开隧道路由,模拟"漏出去"
+if [ -n "$U" ] && [ -n "$defif" ]; then
+  dip=$(ipconfig getifaddr "$defif" 2>/dev/null)
+  dc=$(sudo -u "$U" curl -s --interface "$dip" -m 6 -o /dev/null -w '%{http_code}' http://1.1.1.1/cdn-cgi/trace 2>/dev/null || true)
+  check "普通用户绑物理网卡的直连被拦" "$([ "$dc" != "200" ] && echo 1 || echo 0)" "http=${dc:-000}(网卡 $defif $dip)"
+else
+  echo "  (跳过绑网卡直连探测:普通用户=${U:-未知} 物理网卡=${defif:-未知})"
+fi
+tc=$(curl -s -m 15 -o /dev/null -w '%{http_code}' https://1.1.1.1/cdn-cgi/trace 2>/dev/null || true) # 明文 http 会被 301 到 https,拿 https 直接要 200
+check "经隧道照常" "$([ "$tc" = "200" ] && echo 1 || echo 0)" "http=${tc:-000}"
+gl=$(pub4); check "全局模式出口是节点" "$([ -n "$gl" ] && [ "$gl" != "$before" ] && echo 1 || echo 0)" "global=$gl 连接前=$before"
+check "切回规则模式成功" "$("$BIN" mode rule >/dev/null 2>&1 && echo 1 || echo 0)" ""
+sleep 2
+check "切回规则模式后锚点清空" "$([ -z "$(pfctl -a com.apple/godusevpn -sr 2>/dev/null)" ] && echo 1 || echo 0)" "$(pfctl -a com.apple/godusevpn -sr 2>/dev/null | tr '\n' ';')"
+check "规则模式恢复连接" "$(wait_status connected 15 && echo 1 || echo 0)" ""
 
 echo "== 4. IPv6:关闭时必须是真拒绝,且不能绕过隧道出去"
 a6=$(resolve6 www.google.com); check "AAAA 为空" "$([ -z "$a6" ] && echo 1 || echo 0)" "${a6:-(空)}"
@@ -166,7 +178,11 @@ echo "== 6. 模式切换"
 # 前后两次拿到的末段可能不同(跑机上实测 .161 变 .160),拿它当相等条件会无谓地红。
 check "切换直连模式成功" "$("$BIN" mode direct >/dev/null 2>&1 && echo 1 || echo 0)" ""
 sleep 3; d=$(pub4); check "直连模式不再走节点" "$([ -n "$d" ] && [ "$d" != "$now" ] && echo 1 || echo 0)" "direct=$d 节点出口=$now 连接前=$before"
-reject_global direct
+check "直连模式下锚点是空的" "$([ -z "$(pfctl -a com.apple/godusevpn -sr 2>/dev/null)" ] && echo 1 || echo 0)" "$(pfctl -a com.apple/godusevpn -sr 2>/dev/null | tr '\n' ';')"
+# 从直连切严格全局同样要被接受、闸当场装上(3.7 验的是从规则模式切过去,这里补上另一条路径)
+check "从直连切严格全局被接受" "$("$BIN" mode global >/dev/null 2>&1 && echo 1 || echo 0)" ""
+sleep 2
+check "从直连切过去后闸装上了" "$(pfctl -a com.apple/godusevpn -sr 2>/dev/null | grep -c 'block drop out quick all')" ""
 check "切回规则模式成功" "$("$BIN" mode rule >/dev/null 2>&1 && echo 1 || echo 0)" ""
 check "规则模式恢复连接" "$(wait_status connected 15 && echo 1 || echo 0)" ""
 check "节点列表" "$("$BIN" nodes | grep -c '^\*')" "$("$BIN" nodes | tr '\n' ' ' | cut -c1-80)"
