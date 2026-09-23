@@ -420,8 +420,8 @@ func (m *Machine) watch(ctx context.Context) (bool, error) {
 		err := m.d.Health(ctx)
 		cur := m.Snapshot().Status
 		if err == nil {
-			if fails > 0 {
-				health.Reset(m.d.HealthEvery) // 好了,回到正常节奏
+			if fails > 0 || cur == Degraded {
+				health.Reset(m.d.HealthEvery) // 好了,回到正常节奏(隐私类降级不走 fails 计数,也要收回来)
 			}
 			fails, tried = 0, false
 			if cur == Degraded {
@@ -440,9 +440,7 @@ func (m *Machine) watch(ctx context.Context) (bool, error) {
 		// 同时把状态如实报成 Degraded 让用户看见。m29 在这里立刻 rebuild,而且每次重连后 attempt 归零,
 		// 泄漏治不好、网却一直断。
 		if isPrivacyCode(CodeOf(err)) {
-			if cur != Degraded {
-				m.set(Degraded, err)
-			}
+			m.set(Degraded, err) // 已经因节点不通降级过也要更新错误码,界面才说得清是隐私核查没过
 			health.Reset(m.d.DegradedEvery)
 			return false, nil
 		}

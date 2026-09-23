@@ -728,12 +728,19 @@ func (d *Daemon) health(ctx context.Context) error {
 	// 隐私保护是运行期不变量,不只是在启动时检查一次。新网卡、外部改了过滤器、IPv6 绑定又冒出来 ——
 	// 这些都在这里被发现。发现了就**原地修**:闸掉了重装、网卡 v6 冒出来再停用,隧道留着;
 	// 状态机把它报成 Degraded 而不是拆隧道(拆了只会更漏,见 state.Machine.watch)。
-	if err := d.ensurePrivacyReady(); err != nil {
-		d.syncGuard()
-		if nicErr := d.syncNICIPv6(); nicErr != nil {
-			d.logf("健康检查:网卡 IPv6 原地修复没做成: %v", nicErr)
+	if perr := d.ensurePrivacyReady(); perr != nil {
+		// 闸类问题原地修(重装是事务内替换,幂等);网卡 IPv6 类交给 nicIPv6Loop —— 它有 10 分钟的退避,
+		// 这里每 30 秒起一次 PowerShell 会把那个退避绕过去。
+		if state.CodeOf(perr) == state.CodePrivacyGuard {
+			d.syncGuard()
 		}
-		return err
+		// 隐私没过也要探一次节点:节点挂了照样要走正常的阶梯(降级 → 换线 → 重建),
+		// 不能被隐私 Degraded 挡住,否则闸修不好的那段时间节点死了也没人管。
+		if _, err := d.core.URLTest(ctx, "proxy", builder.TestURL); err != nil {
+			d.setPing(0)
+			return state.Errf(state.CodeNodeDown, "当前节点不可用: %v", err)
+		}
+		return perr
 	}
 	ms, err := d.core.URLTest(ctx, "proxy", builder.TestURL)
 	if err != nil {
@@ -815,6 +822,12 @@ func (d *Daemon) restartForPrivacySettings(prev settings.Settings) error {
 		d.logf("隐私设置重启失败且回滚未完成,设置文件已是新值、数据面仍按旧配置运行: %v", err)
 		return err
 	}
+	// 走到这里事务就结束了:**先**放开 hold,再同步。上一版把放开挪进了 defer,于是下面这两次同步
+	// 是在 hold 仍为 true 时跑的 —— syncGuard 的 hold 分支规格没变就直接返回,放宽方向(全局→规则、
+	// 关掉禁直连)闸根本撤不掉,规则模式下等于断网,直到用户点断开。defer 只兜早返回的路径。
+	d.mu.Lock()
+	d.guardHold, d.nicHold = false, false
+	d.mu.Unlock()
 	// 收紧方向:新数据面已成功启动,现在才按新设置调整规格。
 	// 放宽方向:哪怕隧道没重建起来也要在这里撤闸 —— 用户要的就是把保护放开,闸留着等于网还是没有。
 	d.syncGuard()

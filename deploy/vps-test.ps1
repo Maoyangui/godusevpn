@@ -83,6 +83,10 @@ $aaaa = Resolve-DnsName -Name "www.google.com" -Type AAAA -ErrorAction SilentlyC
 Check "AAAA 为空(禁 IPv6)" ($null -eq $aaaa) ($(if ($aaaa) { ($aaaa | Select-Object -First 1).IPAddress } else { "" }))
 
 Write-Host "== 3.7 全局禁直连(WFP 闸:绑物理网卡的直连被拦,经隧道照常;停服务闸仍在;切回规则模式闸清空)" -ForegroundColor Cyan
+# 正控制:规则模式下(闸没开)绑物理网卡的直连必须是 200,否则探测本身跑不通,下面"被拦"的断言没有意义
+$d0 = Direct-Http
+$script:directOK = ($d0 -eq "200")
+if (-not $script:directOK) { Write-Host "  (正控制没过:规则模式下绑物理网卡直连 http=$d0,被拦断言改为跳过)" }
 & $cli mode global | Out-Null
 Start-Sleep -Seconds 2
 $stg = Wait-Status "connected" 15
@@ -101,15 +105,13 @@ if (Test-Path $stateXml) {
   if ($ours.Count -gt 0) { $bound = ($ours | ForEach-Object { "serviceName=[" + $_.serviceName + "]" }) -join ", " }
   Check "WFP 提供者存在且没有绑服务名" (($ours.Count -gt 0) -and -not ($ours | Where-Object { -not [string]::IsNullOrEmpty($_.serviceName) })) $bound
 } else { Check "WFP 提供者没有绑服务名" $false $bound }
-$d = Direct-Http
-Check "绑物理网卡的直连被拦" ($physIp -and $d -ne "200") "http=$d(网卡 $physIp)"
+if ($script:directOK) { $d = Direct-Http; Check "绑物理网卡的直连被拦" ($d -and $d -ne "200") "http=$d(网卡 $physIp)" }
 try { $tc = (& curl.exe -s -m 15 -o NUL -w "%{http_code}" "https://1.1.1.1/cdn-cgi/trace") } catch { $tc = "000" }
 Check "经隧道照常" ($tc -eq "200") "http=$tc"
 # 闸是持久的:服务停了也必须还在拦。这是 m29 绑服务名之后失效的那条性质,直接停服务实测。
 & $svc stop | Out-Null
 Start-Sleep -Seconds 3
-$d2 = Direct-Http
-Check "服务停止后闸仍在拦直连" ($physIp -and $d2 -ne "200") "http=$d2"
+if ($script:directOK) { $d2 = Direct-Http; Check "服务停止后闸仍在拦直连" ($d2 -and $d2 -ne "200") "http=$d2" }
 & $svc start | Out-Null
 $stb = Wait-Status "connected" 60
 Check "服务重启后自动恢复连接(落盘的连接意愿)" ($stb -match "状态:\s+connected") ($stb.Trim() -replace "`r?`n", " | ")

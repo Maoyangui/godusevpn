@@ -277,7 +277,7 @@ func Main(args []string) int {
 		if errors.Is(err, ipc.ErrNoService) {
 			fmt.Fprintln(os.Stderr, InstallHint)
 		} else if errors.Is(err, ipc.ErrNoPermission) {
-			fmt.Fprintln(os.Stderr, "没有权限连接服务,请用 sudo 运行")
+			fmt.Fprintln(os.Stderr, err.Error()) // 各平台的提示不一样(Windows 是"账户没登记"),原样打出来
 		} else {
 			fmt.Fprintln(os.Stderr, "失败:", err)
 		}

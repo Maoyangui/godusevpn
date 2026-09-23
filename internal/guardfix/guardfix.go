@@ -47,11 +47,12 @@ func Clear() (text string, ok bool) {
 	}
 
 	switchedOff, switchErr := switchOff()
-	if switchErr != nil {
-		// 开关关不掉(控制口超时、服务正在崩溃重启)。仍然要往下走把闸撤掉:用户点这个菜单的时候
-		// 多半已经没网了。顺手让它先断开,能少一次"服务重连又把闸装回来"的竞态;断不断得掉都继续。
-		disconnectQuietly()
-	}
+	// 不管开关关没关掉,都先让守护进程断开:「恢复网络」的意思就是回到没装过的样子。
+	// 隧道还在跑就去还原系统 DNS(macOS)/ 回包路由(Linux),会出现"界面显示已连接、解析却明文出局域网"
+	// 的状态;而开关关不掉时(控制口超时、服务正在崩溃重启)先断开还能少一次"服务重连又把闸装回来"的竞态。
+	// 断不断得掉都继续往下走 —— 用户点这个菜单的时候多半已经没网了。
+	disconnectQuietly()
+	_ = switchErr
 	clearErr := netmode.ClearGuard()
 	restoreErr := netmode.RestoreNICIPv6() // 网卡 IPv6 和闸一样是持久的,恢复网络就该一并还原,不然用户以为好了、v6 还是没有
 	// macOS 的系统 DNS 被接管到隧道地址、Linux 的回包策略路由也是"持久"的:闸撤了、隧道没了,

@@ -2,7 +2,8 @@
 # 佛跳墙 Linux 真机验收(本机模式)。以 root 跑:
 #   sudo sh linux-test.sh "https://面板/sub/用户名" [/usr/local/bin/godusevpn]
 # 步骤:装服务 → 设订阅 → 连接 → 检查 TUN、策略路由、fake-ip、DNS 劫持、出口、IPv6 阻断、三态、直连真实 IP → 断开 → 清理检查。
-# 在云主机上跑之前会先布一个"死人开关":150 秒内没跑完就自动停服务,防止 SSH 被切断后失联。
+# 在云主机上跑之前会先布一个"死人开关":420 秒内没跑完就自动断开、停服务、撤闸,防止 SSH 被切断后失联,
+# 也防止闸留在机器上把跑机的代理一起断掉(作业会挂到超时)。
 SUB="$1"
 BIN="${2:-/usr/local/bin/godusevpn}"
 [ -z "$SUB" ] && { echo "用法: $0 <订阅地址> [二进制路径]"; exit 2; }
@@ -26,7 +27,7 @@ real=$(resolve api.ipify.org); echo "api.ipify.org 真实 IP: $real"
 defif=$(ip route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}')
 dip=$(ip -4 addr show "$defif" 2>/dev/null | awk '/inet /{print $2; exit}' | cut -d/ -f1)
 # nft 的闸按 uid 放行 root(守护进程),所以要拿一个普通用户去试;跑机上是 uid 1000,别的机器退到 nobody
-U=$(id -un 1000 2>/dev/null || true); [ "$U" = root ] && U=""; [ -z "$U" ] && id nobody >/dev/null 2>&1 && U=nobody
+U=$(id -un 1001 2>/dev/null || id -un 1000 2>/dev/null || true); [ "$U" = root ] && U=""; [ -z "$U" ] && id nobody >/dev/null 2>&1 && U=nobody # 跑机上 runner 是 1001
 echo "连接前默认出口网卡: ${defif:-?} ${dip:-?};直连探测用的普通用户: ${U:-无}"
 
 echo "== 1. 安装"
@@ -37,7 +38,7 @@ check "面板可达" "$(curl -s --max-time 5 http://127.0.0.1:9800/api/ping | gr
 
 echo "== 2. 订阅与连接"
 p=$("$BIN" profile "$SUB" 2>&1); check "订阅拉取" "$(echo "$p" | grep -c '个节点')" "$(echo "$p" | head -1)"
-( sleep 300; systemctl stop godusevpn 2>/dev/null; rm -f /var/lib/godusevpn/state.json ) >/dev/null 2>&1 &
+( sleep 420; "$BIN" disconnect >/dev/null 2>&1; systemctl stop godusevpn 2>/dev/null; "$BIN" guard clear >/dev/null 2>&1 || nft delete table inet godusevpn_guard 2>/dev/null; rm -f /var/lib/godusevpn/state.json ) >/dev/null 2>&1 &
 deadman=$!
 "$BIN" connect >/dev/null
 if wait_status connected 60; then check "进入 connected" 1 "$("$BIN" status | sed -n 2p)"; else check "进入 connected" 0 "$("$BIN" status | sed -n 2p)"; fi
@@ -87,15 +88,22 @@ fi
 echo "== 3.7 全局禁直连(nftables 闸:普通用户绑物理网卡直连被拦,经隧道照常;切回规则模式闸表清空)"
 # Linux 的闸是 nftables 的一张 inet 表,由守护进程装、只在严格全局模式下存在。这里不验"程序会不会拒绝服务",
 # 验的是闸真的拦得住:拿普通用户绑物理网卡实打实打一次。
+# 正控制:规则模式下(闸没开)普通用户绑物理网卡的直连必须是 200,否则探测本身跑不通,
+# 下面"被拦"的断言就没有意义 —— 那种情况明确跳过,而不是让一个空串冒充"被拦"。
+direct_ok=0
+if [ -n "$U" ] && [ -n "$dip" ]; then
+  d0=$(su -s /bin/sh "$U" -c "curl -s --interface $dip -m 6 -o /dev/null -w '%{http_code}' http://1.1.1.1/cdn-cgi/trace" 2>/dev/null || true)
+  if [ "$d0" = "200" ]; then direct_ok=1; else echo "  (正控制没过:规则模式下绑物理网卡直连 http=${d0:-000},绑网卡直连探测本身跑不通,3.7 的被拦断言改为跳过)"; fi
+fi
 gres=$("$BIN" mode global 2>&1); grc=$?
 check "切到严格全局模式被接受" "$([ "$grc" = 0 ] && echo 1 || echo 0)" "$gres"
 sleep 2
 check "全局模式下连接仍在" "$(wait_status connected 15 && echo 1 || echo 0)" "$("$BIN" status | sed -n 2p)"
 rules=$(nft list table inet godusevpn_guard 2>/dev/null)
 check "nft 闸表存在且有 drop 规则" "$(echo "$rules" | grep -c 'drop')" "$(echo "$rules" | grep -c .) 行"
-if [ -n "$U" ] && [ -n "$dip" ]; then
+if [ "$direct_ok" = 1 ]; then
   d=$(su -s /bin/sh "$U" -c "curl -s --interface $dip -m 6 -o /dev/null -w '%{http_code}' http://1.1.1.1/cdn-cgi/trace" 2>/dev/null || true)
-  check "普通用户绑物理网卡的直连被拦" "$([ "$d" != "200" ] && echo 1 || echo 0)" "http=${d:-000}(网卡 $defif $dip 用户 $U)"
+  check "普通用户绑物理网卡的直连被拦" "$([ -n "$d" ] && [ "$d" != "200" ] && echo 1 || echo 0)" "http=${d:-000}(网卡 $defif $dip 用户 $U)"
 else
   echo "  (跳过绑网卡直连探测:普通用户=${U:-无} 物理网卡=${defif:-无})"
 fi
@@ -132,7 +140,7 @@ echo "== 5. 模式切换"
 check "节点列表" "$("$BIN" nodes | grep -c '^\*')" "$("$BIN" nodes | tr '\n' ' ')"
 
 echo "== 6. 断开与清理"
-kill $deadman 2>/dev/null; pkill -f "sleep 300" 2>/dev/null
+kill $deadman 2>/dev/null; pkill -f "sleep 420" 2>/dev/null
 "$BIN" disconnect >/dev/null; sleep 3
 check "断开后 TUN 网卡消失" "$([ -z "$(ip link show godusevpn 2>/dev/null)" ] && echo 1 || echo 0)" ""
 check "断开后策略路由撤掉" "$([ "$(ip rule show | grep -c '^5000:')" = 0 ] && echo 1 || echo 0)" ""

@@ -207,7 +207,7 @@ func ControllerOwnerSIDs() []string {
 		return nil
 	}
 	var out []string
-	for _, ln := range strings.Split(string(b), "\n") {
+	for _, ln := range strings.Split(strings.TrimPrefix(string(b), "\uFEFF"), "\n") { // 记事本会给文件加 BOM
 		ln = strings.TrimSpace(ln)
 		if sidPattern.MatchString(ln) {
 			out = append(out, ln)
@@ -246,5 +246,5 @@ func listenerClosed(err error) bool { return errors.Is(err, winio.ErrPipeListene
 func permissionDenied(err error) bool { return errors.Is(err, windows.ERROR_ACCESS_DENIED) }
 
 func init() {
-	permissionHint = "当前 Windows 账户没有登记为控制用户。用管理员身份运行一次「登记当前账户」(godusevpn-svc.exe register-controller),或重新安装"
+	permissionHint = "当前 Windows 账户没有登记为控制用户。用管理员身份运行 godusevpn-svc.exe register-controller 把它加进名单,然后重启服务(或重启电脑);或者重新安装一次"
 }
