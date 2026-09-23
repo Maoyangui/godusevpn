@@ -28,6 +28,8 @@ jobs:
   windows:
     needs: version
     runs-on: windows-latest
+    env:
+      TEST_SUB_URL: ${{ secrets.TEST_SUB_URL }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -65,6 +67,17 @@ jobs:
             CGO_ENABLED=0 GOOS=windows GOARCH=$arch go build -tags desktop,production -trimpath -ldflags "$LD -H windowsgui" -o dist/$arch/godusevpn.exe ./cmd/godusevpn
           done
           ls -la dist/amd64 dist/arm64
+
+      # 在这台真 Windows 上把服务装起来、建隧道、切到严格全局模式:WFP 闸拦不拦得住绑物理网卡的直连、
+      # 提供者有没有绑服务名、停服务后闸还在不在、网卡 IPv6 的停用 / 还原脚本(含备份里有已消失网卡)能不能跑通。
+      # 这些只有真机能验;没配 TEST_SUB_URL 机密时只编译不验收(外部 PR 拿不到机密)。
+      - name: 真机验收(WFP 闸、停服务闸仍在、网卡 IPv6 还原)
+        if: env.TEST_SUB_URL != ''
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Continue"
+          & .\deploy\vps-test.ps1 -Sub $env:TEST_SUB_URL -Bin (Resolve-Path dist\amd64).Path
+          exit $LASTEXITCODE
 
       - name: Fetch WebView2 installers
         shell: bash
@@ -109,6 +122,8 @@ jobs:
   linux:
     needs: version
     runs-on: ubuntu-latest
+    env:
+      TEST_SUB_URL: ${{ secrets.TEST_SUB_URL }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -142,6 +157,16 @@ jobs:
           build mipsle mipsle GOMIPS=softfloat
           build mips mips GOMIPS=softfloat
           ls -la out
+
+      # 在这台真 Linux 上把服务装起来、建隧道、切到严格全局模式:nftables 闸拦不拦得住普通用户绑物理网卡的直连、
+      # 切回规则模式表清不清得空、网卡 IPv6 的还原(含备份里有已消失网卡)能不能跑通。没配机密时只编译不验收。
+      - name: 真机验收(建隧道、nftables 闸、网卡 IPv6 还原)
+        if: env.TEST_SUB_URL != ''
+        run: |
+          set -e
+          sudo apt-get install -y -qq nftables >/dev/null 2>&1 || true
+          sudo install -m755 dist/linux/amd64/godusevpn /usr/local/bin/godusevpn
+          sudo sh deploy/linux-test.sh "$TEST_SUB_URL" /usr/local/bin/godusevpn
 
       - uses: actions/upload-artifact@v4
         with:

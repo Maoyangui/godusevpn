@@ -22,6 +22,12 @@ echo "== 0. 环境"
 uname -r; grep PRETTY_NAME /etc/os-release
 before=$(pub4); echo "连接前公网 IPv4: $before"
 real=$(resolve api.ipify.org); echo "api.ipify.org 真实 IP: $real"
+# 连上以后默认路由已经指向隧道,物理网卡要在这之前记下来;绑它发直连是全局禁直连闸的实测
+defif=$(ip route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}')
+dip=$(ip -4 addr show "$defif" 2>/dev/null | awk '/inet /{print $2; exit}' | cut -d/ -f1)
+# nft 的闸按 uid 放行 root(守护进程),所以要拿一个普通用户去试;跑机上是 uid 1000,别的机器退到 nobody
+U=$(id -un 1000 2>/dev/null || true); [ "$U" = root ] && U=""; [ -z "$U" ] && id nobody >/dev/null 2>&1 && U=nobody
+echo "连接前默认出口网卡: ${defif:-?} ${dip:-?};直连探测用的普通用户: ${U:-无}"
 
 echo "== 1. 安装"
 "$BIN" uninstall >/dev/null 2>&1
@@ -31,7 +37,7 @@ check "面板可达" "$(curl -s --max-time 5 http://127.0.0.1:9800/api/ping | gr
 
 echo "== 2. 订阅与连接"
 p=$("$BIN" profile "$SUB" 2>&1); check "订阅拉取" "$(echo "$p" | grep -c '个节点')" "$(echo "$p" | head -1)"
-( sleep 150; systemctl stop godusevpn 2>/dev/null; rm -f /var/lib/godusevpn/state.json ) >/dev/null 2>&1 &
+( sleep 300; systemctl stop godusevpn 2>/dev/null; rm -f /var/lib/godusevpn/state.json ) >/dev/null 2>&1 &
 deadman=$!
 "$BIN" connect >/dev/null
 if wait_status connected 60; then check "进入 connected" 1 "$("$BIN" status | sed -n 2p)"; else check "进入 connected" 0 "$("$BIN" status | sed -n 2p)"; fi
@@ -78,6 +84,41 @@ if [ -n "$np" ]; then
   check "朝节点服务器发起的连接判给了直连" "$hit" "$np(试了 $i 次)"
 fi
 
+echo "== 3.7 全局禁直连(nftables 闸:普通用户绑物理网卡直连被拦,经隧道照常;切回规则模式闸表清空)"
+# Linux 的闸是 nftables 的一张 inet 表,由守护进程装、只在严格全局模式下存在。这里不验"程序会不会拒绝服务",
+# 验的是闸真的拦得住:拿普通用户绑物理网卡实打实打一次。
+gres=$("$BIN" mode global 2>&1); grc=$?
+check "切到严格全局模式被接受" "$([ "$grc" = 0 ] && echo 1 || echo 0)" "$gres"
+sleep 2
+check "全局模式下连接仍在" "$(wait_status connected 15 && echo 1 || echo 0)" "$("$BIN" status | sed -n 2p)"
+rules=$(nft list table inet godusevpn_guard 2>/dev/null)
+check "nft 闸表存在且有 drop 规则" "$(echo "$rules" | grep -c 'drop')" "$(echo "$rules" | grep -c .) 行"
+if [ -n "$U" ] && [ -n "$dip" ]; then
+  d=$(su -s /bin/sh "$U" -c "curl -s --interface $dip -m 6 -o /dev/null -w '%{http_code}' http://1.1.1.1/cdn-cgi/trace" 2>/dev/null || true)
+  check "普通用户绑物理网卡的直连被拦" "$([ "$d" != "200" ] && echo 1 || echo 0)" "http=${d:-000}(网卡 $defif $dip 用户 $U)"
+else
+  echo "  (跳过绑网卡直连探测:普通用户=${U:-无} 物理网卡=${defif:-无})"
+fi
+tc=$(curl -s -m 15 -o /dev/null -w '%{http_code}' https://1.1.1.1/cdn-cgi/trace 2>/dev/null || true)
+check "经隧道照常" "$([ "$tc" = "200" ] && echo 1 || echo 0)" "http=${tc:-000}"
+# 网卡 IPv6 备份:往里塞一张根本不存在的网卡。断开时的还原必须跳过它、把其它网卡照常还原、并把备份删干净 ——
+# m29 曾在这一步整体失败,备份永远删不掉、卸载永远跑不完。
+NICB=/var/lib/godusevpn/nic-ipv6-backup.json; nicb=0
+if [ -f "$NICB" ] && command -v python3 >/dev/null 2>&1; then
+  python3 - "$NICB" <<'PY'
+import json, sys
+p = sys.argv[1]; d = json.load(open(p)); d["zz-gone-nic"] = "0"; json.dump(d, open(p, "w"))
+PY
+  nicb=1
+  check "网卡 IPv6 备份存在(已注入一张不存在的网卡)" 1 "$(cat "$NICB")"
+else
+  echo "  (没有网卡 IPv6 备份或没有 python3:跳过消失网卡的还原测试)"
+fi
+check "切回规则模式成功" "$("$BIN" mode rule >/dev/null 2>&1 && echo 1 || echo 0)" ""
+sleep 2
+check "切回规则模式后闸表清空" "$([ -z "$(nft list table inet godusevpn_guard 2>/dev/null)" ] && echo 1 || echo 0)" "$(nft list table inet godusevpn_guard 2>/dev/null | head -3 | tr '\n' ';')"
+check "规则模式恢复连接" "$(wait_status connected 15 && echo 1 || echo 0)" ""
+
 echo "== 4. 出口"
 now=$(pub4); check "规则模式出口 IP 变了" "$([ -n "$now" ] && [ "$now" != "$before" ] && echo 1 || echo 0)" "before=$before now=$now"
 v6=$(pub6); check "IPv6 出网被阻断" "$([ -z "$v6" ] && echo 1 || echo 0)" "v6=$v6"
@@ -91,11 +132,15 @@ echo "== 5. 模式切换"
 check "节点列表" "$("$BIN" nodes | grep -c '^\*')" "$("$BIN" nodes | tr '\n' ' ')"
 
 echo "== 6. 断开与清理"
-kill $deadman 2>/dev/null; pkill -f "sleep 150" 2>/dev/null
+kill $deadman 2>/dev/null; pkill -f "sleep 300" 2>/dev/null
 "$BIN" disconnect >/dev/null; sleep 3
 check "断开后 TUN 网卡消失" "$([ -z "$(ip link show godusevpn 2>/dev/null)" ] && echo 1 || echo 0)" ""
 check "断开后策略路由撤掉" "$([ "$(ip rule show | grep -c '^5000:')" = 0 ] && echo 1 || echo 0)" ""
 after=$(pub4); check "断开后出口恢复" "$([ "$after" = "$before" ] && echo 1 || echo 0)" "after=$after"
+if [ "$nicb" = 1 ]; then
+  check "断开后网卡 IPv6 备份已清理(含那张不存在的网卡)" "$([ ! -f "$NICB" ] && echo 1 || echo 0)" "$(cat "$NICB" 2>/dev/null)"
+  check "服务日志记下了已消失的网卡" "$("$BIN" logs 80 2>/dev/null | grep -c '已经不在了')" ""
+fi
 echo
 if [ $fail = 0 ]; then echo "全部通过"; else echo "$fail 项失败"; echo "== 内核日志"; "$BIN" logs 40 core; echo "== 服务日志"; "$BIN" logs 20; fi
 exit $fail
