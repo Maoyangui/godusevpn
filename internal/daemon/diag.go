@@ -61,7 +61,7 @@ var (
 	diagURL       = regexp.MustCompile(`[A-Za-z][A-Za-z0-9+.-]*://[^\s<>"'\x60]+`)
 	subPath       = regexp.MustCompile(`(?i)(/sub/)[^\s/?#"'<>]+`)
 	bearerToken   = regexp.MustCompile(`(?i)\bBearer[ \t]+[^\s,"'<>]+`)
-	logCredential = regexp.MustCompile(`(?i)\b((?:access[_-]?|refresh[_-]?)?token|(?:web[_-]?|obfs[_-]?|proxy[_-]?)?password|client[_-]?secret|private[_-]?key|api[_-]?key|authorization|uuid|psk)([ \t]*[:=][ \t]*)(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s,;]+)`)
+	logCredential = regexp.MustCompile(`(?i)\b((?:access[_-]?|refresh[_-]?)?token|(?:web[_-]?|obfs[_-]?|proxy[_-]?)?password|client[_-]?secret|private[_-]?key|api[_-]?key|authorization|uuid|psk)("?[ \t]*[:=][ \t]*)("[^"\r\n]*"|'[^'\r\n]*'|[^\s,;"']+)`)
 )
 
 func redactURL(raw string) string {
@@ -88,8 +88,23 @@ func redactText(s string) string {
 	s = strings.ReplaceAll(s, `\/`, `/`)
 	s = diagURL.ReplaceAllStringFunc(s, redactURL)
 	s = bearerToken.ReplaceAllString(s, "Bearer ***")
-	s = logCredential.ReplaceAllString(s, "${1}${2}***")
+	s = logCredential.ReplaceAllStringFunc(s, redactCredential)
 	return subPath.ReplaceAllString(s, "${1}***")
+}
+
+// redactCredential 把 key: value 里的 value 换成 ***,**引号保留**。
+// info.json / config.redacted.json 是先序列化再整段过这个正则的;m29 的写法连闭合引号一起吃掉,
+// 于是 "psk=xxx" 这种出现在节点名里的值会让整个 JSON 变成非法的,诊断包里最重要的两个文件打不开。
+func redactCredential(m string) string {
+	sub := logCredential.FindStringSubmatch(m)
+	if len(sub) < 4 {
+		return m
+	}
+	key, sep, val := sub[1], sub[2], sub[3]
+	if len(val) >= 2 && (val[0] == '"' || val[0] == '\'') && val[len(val)-1] == val[0] {
+		return key + sep + string(val[0]) + "***" + string(val[0])
+	}
+	return key + sep + "***"
 }
 
 func cmdOut(name string, args ...string) string {

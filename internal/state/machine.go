@@ -397,6 +397,9 @@ const degradedGiveUp = 4
 // 调用方(run)两种情况的处理本来就一样:停干净、退避、从头 Prepare + Start。
 // 早先没有这条出路 —— 手动选定节点的用户夜里节点被墙,界面就永久停在「已连接 · 节点不稳」,
 // 既不会自己换线也不会重连,开着「全局禁直连」时连直连都没有,只能人去点断开再连。
+// isPrivacyCode 隐私核查类错误:闸、网卡 IPv6。这类错误拆隧道没有任何好处,见 watch 里的说明。
+func isPrivacyCode(code string) bool { return code == CodePrivacyGuard || code == CodePrivacyNIC }
+
 func (m *Machine) watch(ctx context.Context) (bool, error) {
 	alive := time.NewTicker(m.d.AliveEvery)
 	health := time.NewTicker(m.d.HealthEvery)
@@ -429,11 +432,19 @@ func (m *Machine) watch(ctx context.Context) (bool, error) {
 		if CodeOf(err) == CodeCoreCrash {
 			return true, err
 		}
-		// Privacy protection is a hard runtime invariant. Do not leave a
-		// working data plane up while the guard or managed IPv6 state is
-		// missing; stop and rebuild only after the next attempt verifies it.
-		if code := CodeOf(err); code == CodePrivacyGuard || code == CodePrivacyNIC {
-			return true, err
+		// 隐私核查没过(闸缺失 / 规格没同步 / 网卡还挂着公网 v6):**绝不拆隧道**。
+		// 拆了没有任何一种情况变好 —— 闸还在,拆隧道只是白断网,网卡上的 v6 地址也不会因此消失;
+		// 闸缺失,拆隧道等于让所有流量直连;规则模式本来没闸,拆了同样全部直连。
+		// 隧道 + strict_route 本身兜住绝大多数流量,该做的是原地把闸 / 网卡 IPv6 修回去
+		// (health 里已经调 syncGuard / syncNICIPv6 试过一次,守护进程的巡检还会继续试),
+		// 同时把状态如实报成 Degraded 让用户看见。m29 在这里立刻 rebuild,而且每次重连后 attempt 归零,
+		// 泄漏治不好、网却一直断。
+		if isPrivacyCode(CodeOf(err)) {
+			if cur != Degraded {
+				m.set(Degraded, err)
+			}
+			health.Reset(m.d.DegradedEvery)
+			return false, nil
 		}
 		fails++
 		// 第一次不通就把节奏收紧:确认"真的不对劲"只要再等一个短周期,而不是再等三分钟。

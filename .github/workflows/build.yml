@@ -330,15 +330,15 @@ jobs:
             echo "::error::产物里有未签名的 debug 包,不能发布:"; ls out/ | grep "DO-NOT-SHIP"; exit 1
           fi
           cd out && sha256sum * > SHA256SUMS && cat SHA256SUMS
+      # 发布信任根的私钥只在打 tag 的发布构建里解出来。m29 的写法是"非 tag 且没密钥才跳过",
+      # 于是推 master、同仓库分支的 PR 也会把私钥写进跑机的 /tmp 并签一份 —— 平白多出一片暴露面,
+      # 而那些构建根本不会发布,签了也没人用。
       - name: Sign checksums
+        if: startsWith(github.ref, 'refs/tags/v')
         env:
           RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
         run: |
           set -euo pipefail
-          if [[ "$GITHUB_REF" != refs/tags/v* && -z "$RELEASE_SIGNING_KEY" ]]; then
-            echo "非发布构建没有 RELEASE_SIGNING_KEY,跳过签名"
-            exit 0
-          fi
           test -n "$RELEASE_SIGNING_KEY" || { echo "::error::缺少 RELEASE_SIGNING_KEY,拒绝发布"; exit 1; }
           printf '%s\n' "$RELEASE_SIGNING_KEY" > /tmp/godusevpn-release.key
           cat > sign-sums.go <<'EOF'

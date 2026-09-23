@@ -82,6 +82,23 @@ func main() {
 			fail(fmt.Errorf("服务已注册但启动失败: %w", err))
 		}
 		fmt.Println("服务已安装并启动:", svc.DisplayName)
+	case "register-controller":
+		// 把一个 Windows 账户加进控制管道的名单(需要管理员身份;托盘在权限不足时会提权来调它)。
+		// 不带参数就登记当前交互会话的用户;带参数可以是 SID 或账户名。
+		var regErr error
+		switch {
+		case len(os.Args) > 2 && strings.HasPrefix(os.Args[2], "S-"):
+			regErr = ipc.RegisterControllerOwnerSID(os.Args[2])
+		case len(os.Args) > 2:
+			regErr = ipc.RegisterControllerOwnerName(os.Args[2])
+		default:
+			regErr = ipc.RegisterControllerOwner()
+		}
+		if regErr != nil {
+			fail(fmt.Errorf("登记控制用户失败: %w", regErr))
+		}
+		fmt.Println("已登记。名单里现在有:", strings.Join(ipc.ControllerOwnerSIDs(), ", "))
+		fmt.Println("重启服务后生效:godusevpn-svc.exe stop && godusevpn-svc.exe start")
 	case "uninstall":
 		// 闸是持久的,卸载要撤掉,不然文件删了闸还在、机器一直断网。先停服务再撤,
 		// 并且只有确认闸和 IPv6 都清理成功后才删除服务对象；失败时保留保护与可重试状态。
@@ -98,6 +115,12 @@ func main() {
 		if err := netmode.RestoreNICIPv6(); err != nil {
 			fmt.Println("注意:网卡 IPv6 没能还原回去:", err)
 			fmt.Println("卸载继续。要手动开回去:在「网络适配器属性」里把「Internet 协议版本 6 (TCP/IPv6)」勾回来。")
+		}
+		// 系统 DNS(macOS 被接管到隧道地址)/ 回包策略路由(Linux)和闸一样是持久的。m28 卸载时
+		// 会经 stop() 无条件还原;m29 让 stop() 在"落盘仍写着想连"时保留密封,于是卸载之后 DNS
+		// 永远指着一个已经不存在的隧道。卸载是用户明确要"回到没装过的样子",这里显式还原。
+		if err := netmode.UnprotectChecked(); err != nil {
+			fmt.Println("注意:系统 DNS / 路由没能还原:", err)
 		}
 		if err := svc.Uninstall(); err != nil {
 			fail(err)

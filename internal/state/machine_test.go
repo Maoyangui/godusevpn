@@ -118,7 +118,11 @@ func TestCoreDeathReconnects(t *testing.T) {
 	m.Disconnect()
 }
 
-func TestPrivacyFailureStopsImmediatelyAndKeepsCode(t *testing.T) {
+// 隐私核查失败(闸缺失 / 网卡 v6 冒出来)只降级、**不拆隧道**:拆了没有任何一种情况变好 ——
+// 闸还在时只是白断网,网卡上的地址也不会因此消失;闸缺失或规则模式下拆了等于全部直连。
+// m29 在这里立刻 Stop 并重连,每次重连 attempt 归零,泄漏治不好、网却一直断。
+// 错误码要原样留在状态里,让界面能说清楚是隐私核查没过,而不是"内核崩溃"。
+func TestPrivacyFailureDegradesWithoutStopping(t *testing.T) {
 	f := &fake{}
 	m := New(f.deps())
 	m.Connect()
@@ -126,17 +130,20 @@ func TestPrivacyFailureStopsImmediatelyAndKeepsCode(t *testing.T) {
 	f.mu.Lock()
 	f.health = Errf(CodePrivacyNIC, "网卡 IPv6 保护丢失")
 	f.mu.Unlock()
-	waitFor(t, m, Failed)
+	waitFor(t, m, Degraded)
 	if got := m.Snapshot(); got.Code != CodePrivacyNIC {
-		t.Fatalf("隐私保护失败不能被改记成内核崩溃: %+v", got)
+		t.Fatalf("隐私核查失败的错误码要原样保留: %+v", got)
 	}
-	if atomic.LoadInt32(&f.stops) == 0 {
-		t.Fatal("隐私保护失败应立即停止数据面")
+	if atomic.LoadInt32(&f.stops) != 0 {
+		t.Fatal("隐私核查失败不能拆隧道:闸缺失时拆了等于全部直连")
 	}
 	f.mu.Lock()
 	f.health = nil
 	f.mu.Unlock()
 	waitFor(t, m, Connected)
+	if atomic.LoadInt32(&f.stops) != 0 {
+		t.Fatal("修好之后也不该有过任何一次停机")
+	}
 	m.Disconnect()
 }
 

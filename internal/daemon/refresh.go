@@ -184,7 +184,13 @@ func (d *Daemon) syncGuard() {
 	hold := d.guardHold
 	d.mu.Unlock()
 	if hold && on {
-		// 放宽模式 / 禁直连设置的事务尚未完成:旧数据面仍在使用,旧闸必须保留。
+		// 隐私事务进行中:旧数据面还在用,闸必须留着 —— 但"留着"不等于"不能换规格"。
+		// 同一次保存里顺手改了「局域网直通」或网关模式,规格就变了;不在这里原地重装(事务内替换,
+		// 没有空窗),prepare 里 ensurePrivacyReady 的"规格未同步"检查必然失败,整份设置被回滚,
+		// 用户什么都改不了。m29 就是这样。
+		if d.appliedGuardSpec() != d.guardSpec() {
+			d.applyGuard("隐私事务进行中,闸规格变了,已原地重装")
+		}
 		return
 	}
 	switch {

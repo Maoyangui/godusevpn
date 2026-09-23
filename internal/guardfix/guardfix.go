@@ -54,6 +54,9 @@ func Clear() (text string, ok bool) {
 	}
 	clearErr := netmode.ClearGuard()
 	restoreErr := netmode.RestoreNICIPv6() // 网卡 IPv6 和闸一样是持久的,恢复网络就该一并还原,不然用户以为好了、v6 还是没有
+	// macOS 的系统 DNS 被接管到隧道地址、Linux 的回包策略路由也是"持久"的:闸撤了、隧道没了,
+	// DNS 还指着隧道就等于没网。恢复网络就是要回到没装过的样子,一并还原(Windows 上是空操作)。
+	dnsErr := netmode.UnprotectChecked()
 	n, _ := netmode.GuardStatus()
 
 	// 三件事分开说。m29 不管哪件失败都统一报成"过滤器还剩 N 条,没删干净",于是只有网卡 IPv6
@@ -70,6 +73,9 @@ func Clear() (text string, ok bool) {
 	if restoreErr != nil {
 		bad = append(bad, "网卡 IPv6 没能还原回去("+restoreErr.Error()+"),下次启动服务时会自动再试")
 	}
+	if dnsErr != nil {
+		bad = append(bad, "系统 DNS / 路由没能还原("+dnsErr.Error()+"),下次启动服务时会自动再试")
+	}
 	if switchErr != nil {
 		bad = append(bad, "没能关掉「全局禁直连」/「连接时停用网卡 IPv6」两个开关("+switchErr.Error()+"),服务下一次重连可能又把闸装回来;真装回来就去设置 → 隐私里手动关掉")
 	}
@@ -78,7 +84,7 @@ func Clear() (text string, ok bool) {
 		if !netOK {
 			lead = "没能完全恢复:"
 		}
-		return lead + strings.Join(bad, ";"), netOK && restoreErr == nil
+		return lead + strings.Join(bad, ";"), netOK && restoreErr == nil && dnsErr == nil
 	}
 	note := ""
 	if w := netmode.GuardWarning(); w != "" {

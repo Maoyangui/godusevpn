@@ -146,8 +146,18 @@ func RegisterControllerOwnerSID(sid string) error {
 	if err := paths.Ensure(); err != nil {
 		return err
 	}
+	// 登记文件是一份**名单**,一行一个 SID:同一台机器上第二个账户、换过 SID 的账户都能被追加进来。
+	// m29 只存一个、每次覆盖,于是这台机器上第二个 Windows 账户的托盘永远连不上控制口,
+	// 界面还谎报"服务未运行",而且没有任何产品内的恢复路径。
+	sids := ControllerOwnerSIDs()
+	for _, have := range sids {
+		if strings.EqualFold(have, sid) {
+			return nil
+		}
+	}
+	sids = append(sids, sid)
 	tmp := controllerSIDPath() + ".tmp"
-	if err := os.WriteFile(tmp, []byte(sid+"\n"), 0o600); err != nil {
+	if err := os.WriteFile(tmp, []byte(strings.Join(sids, "\n")+"\n"), 0o600); err != nil {
 		return fmt.Errorf("写入控制用户 SID: %w", err)
 	}
 	if err := os.Rename(tmp, controllerSIDPath()); err != nil {
@@ -188,21 +198,37 @@ func RegisterControllerOwnerName(name string) error {
 // ControllerOwnerRegistered reports whether a valid owner is already stored.
 // Upgrades must preserve it: the account supplying a later UAC prompt may be
 // a different administrator from the user who owns the running tray.
-func ControllerOwnerRegistered() bool {
-	b, err := os.ReadFile(controllerSIDPath())
-	return err == nil && sidPattern.MatchString(strings.TrimSpace(string(b)))
-}
+func ControllerOwnerRegistered() bool { return len(ControllerOwnerSIDs()) > 0 }
 
-func pipeSDDL() string {
+// ControllerOwnerSIDs 登记过的控制用户 SID 名单(格式不对的行忽略)。
+func ControllerOwnerSIDs() []string {
 	b, err := os.ReadFile(controllerSIDPath())
 	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, ln := range strings.Split(string(b), "\n") {
+		ln = strings.TrimSpace(ln)
+		if sidPattern.MatchString(ln) {
+			out = append(out, ln)
+		}
+	}
+	return out
+}
+
+func pipeSDDL() string { return sddlFor(ControllerOwnerSIDs()) }
+
+// sddlFor 拆出来只为可测:SYSTEM 与管理员全权,名单里的每个账户可读写。名单为空退回只许管理员。
+func sddlFor(sids []string) string {
+	if len(sids) == 0 {
 		return sddlFallback
 	}
-	sid := strings.TrimSpace(string(b))
-	if !sidPattern.MatchString(sid) {
-		return sddlFallback
+	var b strings.Builder
+	b.WriteString(sddlFallback)
+	for _, sid := range sids {
+		b.WriteString("(A;;GRGW;;;" + sid + ")")
 	}
-	return "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;" + sid + ")"
+	return b.String()
 }
 
 func listen() (net.Listener, error) {
@@ -215,5 +241,10 @@ func dial(ctx context.Context) (net.Conn, error) {
 
 func listenerClosed(err error) bool { return errors.Is(err, winio.ErrPipeListenerClosed) }
 
-// 管道 ACL 只放行当前交互式用户、SYSTEM 与管理员;连不上就是服务没跑或调用者没有交互式会话。
-func permissionDenied(error) bool { return false }
+// permissionDenied 管道在、但这个账户不在 ACL 里:Windows 会回 ERROR_ACCESS_DENIED。
+// m29 把它一律当成"服务未运行",于是第二个账户看到的是一句假话,还没法从提示里知道该怎么办。
+func permissionDenied(err error) bool { return errors.Is(err, windows.ERROR_ACCESS_DENIED) }
+
+func init() {
+	permissionHint = "当前 Windows 账户没有登记为控制用户。用管理员身份运行一次「登记当前账户」(godusevpn-svc.exe register-controller),或重新安装"
+}

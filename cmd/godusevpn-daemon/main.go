@@ -96,6 +96,12 @@ func main() {
 				fmt.Println("卸载继续。要手动开回去:sysctl -w net.ipv6.conf.<网卡>.disable_ipv6=0")
 			}
 		}
+		// 系统 DNS(macOS 被接管到隧道地址)/ 回包策略路由(Linux)和闸一样是持久的。m28 卸载时
+		// 会经 stop() 无条件还原;m29 让 stop() 在"落盘仍写着想连"时保留密封,于是卸载之后 DNS
+		// 永远指着一个已经不存在的隧道。卸载是用户明确要"回到没装过的样子",这里显式还原。
+		if err := netmode.UnprotectChecked(); err != nil {
+			fmt.Println("注意:系统 DNS / 路由没能还原:", err)
+		}
 		if err := svc.Uninstall(); err != nil {
 			fail(err)
 		}

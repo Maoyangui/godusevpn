@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"sync"
 	"time"
@@ -145,7 +146,9 @@ func call(h Handler, params json.RawMessage) (res any, err error) {
 // Call 客户端:连上控制口、发一条、收一条。服务没起来时返回 ErrNoService;没权限连(Linux 上非 root)返回 ErrNoPermission。
 var (
 	ErrNoService    = errors.New("服务未运行")
-	ErrNoPermission = errors.New("没有权限连接控制口(需要 root / sudo)")
+	ErrNoPermission = errors.New("没有权限连接控制口")
+	// permissionHint 各平台在 init 里填:Linux / macOS 是"需要 root / sudo",Windows 是"账户没登记"。
+	permissionHint = "需要 root / sudo"
 )
 
 func Call(ctx context.Context, method string, params any, result any) error {
@@ -154,7 +157,7 @@ func Call(ctx context.Context, method string, params any, result any) error {
 	conn, err := dial(dctx)
 	if err != nil {
 		if permissionDenied(err) {
-			return ErrNoPermission
+			return fmt.Errorf("%w(%s)", ErrNoPermission, permissionHint)
 		}
 		return ErrNoService
 	}

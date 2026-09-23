@@ -70,8 +70,9 @@ type Daemon struct {
 	guardOn                    bool                        // 「全局禁直连」的闸此刻开着
 	// tunUpPending 隧道网卡的转发层放行没成功(网卡还没注册好之类),下一次同步再试
 	tunUpPending atomic.Bool
-	guardErr     string // 闸该开却没开成的原因
-	persistedOK  bool   // persisted 状态文件可被可靠读取;未知时不撤保护、不自动连接
+	guardErr     string     // 闸该开却没开成的原因
+	persistedOK  bool       // persisted 状态文件可被可靠读取;未知时不撤保护、不自动连接
+	connOpMu     sync.Mutex // MConnect / MDisconnect 串行:两者交错会让落盘意愿与状态机相反
 	// settingsOK 设置文件读出来了。读不出来时用的是默认值,而默认值(模式=规则)会让
 	// syncGuard 判定"不该有闸"、syncNICIPv6 判定"该还原" —— 等于拿一份猜出来的设置去放宽用户的保护。
 	// 所以未知时一律保持现状:不撤闸、不还原网卡 IPv6、不自动连接。用户在界面里保存一次设置就恢复正常。
@@ -724,10 +725,14 @@ func (d *Daemon) health(ctx context.Context) error {
 	if !d.core.Running() {
 		return state.Errf(state.CodeCoreCrash, "内核未运行")
 	}
-	// 隐私保护是运行期不变量,不只是在启动时检查一次。新网卡、外部
-	// 修改过滤器或 IPv6 绑定重新出现时,先让状态机停掉数据面并退避,
-	// 直到下一轮重新建立并验证完整保护。
+	// 隐私保护是运行期不变量,不只是在启动时检查一次。新网卡、外部改了过滤器、IPv6 绑定又冒出来 ——
+	// 这些都在这里被发现。发现了就**原地修**:闸掉了重装、网卡 v6 冒出来再停用,隧道留着;
+	// 状态机把它报成 Degraded 而不是拆隧道(拆了只会更漏,见 state.Machine.watch)。
 	if err := d.ensurePrivacyReady(); err != nil {
+		d.syncGuard()
+		if nicErr := d.syncNICIPv6(); nicErr != nil {
+			d.logf("健康检查:网卡 IPv6 原地修复没做成: %v", nicErr)
+		}
 		return err
 	}
 	ms, err := d.core.URLTest(ctx, "proxy", builder.TestURL)
@@ -789,6 +794,14 @@ func (d *Daemon) restartForPrivacySettings(prev settings.Settings) error {
 	d.mu.Lock()
 	d.guardHold, d.nicHold = hold, nicHold
 	d.mu.Unlock()
+	// hold 只在这个事务里有意义,函数退出时一定要放开。m29 在"回滚设置也失败"那条路上直接 return,
+	// hold 永远是 true:之后 syncGuard 整段空转,用户点断开也撤不了闸,只能重启服务。
+	// 放开 hold 不等于放松保护 —— 闸和网卡 IPv6 本身没动,syncGuard 只是重新按当前设置对齐。
+	defer func() {
+		d.mu.Lock()
+		d.guardHold, d.nicHold = false, false
+		d.mu.Unlock()
+	}()
 	var rollback func() error
 	if !relax {
 		rollback = func() error { return d.setSettings(prev) }
@@ -796,14 +809,12 @@ func (d *Daemon) restartForPrivacySettings(prev settings.Settings) error {
 	err := d.machine.RestartChecked(rollback)
 	current := d.getSettings()
 	if err != nil && !relax && !reflect.DeepEqual(current, prev) {
-		// 收紧方向:回滚设置本身也失败时不能放开 hold;下一次重试前仍要保持旧闸 / IPv6 状态,
-		// 避免"设置不确定 + 保护已撤销"的组合。
-		d.logf("隐私设置回滚未完成,继续保持保护: %v", err)
+		// 收紧方向:重启失败、回滚设置也失败。此刻设置文件是新值、数据面按旧配置在跑(RestartChecked
+		// 失败时旧数据面保留)。闸与网卡 IPv6 由 syncGuard / syncNICIPv6 按当前设置继续对齐;
+		// 这里把事实报出去,不再用永久 hold 把撤闸路径一起锁死。
+		d.logf("隐私设置重启失败且回滚未完成,设置文件已是新值、数据面仍按旧配置运行: %v", err)
 		return err
 	}
-	d.mu.Lock()
-	d.guardHold, d.nicHold = false, false
-	d.mu.Unlock()
 	// 收紧方向:新数据面已成功启动,现在才按新设置调整规格。
 	// 放宽方向:哪怕隧道没重建起来也要在这里撤闸 —— 用户要的就是把保护放开,闸留着等于网还是没有。
 	d.syncGuard()
@@ -1512,6 +1523,10 @@ func (d *Daemon) registerHandlers() {
 		return map[string]string{"path": p}, nil
 	})
 	h(ipc.MConnect, func(json.RawMessage) (any, error) {
+		// 连接与断开互斥:两个并发调用会各自 savePersisted(同一个 .tmp 路径)并交错调用状态机,
+		// 落盘的 Wanted 可能和状态机的意愿相反,重启后按落盘值重连或撤闸就错了。
+		d.connOpMu.Lock()
+		defer d.connOpMu.Unlock()
 		if a, _ := d.activeProfile(); a == nil {
 			return nil, &ipc.CallError{Code: state.CodeProfileMissing, Msg: "还没有添加订阅"}
 		}
@@ -1526,13 +1541,18 @@ func (d *Daemon) registerHandlers() {
 		return d.stateView(), nil
 	})
 	h(ipc.MDisconnect, func(json.RawMessage) (any, error) {
-		// 先把“明确断开”的意愿持久化。写不进去时仍按严格连接
-		// 状态保留闸与网卡 IPv6 保护，不能出现磁盘仍写着 Wanted=true
-		// 但系统保护已经撤掉的重启竞态。
+		d.connOpMu.Lock()
+		defer d.connOpMu.Unlock()
+		// 先把"明确断开"的意愿持久化。写不进去时仍按严格连接状态保留闸与网卡 IPv6 保护,
+		// 不能出现磁盘仍写着 Wanted=true 但系统保护已经撤掉的重启竞态。
 		if err := d.savePersisted(persisted{Wanted: false}); err != nil {
 			return nil, fmt.Errorf("保存断开状态失败,保护保持: %w", err)
 		}
 		d.machine.Disconnect()
+		// 用户明确点了断开:隐私事务残留的 hold(回滚失败那种)不能再挡着撤闸,否则断了也断不干净
+		d.mu.Lock()
+		d.guardHold, d.nicHold = false, false
+		d.mu.Unlock()
 		d.syncGuard()
 		nicErr := d.syncNICIPv6()
 		if nicErr != nil {
