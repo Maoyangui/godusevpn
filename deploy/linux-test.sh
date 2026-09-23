@@ -56,7 +56,9 @@ a6=$(getent ahostsv6 www.google.com 2>/dev/null | awk '{print $1}' | grep -v '^:
 # 测出来的延迟也不是节点的真实延迟。真机上出现过(anytls 这类 TCP 节点),这里长期盯着。
 # nodepairs 订阅里所有节点的"地址:端口"(诊断里现成的)。比对要连端口一起比:
 # 只按地址比会把远程 DoH(1.1.1.1:443,本来就该经代理走)也算进来。
-nodepairs() { "$BIN" diag 2>/dev/null | grep -o '"[0-9]\{1,3\}\.[0-9.]*:[0-9]\{1,5\}"' | tr -d '"' | grep -v '^127\.' | sort -u; }
+# 排掉回环和 0.0.0.0:面板的监听地址(Linux 上是 0.0.0.0:9800)也会以 "ip:port" 的样子出现在诊断里,
+# 它排在所有节点 IP 前面,拿它当节点地址去打,那条"判给了直连"的检查就永远红。
+nodepairs() { "$BIN" diag 2>/dev/null | grep -o '"[0-9]\{1,3\}\.[0-9.]*:[0-9]\{1,5\}"' | tr -d '"' | grep -v '^127\.' | grep -v '^0\.0\.0\.0:' | sort -u; }
 loopcheck() {
   pairs=$(nodepairs)
   [ -z "$pairs" ] && { echo 0; return; }
@@ -93,7 +95,8 @@ echo "== 3.7 全局禁直连(nftables 闸:普通用户绑物理网卡直连被�
 direct_ok=0
 if [ -n "$U" ] && [ -n "$dip" ]; then
   d0=$(su -s /bin/sh "$U" -c "curl -s --interface $dip -m 6 -o /dev/null -w '%{http_code}' http://1.1.1.1/cdn-cgi/trace" 2>/dev/null || true)
-  if [ "$d0" = "200" ]; then direct_ok=1; else echo "  (正控制没过:规则模式下绑物理网卡直连 http=${d0:-000},绑网卡直连探测本身跑不通,3.7 的被拦断言改为跳过)"; fi
+  # 明文 http 会被 1.1.1.1 跳转到 https(301),那也是"通了";闸拦住时 curl 连不上,状态码是 000
+  case "$d0" in 2*|3*) direct_ok=1;; *) echo "  (正控制没过:规则模式下绑物理网卡直连 http=${d0:-000},绑网卡直连探测本身跑不通,3.7 的被拦断言改为跳过)";; esac
 fi
 gres=$("$BIN" mode global 2>&1); grc=$?
 check "切到严格全局模式被接受" "$([ "$grc" = 0 ] && echo 1 || echo 0)" "$gres"
@@ -103,7 +106,8 @@ rules=$(nft list table inet godusevpn_guard 2>/dev/null)
 check "nft 闸表存在且有 drop 规则" "$(echo "$rules" | grep -c 'drop')" "$(echo "$rules" | grep -c .) 行"
 if [ "$direct_ok" = 1 ]; then
   d=$(su -s /bin/sh "$U" -c "curl -s --interface $dip -m 6 -o /dev/null -w '%{http_code}' http://1.1.1.1/cdn-cgi/trace" 2>/dev/null || true)
-  check "普通用户绑物理网卡的直连被拦" "$([ -n "$d" ] && [ "$d" != "200" ] && echo 1 || echo 0)" "http=${d:-000}(网卡 $defif $dip 用户 $U)"
+  case "$d" in 2*|3*) blocked=0;; *) blocked=1;; esac # 2xx/3xx 都是通了;被拦是 000
+  check "普通用户绑物理网卡的直连被拦" "$blocked" "http=${d:-000}(网卡 $defif $dip 用户 $U)"
 else
   echo "  (跳过绑网卡直连探测:普通用户=${U:-无} 物理网卡=${defif:-无})"
 fi

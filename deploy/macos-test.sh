@@ -87,7 +87,9 @@ echo "  内核看到的入站连接数: $("$BIN" logs 400 core 2>/dev/null | gre
 # 测出来的延迟也不是节点的真实延迟。真机上出现过(anytls 这类 TCP 节点),这里长期盯着。
 # nodepairs 订阅里所有节点的"地址:端口"(诊断里现成的)。比对要连端口一起比:
 # 只按地址比会把远程 DoH(1.1.1.1:443,本来就该经代理走)也算进来。
-nodepairs() { "$BIN" diag 2>/dev/null | grep -o '"[0-9]\{1,3\}\.[0-9.]*:[0-9]\{1,5\}"' | tr -d '"' | grep -v '^127\.' | sort -u; }
+# 排掉回环和 0.0.0.0:面板的监听地址(Linux 上是 0.0.0.0:9800)也会以 "ip:port" 的样子出现在诊断里,
+# 它排在所有节点 IP 前面,拿它当节点地址去打,那条"判给了直连"的检查就永远红。
+nodepairs() { "$BIN" diag 2>/dev/null | grep -o '"[0-9]\{1,3\}\.[0-9.]*:[0-9]\{1,5\}"' | tr -d '"' | grep -v '^127\.' | grep -v '^0\.0\.0\.0:' | sort -u; }
 loopcheck() {
   pairs=$(nodepairs)
   [ -z "$pairs" ] && { echo 0; return; }
@@ -131,7 +133,8 @@ check "pf 锚点里有规则" "$(echo "$rules" | grep -c 'block drop out quick a
 if [ -n "$U" ] && [ -n "$defif" ]; then
   dip=$(ipconfig getifaddr "$defif" 2>/dev/null)
   dc=$(sudo -u "$U" curl -s --interface "$dip" -m 6 -o /dev/null -w '%{http_code}' http://1.1.1.1/cdn-cgi/trace 2>/dev/null || true)
-  check "普通用户绑物理网卡的直连被拦" "$([ "$dc" != "200" ] && echo 1 || echo 0)" "http=${dc:-000}(网卡 $defif $dip)"
+  case "$dc" in 2*|3*) blocked=0;; *) blocked=1;; esac # 明文 http 被 301 到 https 也是"通了";被拦是 000
+  check "普通用户绑物理网卡的直连被拦" "$blocked" "http=${dc:-000}(网卡 $defif $dip)"
 else
   echo "  (跳过绑网卡直连探测:普通用户=${U:-未知} 物理网卡=${defif:-未知})"
 fi
