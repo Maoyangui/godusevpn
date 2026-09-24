@@ -85,7 +85,9 @@ func main() {
 		}
 		fmt.Println("服务已安装并启动:", svc.DisplayName)
 	case "register-controller":
-		// 把一个 Windows 账户加进控制管道的名单(需要管理员身份;界面与托盘的「登记本账户」提权来调它)。
+		// 把一个 Windows 账户加进控制管道的名单(需要管理员身份;主界面横幅上的「登记本账户」提权来调它)。
+		// 带 --restart 时的退出码:0 = 登记并重启成功;1 = 登记本身失败;2 = 已登记但服务没停下来、没重启;
+		// 3 = 已登记、服务已停但没拉起来(界面会再用普通用户权限试着拉一次)。
 		// 不带参数就登记当前交互会话的用户;带参数可以是 SID 或账户名。管道的 ACL 在服务监听时算一次,
 		// 所以要重启服务才生效;带 --restart 就顺手重启(闸是持久的、第二代不绑服务名,重启不撤闸)。
 		var regErr error
@@ -122,10 +124,12 @@ func main() {
 			stopped = svc.QueryStatus() == "stopped"
 		}
 		if !stopped {
-			fail(errors.New("已登记,但服务迟迟没停下来,没能重启;重启电脑后生效"))
+			fmt.Fprintln(os.Stderr, "已登记,但服务迟迟没停下来,没能重启;重启电脑后生效")
+			os.Exit(2)
 		}
 		if err := svc.Start(); err != nil && svc.QueryStatus() != "running" {
-			fail(fmt.Errorf("已登记,服务已停止但启动失败(在开始菜单打开佛跳墙或重启电脑即可拉起): %w", err))
+			fmt.Fprintln(os.Stderr, "已登记,服务已停止但启动失败(在开始菜单打开佛跳墙或重启电脑即可拉起):", err)
+			os.Exit(3)
 		}
 		fmt.Println("服务已重启,登记生效")
 	case "uninstall":
@@ -142,8 +146,16 @@ func main() {
 		// m29 把这两件事同等对待,于是一张早就拔掉的 USB 网卡就能让产品永远卸不掉。
 		// 这里改成:如实报出来、告诉用户怎么手动开回去,然后照常卸载。
 		if err := netmode.RestoreNICIPv6(); err != nil {
-			fmt.Println("注意:网卡 IPv6 没能完全还原:", err)
-			fmt.Println("卸载继续。要手动开回去:在「网络适配器属性」里把「Internet 协议版本 6 (TCP/IPv6)」勾回来。")
+			var inc *netmode.NICRestoreIncomplete
+			if !errors.As(err, &inc) { // "原值丢了"那种下面从持久记录里说
+				fmt.Println("注意:网卡 IPv6 没能还原回去:", err)
+				fmt.Println("卸载继续。要手动开回去:在「网络适配器属性」里把「Internet 协议版本 6 (TCP/IPv6)」勾回来。")
+			}
+		}
+		if lost := netmode.NICLossNote(); lost != "" {
+			fmt.Println("注意:有几张网卡动手前的 IPv6 状态丢了,可能还关着:", lost)
+			fmt.Println("要手动开回去:在「网络适配器属性」里把「Internet 协议版本 6 (TCP/IPv6)」勾回来。")
+			_ = netmode.ClearNICLoss()
 		}
 		// 系统 DNS(macOS 被接管到隧道地址)/ 回包策略路由(Linux)和闸一样是持久的。m28 卸载时
 		// 会经 stop() 无条件还原;m29 让 stop() 在"落盘仍写着想连"时保留密封,于是卸载之后 DNS

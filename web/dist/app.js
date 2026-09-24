@@ -528,6 +528,7 @@ function renderHome(el) {
       <div class="status-text" id="status"></div>
       <div class="status-sub" id="status-sub"></div>
       <div class="guard-pill" id="guard-pill" hidden></div>
+      <div class="guard-pill warn" id="nic-pill" hidden></div>
     </div>
     <button class="idcard" id="id-card">
       <span class="flag none" id="id-flag">${ICON_GLOBE}</span>
@@ -593,6 +594,16 @@ function updateHome() {
   if (v.guardError) { gp.hidden = false; gp.className = 'guard-pill warn'; gp.innerHTML = ICON_WARN + `<span>${t(v.guard === 'on' ? 'home.guardWarn' : 'home.guardErr')} · ${esc(v.guardError)}</span>`; }
   else if (v.guard === 'on') { gp.hidden = false; gp.className = 'guard-pill'; gp.innerHTML = ICON_SHIELD + `<span>${t('home.guard')}</span>`; }
   else gp.hidden = true;
+  // 有几张网卡动手前的 IPv6 状态丢了(备份坏了):一直挂着,直到用户点「知道了」。内容变了才重画,免得每次推送都换掉按钮
+  const np = $('#nic-pill');
+  const lost = v.nicLost || '';
+  if (np && np.dataset.lost !== lost) {
+    np.dataset.lost = lost;
+    np.hidden = !lost;
+    np.innerHTML = lost ? ICON_WARN + `<span>${t('home.nicLost')} ${esc(lost)}</span> <button class="btn sm" id="nic-ok">${t('home.nicLostOk')}</button>` : '';
+    const ok = np.querySelector('#nic-ok');
+    if (ok) ok.addEventListener('click', async () => { try { await App().DismissNICLost(); } catch (e) { toast(errText(e), 'err'); } });
+  }
 
   // 出口卡片:自动选择时显示实际落到的那个节点,底下是这条线路真正的出口地址
   const auto = v.node === 'auto' || !v.node;
@@ -656,8 +667,12 @@ async function pasteInto(sel) {
 async function repairService() {
   try { await App().RepairService(); toast(t('about.repairDone'), 'ok'); } catch (e) { toast(errText(e), 'err'); }
 }
+let registering = false; // 在途时再点只提示,不再叠一个 UAC
 async function registerController() {
-  try { await App().RegisterController(); toast(t('banner.registerDone'), 'ok'); } catch (e) { toast(errText(e), 'err'); }
+  if (registering) { toast(t('banner.registering')); return; }
+  registering = true;
+  toast(t('banner.registering'));
+  try { await App().RegisterController(); toast(t('banner.registerDone'), 'ok'); } catch (e) { toast(errText(e), 'err'); } finally { registering = false; }
 }
 
 // ---- 首页三个面板 ----
@@ -1429,7 +1444,7 @@ function renderAbout(el) {
     <div class="list">
       <div class="item"><span class="dot ${state && state.service ? 'on' : 'err'}"></span>
         <div class="name"><b>${t('about.svc')}</b><span id="about-svc">${esc(svcText(state))}</span></div>
-        ${window.__web || window.__android ? '' : `<button class="btn sm" id="repair">${t('about.repair')}</button>`}</div>
+        ${window.__web || window.__android || (state && state.svcState === 'no-permission') ? '' : `<button class="btn sm" id="repair">${t('about.repair')}</button>`}</div>
       <div class="item"><div class="name"><b>${t('about.kernel')}</b><span>sing-box${stack ? ' · ' + esc(stack) : ''}${v.version ? ' · ' + t('about.svcVer', { v: v.version }) : ''}</span></div></div>
     </div>
     <div class="list">
@@ -1444,7 +1459,7 @@ function renderAbout(el) {
           <div class="name"><b>${t('about.web')}</b><span>${t('about.webHelp')}</span></div>
           <svg class="rowgo" viewBox="0 0 24 24"><path d="M9 5l7 7-7 7"/></svg></div>`
       : `<div class="item danger" id="quit"><svg class="rowic" viewBox="0 0 24 24"><path d="M12 3v9"/><path d="M6.3 6.8a8 8 0 1 0 11.4 0"/></svg>
-          <div class="name"><b>${t('about.quit')}</b><span>${t('about.quitHelp')}</span></div></div>`}
+          <div class="name"><b>${t('about.quit')}</b><span>${t(state && state.svcState === 'no-permission' ? 'about.quitHelpNoPerm' : 'about.quitHelp')}</span></div></div>`}
     </div>
     <p class="pagehint center">${t('about.license')}</p>`;
   const showUpdate = rel => {

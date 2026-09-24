@@ -365,6 +365,8 @@ func (s *Service) Call(name string, args []json.RawMessage) (any, error) {
 		return view(ipc.MConnect, nil)
 	case "Disconnect":
 		return view(ipc.MDisconnect, nil)
+	case "DismissNICLost":
+		return nil, s.dispatch(ipc.MDismissNICLost, nil, nil)
 	case "SetMode":
 		return view(ipc.MSetMode, map[string]string{"mode": arg[string](args, 0)})
 	case "SelectNode":

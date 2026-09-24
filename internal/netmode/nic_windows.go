@@ -87,6 +87,9 @@ if ($failed.Count -gt 0) { Write-Output ('GODUSEVPN-PARTIAL: ' + ($failed -join 
 		return nicResult(tunName, []string{fmt.Sprintf("%v(%s)", err, out)})
 	}
 	corrupt := nicCorruptWarning(out)
+	if corrupt != "" {
+		recordNICLoss(corrupt) // 停用这一路剔掉的坏行:之后的还原看不见它们了,得落盘等用户看到
+	}
 	var res error
 	if p := psMark(out, markPartial); p != "" {
 		// 有网卡没停成(在脚本跑的这几秒里被拔掉 / 被系统销毁,或者驱动不让改绑定)。
@@ -248,6 +251,7 @@ if ($gone.Count -gt 0) { Write-Output ('GODUSEVPN-GONE: ' + ($gone -join ', ')) 
 		if !errors.As(rerr, &inc) {
 			return rerr // 真失败:备份留着,下次重试
 		}
+		recordNICLoss(inc.Detail)
 		// 做完了但有几行原值丢了:备份脚本里已经删了,往下走把兜底删除也做掉,再把这件事如实交出去
 		if err := os.Remove(nicBackup()); err != nil && !os.IsNotExist(err) {
 			return fmt.Errorf("删除 IPv6 备份: %w", err)

@@ -38,14 +38,19 @@ func Clear() (text string, ok bool) {
 	// m28 在这里是分开处理的,本版照它来。
 	if n, err := netmode.GuardStatus(); err == nil && n == 0 {
 		if !netmode.NICIPv6Off() {
+			if lost := takeNICLoss(); lost != "" {
+				return "闸没有开着,网卡 IPv6 的备份也已清掉;但" + lost + " 两个隐私开关都没动。", true
+			}
 			return "闸没有开着,网卡 IPv6 也没被改过 —— 网络本来就是通的,没有改动任何设置。", true
 		}
 		if err := netmode.RestoreNICIPv6(); err != nil {
 			var inc *netmode.NICRestoreIncomplete
-			if errors.As(err, &inc) {
-				return "闸本来就没开;网卡 IPv6 已按备份还原,但" + inc.Detail + "。两个隐私开关都没动。", true
+			if !errors.As(err, &inc) {
+				return "闸本来就没开;网卡 IPv6 没能还原回去(" + err.Error() + ")。两个隐私开关都没动。", false
 			}
-			return "闸本来就没开;网卡 IPv6 没能还原回去(" + err.Error() + ")。两个隐私开关都没动。", false
+		}
+		if lost := takeNICLoss(); lost != "" {
+			return "闸本来就没开;网卡 IPv6 能还原的都还原了,但" + lost + " 两个隐私开关都没动。", true
 		}
 		return "闸本来就没开;网卡上被停用的 IPv6 已还原。「全局禁直连」与「连接时停用网卡 IPv6」两个开关都没动。", true
 	}
@@ -59,13 +64,14 @@ func Clear() (text string, ok bool) {
 	_ = switchErr
 	clearErr := netmode.ClearGuard()
 	restoreErr := netmode.RestoreNICIPv6() // 网卡 IPv6 和闸一样是持久的,恢复网络就该一并还原,不然用户以为好了、v6 还是没有
-	// 还原做完了、但备份里有几行坏了(那几张网卡的原值丢了):不算失败,但必须说出来 ——
-	// 0.7.4 在这里只记了一条内存里的告警,弹窗照样说"网卡 IPv6 也还原了",而那张网卡的 v6 其实还关着。
-	var nicNote string
+	// 还原做完了、但有几张网卡的原值丢了:不算失败,但必须说出来。要说的话从持久记录里取(takeNICLoss):
+	// 服务在跑时,上面的 switchOff 会让守护进程先还原,这里再还原时备份已经没了、拿不到 Incomplete ——
+	// 0.7.4 的弹窗就是这样照样说"网卡 IPv6 也还原了"。
 	var inc *netmode.NICRestoreIncomplete
 	if errors.As(restoreErr, &inc) {
-		nicNote, restoreErr = inc.Detail, nil
+		restoreErr = nil
 	}
+	nicNote := takeNICLoss()
 	// macOS 的系统 DNS 被接管到隧道地址、Linux 的回包策略路由也是"持久"的:闸撤了、隧道没了,
 	// DNS 还指着隧道就等于没网。恢复网络就是要回到没装过的样子,一并还原(Windows 上是空操作)。
 	dnsErr := netmode.UnprotectChecked()
@@ -89,26 +95,40 @@ func Clear() (text string, ok bool) {
 		bad = append(bad, "系统 DNS / 路由没能还原("+dnsErr.Error()+"),下次启动服务时会自动再试")
 	}
 	if nicNote != "" {
-		bad = append(bad, "网卡 IPv6 已按备份还原,但"+nicNote)
+		bad = append(bad, "网卡 IPv6 能还原的都还原了,但"+nicNote)
 	}
 	if switchErr != nil {
 		bad = append(bad, "没能关掉「全局禁直连」/「连接时停用网卡 IPv6」两个开关("+switchErr.Error()+"),服务下一次重连可能又把闸装回来;真装回来就去设置 → 隐私里手动关掉")
+	}
+	note := ""
+	if w := netmode.GuardWarning(); w != "" {
+		note = "(" + w + ")"
 	}
 	if len(bad) > 0 {
 		lead := "网络已恢复,但有没做完的:"
 		if !netOK {
 			lead = "没能完全恢复:"
 		}
-		return lead + strings.Join(bad, ";"), netOK && restoreErr == nil && dnsErr == nil
-	}
-	note := ""
-	if w := netmode.GuardWarning(); w != "" {
-		note = "(" + w + ")"
+		text := lead + strings.Join(bad, ";")
+		// 两个隐私开关被关掉这件事不能因为别处有没做完的就不说:用户会以为「全局禁直连」还护着他
+		if switchedOff {
+			text += "。另外已关掉「全局禁直连」与「连接时停用网卡 IPv6」两个开关,免得服务一重连又装回来;要再用,去设置 → 隐私打开"
+		}
+		return text + note, netOK && restoreErr == nil && dnsErr == nil
 	}
 	if switchedOff {
 		return "禁直连闸已解除,网卡 IPv6 也还原了,网络恢复。已顺手关掉「全局禁直连」与「连接时停用网卡 IPv6」两个开关,免得服务一重连又装回来;要再用,去设置 → 隐私打开。" + note, true
 	}
 	return "禁直连闸已解除,直连恢复。要再开闸,启动服务并连接即可。" + note, true
+}
+
+// takeNICLoss 取出"网卡原值丢失"的持久记录并删掉 —— 「恢复网络」的弹窗就是把它说给用户的地方。
+func takeNICLoss() string {
+	lost := netmode.NICLossNote()
+	if lost != "" {
+		_ = netmode.ClearNICLoss()
+	}
+	return lost
 }
 
 // disconnectQuietly 尽力让守护进程先断开,好让它不再按旧设置重新上闸。连不上控制口就算了 ——

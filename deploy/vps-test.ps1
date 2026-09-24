@@ -109,10 +109,11 @@ $aaaa = Resolve-DnsName -Name "www.google.com" -Type AAAA -ErrorAction SilentlyC
 Check "AAAA 为空(禁 IPv6)" ($null -eq $aaaa) ($(if ($aaaa) { ($aaaa | Select-Object -First 1).IPAddress } else { "" }))
 
 Write-Host "== 3.7 全局禁直连(WFP 闸:绑物理网卡的直连被拦,经隧道照常;停服务闸仍在;切回规则模式闸清空)" -ForegroundColor Cyan
-# 正控制:规则模式下(闸没开)绑物理网卡的直连必须是 200,否则探测本身跑不通,下面"被拦"的断言没有意义
+# 正控制:规则模式下(闸没开)绑物理网卡的直连必须是通的(2xx / 3xx),否则探测本身跑不通,下面"被拦"的断言没有意义。
+# 没过就按失败报,不静默跳过(Linux / macOS 同样处理):否则后面所有"直连被拦"的断言都会被跳过,脚本照样全部通过。
 $d0 = Direct-Http
 $script:directOK = ($d0 -match '^[23]') # 明文 http 被 1.1.1.1 跳转到 https(301)也是"通了";被拦是 000
-if (-not $script:directOK) { Write-Host "  (正控制没过:规则模式下绑物理网卡直连 http=$d0,被拦断言改为跳过)" }
+Check "正控制:规则模式下绑物理网卡的直连是通的" $script:directOK ("http=" + $d0 + "(网卡 " + $physIp + ")")
 & $cli mode global | Out-Null
 Start-Sleep -Seconds 2
 $stg = Wait-Status "connected" 15
@@ -126,7 +127,8 @@ $bound = Providers-Detail $ours
 if ($null -ne $ours) {
   Check "WFP 提供者存在且没有绑服务名" (($ours.Count -gt 0) -and -not ($ours | Where-Object { -not [string]::IsNullOrEmpty($_.serviceName) })) $bound
   $flags = (($ours | ForEach-Object { @($_.flags.item) -join "+" }) -join ", ")
-  Check "WFP 提供者没带系统的停用标志" (-not ($flags -match 'DISABLED')) "flags=[$flags]"
+  # 这个标志只在开机时由 BFE 设;这里没经过重启,这条只防回归(比如又把提供者绑上服务名),证明不了"重启后闸不被停用"
+  Check "WFP 提供者没带系统的停用标志(没经过重启,只防回归)" (-not ($flags -match 'DISABLED')) "flags=[$flags]"
   Check "闸挂在第二代提供者下" ($script:wfpStateText -match '6f6d9e2e-3a41-4b8e-9d55-676f64757365') ""
 } else { Check "WFP 提供者没有绑服务名" $false $bound }
 if ($script:directOK) { $d = Direct-Http; Check "绑物理网卡的直连被拦" ($d -and $d -notmatch '^[23]') "http=$d(网卡 $physIp)" }
@@ -234,7 +236,7 @@ if ($LegacyBin -and -not $KeepInstalled) {
     if ($script:directOK) { $ld = Direct-Http; Check "旧版闸拦着直连" ($ld -and $ld -notmatch '^[23]') "http=$ld" }
     # 原地升级,照安装器的流程:旧版 stop → 新版 install(沿用服务对象、改可执行文件路径、启动),全程不点断开。
     # 0.7.4 曾在停旧服务之前先用新版 exe 预装第二代(guard arm),0.7.5 去掉了:升级一旦在那之后中止,
-    # 留下的旧版认不出第二代,撤不掉它。停旧服务本来就不会让旧版的闸失效(实测),下面照样断言。
+    # 留下的旧版认不出第二代,撤不掉它。0.6.13-m15 起停旧服务不会让旧版的闸失效(实测,这里的旧版是 0.7.1),下面照样断言。
     & $lsvc stop | Out-Null
     Start-Sleep -Seconds 2
     if ($script:directOK) { # 旧服务停止、新服务还没起来的这一段,直连必须仍被拦。多采几次,免得只撞上网卡重绑的那一瞬

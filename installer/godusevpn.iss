@@ -175,6 +175,10 @@ begin
   if FileExists(ExpandConstant('{app}\godusevpn-svc.exe')) then
   begin
     Exec('taskkill.exe', '/F /IM godusevpn.exe', '', SW_HIDE, ewWaitUntilTerminated, rc);
+    // 0.6.13-m15 起旧服务停了闸还在(持久);更早的 0.6.10-m12 ~ 0.6.12-m14 三个预发布版不是 ——
+    // 那几版的闸是动态会话,或者停服务时自己撤掉,从它们直接升级,停旧服务到新服务开闸之间有一段没闸。
+    // 那三版只活了几个小时就被替换,这里不为它们加预装(预装在升级中止时会留下旧版撤不掉的闸,见 0.7.5 的说明),
+    // 排障页写明:从那几版升级前先点「断开」。
     // 升级只停止服务,不能走 uninstall:卸载命令按用户明确请求会撤闸并恢复网卡 IPv6,
     // 那会在替换文件期间制造直连泄漏窗口。新版本安装后由 SCM 重新启动并接管现有闸。
     //

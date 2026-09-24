@@ -34,9 +34,10 @@ const (
 	MRemoveProfile  = "RemoveProfile"
 	MSelectProfile  = "SelectProfile" // 切换当前订阅
 	MRenameProfile  = "RenameProfile"
-	MGetDevices     = "GetDevices"   // 局域网设备列表(网关模式)
-	MSetDevice      = "SetDevice"    // 记下 / 修改一台设备的名字与策略(按 MAC)
-	MRemoveDevice   = "RemoveDevice" // 从设置里删掉一台设备
+	MGetDevices     = "GetDevices"     // 局域网设备列表(网关模式)
+	MSetDevice      = "SetDevice"      // 记下 / 修改一台设备的名字与策略(按 MAC)
+	MRemoveDevice   = "RemoveDevice"   // 从设置里删掉一台设备
+	MDismissNICLost = "DismissNICLost" // 用户在界面上点了"知道了":删掉"网卡原值丢失"的记录
 )
 
 type Request struct {

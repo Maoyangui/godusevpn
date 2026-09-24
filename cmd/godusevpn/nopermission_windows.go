@@ -9,6 +9,8 @@ import (
 	"unsafe"
 
 	"golang.org/x/sys/windows"
+
+	"github.com/Maoyangui/godusevpn/internal/svc"
 )
 
 // noPermissionHint 控制口拒绝这个账户时提示的种类,以及界面能不能替用户登记。
@@ -55,12 +57,12 @@ func registerController(svcExe string) error {
 	info.cbSize = uint32(unsafe.Sizeof(info))
 	if r, _, e := procShellExecuteExW.Call(uintptr(unsafe.Pointer(&info))); r == 0 {
 		if errors.Is(e, windows.ERROR_CANCELLED) {
-			return errors.New("E_REGISTER_FAILED: 没有同意管理员权限")
+			return errors.New("E_UAC_CANCELLED: ")
 		}
 		return fmt.Errorf("E_REGISTER_FAILED: %v", e)
 	}
 	if info.hProcess == 0 {
-		return errors.New("E_REGISTER_FAILED: 没拿到提权进程")
+		return errors.New("E_REGISTER_FAILED: ")
 	}
 	defer windows.CloseHandle(info.hProcess)
 	ev, err := windows.WaitForSingleObject(info.hProcess, 180*1000)
@@ -68,14 +70,25 @@ func registerController(svcExe string) error {
 		return fmt.Errorf("E_REGISTER_FAILED: %v", err)
 	}
 	if ev != windows.WAIT_OBJECT_0 {
-		return errors.New("E_REGISTER_FAILED: 三分钟还没跑完")
+		return errors.New("E_REGISTER_FAILED: ")
 	}
 	var code uint32
 	if err := windows.GetExitCodeProcess(info.hProcess, &code); err != nil {
 		return fmt.Errorf("E_REGISTER_FAILED: %v", err)
 	}
-	if code != 0 {
-		return fmt.Errorf("E_REGISTER_FAILED: 退出码 %d", code)
+	// 退出码的含义见 godusevpn-svc 的 register-controller
+	switch code {
+	case 0:
+		return nil
+	case 2:
+		return errors.New("E_REGISTER_NOT_RESTARTED: ")
+	case 3:
+		// 登记成了、服务停着没拉起来:服务 ACL 允许普通用户启动,这里再试一次,免得严格全局下整机断网
+		if err := svc.StartUser(); err == nil {
+			return nil
+		}
+		return errors.New("E_REGISTER_SERVICE_DOWN: ")
+	default:
+		return fmt.Errorf("E_REGISTER_FAILED: %d", code)
 	}
-	return nil
 }

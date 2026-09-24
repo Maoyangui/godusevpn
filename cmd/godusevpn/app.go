@@ -55,6 +55,7 @@ type uiPrefs struct {
 }
 
 type App struct {
+	registerMu  sync.Mutex // 「登记本账户」在途时不再叠一个 UAC
 	ctx         context.Context
 	lastCheck   time.Time // 最近一次检查更新
 	lastStatus  string    // 上次看到的连接状态,连上那一刻顺手查一次更新
@@ -762,6 +763,10 @@ func (a *App) RegisterController() error {
 	if !a.GetState().CanRegister {
 		return errors.New("E_NO_PERMISSION: ")
 	}
+	if !a.registerMu.TryLock() {
+		return errors.New("E_REGISTER_BUSY: ")
+	}
+	defer a.registerMu.Unlock()
 	exe, err := os.Executable()
 	if err != nil {
 		return err
@@ -772,6 +777,13 @@ func (a *App) RegisterController() error {
 	}
 	// 等提权进程跑完、看它的退出码:0.7.4 只管把进程拉起来就报成功,重启服务失败、服务停在那里,界面也说"已登记"
 	err = registerController(svcExe)
+	go a.refresh()
+	return err
+}
+
+// DismissNICLost 用户看过"有几张网卡的 IPv6 原值丢了"的提示,点了"知道了"。
+func (a *App) DismissNICLost() error {
+	err := a.call(ipc.MDismissNICLost, nil, nil)
 	go a.refresh()
 	return err
 }

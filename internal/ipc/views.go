@@ -59,6 +59,7 @@ type StateView struct {
 	Uptime     int64             `json:"uptime"`
 	Guard      string            `json:"guard,omitempty"`      // 全局禁直连的闸:on = 开着;空 = 没开(开关关了、不是全局模式、或没在连)
 	GuardError string            `json:"guardError,omitempty"` // 闸该开却没开成(或隧道网卡放行失败)的原因
+	NICLost    string            `json:"nicLost,omitempty"`    // 有几张网卡动手前的 IPv6 状态丢了、可能还关着;用户点"知道了"之前一直带着
 	Profile    *ProfileView      `json:"profile,omitempty"`    // 当前订阅
 	Profiles   []ProfileView     `json:"profiles"`             // 全部订阅
 	Settings   settings.Settings `json:"settings"`

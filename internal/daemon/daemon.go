@@ -45,6 +45,7 @@ type Daemon struct {
 	coreLevel         atomic.Int32 // 内核日志记到哪一级(core.Writer 按它过滤)
 	nicOff            atomic.Bool  // 各网卡的 IPv6 绑定已由我们停掉、还没还原(和闸一样,跨内核重启 / 服务重启一直有效)
 	nicDisablePending atomic.Bool  // partial disable must be retried even before a public address appears
+	shuttingDown      atomic.Bool  // 服务正在停止:闸和网卡 IPv6 这段时间里一律不动(见 Run 的 ctx.Done)
 	nicMu             sync.Mutex   // syncNICIPv6 串行化:停用那一步要起 PowerShell,不能两个一起跑
 	// lastNICWarn 上一次打过的网卡 IPv6 告警。巡检每 30 秒跑一次,同一句话不重复刷日志;
 	// 但产生了就必须有人读到 —— 不然 setNICWarning 等于写进黑洞。
@@ -280,6 +281,10 @@ func (d *Daemon) Run(ctx context.Context) error {
 			// 那些都各自走处理器;这里要是也撤,net stop、关机、升级换文件的空档就全是直连,
 			// 开机那组过滤器也会跟着被删掉,"持久"就成了空话。上次连着关的机,下次启动会自动重连。
 			d.logf("服务停止(闸留着,下次启动接着用)")
+			// 必须先于 Disconnect:Disconnect 先把"想连"清成假,再等状态机当前这一步跑完。那一步要是正好在
+			// prepare / health 里同步闸和网卡 IPv6,就会按"用户断开"撤闸、还原 IPv6,然后进程才退出 ——
+			// 停服务(升级、net stop、关机、登记账户后重启服务)就成了撤闸。0.7.4 及以前都是这样。
+			d.shuttingDown.Store(true)
 			d.machine.Disconnect()
 			_ = d.server.Close()
 			d.log.Close()
@@ -889,6 +894,9 @@ func nicIPv6Action(want, on bool) nicAction {
 // syncNICIPv6 把网卡 IPv6 的状态和"该不该关"对齐;幂等。连接意愿、设置变了都要调一次。
 // 停用 / 还原都要起 PowerShell(Windows)或改 sysctl,挺慢,所以用 nicOff 记着当前状态,状态没变就什么都不做。
 func (d *Daemon) syncNICIPv6() error {
+	if d.shuttingDown.Load() {
+		return nil // 服务正在停止:不动网卡 IPv6(见 Run 的 ctx.Done)。下次启动由 reconcileNICIPv6 按落盘意愿对账
+	}
 	if !d.settingsTrusted() {
 		return nil // 同 syncGuard:设置不可信时不拿默认值去放宽保护
 	}
@@ -955,7 +963,7 @@ func (d *Daemon) syncNICIPv6() error {
 				d.logf("还原网卡 IPv6 失败,保护状态保留: %v", err)
 				return state.Errf(state.CodePrivacyNIC, "还原网卡 IPv6 失败: %v", err)
 			}
-			d.logf("网卡 IPv6:已按备份还原,但%s", inc.Detail)
+			d.logf("网卡 IPv6:能还原的都还原了;%s", inc.Detail)
 		} else {
 			d.logf("网卡 IPv6:已按动手前的状态还原")
 		}
@@ -1016,7 +1024,7 @@ func (d *Daemon) reconcileNICIPv6() {
 				return
 			}
 			d.nicOff.Store(false)
-			d.logf("网卡 IPv6:上次不是连着关的机(或设置已关掉),已按备份还原,但%s", inc.Detail)
+			d.logf("网卡 IPv6:上次不是连着关的机(或设置已关掉),能还原的都还原了;%s", inc.Detail)
 			return
 		}
 		d.nicOff.Store(false)
@@ -1525,6 +1533,7 @@ func (d *Daemon) stateView() ipc.StateView {
 	}
 	v.GuardError = d.guardErr
 	d.mu.Unlock()
+	v.NICLost = netmode.NICLossNote()
 	return v
 }
 
@@ -1536,6 +1545,7 @@ func (d *Daemon) registerHandlers() {
 		return map[string]any{"version": buildinfo.Version, "protocol": ipc.Version, "name": DisplayName}, nil
 	})
 	h(ipc.MGetState, func(json.RawMessage) (any, error) { return d.stateView(), nil })
+	h(ipc.MDismissNICLost, func(json.RawMessage) (any, error) { return nil, netmode.ClearNICLoss() })
 	h(ipc.MGetClashInfo, func(json.RawMessage) (any, error) {
 		return ipc.ClashInfo{Port: d.activeClashPort(), Secret: d.secret, Running: d.core.Running()}, nil
 	})

@@ -10,6 +10,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -88,13 +89,18 @@ func main() {
 		// 所以上面那道门必须守住;而网卡 IPv6 关着顶多是某几张网卡没有 v6,网照常能上。
 		// m29 把这两件事同等对待,于是一张早就拔掉的 USB 网卡就能让产品永远卸不掉。
 		// 这里改成:如实报出来、告诉用户怎么手动开回去,然后照常卸载。
-		if err := netmode.RestoreNICIPv6(); err != nil {
-			fmt.Println("注意:网卡 IPv6 没能完全还原:", err)
+		var inc *netmode.NICRestoreIncomplete
+		if err := netmode.RestoreNICIPv6(); err != nil && !errors.As(err, &inc) { // "原值丢了"那种下面从持久记录里说
+			fmt.Println("注意:网卡 IPv6 没能还原回去:", err)
 			if runtime.GOOS == "darwin" {
 				fmt.Println("卸载继续。要手动开回去:系统设置 → 网络 → 详细信息 → TCP/IP,把「配置 IPv6」改回「自动」。")
 			} else {
 				fmt.Println("卸载继续。要手动开回去:sysctl -w net.ipv6.conf.<网卡>.disable_ipv6=0")
 			}
+		}
+		if lost := netmode.NICLossNote(); lost != "" {
+			fmt.Println("注意:有几张网卡动手前的 IPv6 状态丢了,可能还关着:", lost)
+			_ = netmode.ClearNICLoss()
 		}
 		// 系统 DNS(macOS 被接管到隧道地址)/ 回包策略路由(Linux)和闸一样是持久的。m28 卸载时
 		// 会经 stop() 无条件还原;m29 让 stop() 在"落盘仍写着想连"时保留密封,于是卸载之后 DNS
