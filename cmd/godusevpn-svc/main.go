@@ -173,6 +173,9 @@ func main() {
 				fmt.Println("闸:没开(直连不受限)")
 			} else {
 				fmt.Printf("闸:开着(%d 条过滤器;隧道以外的流量一律拦下)\n", n)
+				if d := guardDetail(); d != "" {
+					fmt.Println(d)
+				}
 			}
 		case "arm":
 			// 升级用:安装器在停旧服务之前用**新版** exe 跑一次,趁旧服务还在把闸装到第二代提供者下(见 guardfix.Arm)。

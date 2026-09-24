@@ -420,6 +420,21 @@ func persistentGuardReady(fs []filterInfo) bool {
 	return guardCovers(fs, cFWPM_FILTER_FLAG_PERSISTENT)
 }
 
+// Breakdown 只读诊断:我们名下的过滤器一共几条、其中几条被 BFE 标成 DISABLED(不拦任何包)、
+// 运行期那组(PERSISTENT)覆盖全不全。给 guard status 与真机验收用,不参与任何决策。
+func Breakdown() (total, disabled int, persistentReady bool, err error) {
+	fs, err := currentFilters()
+	if err != nil {
+		return 0, 0, false, err
+	}
+	for _, f := range fs {
+		if f.flags&cFWPM_FILTER_FLAG_DISABLED != 0 {
+			disabled++
+		}
+	}
+	return len(fs), disabled, persistentGuardReady(fs), nil
+}
+
 // currentFilters 开一次会话把我们名下的过滤器全取出来。
 func currentFilters() ([]filterInfo, error) {
 	mu.Lock()
