@@ -8,8 +8,8 @@
 # 做不到的:模拟开机(BFE 重新加载持久规则、我们的服务还没起来)。运行中的 Windows 上 BFE 停不下来 ——
 # 它的依赖服务 mpssvc(Windows 防火墙)不接受停止控制,改了服务权限也一样。开机这一段只能靠真重启验证。
 #
-# 清理不走卸载程序:它在卸载末尾用普通 MsgBox 问"要不要删数据",/SUPPRESSMSGBOXES 压不住,静默卸载会卡在那里。
-# 直接跑服务的 uninstall(卸载程序做的也是这一步)。
+# 最后用真正的卸载程序(unins000.exe /VERYSILENT)、不先断开、从严格全局直接卸载:撤闸在用户确认之后、删文件之前
+# (usUninstall);静默卸载不再问"要不要删数据"。找不到卸载程序时退回直接跑服务的 uninstall。
 param(
   [Parameter(Mandatory = $true)][string]$Sub,
   [Parameter(Mandatory = $true)][string]$OldSetup,

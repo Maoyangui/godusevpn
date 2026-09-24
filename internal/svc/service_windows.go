@@ -125,7 +125,12 @@ func Uninstall() error {
 	defer m.Disconnect()
 	s, err := m.OpenService(Name)
 	if err != nil {
-		return errors.New("服务不存在")
+		// 本来就不在(用户先手动跑过 uninstall、安装时服务没注册上、被 sc delete 过)= 已经卸掉了,幂等。
+		// 以前报错,卸载程序看到非零退出码就当"闸撤不掉"中止,而且每次重试都一样,永远卸不掉。
+		if errors.Is(err, windows.ERROR_SERVICE_DOES_NOT_EXIST) {
+			return nil
+		}
+		return fmt.Errorf("打开服务: %w", err)
 	}
 	defer s.Close()
 	if st, err := s.Query(); err == nil && st.State != svc.Stopped {

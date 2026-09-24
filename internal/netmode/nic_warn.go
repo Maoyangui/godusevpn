@@ -105,9 +105,6 @@ func NICLossNote() string {
 	return strings.TrimSpace(string(b))
 }
 
-// RecordNICLoss 给包外用:卸载时网卡 IPv6 真没还原成,之后不会再有守护进程去重试,也记进来。
-func RecordNICLoss(msg string) { recordNICLoss(msg) }
-
 // ClearNICLoss 用户已经看到了:删掉记录。
 func ClearNICLoss() error {
 	if err := os.Remove(nicLossPath()); err != nil && !os.IsNotExist(err) {

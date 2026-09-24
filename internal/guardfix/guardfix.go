@@ -99,7 +99,11 @@ func Clear() (text string, ok bool) {
 		bad = append(bad, "系统 DNS / 路由没能还原("+dnsErr.Error()+"),下次启动服务时会自动再试")
 	}
 	if nicNote != "" {
-		bad = append(bad, "网卡 IPv6 能还原的都还原了,但"+nicNote)
+		if restoreErr != nil {
+			bad = append(bad, "另外"+nicNote) // 上一条已经说了"没还原成、会再试",这里不能再说"能还原的都还原了"
+		} else {
+			bad = append(bad, "网卡 IPv6 能还原的都还原了,但"+nicNote)
+		}
 	}
 	if switchErr != nil {
 		bad = append(bad, "没能关掉「全局禁直连」/「连接时停用网卡 IPv6」两个开关("+switchErr.Error()+"),服务下一次重连可能又把闸装回来;真装回来就去设置 → 隐私里手动关掉")

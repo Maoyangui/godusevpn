@@ -108,8 +108,10 @@ func main() {
 	case "uninstall":
 		// 闸是持久的,卸载要撤掉,不然文件删了闸还在、机器一直断网。先停服务再撤,
 		// 并且只有确认闸和 IPv6 都清理成功后才删除服务对象；失败时保留保护与可重试状态。
-		if err := svc.Stop(); err != nil {
-			fail(fmt.Errorf("停止服务以清理隐私保护失败: %w", err))
+		// 停得慢(守护进程收尾接近或超过 20 秒)不等于停不掉:再等。以前 20 秒一到就失败,卸载程序当成
+		// "闸撤不掉"中止,半秒后服务真停了却没人拉起,严格全局下整机断网。
+		if !stopAndWait() {
+			fail(errors.New("停止服务以清理隐私保护失败:服务迟迟没停下来"))
 		}
 		if err := netmode.ClearGuard(); err != nil {
 			fail(fmt.Errorf("撤销全局禁直连失败,未执行卸载: %w", err))
@@ -122,7 +124,6 @@ func main() {
 		if err := netmode.RestoreNICIPv6(); err != nil && !errors.As(err, &inc) { // "原值丢了"那种下面说
 			fmt.Println("注意:网卡 IPv6 没能还原回去:", err)
 			fmt.Println("卸载继续。要手动开回去:在「网络适配器属性」里把「Internet 协议版本 6 (TCP/IPv6)」勾回来。")
-			netmode.RecordNICLoss("卸载时网卡 IPv6 没能还原回去(" + err.Error() + ")。之后不会再有人去还原,要手动开回去。")
 		}
 		// 记录不在这里删:卸载程序 / 界面「修复」跑这条命令时窗口一闪就关,用户看不到。
 		// 卸载程序会自己弹框说;数据留着的话,重装后首页照样提示,点「知道了」才删。

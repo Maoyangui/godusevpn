@@ -143,12 +143,20 @@ end;
 procedure UninstallGuardOrAbort();
 var rc: Integer;
 begin
+  // 先关掉所有会话里的界面:[UninstallRun] 的 taskkill 要到删文件那一步才跑,撤闸期间界面还开着 ——
+  // 服务一停它就挂出「服务没有运行 · 修复」,谁这时点一下(不弹 UAC)就把服务拉起来、按"想连"把闸装回去,
+  // 接着服务被删、工具被删,留下一道没人撤得掉的闸。
+  Exec('taskkill.exe', '/F /IM godusevpn.exe', '', SW_HIDE, ewWaitUntilTerminated, rc);
   if FileExists(ExpandConstant('{app}\godusevpn-svc.exe')) then
     if (not Exec(ExpandConstant('{app}\godusevpn-svc.exe'), 'uninstall', '', SW_HIDE, ewWaitUntilTerminated, rc)) or (rc <> 0) then
-      RaiseException('无法解除佛跳墙的全局禁直连闸,卸载已中止 —— 现在删掉程序的话机器会一直断网且无法恢复。'#13#10#13#10'原程序与「恢复网络」工具都保留着:先用开始菜单里的「恢复网络」(右键以管理员身份运行)把闸解除,再来卸载。');
-  // 网卡 IPv6 没能还原、或动手前的原值丢了:svc uninstall 在控制台里说过,但那个窗口看不见,这里用对话框再说一次
-  if FileExists(ExpandConstant('{commonappdata}\godusevpn\nic-ipv6-lost.txt')) then
-    SuppressibleMsgBox('注意:有几张网卡的 IPv6 可能还关着(备份损坏,或卸载时没能还原)。'#13#10#13#10'要手动开回去:在「网络适配器属性」里把「Internet 协议版本 6 (TCP/IPv6)」勾回来。'#13#10'详情见 ' + ExpandConstant('{commonappdata}\godusevpn\nic-ipv6-lost.txt'), mbInformation, MB_OK, IDOK);
+    begin
+      // 先说清楚再中止:Abort 不带"Runtime error"那种英文前缀,静默卸载时对话框也会被 /SUPPRESSMSGBOXES 压住
+      SuppressibleMsgBox('无法解除佛跳墙的全局禁直连闸,卸载已中止 —— 现在删掉程序的话机器会一直断网且无法恢复。'#13#10#13#10'原程序与「恢复网络」工具都保留着:先用开始菜单里的「恢复网络」(右键以管理员身份运行)把闸解除,再来卸载。', mbCriticalError, MB_OK, IDOK);
+      Abort;
+    end;
+  // 网卡 IPv6 没能还原(备份还在)、或动手前的原值丢了:svc uninstall 在控制台里说过,但那个窗口看不见,这里再说一次
+  if FileExists(ExpandConstant('{commonappdata}\godusevpn\nic-ipv6-lost.txt')) or FileExists(ExpandConstant('{commonappdata}\godusevpn\nic-ipv6-backup.txt')) then
+    SuppressibleMsgBox('注意:有几张网卡的 IPv6 可能还关着(卸载时没能还原,或备份损坏、原值丢了)。'#13#10#13#10'要手动开回去:在「网络适配器属性」里把「Internet 协议版本 6 (TCP/IPv6)」勾回来。'#13#10'详情见 ' + ExpandConstant('{commonappdata}\godusevpn') + ' 里的 nic-ipv6-backup.txt / nic-ipv6-lost.txt', mbInformation, MB_OK, IDOK);
 end;
 
 // 应用内升级:安装包带 /RELAUNCH=1,静默装完后由 [Run] 里的 runasoriginaluser 条目重新拉起客户端
