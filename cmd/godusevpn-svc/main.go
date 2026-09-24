@@ -54,42 +54,14 @@ func main() {
 	case "repair":
 		// 界面的「修复」:以前是 uninstall + install,而 uninstall 会撤闸、还原网卡 IPv6 —— 服务要是同一台电脑上
 		// 别的账户在用,就是拆别人的保护;自己的也不该因为"修复"就拆。停服务不撤闸(闸是持久的),
-		// 所以这里只停掉、再按 install 重新注册并启动(服务对象在就沿用、改可执行文件路径)。
-		_ = svc.Stop()
-		fallthrough
+		// 所以这里只停稳、再按 install 重新注册并启动(服务对象在就沿用,顺带恢复自动启动与失败重启)。
+		// 停不下来就不往下走:接着 Start 只会失败,服务稍后停下来就没人再拉起了。
+		if !stopAndWait() {
+			fail(errors.New("服务迟迟没停下来,没法修复;重启电脑后再试"))
+		}
+		installService()
 	case "install":
-		exe, err := os.Executable()
-		if err != nil {
-			fail(err)
-		}
-		exe, _ = filepath.Abs(exe)
-		// Resolve the current desktop/session owner independently of a UAC
-		// administrator's token. Manual installs may explicitly supply an owner;
-		// upgrades always preserve the already registered controller.
-		owner := ""
-		for _, arg := range os.Args[2:] {
-			if strings.HasPrefix(arg, "--controller-user=") {
-				owner = strings.Trim(strings.TrimPrefix(arg, "--controller-user="), "\"")
-			}
-		}
-		if !ipc.ControllerOwnerRegistered() {
-			var ownerErr error
-			if owner != "" {
-				ownerErr = ipc.RegisterControllerOwnerName(owner)
-			} else {
-				ownerErr = ipc.RegisterControllerOwner()
-			}
-			if ownerErr != nil {
-				fail(fmt.Errorf("登记控制管道用户失败: %w", ownerErr))
-			}
-		}
-		if err := svc.Install(exe); err != nil {
-			fail(err)
-		}
-		if err := svc.Start(); err != nil {
-			fail(fmt.Errorf("服务已注册但启动失败: %w", err))
-		}
-		fmt.Println("服务已安装并启动:", svc.DisplayName)
+		installService()
 	case "register-controller":
 		// 把一个 Windows 账户加进控制管道的名单(需要管理员身份;主界面横幅上的「登记本账户」提权来调它)。
 		// 带 --restart 时的退出码:0 = 登记并重启成功;1 = 登记本身失败;2 = 已登记但服务没停下来、没重启;
@@ -124,12 +96,7 @@ func main() {
 		// 0.7.4 在这里 Stop 一超时(守护进程收尾超过 20 秒)就直接失败退出,而停止请求已经发出去了 ——
 		// 服务随后停下、却没人再把它拉起来,严格全局模式下整机断网,界面还报"已登记"。
 		// 现在:停得慢就再等;停下来了就一定去拉起来;实在没停下来就不碰它、如实失败。
-		stopped := svc.Stop() == nil
-		for i := 0; !stopped && i < 60; i++ {
-			time.Sleep(time.Second)
-			stopped = svc.QueryStatus() == "stopped"
-		}
-		if !stopped {
+		if !stopAndWait() {
 			fmt.Fprintln(os.Stderr, "已登记,但服务迟迟没停下来,没能重启;重启电脑后生效")
 			os.Exit(2)
 		}
@@ -155,6 +122,7 @@ func main() {
 		if err := netmode.RestoreNICIPv6(); err != nil && !errors.As(err, &inc) { // "原值丢了"那种下面说
 			fmt.Println("注意:网卡 IPv6 没能还原回去:", err)
 			fmt.Println("卸载继续。要手动开回去:在「网络适配器属性」里把「Internet 协议版本 6 (TCP/IPv6)」勾回来。")
+			netmode.RecordNICLoss("卸载时网卡 IPv6 没能还原回去(" + err.Error() + ")。之后不会再有人去还原,要手动开回去。")
 		}
 		// 记录不在这里删:卸载程序 / 界面「修复」跑这条命令时窗口一闪就关,用户看不到。
 		// 卸载程序会自己弹框说;数据留着的话,重装后首页照样提示,点「知道了」才删。
@@ -238,6 +206,54 @@ func runDaemon(ctx context.Context) error {
 		return err
 	}
 	return d.Run(ctx)
+}
+
+// installService 注册(或沿用)服务并启动;名单里还没有人就登记当前账户。install 与 repair 共用。
+func installService() {
+	exe, err := os.Executable()
+	if err != nil {
+		fail(err)
+	}
+	exe, _ = filepath.Abs(exe)
+	// Resolve the current desktop/session owner independently of a UAC
+	// administrator's token. Manual installs may explicitly supply an owner;
+	// upgrades always preserve the already registered controller.
+	owner := ""
+	for _, arg := range os.Args[2:] {
+		if strings.HasPrefix(arg, "--controller-user=") {
+			owner = strings.Trim(strings.TrimPrefix(arg, "--controller-user="), "\"")
+		}
+	}
+	if !ipc.ControllerOwnerRegistered() {
+		var ownerErr error
+		if owner != "" {
+			ownerErr = ipc.RegisterControllerOwnerName(owner)
+		} else {
+			ownerErr = ipc.RegisterControllerOwner()
+		}
+		if ownerErr != nil {
+			fail(fmt.Errorf("登记控制管道用户失败: %w", ownerErr))
+		}
+	}
+	if err := svc.Install(exe); err != nil {
+		fail(err)
+	}
+	if err := svc.Start(); err != nil {
+		fail(fmt.Errorf("服务已注册但启动失败: %w", err))
+	}
+	fmt.Println("服务已安装并启动:", svc.DisplayName)
+}
+
+// stopAndWait 停服务并等它真的停下:停得慢(守护进程收尾超过 20 秒)不等于停不掉,再等最多 60 秒。
+// 服务不存在也算停了。
+func stopAndWait() bool {
+	stopped := svc.Stop() == nil
+	for i := 0; !stopped && i < 60; i++ {
+		time.Sleep(time.Second)
+		st := svc.QueryStatus()
+		stopped = st == "stopped" || st == "not-installed"
+	}
+	return stopped
 }
 
 func fail(err error) {

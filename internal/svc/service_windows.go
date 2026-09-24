@@ -84,10 +84,15 @@ func Install(exe string) error {
 			return fmt.Errorf("读取已有服务配置: %w", err)
 		}
 		cfg.BinaryPathName = syscall.EscapeArg(exe) + " service"
+		// 启动类型与依赖也一并恢复:被优化工具 / 用户设成「禁用」或「手动」的服务,以前靠「修复」的 uninstall + install
+		// 重建;现在「修复」不再卸载(那会撤闸),这里把它们改回来。开机后闸要靠服务起来重装,自动启动是前提。
+		cfg.StartType = mgr.StartAutomatic
+		cfg.Dependencies = []string{"BFE", "Tcpip"}
 		if err := s.UpdateConfig(cfg); err != nil {
 			return fmt.Errorf("更新已有服务配置: %w", err)
 		}
 		_ = exec.Command("sc.exe", "sdset", Name, userStartStopSDDL).Run()
+		_ = s.SetRecoveryActions(recoveryActions, 86400)
 		return nil
 	}
 	s, err := m.CreateService(Name, exe, mgr.Config{
@@ -100,12 +105,15 @@ func Install(exe string) error {
 	defer s.Close()
 	// 让本机已登录用户能启停服务(托盘"退出"要把服务一起停掉,登录时再拉起,都不弹 UAC)
 	_ = exec.Command("sc.exe", "sdset", Name, userStartStopSDDL).Run()
-	_ = s.SetRecoveryActions([]mgr.RecoveryAction{
-		{Type: mgr.ServiceRestart, Delay: 5 * time.Second},
-		{Type: mgr.ServiceRestart, Delay: 15 * time.Second},
-		{Type: mgr.ServiceRestart, Delay: 60 * time.Second},
-	}, 86400)
+	_ = s.SetRecoveryActions(recoveryActions, 86400)
 	return nil
+}
+
+// recoveryActions 服务崩了由 SCM 拉起:5 秒、15 秒、60 秒。
+var recoveryActions = []mgr.RecoveryAction{
+	{Type: mgr.ServiceRestart, Delay: 5 * time.Second},
+	{Type: mgr.ServiceRestart, Delay: 15 * time.Second},
+	{Type: mgr.ServiceRestart, Delay: 60 * time.Second},
 }
 
 // Uninstall 停止并删除服务。

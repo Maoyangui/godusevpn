@@ -36,11 +36,11 @@ func TestRestoreOutcome(t *testing.T) {
 			t.Fatalf("got %v", err)
 		}
 	})
-	t.Run("有 FAILED:普通失败,消息带上无效行", func(t *testing.T) {
-		_, err := restoreOutcome("GODUSEVPN-CORRUPT: 1\nGODUSEVPN-FAILED: 以太网: 拒绝访问")
+	t.Run("有 FAILED:普通失败;坏行说明只在告警里,不重复进错误", func(t *testing.T) {
+		w, err := restoreOutcome("GODUSEVPN-CORRUPT: 1\nGODUSEVPN-FAILED: 以太网: 拒绝访问")
 		var inc *NICRestoreIncomplete
-		if err == nil || errors.As(err, &inc) || !strings.Contains(err.Error(), "拒绝访问") || !strings.Contains(err.Error(), "1 行无效") {
-			t.Fatalf("got %v", err)
+		if err == nil || errors.As(err, &inc) || !strings.Contains(err.Error(), "拒绝访问") || strings.Contains(err.Error(), "行无效") || !strings.Contains(w, "1 行无效") {
+			t.Fatalf("got %q %v", w, err)
 		}
 	})
 }

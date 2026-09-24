@@ -110,6 +110,7 @@ type Machine struct {
 	d      Deps
 	snap   Snapshot
 	wanted bool
+	closed bool // Shutdown 过了:服务正在停,任何在途的 Restart / 重连都不许再把内核拉起来
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
 	pre    []byte // Restart 提前备好的配置:下一轮 run 直接用它,不再 Prepare 一遍
@@ -182,6 +183,10 @@ func (m *Machine) Connect() {
 // connect 调用方必须已经持有 opMu。
 func (m *Machine) connect() {
 	m.mu.Lock()
+	if m.closed {
+		m.mu.Unlock()
+		return // 服务正在停:Prepare 跨过了 Shutdown 的那次 Restart / 重连,不再起内核
+	}
 	m.wanted = true
 	if m.cancel != nil {
 		m.mu.Unlock()
@@ -213,8 +218,17 @@ func (m *Machine) Disconnect() {
 func (m *Machine) Shutdown() {
 	m.opMu.Lock()
 	defer m.opMu.Unlock()
+	m.mu.Lock()
+	m.closed = true
+	m.mu.Unlock()
 	m.stopLoop()
 	m.set(Disconnected, nil)
+}
+
+func (m *Machine) isClosed() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.closed
 }
 
 // Restart 配置或订阅变了:想连的话换新配置重来一遍,不想连的什么都不做。
@@ -266,7 +280,7 @@ func (m *Machine) RestartChecked(rollback func() error) error {
 	}
 	m.opMu.Lock()
 	defer m.opMu.Unlock()
-	if !m.Wanted() {
+	if !m.Wanted() || m.isClosed() {
 		return nil
 	}
 	m.stopLoop()

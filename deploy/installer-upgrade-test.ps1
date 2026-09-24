@@ -110,10 +110,20 @@ function Provider-Flags() { # 我们的提供者各带哪些标志(FWPM_PROVIDER
   return (($p | ForEach-Object { "key=" + $_.providerKey + " serviceName=[" + $_.serviceName + "] flags=[" + ((@($_.flags.item) | Where-Object { $_ }) -join "+") + "]" }) -join ", ")
 }
 function Cleanup($tag) {
-  & $cli mode rule 2>&1 | Out-Null
-  & $cli disconnect 2>&1 | Out-Null
-  Start-Sleep -Seconds 2
-  & $svc uninstall 2>&1 | Out-Null
+  $unins = Join-Path $app "unins000.exe"
+  if (Test-Path $unins) {
+    # 用真正的卸载程序、不先断开,从严格全局直接静默卸载:撤闸在卸载程序的 usUninstall 那一步(用户确认之后、
+    # 删文件之前)。Inno 会把自己拷到临时目录再跑,原进程先退出,所以等程序文件真的没了再往下查。
+    Start-Process -FilePath $unins -ArgumentList @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART') -Wait
+    for ($i = 0; $i -lt 90 -and (Test-Path $svc); $i++) { Start-Sleep -Seconds 1 }
+    Check "卸载程序删掉了程序文件($tag)" (-not (Test-Path $svc)) ""
+    Check "卸载后服务不存在($tag)" ($null -eq (Get-Service -Name godusevpn -ErrorAction SilentlyContinue)) ""
+  } else {
+    & $cli mode rule 2>&1 | Out-Null
+    & $cli disconnect 2>&1 | Out-Null
+    Start-Sleep -Seconds 2
+    & $svc uninstall 2>&1 | Out-Null
+  }
   Start-Sleep -Seconds 2
   $s = Get-WfpState
   Check "清理后两代提供者都不在($tag)" ($s -and ($s -notmatch '6f6d9e2[cdef]-3a41-4b8e-9d55-676f64757365')) ""

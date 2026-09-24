@@ -136,22 +136,19 @@ end;
 // 注意这道门守的**只有闸**:闸还在 = 机器断网,删掉工具等于把人锁死,拦住卸载是对的。
 // 网卡 IPv6 没还原不属于这一类(顶多是某几张网卡没有 v6,网照样能上),
 // godusevpn-svc.exe 那边已经改成"报出来但照常卸载",不会再把卸载永久挡住。
-function InitializeUninstall(): Boolean;
+// 撤闸、还原网卡 IPv6 / DNS、删服务都**不**放在 InitializeUninstall 里:Inno 先跑它、后弹「确定要删除吗」,
+// 而那个框的默认按钮是「否」—— 用户一取消,程序还在,保护却已经没了(0.7.4 及以前如此)。
+// 挪到 usUninstall:它在用户确认之后、删任何文件之前。撤不掉就抛异常,Inno 在删文件之前中止卸载,
+// 原程序和「恢复网络」都留着(删了程序而闸还在,机器会一直断网且没有工具能恢复)。
+procedure UninstallGuardOrAbort();
 var rc: Integer;
 begin
-  Result := True;
   if FileExists(ExpandConstant('{app}\godusevpn-svc.exe')) then
-  begin
-    if (not Exec(ExpandConstant('{app}\godusevpn-svc.exe'), 'uninstall', '', SW_SHOWNORMAL, ewWaitUntilTerminated, rc)) or (rc <> 0) then
-    begin
-      MsgBox('无法解除佛跳墙的全局禁直连闸,卸载已中止 —— 现在删掉程序的话机器会一直断网且无法恢复。'#13#10#13#10'原程序与「恢复网络」工具都保留着:先用开始菜单里的「恢复网络」(右键以管理员身份运行)把闸解除,再来卸载。', mbError, MB_OK);
-      Result := False;
-      exit;
-    end;
-  end;
-  // 网卡原值丢失的记录:svc uninstall 在控制台里说过,但那个窗口一闪就关,这里用对话框再说一次
+    if (not Exec(ExpandConstant('{app}\godusevpn-svc.exe'), 'uninstall', '', SW_HIDE, ewWaitUntilTerminated, rc)) or (rc <> 0) then
+      RaiseException('无法解除佛跳墙的全局禁直连闸,卸载已中止 —— 现在删掉程序的话机器会一直断网且无法恢复。'#13#10#13#10'原程序与「恢复网络」工具都保留着:先用开始菜单里的「恢复网络」(右键以管理员身份运行)把闸解除,再来卸载。');
+  // 网卡 IPv6 没能还原、或动手前的原值丢了:svc uninstall 在控制台里说过,但那个窗口看不见,这里用对话框再说一次
   if FileExists(ExpandConstant('{commonappdata}\godusevpn\nic-ipv6-lost.txt')) then
-    SuppressibleMsgBox('注意:有几张网卡动手前的 IPv6 状态丢了(备份文件损坏),它们的 IPv6 可能还关着。'#13#10#13#10'要手动开回去:在「网络适配器属性」里把「Internet 协议版本 6 (TCP/IPv6)」勾回来。'#13#10'详情见 ' + ExpandConstant('{commonappdata}\godusevpn\nic-ipv6-lost.txt'), mbInformation, MB_OK, IDOK);
+    SuppressibleMsgBox('注意:有几张网卡的 IPv6 可能还关着(备份损坏,或卸载时没能还原)。'#13#10#13#10'要手动开回去:在「网络适配器属性」里把「Internet 协议版本 6 (TCP/IPv6)」勾回来。'#13#10'详情见 ' + ExpandConstant('{commonappdata}\godusevpn\nic-ipv6-lost.txt'), mbInformation, MB_OK, IDOK);
 end;
 
 // 应用内升级:安装包带 /RELAUNCH=1,静默装完后由 [Run] 里的 runasoriginaluser 条目重新拉起客户端
@@ -211,10 +208,13 @@ end;
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 var dir: string;
 begin
+  if CurUninstallStep = usUninstall then
+    UninstallGuardOrAbort();
   if CurUninstallStep = usPostUninstall then
   begin
     dir := ExpandConstant('{commonappdata}\godusevpn');
-    if DirExists(dir) then
+    // 静默卸载不问(普通 MsgBox 压不住 /SUPPRESSMSGBOXES,静默卸载会一直卡在这里),数据留着
+    if DirExists(dir) and not UninstallSilent then
       if MsgBox(Format(CustomMessage('RemoveData'), [dir]), mbConfirmation, MB_YESNO) = IDYES then
         DelTree(dir, True, True, True);
   end;

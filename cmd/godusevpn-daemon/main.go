@@ -48,7 +48,13 @@ func main() {
 		if err := svc.Run(runDaemon); err != nil {
 			fail(err)
 		}
-	case "repair": // 界面的「修复」:install 本身就会重新加载服务(macOS bootout + bootstrap),不走 uninstall
+	case "repair":
+		// 界面的「修复」:不走 uninstall(那会撤闸、还原网卡 IPv6 与 DNS)。先停并等旧进程真的退出 ——
+		// launchctl bootout 是异步的,紧接着 bootstrap 可能撞上还没退的旧进程而失败,服务就停着没人拉起。
+		_ = svc.Stop()
+		for i := 0; i < 30 && svc.QueryStatus() == "running"; i++ {
+			time.Sleep(time.Second)
+		}
 		fallthrough
 	case "install":
 		exe, err := os.Executable()
@@ -59,14 +65,21 @@ func main() {
 		if err := paths.Ensure(); err != nil {
 			fail(err)
 		}
-		s, _ := settings.Load(paths.Settings())
+		s, lerr := settings.Load(paths.Settings())
 		pw := ""
-		if s.WebPublic() && s.WebPassword == "" {
-			pw = settings.RandomPassword()
-			_ = s.SetWebPassword(pw)
-		}
-		if err := s.Save(paths.Settings()); err != nil {
-			fail(err)
+		if lerr != nil {
+			// 读不出来(损坏、来自更新的版本):绝不拿默认值覆盖 —— 那会把用户的订阅和隐私设置抹成默认(规则模式),
+			// 重启后的守护进程就按规则模式撤闸、还原 DNS。守护进程自己会带着默认值起来但不动现有保护,
+			// 用户在界面里保存一次设置即可修复。
+			fmt.Println("注意:设置文件读不出来,原文件保留不覆盖:", lerr)
+		} else {
+			if s.WebPublic() && s.WebPassword == "" {
+				pw = settings.RandomPassword()
+				_ = s.SetWebPassword(pw)
+			}
+			if err := s.Save(paths.Settings()); err != nil {
+				fail(err)
+			}
 		}
 		if err := svc.Install(exe); err != nil {
 			fail(err)

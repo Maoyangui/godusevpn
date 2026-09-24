@@ -18,3 +18,25 @@ func TestShutdownKeepsWanted(t *testing.T) {
 		t.Fatal("Shutdown 没有停内核")
 	}
 }
+
+// Shutdown 之后,任何在途的 Restart / 重连(它们的 Prepare 不持 opMu,可能跨过 Shutdown)都不许再把内核拉起来 ——
+// 否则服务已经返回、控制口已关,数据面又被起了一遍,而且不会走正常的停止路径。
+func TestNoStartAfterShutdown(t *testing.T) {
+	f := &kickDeps{}
+	m := newConnected(t, f)
+	m.Shutdown()
+	_, _, startsBefore, _ := f.counts()
+	m.connect()
+	if err := m.Restart(); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.RestartChecked(func() error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, starts, _ := f.counts(); starts != startsBefore {
+		t.Fatalf("Shutdown 之后内核又被起了 %d 次", starts-startsBefore)
+	}
+	if st := m.Snapshot().Status; st != Disconnected {
+		t.Fatalf("Shutdown 之后状态应保持 Disconnected,实际 %s", st)
+	}
+}

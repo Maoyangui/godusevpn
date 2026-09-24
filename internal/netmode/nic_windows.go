@@ -122,8 +122,10 @@ func restoreOutcome(out string) (warn string, err error) {
 	}
 	warn = strings.Join(warns, ";")
 	if f := psMark(out, markFailed); f != "" {
-		if warn != "" {
-			return warn, fmt.Errorf("还原网卡 IPv6: %s(另外:%s)", f, warn)
+		// 坏行的说明不放进这条错误:它已经单独落盘(recordNICLoss),「恢复网络」弹窗会单独说,
+		// 两处都放的话同一段话会出现两遍、而且一句说"下次会自动再试"一句说"能还原的都还原了"。
+		if g := psMark(out, markGone); g != "" {
+			return warn, fmt.Errorf("还原网卡 IPv6: %s(另外这些网卡已经不在了: %s)", f, g)
 		}
 		return warn, fmt.Errorf("还原网卡 IPv6: %s", f)
 	}
