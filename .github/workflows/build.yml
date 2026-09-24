@@ -114,6 +114,24 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit 1 }
           Get-ChildItem dist\installer
 
+      # 用**真正的安装包**从 0.7.1 原地升级(不断开),后台持续绑物理网卡打直连,断言一次都没通。
+      # 先做反向对照(0.7.1 → 0.7.3,没有预装闸):必须看得见漏,正向的"0 次漏"才有意义。见 deploy/installer-upgrade-test.ps1。
+      - name: 真机验收(用安装包从 0.7.1 原地升级,全程直连一次都不能通)
+        if: env.TEST_SUB_URL != ''
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = "Continue"
+          gh release download v0.7.1 -R ${{ github.repository }} -p "godusevpn-0.7.1-windows-x64-setup.exe" -D legacy-setup
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          gh release download v0.7.3 -R ${{ github.repository }} -p "godusevpn-0.7.3-windows-x64-setup.exe" -D legacy-setup
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          $new = @(Get-ChildItem dist\installer -Filter "*-windows-x64-setup.exe")
+          if ($new.Count -ne 1) { Write-Host "找不到唯一的新版 x64 安装包"; Get-ChildItem dist\installer; exit 1 }
+          & .\deploy\installer-upgrade-test.ps1 -Sub $env:TEST_SUB_URL -OldSetup (Resolve-Path legacy-setup\godusevpn-0.7.1-windows-x64-setup.exe).Path -LeakySetup (Resolve-Path legacy-setup\godusevpn-0.7.3-windows-x64-setup.exe).Path -NewSetup $new[0].FullName
+          exit $LASTEXITCODE
+
       - name: Collect
         shell: pwsh
         run: |
