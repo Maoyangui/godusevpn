@@ -26,6 +26,7 @@ import (
 	"github.com/Maoyangui/godusevpn/internal/ipc"
 	"github.com/Maoyangui/godusevpn/internal/netmode"
 	"github.com/Maoyangui/godusevpn/internal/svc"
+	"github.com/Maoyangui/godusevpn/internal/tlsroots"
 )
 
 func main() {
@@ -216,6 +217,7 @@ func runDaemon(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	d.Logf("证书校验:%s", tlsroots.Status())
 	return d.Run(ctx)
 }
 
