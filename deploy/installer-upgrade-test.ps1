@@ -51,10 +51,15 @@ function Svc-Crashes($since) {
     return $null
   }
 }
+# 这次验收期间 crash.log 新增的崩溃内容:抬头("== … 启动")以外的任何非空行都算。不能只认 panic / fatal error ——
+# Go 的 fatal error 在只靠 SetCrashOutput 时原因行进不了文件,只剩栈;DLL 里的访问违例是"Exception 0x…"。
+# 文件在这期间被轮转(超过 1MB 挪成 crash.log.1)的话行数会比基线少,那就从头算。
 function Crash-Lines() {
   if (-not (Test-Path $script:crashLog)) { return ,@() }
   $all = @(Get-Content $script:crashLog -Encoding UTF8)
-  return ,@($all | Select-Object -Skip $script:crashBase | Where-Object { $_ -match '^(panic|fatal error)' })
+  $skip = $script:crashBase
+  if ($all.Count -lt $skip) { $skip = 0 }
+  return ,@($all | Select-Object -Skip $skip | Where-Object { $_.Trim() -ne '' -and $_ -notmatch '^== ' })
 }
 # 失败时的现场:直接读日志文件(服务可能已经卸掉或崩了,不能再靠命令行去问服务),再列服务管理器事件
 function Dump-Evidence() {

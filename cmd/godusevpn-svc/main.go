@@ -210,7 +210,8 @@ func main() {
 }
 
 func runDaemon(ctx context.Context) error {
-	daemon.CaptureCrashes()
+	// 以服务身份跑时把标准错误整个接到 crash.log;前台 run 留给控制台
+	daemon.CaptureCrashes(svc.IsService())
 	d, err := daemon.New()
 	if err != nil {
 		return err
