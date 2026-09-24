@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -1709,8 +1710,11 @@ func (d *Daemon) registerHandlers() {
 			}
 			res = probeDirect(ctx, p, set, d.logf)
 		}
+		// 存一份拷贝,别和返回值共用一个 map:返回值交给控制口在锁外序列化(遍历),而下一次测速每测出一个就往
+		// d.delays 里写 —— 同一个 map 一边遍历一边写是不可恢复的 fatal error,服务进程直接退出。界面连点两次
+		// 「测速」、或界面和命令行同时测,就会撞上。
 		d.mu.Lock()
-		d.delays = res
+		d.delays = maps.Clone(res)
 		d.mu.Unlock()
 		return res, nil
 	})
