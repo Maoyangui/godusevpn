@@ -114,20 +114,33 @@ function Provider-Flags() { # 我们的提供者各带哪些标志(FWPM_PROVIDER
   if ($p.Count -eq 0) { return "(没有我们的提供者)" }
   return (($p | ForEach-Object { "key=" + $_.providerKey + " serviceName=[" + $_.serviceName + "] flags=[" + ((@($_.flags.item) | Where-Object { $_ }) -join "+") + "]" }) -join ", ")
 }
+function Grant-AdminStop($name) { # 管理员缺停止权(WP)就临时加上;返回原来的 DACL,没改返回空串
+  $orig = ((& sc.exe sdshow $name) | Where-Object { $_ -match '^D:' } | Select-Object -First 1)
+  if (-not $orig) { return "" }
+  $orig = $orig.Trim()
+  $patched = [regex]::Replace($orig, '\(A;;([A-Z]+);;;BA\)', { param($m) if ($m.Groups[1].Value -match 'WP') { $m.Value } else { '(A;;' + $m.Groups[1].Value + 'WP;;;BA)' } })
+  if ($patched -eq $orig) { return "" }
+  & sc.exe sdset $name $patched | Out-Null
+  return $orig
+}
+function Running-Dependents($name, $seen) { # 递归列出正在运行的依赖服务
+  foreach ($d in @((Get-Service $name).DependentServices)) {
+    if ($d.Status -eq 'Running' -and -not $seen.Contains($d.Name)) { [void]$seen.Add($d.Name); Running-Dependents $d.Name $seen }
+  }
+}
 function Restart-Bfe() { # 停掉 BFE(连带依赖它的服务)再只启动 BFE。返回 @{ ok; log }:ok = 确实看到它停下又起来了
   $log = @()
-  $orig = ((& sc.exe sdshow BFE) | Where-Object { $_ -match '^D:' } | Select-Object -First 1).Trim()
-  $log += "sddl=" + $orig
-  # 给 BUILTIN\Administrators 那一条 ACE 加上 WP(SERVICE_STOP)
-  $patched = [regex]::Replace($orig, '\(A;;([A-Z]+);;;BA\)', { param($m) if ($m.Groups[1].Value -match 'WP') { $m.Value } else { '(A;;' + $m.Groups[1].Value + 'WP;;;BA)' } })
-  $r = & sc.exe sdset BFE $patched 2>&1 | Out-String; $log += "sdset=" + $r.Trim()
-  $deps = @((Get-Service BFE).DependentServices | Where-Object { $_.Status -eq 'Running' } | ForEach-Object { $_.Name })
-  $log += "running-dependents=" + ($deps -join ",")
+  $seen = New-Object System.Collections.Generic.HashSet[string]
+  Running-Dependents "BFE" $seen
+  $log += "running-dependents=" + (@($seen) -join ",")
+  $restore = @{}
+  foreach ($n in @("BFE") + @($seen)) { $o = Grant-AdminStop $n; if ($o) { $restore[$n] = $o } }
+  $log += "granted-stop=" + (@($restore.Keys) -join ",")
   $stopped = $false; $started = $false
   try { Stop-Service -Name BFE -Force -ErrorAction Stop; $stopped = ((Get-Service BFE).Status -eq 'Stopped'); $log += "stop=" + (Get-Service BFE).Status } catch { $log += "stopErr=" + $_.Exception.Message }
   Start-Sleep -Seconds 2
   try { Start-Service -Name BFE -ErrorAction Stop; $started = ((Get-Service BFE).Status -eq 'Running'); $log += "start=" + (Get-Service BFE).Status } catch { $log += "startErr=" + $_.Exception.Message }
-  & sc.exe sdset BFE $orig 2>&1 | Out-Null # 权限改回去
+  foreach ($n in @($restore.Keys)) { & sc.exe sdset $n $restore[$n] | Out-Null } # 权限改回去
   return @{ ok = ($stopped -and $started); log = ($log -join "; ") }
 }
 function Measure-BootWindow($label) { # 模拟开机:BFE 重新起来、我们的服务还没起来。采样 + 数被停用的过滤器
@@ -144,7 +157,7 @@ function Measure-BootWindow($label) { # 模拟开机:BFE 重新起来、我们�
   $after = Direct-Many 4
   Note "BFE 起来后、我们的服务=$svcState($label)" ((GuardProbe) + ";" + (Provider-Flags))
   Note "采样($label)" ("BFE 停启期间与之后 10 秒:采样 " + $r.total + " 次,通 " + $r.open + " 次" + $(if ($r.open) { ":" + (($r.openLines | Select-Object -First 10) -join "; ") } else { "" }) + ";之后 " + ($after -join ","))
-  foreach ($n in @("mpssvc", "IKEEXT", "PolicyAgent", "iphlpsvc")) { Start-Service -Name $n -ErrorAction SilentlyContinue }
+  foreach ($n in @("mpssvc", "IKEEXT", "PolicyAgent", "iphlpsvc", "SharedAccess")) { Start-Service -Name $n -ErrorAction SilentlyContinue } # 依赖 BFE 被连带停掉的系统服务拉回来(我们的服务由调用方决定何时起)
   return @{ ok = $b.ok; open = $r.open + (Count-Open $after); total = $r.total }
 }
 function Cleanup($tag) {
