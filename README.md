@@ -145,7 +145,7 @@ curl -fsSL https://raw.githubusercontent.com/Maoyangui/godusevpn/master/deploy/i
 - 数据布局与 Windows 一致:设置在 `/etc/godusevpn/`,缓存、规则集、日志在 `/var/lib/godusevpn/`(梅林等 Entware 环境在 `/opt/etc` 与 `/opt/var/lib` 下)。
 - 自启按初始化系统落地:systemd 单元、OpenWrt 的 procd 脚本、Entware 的 init.d 脚本;`godusevpn install | uninstall | start | stop | status`。
 - 本机模式(默认):TUN 只代理本机流量,与 Windows 相同;连上后会给每个物理网卡地址加一条"回包走主表"的策略路由,远程 SSH 不会被切断。
-- 网关模式(OpenWrt / iStoreOS 等软路由):设置 → 网络 → 网络模式选"网关"(或 `godusevpn settings netMode=gateway`),局域网设备把网关和 DNS 指向这台机器即被代理,设备的 DNS 查询由内核接管(fake-ip、防泄漏)。菜单里多出"设备"页:自动发现在线设备(DHCP 租约 + 邻居表),每台可设跟随规则 / 强制代理 / 直连 / 拒绝上网,按 MAC 记住;命令行 `godusevpn devices`、`godusevpn device <MAC> <follow|proxy|direct|reject> [名字]`。需要内核带 nftables(OpenWrt 22.03 起的 fw4 都有)。
+- 网关模式(OpenWrt / iStoreOS 等软路由):设置 → 网络 → 网络模式选"网关"(或 `godusevpn settings netMode=gateway`),局域网设备把网关和 DNS 指向这台机器即被代理,设备的 DNS 查询由内核接管(fake-ip、防泄漏)。菜单里多出"设备"页:自动发现在线设备(DHCP 租约 + 邻居表),每台可设跟随规则 / 强制代理 / 直连 / 拒绝上网,按 MAC 记住;命令行 `godusevpn devices`、`godusevpn device <MAC> <follow|proxy|direct|reject> [名字]`。需要内核带 nftables(OpenWrt 22.03 起的 fw4 都有)。「全局禁直连」生效时(全局模式),设备的「直连」不生效,照样走隧道。
 - 验收脚本 `deploy/linux-test.sh`,与 Windows 的检查项相同;网关模式在 Docker 里的 OpenWrt 23.05 + 一台 LAN 容器上验证过(设备被代理、fake-ip、IPv6 屏蔽、三种设备策略)。
 
 ## Android(手机 / 电视)
@@ -154,7 +154,7 @@ curl -fsSL https://raw.githubusercontent.com/Maoyangui/godusevpn/master/deploy/i
 
 - **安装**:侧载 `godusevpn-<版本>-android-<ABI>.apk`(手机与电视基本都是 arm64;不确定就装 universal),首次安装要允许"未知来源"。最低 Android 8.0。
 - **同一套界面与功能**:守护进程(设置、多订阅与刷新回退链、规则组、状态机、定时测速)和页面与 Windows / Linux 是同一份代码,数据布局也一样(`settings.json`、`profiles/`、`config.json`、`logs/`),只是放在应用私有目录。
-- **隧道**:第一次点"连接"会弹系统的 VPN 授权;之后 VpnService 按引擎给的参数建隧道(地址、路由、DNS、按应用直连),通知栏常驻状态并带"断开"。应用自身默认绕过隧道(订阅刷新直连、升级下载不绕回内核)。
+- **隧道**:第一次点"连接"会弹系统的 VPN 授权;之后 VpnService 按引擎给的参数建隧道(地址、路由、DNS、按应用直连),通知栏常驻状态并带"断开"。应用自身**不**排除在隧道之外(排除了的话本应用套接字的回包会从物理网卡漏走,真机实测 DNS 通、TCP 全断);内核自己连节点的套接字经 protect 不进 VPN。
 - **按应用直连**:Windows 的"按进程直连"在 Android 上就是应用包名(设置 → 分流),这些应用整个绕过 VPN。「全局禁直连」生效时(全局模式)不生效,这些应用也走 VPN。
 - **开机自启**:引擎按上次状态自动连;Android 12 起后台起前台服务受限,开机与升级完成的广播窗口里会先把服务拉起来。系统设置里也可以把它设为"始终开启的 VPN"。
 - **升级**:关于 → 检查更新 → 下载对应 ABI 的 APK、校验 SHA256 后拉起系统安装器;装完引擎按上次状态重新连接。每一版都用同一把签名密钥,否则系统不让覆盖安装。

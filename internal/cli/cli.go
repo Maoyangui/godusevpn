@@ -207,7 +207,7 @@ func Main(args []string) int {
 		}
 	case "device":
 		if len(args) < 2 {
-			err = errors.New("用法: device <MAC> <follow|proxy|direct|reject> [名字]")
+			err = errors.New("用法: device <MAC> <follow|proxy|direct|reject> [名字](全局模式下全局禁直连开着时 direct 不生效)")
 			break
 		}
 		mode := args[1]

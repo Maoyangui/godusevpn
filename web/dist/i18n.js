@@ -3,7 +3,7 @@ const I18N = {
   zh: {
     'app.name': '佛跳墙',
     'menu.settings': '设置', 'menu.profiles': '订阅管理', 'menu.rules': '路由规则', 'menu.devices': '设备',
-    'dev.title': '局域网设备', 'dev.intro': '网关模式下经本机上网的设备。每台可设:跟随规则、强制代理、直连、拒绝上网;按 MAC 记住,换 IP 也跟着。', 'dev.empty': '还没发现设备(网关模式下把设备的网关指向本机)', 'dev.online': '在线', 'dev.offline': '离线', 'dev.rename': '改名', 'dev.renamePrompt': '设备名称',
+    'dev.title': '局域网设备', 'dev.intro': '网关模式下经本机上网的设备。每台可设:跟随规则、强制代理、直连、拒绝上网;按 MAC 记住,换 IP 也跟着。全局模式下「全局禁直连」开着时,「直连」不生效(照样走隧道)。', 'dev.empty': '还没发现设备(网关模式下把设备的网关指向本机)', 'dev.online': '在线', 'dev.offline': '离线', 'dev.rename': '改名', 'dev.renamePrompt': '设备名称',
     'dev.m.follow': '跟随', 'dev.m.proxy': '代理', 'dev.m.direct': '直连', 'dev.m.reject': '拒绝',
     'set.g.net': '网络', 'set.netMode': '网络模式', 'set.netModeHelp': '本机:只代理这台机器;网关:还代理经它转发的局域网设备(软路由),设备的 DNS 也会被接管', 'set.netLocal': '本机', 'set.netGateway': '网关',
     'set.dnsHijack': '劫持局域网 DNS', 'set.dnsHijackHelp': '网关模式下把设备发给本机 53 端口的查询接进内核(fake-ip、防泄漏)', 'set.lanSubnets': '局域网网段', 'set.lanSubnetsHelp': '逗号分隔;留空自动', 'set.webListen': '面板监听', 'set.webListenHelp': '如 0.0.0.0:9800;非本机地址必须先设密码;改后重启服务生效', 'menu.conns': '连接', 'menu.logs': '日志', 'menu.about': '关于',
@@ -68,7 +68,7 @@ const I18N = {
   en: {
     'app.name': 'Fotiaoqiang',
     'menu.settings': 'Settings', 'menu.profiles': 'Subscriptions', 'menu.rules': 'Routing rules', 'menu.devices': 'Devices',
-    'dev.title': 'LAN devices', 'dev.intro': 'Devices going online through this box in gateway mode. Each can follow the rules, or be forced to proxy, direct or blocked; remembered by MAC.', 'dev.empty': 'No devices seen yet (point their gateway at this box)', 'dev.online': 'online', 'dev.offline': 'offline', 'dev.rename': 'Rename', 'dev.renamePrompt': 'Device name',
+    'dev.title': 'LAN devices', 'dev.intro': 'Devices going online through this box in gateway mode. Each can follow the rules, or be forced to proxy, direct or blocked; remembered by MAC. “Direct” is ignored while “No direct traffic in global mode” is in effect.', 'dev.empty': 'No devices seen yet (point their gateway at this box)', 'dev.online': 'online', 'dev.offline': 'offline', 'dev.rename': 'Rename', 'dev.renamePrompt': 'Device name',
     'dev.m.follow': 'Follow', 'dev.m.proxy': 'Proxy', 'dev.m.direct': 'Direct', 'dev.m.reject': 'Block',
     'set.g.net': 'Network', 'set.netMode': 'Network mode', 'set.netModeHelp': 'Local: only this machine; Gateway: also LAN devices routed through it (router); their DNS is taken over too', 'set.netLocal': 'Local', 'set.netGateway': 'Gateway',
     'set.dnsHijack': 'Hijack LAN DNS', 'set.dnsHijackHelp': 'Gateway mode: queries sent to this box on port 53 are answered by the core (fake-ip, no leaks)', 'set.lanSubnets': 'LAN subnets', 'set.lanSubnetsHelp': 'Comma separated; empty = auto', 'set.webListen': 'Panel listen', 'set.webListenHelp': 'e.g. 0.0.0.0:9800; non-loopback needs a password; restart the service after changing', 'menu.conns': 'Connections', 'menu.logs': 'Logs', 'menu.about': 'About',
