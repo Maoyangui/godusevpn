@@ -133,15 +133,65 @@ func Uninstall() error {
 		return fmt.Errorf("打开服务: %w", err)
 	}
 	defer s.Close()
-	if st, err := s.Query(); err == nil && st.State != svc.Stopped {
-		_, _ = s.Control(svc.Stop)
-		waitState(s, svc.Stopped, 20*time.Second)
+	// 删之前必须停稳。DeleteService 对还在跑的服务只做"标记删除"、照样返回成功,进程接着跑:调用方(svc uninstall)
+	// 撤闸到这里之间要是有人打开客户端把服务拉了起来,而以前这里只发一次 Stop、结果不看(启动中的服务会拒收),
+	// 活着的守护进程就会按"想连"把调用方随后的第二次撤闸装回去,接着程序被删,留下一道谁都撤不掉的闸。
+	// 停不下来就不删,返回错误让卸载中止。
+	if err := stopHard(s, 60*time.Second); err != nil {
+		return fmt.Errorf("服务停不下来,没有删除: %w", err)
 	}
 	// 已经被标记删除(别处 sc delete 过、服务管理器还开着句柄):句柄一关它就没了,算卸掉了
 	if err := s.Delete(); err != nil && !errors.Is(err, windows.ERROR_SERVICE_MARKED_FOR_DELETE) {
 		return err
 	}
+	// 删完再确认一次:上面停稳到 Delete 之间要是又有人拉起了它,它还活着。标记删除以后 StartService 一律失败
+	// (ERROR_SERVICE_MARKED_FOR_DELETE),所以这里停稳就是永久停稳,调用方的第二次撤闸不会再被装回去。
+	if err := stopHard(s, 60*time.Second); err != nil {
+		return fmt.Errorf("服务已标记删除,但还在运行、停不下来: %w", err)
+	}
 	return nil
+}
+
+// stopper 是 stopHard 用到的 *mgr.Service 那两个方法;抽出来好在测试里用假的服务驱动。
+type stopper interface {
+	Query() (svc.Status, error)
+	Control(c svc.Cmd) (svc.Status, error)
+}
+
+// stopPoll 轮询间隔;stopResend 发出的 Stop 被接受后,过了这么久还在"运行 / 启动中"就当新实例重发。测试里调小。
+var stopPoll, stopResend = 300 * time.Millisecond, 2 * time.Second
+
+// stopHard 用这个句柄把服务停下来,确认真停稳了(Stopped)才返回 nil。
+// 启动中(START_PENDING)的服务不接受 Stop,ControlService 返回 ERROR_SERVICE_CANNOT_ACCEPT_CTRL;以前只发一次就干等,
+// 等来的是一个跑起来的服务。这里在它"运行 / 启动中"时重发。被接受的 Stop 几毫秒内就会让守护进程报"停止中"
+// (Execute 收到 Stop 第一件事就是报 StopPending),所以发出后过了 2 秒还在"运行 / 启动中",就是又被人拉起了
+// 一个新实例,再发。不对同一个实例连发:x/sys 的服务循环在处理 Stop 期间不再收新的控制命令,多发的那条会卡住。
+func stopHard(s stopper, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	var sent time.Time
+	var lastErr error
+	for {
+		st, err := s.Query()
+		switch {
+		case err != nil:
+			lastErr = err
+		case st.State == svc.Stopped:
+			return nil
+		case (st.State == svc.Running || st.State == svc.StartPending) && time.Since(sent) > stopResend:
+			if _, err := s.Control(svc.Stop); err == nil {
+				sent = time.Now()
+			} else if !errors.Is(err, windows.ERROR_SERVICE_NOT_ACTIVE) && !errors.Is(err, windows.ERROR_SERVICE_CANNOT_ACCEPT_CTRL) {
+				lastErr = err
+			}
+		}
+		if !time.Now().Before(deadline) {
+			if lastErr != nil {
+				return fmt.Errorf("服务停止超时: %w", lastErr)
+			}
+			return errors.New("服务停止超时")
+		}
+		time.Sleep(stopPoll)
+	}
 }
 
 func Start() error {
@@ -178,13 +228,8 @@ func Stop() error {
 		return errors.New("服务未安装")
 	}
 	defer s.Close()
-	if _, err := s.Control(svc.Stop); err != nil && !errors.Is(err, windows.ERROR_SERVICE_NOT_ACTIVE) {
-		return err
-	}
-	if !waitState(s, svc.Stopped, 20*time.Second) {
-		return errors.New("服务停止超时")
-	}
-	return nil
+	// 启动中的服务会拒收 Stop:以前直接把 1061 当失败返回,调用方(stopAndWait)只剩干等,等来一个跑起来的服务
+	return stopHard(s, 20*time.Second)
 }
 
 // userStartStopSDDL 默认服务 ACL 基础上给 Authenticated Users 加 RP(启动)与 WP(停止)。
