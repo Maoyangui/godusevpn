@@ -45,6 +45,16 @@ jobs:
           go vet -tags desktop,production ./cmd/godusevpn
           go test -count=1 -tags "$TAGS" ./...
 
+      - name: Race
+        shell: bash
+        env:
+          CGO_ENABLED: "1"
+        run: |
+          # 数据竞争在服务里是致命的:并发读写 map 是不可恢复的 fatal error,进程直接退出、几秒后被服务管理器拉起,
+          # 真机验收里只表现为"控制管道突然连不上、过一会儿又好了"。-race 要 cgo(gcc);没有 gcc 就让这一步失败,别悄悄跳过。
+          gcc --version | head -1
+          go test -race -count=1 -tags "$TAGS" ./internal/...
+
       - name: Embed icon and version resources
         shell: bash
         run: |
@@ -172,6 +182,15 @@ jobs:
           # cmd/godusevpn 是 Wails 窗口程序,Linux 上没有它要的 GTK/WebKit 头文件,不在这里编
           go vet -tags "$TAGS" ./internal/... ./cmd/godusevpn-daemon ./cmd/godusevpn-cli
           go test -count=1 -tags "$TAGS" ./internal/... ./cmd/godusevpn-daemon ./cmd/godusevpn-cli
+
+      - name: Race
+        env:
+          CGO_ENABLED: "1"
+        run: |
+          # 数据竞争在服务里是致命的:并发读写 map 是不可恢复的 fatal error,进程直接退出、几秒后被服务管理器拉起,
+          # 真机验收里只表现为"控制管道突然连不上、过一会儿又好了"。-race 要 cgo(gcc);没有 gcc 就让这一步失败,别悄悄跳过。
+          gcc --version | head -1
+          go test -race -count=1 -tags "$TAGS" ./internal/...
 
       - name: Build (amd64, arm64, armv7, mipsle, mips)
         run: |

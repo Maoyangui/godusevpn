@@ -210,6 +210,7 @@ func main() {
 }
 
 func runDaemon(ctx context.Context) error {
+	daemon.CaptureCrashes()
 	d, err := daemon.New()
 	if err != nil {
 		return err

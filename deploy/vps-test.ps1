@@ -21,6 +21,46 @@ function Check($name, $ok, $detail) {
   if ($ok) { Write-Host ("[PASS] {0}  {1}" -f $name, $detail) -ForegroundColor Green }
   else { Write-Host ("[FAIL] {0}  {1}" -f $name, $detail) -ForegroundColor Red; $script:fail++ }
 }
+$script:t0 = Get-Date
+$script:logDir = Join-Path $env:ProgramData "godusevpn\logs"
+$script:crashLog = Join-Path $script:logDir "crash.log"
+# crash.log 在同一台机器上反复跑会累积,只看这次验收新增的那部分
+$script:crashBase = 0
+if (Test-Path $script:crashLog) { $script:crashBase = @(Get-Content $script:crashLog -Encoding UTF8).Count }
+# 服务意外退出:服务管理器在系统日志里记 7031 / 7034("意外终止")。服务崩了会被恢复策略几秒后拉起,
+# 后面的检查也许照样通过 —— 单独抓出来,不让一次崩溃藏在全绿里。返回 $null 表示读不到日志(不能当成"没崩")。
+function Svc-Crashes($since) {
+  try {
+    $ev = Get-WinEvent -FilterHashtable @{ LogName = 'System'; ProviderName = 'Service Control Manager'; Id = 7031, 7034; StartTime = $since } -ErrorAction Stop |
+      Where-Object { $_.Message -match '佛跳墙|godusevpn' }
+    return ,@($ev)
+  } catch {
+    if ($_.FullyQualifiedErrorId -like 'NoMatchingEventsFound*') { return ,@() }
+    Write-Host ("  (读系统事件日志失败:{0})" -f $_.Exception.Message)
+    return $null
+  }
+}
+function Crash-Lines() {
+  if (-not (Test-Path $script:crashLog)) { return ,@() }
+  $all = @(Get-Content $script:crashLog -Encoding UTF8)
+  return ,@($all | Select-Object -Skip $script:crashBase | Where-Object { $_ -match '^(panic|fatal error)' })
+}
+# 失败时的现场:直接读日志文件(服务可能已经卸掉或崩了,不能再靠命令行去问服务),再列服务管理器事件
+function Dump-Evidence() {
+  foreach ($n in @(@("service.log", 300), @("core.log", 80), @("crash.log", 200))) {
+    $p = Join-Path $script:logDir $n[0]
+    if (Test-Path $p) {
+      Write-Host ("== {0}(最近 {1} 行)" -f $n[0], $n[1]) -ForegroundColor Cyan
+      Get-Content $p -Tail $n[1] -Encoding UTF8
+    }
+  }
+  Write-Host "== 服务管理器事件(本次验收期间)" -ForegroundColor Cyan
+  try {
+    Get-WinEvent -FilterHashtable @{ LogName = 'System'; ProviderName = 'Service Control Manager'; StartTime = $script:t0 } -ErrorAction Stop |
+      Where-Object { $_.Message -match '佛跳墙|godusevpn' } | Sort-Object TimeCreated |
+      ForEach-Object { "{0} {1} {2}" -f $_.TimeCreated.ToString('HH:mm:ss.fff'), $_.Id, ($_.Message -replace "`r?`n", ' ') }
+  } catch { Write-Host ("  (没有 / 读不到:{0})" -f $_.Exception.Message) }
+}
 function Wait-Status($want, $seconds, $c = $cli) { # $c:用哪个命令行去问(旧版升级那段用旧版的)
   $deadline = (Get-Date).AddSeconds($seconds)
   while ((Get-Date) -lt $deadline) {
@@ -275,13 +315,16 @@ if ($LegacyBin -and -not $KeepInstalled) {
     Check "服务已卸载(升级场景)" ((& $svc status) -eq "not-installed") (& $svc status)
   }
 } elseif (-not $LegacyBin) { Write-Host "  (没给 -LegacyBin:跳过「从旧版原地升级」那一段)" }
+Write-Host "== 8. 服务稳定性(整个验收期间)" -ForegroundColor Cyan
+$ev = Svc-Crashes $script:t0
+if ($null -eq $ev) { Check "服务没有意外退出过(系统日志 7031/7034)" $false "读不到系统事件日志" }
+else { Check "服务没有意外退出过(系统日志 7031/7034)" ($ev.Count -eq 0) (($ev | ForEach-Object { $_.TimeCreated.ToString('HH:mm:ss.fff') + ' #' + $_.Id }) -join ' | ') }
+$cl = Crash-Lines
+Check "crash.log 里没有新的崩溃" ($cl.Count -eq 0) (($cl | Select-Object -First 3) -join ' | ')
 Write-Host ""
 if ($fail -eq 0) { Write-Host "全部通过" -ForegroundColor Green } else {
   Write-Host "$fail 项失败" -ForegroundColor Red
-  Write-Host "== 内核日志(最近 60 行)" -ForegroundColor Cyan
-  & $cli logs 60 core
-  Write-Host "== 服务日志(最近 30 行)" -ForegroundColor Cyan
-  & $cli logs 30
+  Dump-Evidence
 }
 Write-Host "日志: $env:ProgramData\godusevpn\logs\"
 exit $fail

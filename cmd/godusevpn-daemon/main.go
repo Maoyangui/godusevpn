@@ -178,6 +178,7 @@ func main() {
 
 // runDaemon 守护进程 + 面板一起跑。
 func runDaemon(ctx context.Context) error {
+	daemon.CaptureCrashes()
 	d, err := daemon.New()
 	if err != nil {
 		return err
