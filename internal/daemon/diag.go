@@ -178,8 +178,10 @@ func (d *Daemon) exportDiag() (string, error) {
 }
 
 // crashExcerpt 崩溃记录摘要。每段(以"== … 启动"抬头分开)的原因行在最前面("fatal error: …"、"Exception 0x…"、
-// "panic: …"),后面跟着全部 goroutine 的栈,动辄上千行;只取整个文件的最后几百行会把原因截掉。这里取最后 3 段,
-// 每段超过 200 行就留头 150 行、尾 50 行。没有抬头的(Android 那份)照旧取最后 300 行。
+// "panic: …"),后面跟着全部 goroutine 的栈,动辄上千行;只取整个文件的最后几百行会把原因截掉。
+// 只挑有内容的段(抬头以外还有非空行),取最后 3 段,每段超过 200 行就留头 150 行、尾 50 行:每次正常启动都会写
+// 一行抬头,按段数取的话,崩溃之后服务被自动拉起、再开两次机,崩溃那段就被只有抬头的段挤出去了。
+// 最后一段有内容的之后还有几次启动,记一行。没有抬头的(Android 那份)照旧取最后 300 行。
 func crashExcerpt(path string) string {
 	b, err := os.ReadFile(path)
 	if err != nil || len(b) == 0 {
@@ -201,16 +203,32 @@ func crashExcerpt(path string) string {
 	if starts[0] > 0 {
 		starts = append([]int{0}, starts...) // 第一个抬头之前的内容(轮转时被截在中间的那段)单算一段
 	}
-	if len(starts) > 3 {
-		starts = starts[len(starts)-3:]
-	}
-	var out []string
+	type seg struct{ s, e int }
+	var withContent []seg
+	lastContent := -1
 	for k, st := range starts {
 		end := len(lines)
 		if k+1 < len(starts) {
 			end = starts[k+1]
 		}
-		blk := lines[st:end]
+		for _, l := range lines[st:end] {
+			if strings.TrimSpace(l) != "" && !strings.HasPrefix(l, "== ") {
+				withContent = append(withContent, seg{st, end})
+				lastContent = k
+				break
+			}
+		}
+	}
+	if len(withContent) == 0 {
+		// 全是启动抬头:没有崩溃记录。留最后一行抬头,看得出记录本身是开着的
+		return lines[starts[len(starts)-1]] + "\n(没有崩溃记录)"
+	}
+	if len(withContent) > 3 {
+		withContent = withContent[len(withContent)-3:]
+	}
+	var out []string
+	for _, g := range withContent {
+		blk := lines[g.s:g.e]
 		if len(blk) > 200 {
 			out = append(out, blk[:150]...)
 			out = append(out, fmt.Sprintf("…(省略 %d 行)…", len(blk)-200))
@@ -218,6 +236,9 @@ func crashExcerpt(path string) string {
 		} else {
 			out = append(out, blk...)
 		}
+	}
+	if later := len(starts) - 1 - lastContent; later > 0 {
+		out = append(out, fmt.Sprintf("…(之后又启动了 %d 次,没有崩溃记录;最后一次:%s)", later, lines[starts[len(starts)-1]]))
 	}
 	return strings.Join(out, "\n")
 }

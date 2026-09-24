@@ -70,7 +70,7 @@ function New-CrashText() {
 # 进程级崩溃的标志:Go 的 panic / fatal error、Windows 异常、goroutine 栈(只靠 SetCrashOutput 时 fatal 的原因行
 # 不在,栈在)。注意是 "panic: " 带冒号:sing-box 启动失败时 println 的 "panic on early start: …" 不是进程崩溃。
 # 其余的是进程没崩时写到标准错误的东西,单独报、不算崩溃。
-$script:crashMark = '^(panic: |fatal error:|Exception 0x|goroutine \d+ \[|runtime stack:)'
+$script:crashMark = '^(panic: |fatal error:|Exception 0x|goroutine \d+ (gp=|\[)|runtime stack:)'
 function Crash-Lines() { $t = New-CrashText; return ,@($t | Where-Object { $_ -match $script:crashMark }) }
 function Stderr-Other() { $t = New-CrashText; return ,@($t | Where-Object { $_ -notmatch $script:crashMark }) }
 # 失败时的现场:直接读日志文件(服务可能已经卸掉或崩了,不能再靠命令行去问服务),再列服务管理器事件
