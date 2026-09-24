@@ -40,16 +40,28 @@ function Svc-Crashes($since) {
     return $null
   }
 }
-# 这次验收期间 crash.log 新增的崩溃内容:抬头("== … 启动")以外的任何非空行都算。不能只认 panic / fatal error ——
-# Go 的 fatal error 在只靠 SetCrashOutput 时原因行进不了文件,只剩栈;DLL 里的访问违例是"Exception 0x…"。
-# 文件在这期间被轮转(超过 1MB 挪成 crash.log.1)的话行数会比基线少,那就从头算。
-function Crash-Lines() {
-  if (-not (Test-Path $script:crashLog)) { return ,@() }
-  $all = @(Get-Content $script:crashLog -Encoding UTF8)
-  $skip = $script:crashBase
-  if ($all.Count -lt $skip) { $skip = 0 }
-  return ,@($all | Select-Object -Skip $skip | Where-Object { $_.Trim() -ne '' -and $_ -notmatch '^== ' })
+# 这次验收期间 crash.log 新增的内容(抬头"== … 启动"与空行除外)。期间要是被轮转过(启动时超过 1MB 挪成 .1)——
+# 那恰恰是一次崩溃把文件推过了 1MB,现场在 .1 里:.1 基线之后的部分也算,再加上新 crash.log 的全部。
+function New-CrashText() {
+  $old = "$script:crashLog.1"
+  $lines = @()
+  if ((Test-Path $old) -and ((Get-Item $old).LastWriteTime -ge $script:t0)) {
+    $lines += @(Get-Content $old -Encoding UTF8 | Select-Object -Skip $script:crashBase)
+    if (Test-Path $script:crashLog) { $lines += @(Get-Content $script:crashLog -Encoding UTF8) }
+  } elseif (Test-Path $script:crashLog) {
+    $all = @(Get-Content $script:crashLog -Encoding UTF8)
+    $skip = $script:crashBase
+    if ($all.Count -lt $skip) { $skip = 0 }
+    $lines = @($all | Select-Object -Skip $skip)
+  }
+  return ,@($lines | Where-Object { $_.Trim() -ne '' -and $_ -notmatch '^== ' })
 }
+# 进程级崩溃的标志:Go 的 panic / fatal error、Windows 异常、goroutine 栈(只靠 SetCrashOutput 时 fatal 的原因行
+# 不在,栈在)。注意是 "panic: " 带冒号:sing-box 启动失败时 println 的 "panic on early start: …" 不是进程崩溃。
+# 其余的是进程没崩时写到标准错误的东西,单独报、不算崩溃。
+$script:crashMark = '^(panic: |fatal error:|Exception 0x|goroutine \d+ \[|runtime stack:)'
+function Crash-Lines() { $t = New-CrashText; return ,@($t | Where-Object { $_ -match $script:crashMark }) }
+function Stderr-Other() { $t = New-CrashText; return ,@($t | Where-Object { $_ -notmatch $script:crashMark }) }
 # 失败时的现场:直接读日志文件(服务可能已经卸掉或崩了,不能再靠命令行去问服务),再列服务管理器事件
 function Dump-Evidence() {
   foreach ($n in @(@("service.log", 300), @("core.log", 80), @("crash.log", 200))) {
@@ -326,6 +338,8 @@ if ($null -eq $ev) { Check "服务没有意外退出过(系统日志 7031/7034)"
 else { Check "服务没有意外退出过(系统日志 7031/7034)" ($ev.Count -eq 0) (($ev | ForEach-Object { $_.TimeCreated.ToString('HH:mm:ss.fff') + ' #' + $_.Id }) -join ' | ') }
 $cl = Crash-Lines
 Check "crash.log 里没有新的崩溃" ($cl.Count -eq 0) (($cl | Select-Object -First 3) -join ' | ')
+$so = Stderr-Other
+if ($so.Count -gt 0) { Write-Host ("[NOTE] crash.log 里有进程没崩时写的标准错误输出({0} 行):{1}" -f $so.Count, (($so | Select-Object -First 3) -join ' | ')) -ForegroundColor Yellow }
 Write-Host ""
 if ($fail -eq 0) { Write-Host "全部通过" -ForegroundColor Green } else {
   Write-Host "$fail 项失败" -ForegroundColor Red

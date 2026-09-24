@@ -24,11 +24,15 @@ var crashFile *os.File
 //
 // service 为 true 且在 Windows 上:把进程的标准错误句柄直接指到这个文件。只靠 debug.SetCrashOutput 不够 ——
 // fatal error(并发读写 map 等)的"fatal error: ..."那一行是在复制到崩溃文件之前就写出去的,文件里只剩栈、
-// 没有原因;非 Go 代码(wintun、WFP 等 DLL)里的访问违例走 winthrow,一个字都不会复制过去。运行时每次写标准
-// 错误都会重新取句柄,所以这两类都能收下;而 os.Stderr 在启动时就定下了(服务里是无效句柄),内核照常写
-// 标准错误的日志不会灌进这个文件。
-// 其余情形(Linux / macOS 的标准错误本来就进 journald / launchd 日志,前台 run 模式要留给控制台):用
-// SetCrashOutput 另抄一份,原因行留在标准错误那边。
+// 没有原因;Go 线程调进 DLL(wintun、WFP 等)时出的访问违例走 winthrow,一个字都不会复制过去。运行时每次写
+// 标准错误都会重新取句柄,所以这两类都能收下;而 os.Stderr 在启动时就定下了(服务里是无效句柄),内核照常
+// 写标准错误的日志不会灌进这个文件。依赖库用内建 println 写的东西也会进来(比如 sing-box 启动失败、关闭时又
+// panic 被它自己 recover 的那两行):那不是进程崩溃,验收脚本分开报。
+// 收不到的:DLL 自己起的线程里崩掉(那里没有 Go 的 g,Go 不打印,系统直接结束进程),只剩系统日志里的
+// "意外终止"(7031 / 7034)。
+// 其余情形用 SetCrashOutput 另抄一份,fatal 的原因行留在标准错误那边:systemd / procd / launchd 都收标准
+// 错误,前台 run 模式留给控制台。Entware(梅林)的启动脚本把标准错误丢进 /dev/null,那里原因行仍会丢、
+// 只剩栈 —— 已知,要改 Entware 的启停脚本(和它的卸载问题一起)。
 func CaptureCrashes(service bool) {
 	dir := paths.Logs()
 	if err := os.MkdirAll(dir, 0o700); err != nil {

@@ -163,12 +163,61 @@ func (d *Daemon) exportDiag() (string, error) {
 	}
 	add("service.log", strings.Join(logx.Tail(d.log.Path(), 500), "\n"))
 	add("core.log", strings.Join(logx.Tail(d.coreLog.Path(), 500), "\n"))
-	if crash := filepath.Join(paths.Logs(), "crash.log"); func() bool { st, err := os.Stat(crash); return err == nil && st.Size() > 0 }() { // Android 上 Go / Kotlin 侧的崩溃记录
-		add("crash.log", strings.Join(logx.Tail(crash, 300), "\n"))
+	// 崩溃记录(Windows 服务 / Linux / macOS 的 CaptureCrashes,Android 上 Go / Kotlin 侧)。.1 是启动时超过 1MB
+	// 挪走的那份 —— 轮转恰恰发生在一次崩溃把文件推过 1MB 之后,现场在那里。
+	for _, name := range []string{"crash.log", "crash.log.1"} {
+		if s := crashExcerpt(filepath.Join(paths.Logs(), name)); s != "" {
+			add(name, s)
+		}
 	}
 	sysDiag(add)
 	if err := zw.Close(); err != nil {
 		return "", err
 	}
 	return path, nil
+}
+
+// crashExcerpt 崩溃记录摘要。每段(以"== … 启动"抬头分开)的原因行在最前面("fatal error: …"、"Exception 0x…"、
+// "panic: …"),后面跟着全部 goroutine 的栈,动辄上千行;只取整个文件的最后几百行会把原因截掉。这里取最后 3 段,
+// 每段超过 200 行就留头 150 行、尾 50 行。没有抬头的(Android 那份)照旧取最后 300 行。
+func crashExcerpt(path string) string {
+	b, err := os.ReadFile(path)
+	if err != nil || len(b) == 0 {
+		return ""
+	}
+	lines := strings.Split(strings.ReplaceAll(string(b), "\r\n", "\n"), "\n")
+	var starts []int
+	for i, l := range lines {
+		if strings.HasPrefix(l, "== ") {
+			starts = append(starts, i)
+		}
+	}
+	if len(starts) == 0 {
+		if len(lines) > 300 {
+			lines = lines[len(lines)-300:]
+		}
+		return strings.Join(lines, "\n")
+	}
+	if starts[0] > 0 {
+		starts = append([]int{0}, starts...) // 第一个抬头之前的内容(轮转时被截在中间的那段)单算一段
+	}
+	if len(starts) > 3 {
+		starts = starts[len(starts)-3:]
+	}
+	var out []string
+	for k, st := range starts {
+		end := len(lines)
+		if k+1 < len(starts) {
+			end = starts[k+1]
+		}
+		blk := lines[st:end]
+		if len(blk) > 200 {
+			out = append(out, blk[:150]...)
+			out = append(out, fmt.Sprintf("…(省略 %d 行)…", len(blk)-200))
+			out = append(out, blk[len(blk)-50:]...)
+		} else {
+			out = append(out, blk...)
+		}
+	}
+	return strings.Join(out, "\n")
 }

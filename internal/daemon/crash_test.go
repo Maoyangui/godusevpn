@@ -4,9 +4,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // TestCrashChild 只在子进程里跑:按 GODUSEVPN_CRASH_KIND 真的崩一次。
@@ -14,7 +16,16 @@ func TestCrashChild(t *testing.T) {
 	if os.Getenv("GODUSEVPN_CRASH_CHILD") == "" {
 		t.Skip("只在 crash 测试的子进程里跑")
 	}
-	CaptureCrashes(os.Getenv("GODUSEVPN_CRASH_SERVICE") == "1")
+	service := os.Getenv("GODUSEVPN_CRASH_SERVICE") == "1"
+	CaptureCrashes(service)
+	if service {
+		// 先让垃圾回收和终结器跑几遍再崩:crash.log 的 *os.File 要是没被包级变量引用住,终结器会关掉
+		// 标准错误句柄,后面的崩溃输出就丢了。服务是长期运行的,这一步一定会发生。
+		for i := 0; i < 3; i++ {
+			runtime.GC()
+			time.Sleep(30 * time.Millisecond)
+		}
+	}
 	switch os.Getenv("GODUSEVPN_CRASH_KIND") {
 	case "panic":
 		go func() { panic("故意崩溃:crash.log 测试") }()
