@@ -8,70 +8,18 @@ package guardfix
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
-	"os"
 	"strings"
 	"time"
 
-	"github.com/Maoyangui/godusevpn/internal/builder"
 	"github.com/Maoyangui/godusevpn/internal/ipc"
 	"github.com/Maoyangui/godusevpn/internal/netmode"
 	"github.com/Maoyangui/godusevpn/internal/paths"
 	"github.com/Maoyangui/godusevpn/internal/settings"
 	"github.com/Maoyangui/godusevpn/internal/svc"
 )
-
-// Arm 升级前的离线预装:安装器在停掉旧服务**之前**,用解到临时目录的新版 exe 跑一次,把闸装到第二代提供者下。
-//
-// 这是多一道保险,不是在堵一个已知的漏洞。写它的时候以为 0.6.25-m29 ~ 0.7.1 那种绑了服务名的提供者,旧服务
-// 一停过滤器就全部失效、"停旧服务 → 新服务起来"这一段会漏;实测否定了(停服务不影响过滤器,见 wfp.baseProvider),
-// 用真安装包从 0.7.1 原地升级、全程采样也是 0 次漏。留着它的理由是:升级这一段本来就是"旧进程已退、新进程未起",
-// 趁旧服务还在先把第二代装上,闸在这一段的有无就不再依赖旧版本的任何行为。
-// 第二代不绑服务名;旧守护进程发现"闸不见了"会把第一代重装回来,两代并存、都是 BLOCK、放行的东西一样,
-// 不漏也不多拦;新服务起来后 Enable 再把两代一并换成干净的第二代。
-//
-// 只在"落盘的意愿是连着 + 全局模式 + 禁直连"时动手(和守护进程启动时 reconcileGuard 的判据一致);
-// 设置或状态读不出来、条件不满足,一律什么都不做 —— 这是升级路上的加固,绝不能因为它把安装挡住,
-// 也绝不能在用户没开闸的机器上凭空装闸。selfPath 是要放行的服务 exe 路径(安装后那个位置;升级时新旧路径相同)。
-func Arm(selfPath string) (text string, armed bool, err error) {
-	s, err := settings.Load(paths.Settings())
-	if err != nil {
-		return "设置读不出来,不动闸: " + err.Error(), false, nil
-	}
-	b, err := os.ReadFile(paths.State())
-	if err != nil {
-		return "连接状态读不出来,不动闸: " + err.Error(), false, nil
-	}
-	var p struct {
-		Wanted bool `json:"wanted"`
-	}
-	if err := json.Unmarshal(b, &p); err != nil {
-		return "连接状态损坏,不动闸: " + err.Error(), false, nil
-	}
-	if !p.Wanted || !s.NoDirect || s.Mode != settings.ModeGlobal {
-		return "不是严格全局模式下连着的机器,不动闸", false, nil
-	}
-	spec := netmode.GuardSpec{
-		TunName:  builder.TunName,
-		TunAddr4: strings.Split(builder.TunAddr4, "/")[0],
-		TunAddr6: strings.Split(builder.TunAddr6, "/")[0],
-		LAN:      s.LANBypass,
-		Gateway:  s.NetMode == settings.NetGateway,
-		SelfPath: selfPath,
-	}
-	if err := netmode.ApplyGuard(spec); err != nil {
-		return "", false, err
-	}
-	n, _ := netmode.GuardStatus()
-	note := ""
-	if w := netmode.GuardWarning(); w != "" {
-		note = "(" + w + ")"
-	}
-	return fmt.Sprintf("闸已按第二代提供者装上(%d 条过滤器)%s", n, note), true, nil
-}
 
 // Clear 撤闸。返回给用户看的一句话,以及网络是不是真的恢复了。
 //
@@ -93,6 +41,10 @@ func Clear() (text string, ok bool) {
 			return "闸没有开着,网卡 IPv6 也没被改过 —— 网络本来就是通的,没有改动任何设置。", true
 		}
 		if err := netmode.RestoreNICIPv6(); err != nil {
+			var inc *netmode.NICRestoreIncomplete
+			if errors.As(err, &inc) {
+				return "闸本来就没开;网卡 IPv6 已按备份还原,但" + inc.Detail + "。两个隐私开关都没动。", true
+			}
 			return "闸本来就没开;网卡 IPv6 没能还原回去(" + err.Error() + ")。两个隐私开关都没动。", false
 		}
 		return "闸本来就没开;网卡上被停用的 IPv6 已还原。「全局禁直连」与「连接时停用网卡 IPv6」两个开关都没动。", true
@@ -107,6 +59,13 @@ func Clear() (text string, ok bool) {
 	_ = switchErr
 	clearErr := netmode.ClearGuard()
 	restoreErr := netmode.RestoreNICIPv6() // 网卡 IPv6 和闸一样是持久的,恢复网络就该一并还原,不然用户以为好了、v6 还是没有
+	// 还原做完了、但备份里有几行坏了(那几张网卡的原值丢了):不算失败,但必须说出来 ——
+	// 0.7.4 在这里只记了一条内存里的告警,弹窗照样说"网卡 IPv6 也还原了",而那张网卡的 v6 其实还关着。
+	var nicNote string
+	var inc *netmode.NICRestoreIncomplete
+	if errors.As(restoreErr, &inc) {
+		nicNote, restoreErr = inc.Detail, nil
+	}
 	// macOS 的系统 DNS 被接管到隧道地址、Linux 的回包策略路由也是"持久"的:闸撤了、隧道没了,
 	// DNS 还指着隧道就等于没网。恢复网络就是要回到没装过的样子,一并还原(Windows 上是空操作)。
 	dnsErr := netmode.UnprotectChecked()
@@ -128,6 +87,9 @@ func Clear() (text string, ok bool) {
 	}
 	if dnsErr != nil {
 		bad = append(bad, "系统 DNS / 路由没能还原("+dnsErr.Error()+"),下次启动服务时会自动再试")
+	}
+	if nicNote != "" {
+		bad = append(bad, "网卡 IPv6 已按备份还原,但"+nicNote)
 	}
 	if switchErr != nil {
 		bad = append(bad, "没能关掉「全局禁直连」/「连接时停用网卡 IPv6」两个开关("+switchErr.Error()+"),服务下一次重连可能又把闸装回来;真装回来就去设置 → 隐私里手动关掉")

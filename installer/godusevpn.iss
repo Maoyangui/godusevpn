@@ -175,12 +175,6 @@ begin
   if FileExists(ExpandConstant('{app}\godusevpn-svc.exe')) then
   begin
     Exec('taskkill.exe', '/F /IM godusevpn.exe', '', SW_HIDE, ewWaitUntilTerminated, rc);
-    // 多一道保险:先把**新版**的 svc.exe 解到临时目录,趁旧服务还在跑,用它把闸装到第二代提供者下,
-    // "旧进程已退、新进程未起"这一段闸的有无就不再依赖旧版本的行为(实测旧版停服务并不会让它的闸失效,
-    // 见 internal/netmode/wfp 的 baseProvider)。只在严格全局模式下连着的机器上才会真的动手,
-    // 失败不影响安装(新服务起来后会重装)。放行的是安装后那个路径上的服务 exe。
-    ExtractTemporaryFile('godusevpn-svc.exe');
-    Exec(ExpandConstant('{tmp}\godusevpn-svc.exe'), 'guard arm --self="' + ExpandConstant('{app}\godusevpn-svc.exe') + '"', '', SW_HIDE, ewWaitUntilTerminated, rc);
     // 升级只停止服务,不能走 uninstall:卸载命令按用户明确请求会撤闸并恢复网卡 IPv6,
     // 那会在替换文件期间制造直连泄漏窗口。新版本安装后由 SCM 重新启动并接管现有闸。
     //

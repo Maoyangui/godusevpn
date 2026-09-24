@@ -24,7 +24,6 @@ var (
 func ApplyGuard(spec GuardSpec) error {
 	var s wfp.Spec
 	s.LAN = spec.LAN
-	s.SelfPath = spec.SelfPath
 	if a, err := netip.ParseAddr(spec.TunAddr4); err == nil && a.Is4() {
 		s.Tun4 = a.As4()
 	} else {
@@ -116,6 +115,10 @@ func GuardInstallable() bool { return true }
 
 // GuardPersistentSupported WFP 的对象是持久的:进程退出、被强杀、崩溃、升级换文件、重启,闸都还在。
 func GuardPersistentSupported() bool { return true }
+
+// GuardBootDisabled 我们的 WFP 提供者身上有没有 FWPM_PROVIDER_FLAG_DISABLED:有 = 上次开机时 BFE 把它名下的
+// 过滤器停用过(开机到本服务重装闸之间那一段没有闸)。只读,给守护进程启动时记日志、给 guard status 显示。
+func GuardBootDisabled() (bool, error) { return wfp.ProviderBootDisabled() }
 
 // GuardPersistentReady 查的是**运行期**那组过滤器覆盖全不全 —— 也就是"守护进程之外也在"的那道闸。
 // 开机那组不在这条里(见 BootGuardReady)。

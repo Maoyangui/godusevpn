@@ -89,7 +89,7 @@ func main() {
 		// m29 把这两件事同等对待,于是一张早就拔掉的 USB 网卡就能让产品永远卸不掉。
 		// 这里改成:如实报出来、告诉用户怎么手动开回去,然后照常卸载。
 		if err := netmode.RestoreNICIPv6(); err != nil {
-			fmt.Println("注意:网卡 IPv6 没能还原回去:", err)
+			fmt.Println("注意:网卡 IPv6 没能完全还原:", err)
 			if runtime.GOOS == "darwin" {
 				fmt.Println("卸载继续。要手动开回去:系统设置 → 网络 → 详细信息 → TCP/IP,把「配置 IPv6」改回「自动」。")
 			} else {

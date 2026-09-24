@@ -134,3 +134,6 @@ func GuardInstallable() bool { return true }
 // Linux currently has no daemon-independent boot-time guard.
 func GuardPersistentSupported() bool      { return false }
 func GuardPersistentReady() (bool, error) { return false, nil }
+
+// GuardBootDisabled 只有 Windows 的 WFP 有"开机时被系统停用"这回事。
+func GuardBootDisabled() (bool, error) { return false, nil }

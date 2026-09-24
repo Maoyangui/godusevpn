@@ -77,3 +77,6 @@ func GuardPersistentSupported() bool {
 }
 
 func GuardPersistentReady() (bool, error) { return BootGuardReady() }
+
+// GuardBootDisabled 只有 Windows 的 WFP 有"开机时被系统停用"这回事。
+func GuardBootDisabled() (bool, error) { return false, nil }

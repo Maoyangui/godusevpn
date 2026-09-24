@@ -18,5 +18,9 @@ func guardDetail() string {
 	if !ready {
 		state = "不全"
 	}
-	return fmt.Sprintf("  其中被系统标为停用(不拦任何包)的 %d 条;运行期那组覆盖%s", disabled, state)
+	boot := ""
+	if dis, err := wfp.ProviderBootDisabled(); err == nil && dis {
+		boot = ";提供者带着系统的「开机时已停用」标志(上次开机时这套规则被防火墙引擎停用过)"
+	}
+	return fmt.Sprintf("  其中被系统标为停用(不拦任何包)的 %d 条;运行期那组覆盖%s%s", disabled, state, boot)
 }

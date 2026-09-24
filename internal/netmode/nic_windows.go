@@ -1,6 +1,7 @@
 package netmode
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -99,6 +100,34 @@ if ($failed.Count -gt 0) { Write-Output ('GODUSEVPN-PARTIAL: ' + ($failed -join 
 		setNICWarning(joinWarn(NICWarning(), corrupt))
 	}
 	return res
+}
+
+// restoreOutcome 把还原脚本的输出翻成结果(纯函数,可测):
+//   - 有 FAILED:普通错误(备份留着下次重试),消息里带上无效行 / 消失网卡的说明;
+//   - 只有无效行:*NICRestoreIncomplete —— 做完了,但那几张网卡的原值丢了,调用方要说给用户;
+//   - 只有消失的网卡、或什么都没有:nil(没什么可还原的不算失败)。
+//
+// warn 是要写进 NICWarning 的那句话(无效行 + 消失的网卡)。
+func restoreOutcome(out string) (warn string, err error) {
+	var warns []string
+	corrupt := nicCorruptWarning(out)
+	if corrupt != "" {
+		warns = append(warns, corrupt)
+	}
+	if g := psMark(out, markGone); g != "" {
+		warns = append(warns, "这些网卡已经不在了,当作无需还原: "+g)
+	}
+	warn = strings.Join(warns, ";")
+	if f := psMark(out, markFailed); f != "" {
+		if warn != "" {
+			return warn, fmt.Errorf("还原网卡 IPv6: %s(另外:%s)", f, warn)
+		}
+		return warn, fmt.Errorf("还原网卡 IPv6: %s", f)
+	}
+	if corrupt != "" {
+		return warn, &NICRestoreIncomplete{Detail: corrupt}
+	}
+	return warn, nil
 }
 
 // nicCorruptWarning 脚本报了"备份里有几行无效"时给用户的那句话;没有就是空串。
@@ -210,22 +239,20 @@ if ($gone.Count -gt 0) { Write-Output ('GODUSEVPN-GONE: ' + ($gone -join ', ')) 
 	if err != nil {
 		return fmt.Errorf("还原网卡 IPv6: %w(%s)", err, out)
 	}
-	// 告警先记:无效行只在这一次脚本里报(它们已经从备份里剔掉了),要是先因 FAILED 返回,这句就永远没人看见。
-	var warns []string
-	if w := nicCorruptWarning(out); w != "" {
-		warns = append(warns, w)
+	warn, rerr := restoreOutcome(out)
+	if warn != "" {
+		setNICWarning(warn)
 	}
-	if g := psMark(out, markGone); g != "" {
-		warns = append(warns, "这些网卡已经不在了,当作无需还原: "+g)
-	}
-	if len(warns) > 0 {
-		setNICWarning(strings.Join(warns, ";"))
-	}
-	if f := psMark(out, markFailed); f != "" {
-		if len(warns) > 0 {
-			return fmt.Errorf("还原网卡 IPv6: %s(另外:%s)", f, strings.Join(warns, ";"))
+	if rerr != nil {
+		var inc *NICRestoreIncomplete
+		if !errors.As(rerr, &inc) {
+			return rerr // 真失败:备份留着,下次重试
 		}
-		return fmt.Errorf("还原网卡 IPv6: %s", f)
+		// 做完了但有几行原值丢了:备份脚本里已经删了,往下走把兜底删除也做掉,再把这件事如实交出去
+		if err := os.Remove(nicBackup()); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("删除 IPv6 备份: %w", err)
+		}
+		return rerr
 	}
 	// 脚本里已经删过一次;这里兜一下,免得脚本那步被杀掉之后下次启动反复还原。
 	if err := os.Remove(nicBackup()); err != nil && !os.IsNotExist(err) {

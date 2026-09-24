@@ -71,6 +71,19 @@ func nicBackupCorrupt(path, why string) error {
 	return nil
 }
 
+// NICRestoreIncomplete 还原做完了能做的(备份已清掉,不必再重试),但备份里有几行 / 整份坏了,
+// 那几张网卡动手前的状态丢了,可能还关着 IPv6。不算失败,但调用方必须把 Detail 说给用户:
+// 0.7.4 只把它记进内存里的告警,「恢复网络」弹窗和卸载都读不到,照样说"已还原"。
+type NICRestoreIncomplete struct{ Detail string }
+
+func (e *NICRestoreIncomplete) Error() string { return e.Detail }
+
+// nicRestoreCorrupt 还原路径上备份整份坏了:和 nicBackupCorrupt 一样挪到 .bad 留证,但返回 NICRestoreIncomplete。
+func nicRestoreCorrupt(path, why string) error {
+	_ = nicBackupCorrupt(path, why)
+	return &NICRestoreIncomplete{Detail: NICWarning()}
+}
+
 // nicLeakConfirmed 抽成变量只为可测:真机上就是 NICIPv6LeakConfirmed。
 var nicLeakConfirmed = NICIPv6LeakConfirmed
 

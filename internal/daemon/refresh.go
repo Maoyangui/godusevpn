@@ -311,6 +311,11 @@ func (d *Daemon) applyGuard(okMsg string) {
 // 上次是断开状态、或不是全局、或开关关了,就把残留的清掉;该在的立刻装上(幂等)——
 // 别让"服务起来 → 连上"这几秒漏出去(重启的话开机那组过滤器已经挡到这里了)。
 func (d *Daemon) reconcileGuard() {
+	// 只读:上次开机时防火墙引擎有没有把闸的规则停用过(Windows)。有的话,开机到这里之间那一段没有闸 ——
+	// 下面照常重装;这条日志是每次开机的自证,出现了就说明"重启不漏"在这台机器上不成立,要反馈。
+	if dis, err := netmode.GuardBootDisabled(); err == nil && dis {
+		d.logf("全局禁直连:开机时防火墙引擎停用过闸的规则(提供者带 DISABLED 标志),开机到本服务启动之间可能没有闸;已照常重装。请把这条日志反馈给开发者")
+	}
 	if !d.settingsTrusted() {
 		d.logf("全局禁直连:设置读不出来,保持现状(不撤闸也不开闸)")
 		return

@@ -11,12 +11,14 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/Maoyangui/godusevpn/internal/buildinfo"
 	"github.com/Maoyangui/godusevpn/internal/daemon"
@@ -111,11 +113,19 @@ func main() {
 			fmt.Println("重启服务后生效:godusevpn-svc.exe stop && godusevpn-svc.exe start")
 			return
 		}
-		if err := svc.Stop(); err != nil {
-			fail(fmt.Errorf("已登记,但停止服务失败(手动重启服务或重启电脑后生效): %w", err))
+		// 0.7.4 在这里 Stop 一超时(守护进程收尾超过 20 秒)就直接失败退出,而停止请求已经发出去了 ——
+		// 服务随后停下、却没人再把它拉起来,严格全局模式下整机断网,界面还报"已登记"。
+		// 现在:停得慢就再等;停下来了就一定去拉起来;实在没停下来就不碰它、如实失败。
+		stopped := svc.Stop() == nil
+		for i := 0; !stopped && i < 60; i++ {
+			time.Sleep(time.Second)
+			stopped = svc.QueryStatus() == "stopped"
 		}
-		if err := svc.Start(); err != nil {
-			fail(fmt.Errorf("已登记,服务已停止但启动失败: %w", err))
+		if !stopped {
+			fail(errors.New("已登记,但服务迟迟没停下来,没能重启;重启电脑后生效"))
+		}
+		if err := svc.Start(); err != nil && svc.QueryStatus() != "running" {
+			fail(fmt.Errorf("已登记,服务已停止但启动失败(在开始菜单打开佛跳墙或重启电脑即可拉起): %w", err))
 		}
 		fmt.Println("服务已重启,登记生效")
 	case "uninstall":
@@ -132,7 +142,7 @@ func main() {
 		// m29 把这两件事同等对待,于是一张早就拔掉的 USB 网卡就能让产品永远卸不掉。
 		// 这里改成:如实报出来、告诉用户怎么手动开回去,然后照常卸载。
 		if err := netmode.RestoreNICIPv6(); err != nil {
-			fmt.Println("注意:网卡 IPv6 没能还原回去:", err)
+			fmt.Println("注意:网卡 IPv6 没能完全还原:", err)
 			fmt.Println("卸载继续。要手动开回去:在「网络适配器属性」里把「Internet 协议版本 6 (TCP/IPv6)」勾回来。")
 		}
 		// 系统 DNS(macOS 被接管到隧道地址)/ 回包策略路由(Linux)和闸一样是持久的。m28 卸载时
@@ -177,24 +187,8 @@ func main() {
 					fmt.Println(d)
 				}
 			}
-		case "arm":
-			// 升级用:安装器在停旧服务之前用**新版** exe 跑一次,趁旧服务还在把闸装到第二代提供者下(多一道保险,见 guardfix.Arm)。
-			// --self=<服务 exe 路径>:要放行的是安装后那个路径上的服务,不是临时目录里的这个进程。
-			self := ""
-			for _, a := range os.Args[3:] {
-				if strings.HasPrefix(a, "--self=") {
-					self = strings.Trim(strings.TrimPrefix(a, "--self="), "\"")
-				}
-			}
-			text, _, err := guardfix.Arm(self)
-			if err != nil {
-				// 不挡安装:新服务起来后 reconcileGuard 会重装。退出码非零只是让安装日志看得出来。
-				fmt.Println("升级前预装闸失败(不影响安装,新服务起来后会重装):", err)
-				os.Exit(1)
-			}
-			fmt.Println(text)
 		default:
-			fmt.Println("用法: godusevpn-svc guard clear | status | arm [--self=<服务 exe 路径>]")
+			fmt.Println("用法: godusevpn-svc guard clear | status")
 			os.Exit(2)
 		}
 	case "start":

@@ -128,8 +128,9 @@ func baseProvider(dd *wtFwpmDisplayData0) wtFwpmProvider0 {
 //
 // 第一代提供者在 m29 那几版被绑上了服务名(闸能不能跨过开机就取决于服务的启动类型,见 baseProvider)。
 // 0.7.2 / 0.7.3 只能等用户下次断开时才换掉;现在 Enable 在一个事务里把过滤器换到第二代名下,
-// 这里只剩收尾,换提供者这一步没有空窗。(停旧服务不会让旧过滤器失效,实测见 baseProvider;
-// 安装器另在停旧服务之前跑 guard arm 预装第二代,是多一道保险。)
+// 这里只剩收尾,换提供者这一步没有空窗。(停旧服务不会让旧过滤器失效,实测见 baseProvider。
+// 0.7.4 的安装器曾在停旧服务之前先用新版 exe 预装第二代;0.7.5 去掉了:升级一旦在那之后中止,
+// 留下的旧版认不出第二代,断开 / 恢复网络 / 卸载都撤不掉它,反而会把人卡在断网里。)
 func dropLegacyBase(s uintptr) string {
 	if err := runTransaction(s, func(s uintptr) error {
 		if err := fwpmSubLayerDeleteByKey0(s, &legacySublayerKey); err != nil && !notFound(err) {
@@ -437,6 +438,25 @@ func Breakdown() (total, disabled int, persistentReady bool, err error) {
 		}
 	}
 	return len(fs), disabled, persistentGuardReady(fs), nil
+}
+
+// ProviderBootDisabled 两代提供者里有没有哪个带着 FWPM_PROVIDER_FLAG_DISABLED —— 也就是上次开机时
+// BFE 把它名下的过滤器停用过。只读诊断:守护进程启动时记一笔,guard status 也显示。
+// 用户那台 Win10 上带着闸真实重启过一次,不挂服务名的提供者没被停用;这条留着,每次开机都能自证一次。
+func ProviderBootDisabled() (bool, error) {
+	mu.Lock()
+	defer mu.Unlock()
+	s, err := openSession()
+	if err != nil {
+		return false, err
+	}
+	defer fwpmEngineClose0(s)
+	for _, k := range []*windows.GUID{&providerKey, &legacyProviderKey} {
+		if fl, ok := providerFlags(s, k); ok && fl&fwpProviderFlagDisabled != 0 {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // currentFilters 开一次会话把我们名下的过滤器全取出来。

@@ -89,6 +89,9 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Continue"
+          # 先把退出码设成一个哨兵值:脚本要是根本没跑起来(语法错、参数绑定失败),Continue 下调用处只打一行红字,
+          # 接着 exit 的就是这个哨兵而不是 0 —— 以前 exit $LASTEXITCODE 在这种情况下是 0,作业照样是绿的、tag 照样发布。
+          $global:LASTEXITCODE = 97
           & .\deploy\vps-test.ps1 -Sub $env:TEST_SUB_URL -Bin (Resolve-Path dist\amd64).Path -LegacyBin (Resolve-Path legacy\bin).Path
           exit $LASTEXITCODE
 
@@ -127,6 +130,9 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit 1 }
           $new = @(Get-ChildItem dist\installer -Filter "*-windows-x64-setup.exe")
           if ($new.Count -ne 1) { Write-Host "找不到唯一的新版 x64 安装包"; Get-ChildItem dist\installer; exit 1 }
+          # 先把退出码设成一个哨兵值:脚本要是根本没跑起来(语法错、参数绑定失败),Continue 下调用处只打一行红字,
+          # 接着 exit 的就是这个哨兵而不是 0 —— 以前 exit $LASTEXITCODE 在这种情况下是 0,作业照样是绿的、tag 照样发布。
+          $global:LASTEXITCODE = 97
           & .\deploy\installer-upgrade-test.ps1 -Sub $env:TEST_SUB_URL -OldSetup (Resolve-Path legacy-setup\godusevpn-0.7.1-windows-x64-setup.exe).Path -NewSetup $new[0].FullName -NewBin (Resolve-Path dist\amd64).Path
           exit $LASTEXITCODE
 

@@ -125,6 +125,8 @@ $ours = Get-WfpProviders
 $bound = Providers-Detail $ours
 if ($null -ne $ours) {
   Check "WFP 提供者存在且没有绑服务名" (($ours.Count -gt 0) -and -not ($ours | Where-Object { -not [string]::IsNullOrEmpty($_.serviceName) })) $bound
+  $flags = (($ours | ForEach-Object { @($_.flags.item) -join "+" }) -join ", ")
+  Check "WFP 提供者没带系统的停用标志" (-not ($flags -match 'DISABLED')) "flags=[$flags]"
   Check "闸挂在第二代提供者下" ($script:wfpStateText -match '6f6d9e2e-3a41-4b8e-9d55-676f64757365') ""
 } else { Check "WFP 提供者没有绑服务名" $false $bound }
 if ($script:directOK) { $d = Direct-Http; Check "绑物理网卡的直连被拦" ($d -and $d -notmatch '^[23]') "http=$d(网卡 $physIp)" }
@@ -230,13 +232,9 @@ if ($LegacyBin -and -not $KeepInstalled) {
     Check "旧版的提供者绑着服务名(场景前提)" (($null -ne $lp) -and ($lp.Count -gt 0) -and -not ($lp | Where-Object { [string]::IsNullOrEmpty($_.serviceName) })) (Providers-Detail $lp)
     Check "旧版的提供者用的是第一代 GUID(场景前提)" ($script:wfpStateText -match '6f6d9e2c-3a41-4b8e-9d55-676f64757365') ""
     if ($script:directOK) { $ld = Direct-Http; Check "旧版闸拦着直连" ($ld -and $ld -notmatch '^[23]') "http=$ld" }
-    # 原地升级,照安装器的流程:趁旧服务还在,先用新版 exe 把闸装到第二代提供者下(guard arm,放行的是旧服务 exe 的路径)
-    # → 旧版 stop → 新版 install(沿用服务对象、改可执行文件路径、启动),全程不点断开。
-    # guard arm 是多一道保险:这一段闸的有无不再依赖旧版本的行为(实测旧版停服务并不会让它的闸失效)。
-    $arm = & $svc guard arm --self="$lsvc" 2>&1 | Out-String
-    Check "停旧服务前先按第二代预装闸" ($arm -match "已按第二代提供者装上") $arm.Trim()
-    $ap = Get-WfpProviders
-    Check "预装后第二代提供者在(旧一代可能仍并存)" ($script:wfpStateText -match '6f6d9e2e-3a41-4b8e-9d55-676f64757365') (Providers-Detail $ap)
+    # 原地升级,照安装器的流程:旧版 stop → 新版 install(沿用服务对象、改可执行文件路径、启动),全程不点断开。
+    # 0.7.4 曾在停旧服务之前先用新版 exe 预装第二代(guard arm),0.7.5 去掉了:升级一旦在那之后中止,
+    # 留下的旧版认不出第二代,撤不掉它。停旧服务本来就不会让旧版的闸失效(实测),下面照样断言。
     & $lsvc stop | Out-Null
     Start-Sleep -Seconds 2
     if ($script:directOK) { # 旧服务停止、新服务还没起来的这一段,直连必须仍被拦。多采几次,免得只撞上网卡重绑的那一瞬
@@ -259,7 +257,7 @@ if ($LegacyBin -and -not $KeepInstalled) {
     Check "升级后经隧道照常" ($tc2 -eq "200") "http=$tc2"
     & $svc stop | Out-Null
     Start-Sleep -Seconds 3
-    if ($script:directOK) { $ud2 = Direct-Http; Check "升级后停服务闸仍在拦(新一代提供者不绑服务名)" ($ud2 -and $ud2 -notmatch '^[23]') "http=$ud2" }
+    if ($script:directOK) { $ud2 = Direct-Http; Check "升级后停服务闸仍在拦" ($ud2 -and $ud2 -notmatch '^[23]') "http=$ud2" }
     & $svc start | Out-Null
     Wait-Status "connected" 60 | Out-Null
     & $cli mode rule | Out-Null

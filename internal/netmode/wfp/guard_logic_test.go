@@ -74,6 +74,12 @@ func TestGuardGenerations(t *testing.T) {
 	if legacyProviderKey != wantLegacyP || legacySublayerKey != wantLegacyS {
 		t.Fatal("第一代 GUID 变了:m29 那几版(0.6.25-m29 ~ 0.7.1)留下的提供者 / 子层 / 过滤器就认不出来了")
 	}
+	// 第二代的值也钉死:改了它,0.7.4 起装下的 …2e / …2f 对象下一版就认不出、删不掉(断开 / 卸载后断网卡死)
+	wantP := windows.GUID{Data1: 0x6f6d9e2e, Data2: 0x3a41, Data3: 0x4b8e, Data4: d4}
+	wantS := windows.GUID{Data1: 0x6f6d9e2f, Data2: 0x3a41, Data3: 0x4b8e, Data4: d4}
+	if providerKey != wantP || sublayerKey != wantS {
+		t.Fatal("第二代 GUID 变了:0.7.4 起装下的提供者 / 子层 / 过滤器就认不出来了。要换代就再加一代,别改这一代的值")
+	}
 	if providerKey == legacyProviderKey || sublayerKey == legacySublayerKey {
 		t.Fatal("现役 GUID 和第一代相同:换代换到同一个 GUID 上,升级又得先删光过滤器再重建,中间没有闸")
 	}

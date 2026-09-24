@@ -52,7 +52,8 @@ fi
 # `pidof godusevpn`,而此刻正在跑这条命令的**就是** godusevpn 自己 —— 它永远报 running,
 # 升级会被永久挡死。其实也不必判:install(1) 是先删掉旧文件再建一个新文件(GNU / BSD 都这样,
 # BusyBox 打开失败后也会删了重试),正在跑的旧进程继续用旧的 inode,不会撞上 ETXTBSY;写不进多半是
-# 权限不够或分区只读。真正让新版本生效的是下面的 `install` 子命令,它会重启服务。
+# 权限不够或分区只读。注意 Linux 上下面的 `install` 子命令只是"注册并启动",服务已经在跑时它不会重启 ——
+# 新版本能不能生效,靠的是这里的 stop 真停下了;stop 失败时(被 || true 吞掉)跑的仍是旧版本,直到下次重启服务。
 if [ -x "$BIN_DIR/godusevpn" ]; then "$BIN_DIR/godusevpn" stop >/dev/null 2>&1 || true; fi
 if ! install -m 755 "$SRC" "$BIN_DIR/godusevpn"; then
   echo "写不进 $BIN_DIR/godusevpn,升级中止(多半是权限不够或分区只读;要用 root 跑)。"

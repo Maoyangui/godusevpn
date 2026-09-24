@@ -950,12 +950,17 @@ func (d *Daemon) syncNICIPv6() error {
 		d.nicDisablePending.Store(false)
 	case nicRestore:
 		if err := netmode.RestoreNICIPv6(); err != nil {
-			d.logf("还原网卡 IPv6 失败,保护状态保留: %v", err)
-			return state.Errf(state.CodePrivacyNIC, "还原网卡 IPv6 失败: %v", err)
+			var inc *netmode.NICRestoreIncomplete
+			if !errors.As(err, &inc) {
+				d.logf("还原网卡 IPv6 失败,保护状态保留: %v", err)
+				return state.Errf(state.CodePrivacyNIC, "还原网卡 IPv6 失败: %v", err)
+			}
+			d.logf("网卡 IPv6:已按备份还原,但%s", inc.Detail)
+		} else {
+			d.logf("网卡 IPv6:已按动手前的状态还原")
 		}
 		d.nicOff.Store(false)
 		d.nicDisablePending.Store(false)
-		d.logf("网卡 IPv6:已按动手前的状态还原")
 	}
 	return nil
 }
@@ -1005,7 +1010,13 @@ func (d *Daemon) reconcileNICIPv6() {
 	switch nicIPv6Action(want, on) {
 	case nicRestore:
 		if err := netmode.RestoreNICIPv6(); err != nil {
-			d.logf("网卡 IPv6:还原失败,保留保护状态: %v", err)
+			var inc *netmode.NICRestoreIncomplete
+			if !errors.As(err, &inc) {
+				d.logf("网卡 IPv6:还原失败,保留保护状态: %v", err)
+				return
+			}
+			d.nicOff.Store(false)
+			d.logf("网卡 IPv6:上次不是连着关的机(或设置已关掉),已按备份还原,但%s", inc.Detail)
 			return
 		}
 		d.nicOff.Store(false)

@@ -15,6 +15,7 @@ var (
 	procFwpmFilterDeleteByKey0       = modfwpuclnt.NewProc("FwpmFilterDeleteByKey0")
 	procFwpmSubLayerDeleteByKey0     = modfwpuclnt.NewProc("FwpmSubLayerDeleteByKey0")
 	procFwpmProviderDeleteByKey0     = modfwpuclnt.NewProc("FwpmProviderDeleteByKey0")
+	procFwpmProviderGetByKey0        = modfwpuclnt.NewProc("FwpmProviderGetByKey0")
 )
 
 // windows_GUID 给本包自己写的文件用的别名,免得每处都写全名。
@@ -68,6 +69,23 @@ func fwpmSubLayerDeleteByKey0(engine uintptr, key *windows.GUID) error {
 
 func fwpmProviderDeleteByKey0(engine uintptr, key *windows.GUID) error {
 	return callProc(procFwpmProviderDeleteByKey0, engine, uintptr(unsafe.Pointer(key)))
+}
+
+// fwpProviderFlagDisabled FWPM_PROVIDER_FLAG_DISABLED:BFE 启动时把这个提供者名下的过滤器停用了。
+// 微软文档:没挂服务名、或挂的服务不是自动启动的提供者会这样。只能由 BFE 设,取的时候才看得到。
+const fwpProviderFlagDisabled = 0x00000010
+
+// providerFlags 读一个提供者的 flags。找不到(不存在、导出缺失、调用失败)返回 found=false。只读。
+func providerFlags(engine uintptr, key *windows.GUID) (flags uint32, found bool) {
+	if err := procFwpmProviderGetByKey0.Find(); err != nil {
+		return 0, false
+	}
+	var p *wtFwpmProvider0
+	if err := callProc(procFwpmProviderGetByKey0, engine, uintptr(unsafe.Pointer(key)), uintptr(unsafe.Pointer(&p))); err != nil || p == nil {
+		return 0, false
+	}
+	defer fwpmFreeMemory0(unsafe.Pointer(&p))
+	return p.flags, true
 }
 
 // ourLayers 我们放过滤器的六个层:出站 / 入站 × IPv4 / IPv6,外加 IP 转发 × IPv4 / IPv6(热点共享经本机转发的流量)。

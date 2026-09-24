@@ -123,7 +123,7 @@ func RestoreNICIPv6() error {
 		if err != nil {
 			why = err.Error()
 		}
-		return nicBackupCorrupt(nicBackup(), why)
+		return nicRestoreCorrupt(nicBackup(), why)
 	}
 	// 备份里的网络服务可能已经被删掉或改名了。那种"还原不了"其实是"没什么可还原",
 	// m29 却把它当成失败,于是备份永远删不掉、卸载也永远跑不完。

@@ -156,7 +156,7 @@ func RestoreNICIPv6() error {
 		if err != nil {
 			why = err.Error()
 		}
-		return nicBackupCorrupt(nicBackup(), why)
+		return nicRestoreCorrupt(nicBackup(), why)
 	}
 	// 备份里的网卡可能已经不在了(拔掉 USB 网卡、关掉虚拟机让 tap/veth 消失、ppp 断开)。
 	// 那种"还原不了"其实是"没什么可还原",m29 却把它当成失败,于是备份永远删不掉、

@@ -123,6 +123,15 @@ echo "== 3.7 全局禁直连(全局模式下闸要在:普通用户绑物理网�
 # 不是拒绝连接的理由。m29 曾把"没有开机期保护就不许进严格全局模式"做成硬门,结果除 Windows 外的平台一律连不上,
 # 用户唯一的绕法是去关掉「全局禁直连」—— 一道以隐私为名的检查,实际把人推向更不私密的配置。
 # 所以这里验的是运行期的闸真的拦得住:拿普通用户绑物理网卡实打实地打一次,而不是验"它拒绝服务"。
+# 正控制:规则模式下(闸没开)同一个探测必须是通的,否则探测本身跑不通,下面"被拦"的 000 就什么也证明不了。
+# 没过就按失败报,不静默跳过。
+dip=""; direct_ok=0
+if [ -n "$U" ] && [ -n "$defif" ]; then
+  dip=$(ipconfig getifaddr "$defif" 2>/dev/null)
+  d0=$(sudo -u "$U" curl -s --interface "$dip" -m 6 -o /dev/null -w '%{http_code}' http://1.1.1.1/cdn-cgi/trace 2>/dev/null || true)
+  case "$d0" in 2*|3*) direct_ok=1;; esac
+fi
+check "正控制:规则模式下普通用户绑物理网卡直连是通的" "$direct_ok" "http=${d0:-000}(用户 ${U:-无} 网卡 ${defif:-无} ${dip:-无})"
 gres=$("$BIN" mode global 2>&1); grc=$?
 check "切到严格全局模式被接受" "$([ "$grc" = 0 ] && echo 1 || echo 0)" "$gres"
 sleep 2
@@ -130,13 +139,10 @@ check "全局模式下连接仍在" "$(wait_status connected 15 && echo 1 || ech
 rules=$(pfctl -a com.apple/godusevpn -sr 2>/dev/null)
 check "pf 锚点里有规则" "$(echo "$rules" | grep -c 'block drop out quick all')" "$(echo "$rules" | grep -c . ) 条"
 # root 是守护进程的身份、本来就放行,所以要用普通用户去试;绑物理网卡是为了绕开隧道路由,模拟"漏出去"
-if [ -n "$U" ] && [ -n "$defif" ]; then
-  dip=$(ipconfig getifaddr "$defif" 2>/dev/null)
+if [ "$direct_ok" = 1 ]; then
   dc=$(sudo -u "$U" curl -s --interface "$dip" -m 6 -o /dev/null -w '%{http_code}' http://1.1.1.1/cdn-cgi/trace 2>/dev/null || true)
   case "$dc" in 2*|3*) blocked=0;; *) blocked=1;; esac # 明文 http 被 301 到 https 也是"通了";被拦是 000
   check "普通用户绑物理网卡的直连被拦" "$blocked" "http=${dc:-000}(网卡 $defif $dip)"
-else
-  echo "  (跳过绑网卡直连探测:普通用户=${U:-未知} 物理网卡=${defif:-未知})"
 fi
 tc=$(curl -s -m 15 -o /dev/null -w '%{http_code}' https://1.1.1.1/cdn-cgi/trace 2>/dev/null || true) # 明文 http 会被 301 到 https,拿 https 直接要 200
 check "经隧道照常" "$([ "$tc" = "200" ] && echo 1 || echo 0)" "http=${tc:-000}"

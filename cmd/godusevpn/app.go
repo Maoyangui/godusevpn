@@ -33,7 +33,8 @@ const testURL = "http://www.gstatic.com/generate_204"
 type UIState struct {
 	Service  bool   `json:"service"`  // 控制管道可达
 	SvcState string `json:"svcState"` // running / stopped / not-installed / unknown(服务管理器视角);no-permission = 服务在跑但当前账户没权限连控制口
-	// SvcHint no-permission 时给用户的一句话,各平台不同(Windows 是登记账户,macOS 是要管理员组);CanRegister = 界面能替用户登记(Windows)
+	// SvcHint no-permission 时提示的种类(页面按它取译文):register = Windows 登记账户,admin = macOS 要管理员组,
+	// root = Linux 要 root。CanRegister = 界面能替用户登记(Windows)
 	SvcHint     string          `json:"svcHint,omitempty"`
 	CanRegister bool            `json:"canRegister,omitempty"`
 	View        ipc.StateView   `json:"view"`
@@ -193,7 +194,9 @@ func (a *App) refresh() {
 	}
 	a.state.SvcState = svc.QueryStatus()
 	a.state.SvcHint, a.state.CanRegister = "", false
-	if errors.Is(err, ipc.ErrNoPermission) {
+	// 服务管理器明确说停了 / 没装时不算"没权限":macOS / Linux 上服务崩了会留下 socket 文件,
+	// 普通用户连它照样拿到 EACCES,那种情况该显示"服务没有运行 + 修复",而不是把修复拦下来。
+	if errors.Is(err, ipc.ErrNoPermission) && a.state.SvcState != "stopped" && a.state.SvcState != "not-installed" {
 		// 服务在跑、控制口也在,只是当前账户没权限连:Windows 上是不在控制名单里(同一台电脑的第二个账户),
 		// macOS 上是 socket 只对管理员组开放。服务管理器视角它是 running,页面若一边说"服务运行中"、
 		// 一边照 service=false 挂出"服务没有运行 + 修复",用户只会去点「修复」—— 而修复走的是 uninstall,
@@ -414,6 +417,13 @@ func (a *App) Minimize() { runtime.WindowMinimise(a.ctx) }
 // QuitApp 托盘"退出":断开连接(TUN 随之拆除)、停掉后台服务进程,再退出自己。
 // 下次登录托盘自启时会把服务再拉起来;上次是手动断开的,不会自动连。
 func (a *App) QuitApp() {
+	if a.GetState().SvcState == "no-permission" {
+		// 这个账户管不了服务(同一台电脑上别的账户在用):「退出」只关自己的界面。
+		// 以前照样 StopUser —— 服务 ACL 允许已登录用户启停,于是第二个账户一点退出,主账户的隧道就断了。
+		a.shutdown(a.ctx)
+		runtime.Quit(a.ctx)
+		return
+	}
 	if a.GetState().Service {
 		var v ipc.StateView
 		_ = a.call(ipc.MDisconnect, nil, &v)
@@ -722,7 +732,7 @@ func (a *App) RepairService() error {
 	if st := a.GetState(); st.SvcState == "no-permission" {
 		// 服务没坏,是这个账户没权限。「修复」= uninstall + install,会把别的账户正在用的闸撤掉、网卡 IPv6 还原,
 		// 而且 install 见名单已有人就不会再登记本账户 —— 白拆一次隧道,问题原样。
-		return errors.New("NO_PERMISSION: " + st.SvcHint)
+		return errors.New("E_NO_PERMISSION: ")
 	}
 	exe, err := os.Executable()
 	if err != nil {
@@ -750,7 +760,7 @@ func (a *App) RepairService() error {
 // 闸是持久的、第二代提供者不绑服务名,重启服务不撤闸;隧道按落盘的意愿自动重连。别的平台没有名单机制,直接报不支持。
 func (a *App) RegisterController() error {
 	if !a.GetState().CanRegister {
-		return errors.New("NO_PERMISSION: " + a.GetState().SvcHint)
+		return errors.New("E_NO_PERMISSION: ")
 	}
 	exe, err := os.Executable()
 	if err != nil {
@@ -760,12 +770,10 @@ func (a *App) RegisterController() error {
 	if err != nil {
 		return err
 	}
-	if err := runElevated(svcExe, "register-controller --restart"); err != nil {
-		return err
-	}
-	time.Sleep(2 * time.Second)
+	// 等提权进程跑完、看它的退出码:0.7.4 只管把进程拉起来就报成功,重启服务失败、服务停在那里,界面也说"已登记"
+	err = registerController(svcExe)
 	go a.refresh()
-	return nil
+	return err
 }
 
 // ReadClipboard 读系统剪贴板文本,给"粘贴"按钮用;失败返回空串。

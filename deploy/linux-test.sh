@@ -96,8 +96,10 @@ direct_ok=0
 if [ -n "$U" ] && [ -n "$dip" ]; then
   d0=$(su -s /bin/sh "$U" -c "curl -s --interface $dip -m 6 -o /dev/null -w '%{http_code}' http://1.1.1.1/cdn-cgi/trace" 2>/dev/null || true)
   # 明文 http 会被 1.1.1.1 跳转到 https(301),那也是"通了";闸拦住时 curl 连不上,状态码是 000
-  case "$d0" in 2*|3*) direct_ok=1;; *) echo "  (正控制没过:规则模式下绑物理网卡直连 http=${d0:-000},绑网卡直连探测本身跑不通,3.7 的被拦断言改为跳过)";; esac
+  case "$d0" in 2*|3*) direct_ok=1;; esac
 fi
+# 正控制没过就按失败报,不再静默跳过:这是唯一一条证明 nft 闸"真拦得住"的断言,跳过它作业照样是绿的
+check "正控制:规则模式下普通用户绑物理网卡直连是通的" "$direct_ok" "http=${d0:-000}(用户 ${U:-无} 网卡 ${defif:-无} ${dip:-无})"
 gres=$("$BIN" mode global 2>&1); grc=$?
 check "切到严格全局模式被接受" "$([ "$grc" = 0 ] && echo 1 || echo 0)" "$gres"
 sleep 2
@@ -108,8 +110,6 @@ if [ "$direct_ok" = 1 ]; then
   d=$(su -s /bin/sh "$U" -c "curl -s --interface $dip -m 6 -o /dev/null -w '%{http_code}' http://1.1.1.1/cdn-cgi/trace" 2>/dev/null || true)
   case "$d" in 2*|3*) blocked=0;; *) blocked=1;; esac # 2xx/3xx 都是通了;被拦是 000
   check "普通用户绑物理网卡的直连被拦" "$blocked" "http=${d:-000}(网卡 $defif $dip 用户 $U)"
-else
-  echo "  (跳过绑网卡直连探测:普通用户=${U:-无} 物理网卡=${defif:-无})"
 fi
 tc=$(curl -s -m 15 -o /dev/null -w '%{http_code}' https://1.1.1.1/cdn-cgi/trace 2>/dev/null || true)
 check "经隧道照常" "$([ "$tc" = "200" ] && echo 1 || echo 0)" "http=${tc:-000}"

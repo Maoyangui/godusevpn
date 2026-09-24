@@ -20,9 +20,6 @@ type GuardSpec struct {
 	TunAddr6 string // 隧道 v6 地址
 	LAN      bool   // 放行局域网 / 私网(打印机、NAS、路由器后台——不出网,不算漏)
 	Gateway  bool   // Linux 网关模式:经本机转发的局域网流量也只许走隧道
-	// SelfPath 放行的服务 exe 路径(Windows):空 = 当前进程。只有升级前的离线预装(guardfix.Arm)
-	// 会填 —— 那时跑的是安装器解到临时目录的新版 exe,要放行的却是安装后那个路径上的服务。
-	SelfPath string
 }
 
 // 私网 / 本地段:这些目标不出网,闸放行它们。

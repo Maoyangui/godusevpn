@@ -331,7 +331,8 @@ function svcBanner(idRepair, idRegister, extra) {
   if (state.service) return '';
   if (state.svcState === 'no-permission') {
     const reg = state.canRegister && !window.__web && !window.__android ? `<button class="btn sm" id="${idRegister}">${t('banner.register')}</button>` : '';
-    return `<div class="banner" data-kind="noperm"><span class="grow">${t('banner.noPermission')} ${esc(state.svcHint || '')}</span>${reg}</div>`;
+    const hint = state.svcHint ? t('svc.hint.' + state.svcHint) : '';
+    return `<div class="banner" data-kind="noperm"><span class="grow">${t('banner.noPermission')} ${esc(hint)}</span>${reg}</div>`;
   }
   // 修复按钮只在桌面端有意义(网页面板和安卓没有 RepairService),别画一颗点了只会报错的按钮
   const fix = window.__web || window.__android ? '' : `<button class="btn sm" id="${idRepair}">${t('banner.repair')}</button>`;
@@ -563,7 +564,7 @@ function renderHome(el) {
   drawSpark();
 }
 async function togglePower() {
-  if (!state || !state.service) { toast(t('svc.down'), 'err'); return; }
+  if (!state || !state.service) { toast(state ? svcText(state) : t('svc.down'), 'err'); return; }
   try { if (state.view.state.wanted) await App().Disconnect(); else await App().Connect(); }
   catch (e) { toast(errText(e), 'err'); }
 }
