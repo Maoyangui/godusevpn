@@ -160,6 +160,10 @@ Write-Host "== 1. 安装服务" -ForegroundColor Cyan
 & $svc install
 Check "服务运行" ((& $svc status) -eq "running") (& $svc status)
 Check "管道可达" ((& $cli version 2>&1) -match "佛跳墙") ""
+# 服务里证书校验不许走 Windows 的平台校验:网络变化(TUN 起停)时它偶尔"成功但不给链",Go 顺着空指针崩在 crypt32 里
+# (刚连上就崩的元凶,golang/go#79247)。服务启动时把设置情况写进日志;这里直接看真服务进程说的,不靠重启压力碰运气。
+$tlsLine = @(Get-Content (Join-Path $script:logDir "service.log") -Encoding UTF8 -ErrorAction SilentlyContinue | Where-Object { $_ -match '证书校验:' } | Select-Object -Last 1)
+Check "服务的证书校验不走 Windows 平台校验" (($tlsLine.Count -eq 1) -and ($tlsLine[0] -match 'Go 自己校验') -and ($tlsLine[0] -notmatch '仍走')) ($(if ($tlsLine.Count) { $tlsLine[0] } else { "(日志里没有这一行)" }))
 
 Write-Host "== 2. 订阅与连接" -ForegroundColor Cyan
 $p = & $cli profile $Sub 2>&1 | Out-String
