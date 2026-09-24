@@ -51,6 +51,14 @@ const (
 	enumBatch                        = 128
 )
 
+// callProc 调一个 fwpuclnt 导出函数。必须带 //go:uintptrescapes:调用处写的 uintptr(unsafe.Pointer(&out)) 这类
+// 输出参数,编译器只在"转换直接写在带这个标注的函数的参数里"时才把 out 放到堆上、调用期间保持存活。以前没带,
+// out 留在协程栈上;调用途中栈一扩容搬家,DLL 就把句柄 / 指针 / 条数写进已经释放的旧栈 —— 也就是写进另一个
+// 刚拿到那块内存的协程里(内核刚启动、sing-box 正大量起协程时最容易撞上),把它的指针改成别的值或空指针,
+// 它下一次拿这个指针调系统 DLL 就在 DLL 里访问违例。LazyProc.Call 自己带这个标注,但转换已经在这里做完了,
+// 它管不到调用方的变量。
+//
+//go:uintptrescapes
 func callProc(p *windows.LazyProc, a ...uintptr) error {
 	r, _, _ := p.Call(a...)
 	if r != 0 {

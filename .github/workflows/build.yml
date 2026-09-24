@@ -113,11 +113,11 @@ jobs:
       - name: 重启压力(严格全局下反复重启,服务不许崩)
         if: env.TEST_SUB_URL != ''
         shell: pwsh
-        timeout-minutes: 15
+        timeout-minutes: 25
         run: |
           $ErrorActionPreference = "Continue"
           $global:LASTEXITCODE = 97 # 哨兵:脚本没跑起来时别当成 0
-          & .\deploy\restart-stress.ps1 -Sub $env:TEST_SUB_URL -Bin (Resolve-Path dist\amd64).Path -Rounds 30
+          & .\deploy\restart-stress.ps1 -Sub $env:TEST_SUB_URL -Bin (Resolve-Path dist\amd64).Path -Rounds 100
           exit $LASTEXITCODE
 
       - name: Fetch WebView2 installers

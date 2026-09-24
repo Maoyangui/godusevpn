@@ -69,6 +69,14 @@ $gs = & $svc guard status 2>&1 | Out-String
 if (($st -notmatch "模式:\s+global") -or ($gs -notmatch "开着")) { Write-Host ("没进严格全局:" + $st + $gs) -ForegroundColor Red; & $svc uninstall | Out-Null; exit 1 }
 Write-Host ("严格全局就绪:" + (($gs -split "`r?`n")[0]))
 
+# 后台一直经隧道发请求:两次崩溃时都有活跃流量(内核在起大量协程、复用栈内存),空转时更难撞上
+$traffic = Start-Job -ScriptBlock {
+  while ($true) {
+    & curl.exe -s -m 5 -o NUL "https://1.1.1.1/cdn-cgi/trace" 2>$null
+    & curl.exe -s -m 5 -o NUL "https://www.gstatic.com/generate_204" 2>$null
+    Start-Sleep -Milliseconds 200
+  }
+}
 $t0 = Get-Date
 $seen = 0
 $notConnected = 0
@@ -92,6 +100,8 @@ for ($i = 1; $i -le $Rounds; $i++) {
 }
 
 Write-Host "== 收尾" -ForegroundColor Cyan
+Stop-Job $traffic -ErrorAction SilentlyContinue
+Remove-Job $traffic -Force -ErrorAction SilentlyContinue
 $ev = Svc-Crashes $t0
 & $cli disconnect | Out-Null
 Start-Sleep -Seconds 3
