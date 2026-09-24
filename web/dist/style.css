@@ -604,6 +604,9 @@ body.tv .drawer-brand b { font-size: 22px; }
 .nogap .guard-pill > *:not([hidden]) + *:not([hidden]) { margin-left: 6px; }
 .guard-pill svg { width: 14px; height: 14px; flex: none; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
 .guard-pill > span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* 网卡原值丢失的提示是要人照着做的说明,不能被省略号截掉 */
+#nic-pill { border-radius: 12px; align-items: flex-start; }
+#nic-pill > span { white-space: normal; overflow: visible; }
 .guard-pill.warn { color: var(--warn); background: rgba(217, 119, 6, .10); border-color: rgba(217, 119, 6, .32); box-shadow: none; }
 /* 刷新后待应用的提示(首页、订阅卡片、节点面板):左边图标、中间两行、右边一颗「现在应用」 */
 .notice { margin: 0 0 10px; }

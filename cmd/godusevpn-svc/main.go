@@ -51,6 +51,12 @@ func main() {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
+	case "repair":
+		// 界面的「修复」:以前是 uninstall + install,而 uninstall 会撤闸、还原网卡 IPv6 —— 服务要是同一台电脑上
+		// 别的账户在用,就是拆别人的保护;自己的也不该因为"修复"就拆。停服务不撤闸(闸是持久的),
+		// 所以这里只停掉、再按 install 重新注册并启动(服务对象在就沿用、改可执行文件路径)。
+		_ = svc.Stop()
+		fallthrough
 	case "install":
 		exe, err := os.Executable()
 		if err != nil {
@@ -145,17 +151,20 @@ func main() {
 		// 所以上面那道门必须守住;而网卡 IPv6 关着顶多是某几张网卡没有 v6,网照常能上。
 		// m29 把这两件事同等对待,于是一张早就拔掉的 USB 网卡就能让产品永远卸不掉。
 		// 这里改成:如实报出来、告诉用户怎么手动开回去,然后照常卸载。
-		if err := netmode.RestoreNICIPv6(); err != nil {
-			var inc *netmode.NICRestoreIncomplete
-			if !errors.As(err, &inc) { // "原值丢了"那种下面从持久记录里说
-				fmt.Println("注意:网卡 IPv6 没能还原回去:", err)
-				fmt.Println("卸载继续。要手动开回去:在「网络适配器属性」里把「Internet 协议版本 6 (TCP/IPv6)」勾回来。")
-			}
+		var inc *netmode.NICRestoreIncomplete
+		if err := netmode.RestoreNICIPv6(); err != nil && !errors.As(err, &inc) { // "原值丢了"那种下面说
+			fmt.Println("注意:网卡 IPv6 没能还原回去:", err)
+			fmt.Println("卸载继续。要手动开回去:在「网络适配器属性」里把「Internet 协议版本 6 (TCP/IPv6)」勾回来。")
 		}
-		if lost := netmode.NICLossNote(); lost != "" {
+		// 记录不在这里删:卸载程序 / 界面「修复」跑这条命令时窗口一闪就关,用户看不到。
+		// 卸载程序会自己弹框说;数据留着的话,重装后首页照样提示,点「知道了」才删。
+		lost := netmode.NICLossNote()
+		if lost == "" && inc != nil {
+			lost = inc.Detail
+		}
+		if lost != "" {
 			fmt.Println("注意:有几张网卡动手前的 IPv6 状态丢了,可能还关着:", lost)
 			fmt.Println("要手动开回去:在「网络适配器属性」里把「Internet 协议版本 6 (TCP/IPv6)」勾回来。")
-			_ = netmode.ClearNICLoss()
 		}
 		// 系统 DNS(macOS 被接管到隧道地址)/ 回包策略路由(Linux)和闸一样是持久的。m28 卸载时
 		// 会经 stop() 无条件还原;m29 让 stop() 在"落盘仍写着想连"时保留密封,于是卸载之后 DNS

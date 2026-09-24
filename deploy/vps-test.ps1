@@ -127,8 +127,9 @@ $bound = Providers-Detail $ours
 if ($null -ne $ours) {
   Check "WFP 提供者存在且没有绑服务名" (($ours.Count -gt 0) -and -not ($ours | Where-Object { -not [string]::IsNullOrEmpty($_.serviceName) })) $bound
   $flags = (($ours | ForEach-Object { @($_.flags.item) -join "+" }) -join ", ")
-  # 这个标志只在开机时由 BFE 设;这里没经过重启,这条只防回归(比如又把提供者绑上服务名),证明不了"重启后闸不被停用"
-  Check "WFP 提供者没带系统的停用标志(没经过重启,只防回归)" (-not ($flags -match 'DISABLED')) "flags=[$flags]"
+  # 这个标志只在开机时由 BFE 设(挂了服务名、而服务不是自动启动的提供者)。这里没经过重启,它恒为没有,
+  # 拦不住任何回归(绑服务名的回归由上一条拦),所以只记录现状,不算一条通过的断言。
+  Write-Host ("  (提供者标志:" + $flags + ";没经过重启,只记录现状)")
   Check "闸挂在第二代提供者下" ($script:wfpStateText -match '6f6d9e2e-3a41-4b8e-9d55-676f64757365') ""
 } else { Check "WFP 提供者没有绑服务名" $false $bound }
 if ($script:directOK) { $d = Direct-Http; Check "绑物理网卡的直连被拦" ($d -and $d -notmatch '^[23]') "http=$d(网卡 $physIp)" }

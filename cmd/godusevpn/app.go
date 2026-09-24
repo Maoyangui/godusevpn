@@ -735,6 +735,11 @@ func (a *App) RepairService() error {
 		// 而且 install 见名单已有人就不会再登记本账户 —— 白拆一次隧道,问题原样。
 		return errors.New("E_NO_PERMISSION: ")
 	}
+	// 「登记本账户」正在重启服务:这时横幅会短暂变成"服务没有运行 + 修复",别在这个空档里再动服务
+	if !a.registerMu.TryLock() {
+		return errors.New("E_REGISTER_BUSY: ")
+	}
+	a.registerMu.Unlock()
 	exe, err := os.Executable()
 	if err != nil {
 		return err
@@ -748,13 +753,9 @@ func (a *App) RepairService() error {
 			return nil
 		}
 	}
-	if st := svc.QueryStatus(); st != "not-installed" {
-		if err := runElevated(svcExe, "uninstall"); err != nil {
-			return err
-		}
-		time.Sleep(time.Second)
-	}
-	return runElevated(svcExe, "install")
+	// 不走 uninstall:那会撤闸、还原网卡 IPv6 —— 服务要是同一台电脑上别的账户在用,就是拆别人的保护。
+	// repair = 停掉(停服务不撤闸)+ 按 install 重新注册并启动。
+	return runElevated(svcExe, "repair")
 }
 
 // RegisterController 把当前 Windows 账户登记为控制用户并重启服务(提权跑 register-controller --restart)。

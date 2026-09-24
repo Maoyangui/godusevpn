@@ -182,6 +182,9 @@ func (d *Daemon) syncGuard() {
 	d.guardMu.Lock()
 	defer d.guardMu.Unlock()
 	want := d.GuardWanted()
+	if d.shuttingDown.Load() {
+		return // 入口查过之后又排队等了锁:停机中照样不动
+	}
 	d.mu.Lock()
 	on := d.guardOn
 	hold := d.guardHold

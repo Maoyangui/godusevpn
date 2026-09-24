@@ -146,8 +146,12 @@ begin
     begin
       MsgBox('无法解除佛跳墙的全局禁直连闸,卸载已中止 —— 现在删掉程序的话机器会一直断网且无法恢复。'#13#10#13#10'原程序与「恢复网络」工具都保留着:先用开始菜单里的「恢复网络」(右键以管理员身份运行)把闸解除,再来卸载。', mbError, MB_OK);
       Result := False;
+      exit;
     end;
   end;
+  // 网卡原值丢失的记录:svc uninstall 在控制台里说过,但那个窗口一闪就关,这里用对话框再说一次
+  if FileExists(ExpandConstant('{commonappdata}\godusevpn\nic-ipv6-lost.txt')) then
+    SuppressibleMsgBox('注意:有几张网卡动手前的 IPv6 状态丢了(备份文件损坏),它们的 IPv6 可能还关着。'#13#10#13#10'要手动开回去:在「网络适配器属性」里把「Internet 协议版本 6 (TCP/IPv6)」勾回来。'#13#10'详情见 ' + ExpandConstant('{commonappdata}\godusevpn\nic-ipv6-lost.txt'), mbInformation, MB_OK, IDOK);
 end;
 
 // 应用内升级:安装包带 /RELAUNCH=1,静默装完后由 [Run] 里的 runasoriginaluser 条目重新拉起客户端
@@ -175,8 +179,9 @@ begin
   if FileExists(ExpandConstant('{app}\godusevpn-svc.exe')) then
   begin
     Exec('taskkill.exe', '/F /IM godusevpn.exe', '', SW_HIDE, ewWaitUntilTerminated, rc);
-    // 0.6.13-m15 起旧服务停了闸还在(持久);更早的 0.6.10-m12 ~ 0.6.12-m14 三个预发布版不是 ——
-    // 那几版的闸是动态会话,或者停服务时自己撤掉,从它们直接升级,停旧服务到新服务开闸之间有一段没闸。
+    // 0.6.13-m15 起旧服务停了闸通常还在(持久);0.7.4 及以前的版本停服务时要是正好在重连或自检,有极小概率
+    // 按"用户断开"撤闸(0.7.5 起已堵,见 daemon 的 Run)。更早的 0.6.10-m12 / m13 的闸是动态会话,m14 停服务时
+    // 自己撤掉,从这三版直接升级,停旧服务到新服务开闸之间有一段没闸。
     // 那三版只活了几个小时就被替换,这里不为它们加预装(预装在升级中止时会留下旧版撤不掉的闸,见 0.7.5 的说明),
     // 排障页写明:从那几版升级前先点「断开」。
     // 升级只停止服务,不能走 uninstall:卸载命令按用户明确请求会撤闸并恢复网卡 IPv6,

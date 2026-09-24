@@ -601,6 +601,7 @@ function updateHome() {
     np.dataset.lost = lost;
     np.hidden = !lost;
     np.innerHTML = lost ? ICON_WARN + `<span>${t('home.nicLost')} ${esc(lost)}</span> <button class="btn sm" id="nic-ok">${t('home.nicLostOk')}</button>` : '';
+    np.title = lost; // 胶囊里放不下全文时,悬停可以看全
     const ok = np.querySelector('#nic-ok');
     if (ok) ok.addEventListener('click', async () => { try { await App().DismissNICLost(); } catch (e) { toast(errText(e), 'err'); } });
   }
@@ -1444,7 +1445,7 @@ function renderAbout(el) {
     <div class="list">
       <div class="item"><span class="dot ${state && state.service ? 'on' : 'err'}"></span>
         <div class="name"><b>${t('about.svc')}</b><span id="about-svc">${esc(svcText(state))}</span></div>
-        ${window.__web || window.__android || (state && state.svcState === 'no-permission') ? '' : `<button class="btn sm" id="repair">${t('about.repair')}</button>`}</div>
+        ${window.__web || window.__android ? '' : `<button class="btn sm" id="repair" ${state && state.svcState === 'no-permission' ? 'hidden' : ''}>${t('about.repair')}</button>`}</div>
       <div class="item"><div class="name"><b>${t('about.kernel')}</b><span>sing-box${stack ? ' · ' + esc(stack) : ''}${v.version ? ' · ' + t('about.svcVer', { v: v.version }) : ''}</span></div></div>
     </div>
     <div class="list">
@@ -1459,7 +1460,7 @@ function renderAbout(el) {
           <div class="name"><b>${t('about.web')}</b><span>${t('about.webHelp')}</span></div>
           <svg class="rowgo" viewBox="0 0 24 24"><path d="M9 5l7 7-7 7"/></svg></div>`
       : `<div class="item danger" id="quit"><svg class="rowic" viewBox="0 0 24 24"><path d="M12 3v9"/><path d="M6.3 6.8a8 8 0 1 0 11.4 0"/></svg>
-          <div class="name"><b>${t('about.quit')}</b><span>${t(state && state.svcState === 'no-permission' ? 'about.quitHelpNoPerm' : 'about.quitHelp')}</span></div></div>`}
+          <div class="name"><b>${t('about.quit')}</b><span id="about-quit-help">${t(state && state.svcState === 'no-permission' ? 'about.quitHelpNoPerm' : 'about.quitHelp')}</span></div></div>`}
     </div>
     <p class="pagehint center">${t('about.license')}</p>`;
   const showUpdate = rel => {
@@ -1566,6 +1567,12 @@ async function init() {
     else if (view === 'home' && !has && hadProfiles) nav('onboard');
     updateHome(); updateOnboardSvc();
     if (view === 'about' && $('#about-svc')) $('#about-svc').textContent = svcText(st);
+    // 关于页只渲染一次:没权限 ↔ 已登记来回变时,「修复」按钮与「退出」的说明要跟着变,否则说明会和实际行为相反
+    if (view === 'about') {
+      const noperm = st.svcState === 'no-permission';
+      const qh = $('#about-quit-help'); if (qh) qh.textContent = t(noperm ? 'about.quitHelpNoPerm' : 'about.quitHelp');
+      const rp = $('#repair'); if (rp) rp.hidden = noperm;
+    }
   });
   window.runtime.EventsOn('traffic', tr => {
     if (!state) return;

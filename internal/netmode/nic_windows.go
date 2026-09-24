@@ -246,12 +246,16 @@ if ($gone.Count -gt 0) { Write-Output ('GODUSEVPN-GONE: ' + ($gone -join ', ')) 
 	if warn != "" {
 		setNICWarning(warn)
 	}
+	// 坏行一旦出现就已经从备份里剔掉了:哪怕同一轮还有网卡没还原成(返回普通错误、下次重试),也得现在就记,
+	// 下次重试时备份里已经没有它们,不会再报。
+	if cw := nicCorruptWarning(out); cw != "" {
+		recordNICLoss(cw)
+	}
 	if rerr != nil {
 		var inc *NICRestoreIncomplete
 		if !errors.As(rerr, &inc) {
 			return rerr // 真失败:备份留着,下次重试
 		}
-		recordNICLoss(inc.Detail)
 		// 做完了但有几行原值丢了:备份脚本里已经删了,往下走把兜底删除也做掉,再把这件事如实交出去
 		if err := os.Remove(nicBackup()); err != nil && !os.IsNotExist(err) {
 			return fmt.Errorf("删除 IPv6 备份: %w", err)

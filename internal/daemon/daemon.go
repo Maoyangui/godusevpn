@@ -281,11 +281,11 @@ func (d *Daemon) Run(ctx context.Context) error {
 			// 那些都各自走处理器;这里要是也撤,net stop、关机、升级换文件的空档就全是直连,
 			// 开机那组过滤器也会跟着被删掉,"持久"就成了空话。上次连着关的机,下次启动会自动重连。
 			d.logf("服务停止(闸留着,下次启动接着用)")
-			// 必须先于 Disconnect:Disconnect 先把"想连"清成假,再等状态机当前这一步跑完。那一步要是正好在
-			// prepare / health 里同步闸和网卡 IPv6,就会按"用户断开"撤闸、还原 IPv6,然后进程才退出 ——
-			// 停服务(升级、net stop、关机、登记账户后重启服务)就成了撤闸。0.7.4 及以前都是这样。
+			// 用 Shutdown 而不是 Disconnect:Disconnect 先把"想连"清成假、再等状态机当前这一步跑完,那一步(或别处
+			// 正排队等锁的同步)读到假,就按"用户断开"撤闸、还原 IPv6 —— 停服务(升级、net stop、关机、登记账户后
+			// 重启服务)就成了撤闸。0.7.4 及以前都是这样。shuttingDown 再加一道:同步函数在入口和读完"想连"之后都查。
 			d.shuttingDown.Store(true)
-			d.machine.Disconnect()
+			d.machine.Shutdown()
 			_ = d.server.Close()
 			d.log.Close()
 			d.coreLog.Close()
@@ -914,6 +914,9 @@ func (d *Daemon) syncNICIPv6() error {
 		d.nicOff.Store(true)
 	}
 	want := d.nicIPv6Wanted()
+	if d.shuttingDown.Load() {
+		return nil // 入口查过之后又排队等了锁:停机中照样不动
+	}
 	// During a privacy-policy transaction the old data plane is still live.
 	// Keep its IPv6 protection until the replacement starts successfully; the
 	// final sync after RestartChecked then performs the requested restore.

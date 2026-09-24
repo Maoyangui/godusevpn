@@ -48,6 +48,8 @@ func main() {
 		if err := svc.Run(runDaemon); err != nil {
 			fail(err)
 		}
+	case "repair": // 界面的「修复」:install 本身就会重新加载服务(macOS bootout + bootstrap),不走 uninstall
+		fallthrough
 	case "install":
 		exe, err := os.Executable()
 		if err != nil {
@@ -98,9 +100,13 @@ func main() {
 				fmt.Println("卸载继续。要手动开回去:sysctl -w net.ipv6.conf.<网卡>.disable_ipv6=0")
 			}
 		}
-		if lost := netmode.NICLossNote(); lost != "" {
+		// 记录不在这里删(见 godusevpn-svc 的同一段):界面「修复」跑卸载时用户看不到输出;重装后首页照样提示
+		lost := netmode.NICLossNote()
+		if lost == "" && inc != nil {
+			lost = inc.Detail
+		}
+		if lost != "" {
 			fmt.Println("注意:有几张网卡动手前的 IPv6 状态丢了,可能还关着:", lost)
-			_ = netmode.ClearNICLoss()
 		}
 		// 系统 DNS(macOS 被接管到隧道地址)/ 回包策略路由(Linux)和闸一样是持久的。m28 卸载时
 		// 会经 stop() 无条件还原;m29 让 stop() 在"落盘仍写着想连"时保留密封,于是卸载之后 DNS

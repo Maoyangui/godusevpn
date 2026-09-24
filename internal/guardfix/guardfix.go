@@ -43,13 +43,15 @@ func Clear() (text string, ok bool) {
 			}
 			return "闸没有开着,网卡 IPv6 也没被改过 —— 网络本来就是通的,没有改动任何设置。", true
 		}
+		incDetail := ""
 		if err := netmode.RestoreNICIPv6(); err != nil {
 			var inc *netmode.NICRestoreIncomplete
 			if !errors.As(err, &inc) {
 				return "闸本来就没开;网卡 IPv6 没能还原回去(" + err.Error() + ")。两个隐私开关都没动。", false
 			}
+			incDetail = inc.Detail
 		}
-		if lost := takeNICLoss(); lost != "" {
+		if lost := orDefault(takeNICLoss(), incDetail); lost != "" {
 			return "闸本来就没开;网卡 IPv6 能还原的都还原了,但" + lost + " 两个隐私开关都没动。", true
 		}
 		return "闸本来就没开;网卡上被停用的 IPv6 已还原。「全局禁直连」与「连接时停用网卡 IPv6」两个开关都没动。", true
@@ -68,10 +70,12 @@ func Clear() (text string, ok bool) {
 	// 服务在跑时,上面的 switchOff 会让守护进程先还原,这里再还原时备份已经没了、拿不到 Incomplete ——
 	// 0.7.4 的弹窗就是这样照样说"网卡 IPv6 也还原了"。
 	var inc *netmode.NICRestoreIncomplete
+	incDetail := ""
 	if errors.As(restoreErr, &inc) {
-		restoreErr = nil
+		incDetail, restoreErr = inc.Detail, nil
 	}
-	nicNote := takeNICLoss()
+	// 落盘失败(磁盘满、只读)时持久记录是空的,回落到这一次还原自己报的原文,绝不能又说回"已还原"
+	nicNote := orDefault(takeNICLoss(), incDetail)
 	// macOS 的系统 DNS 被接管到隧道地址、Linux 的回包策略路由也是"持久"的:闸撤了、隧道没了,
 	// DNS 还指着隧道就等于没网。恢复网络就是要回到没装过的样子,一并还原(Windows 上是空操作)。
 	dnsErr := netmode.UnprotectChecked()
@@ -129,6 +133,13 @@ func takeNICLoss() string {
 		_ = netmode.ClearNICLoss()
 	}
 	return lost
+}
+
+func orDefault(s, def string) string {
+	if s != "" {
+		return s
+	}
+	return def
 }
 
 // disconnectQuietly 尽力让守护进程先断开,好让它不再按旧设置重新上闸。连不上控制口就算了 ——
