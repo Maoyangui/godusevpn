@@ -138,6 +138,12 @@ sleep 2
 check "全局模式下连接仍在" "$(wait_status connected 15 && echo 1 || echo 0)" "$("$BIN" status | sed -n 2p)"
 rules=$(pfctl -a com.apple/godusevpn -sr 2>/dev/null)
 check "pf 锚点里有规则" "$(echo "$rules" | grep -c 'block drop out quick all')" "$(echo "$rules" | grep -c . ) 条"
+# 拦 DNS(53 / 853)要排在局域网放行前面:隧道断开时 DNS 不许经局域网放行发给路由器。pfctl 把 53 显示成 domain。
+dnsln=$(echo "$rules" | grep -nE 'block drop out quick .*port = (domain|53)' | head -1 | cut -d: -f1)
+lanln=$(echo "$rules" | grep -nE 'pass out quick .*to (10\.0\.0\.0/8|192\.168\.0\.0/16)' | head -1 | cut -d: -f1)
+check "pf 里拦 DNS、而且排在局域网放行前面" "$([ -n "$dnsln" ] && [ -n "$lanln" ] && [ "$dnsln" -lt "$lanln" ] && echo 1 || echo 0)" "拦 DNS 在第 ${dnsln:-无} 行,局域网放行在第 ${lanln:-无} 行"
+dq=$(dig +short +time=5 +tries=1 www.google.com A 2>/dev/null | head -1)
+check "严格全局下系统 DNS 照常(fake-ip)" "$(echo "$dq" | grep -cE '^198\.1[89]\.')" "$dq"
 # root 是守护进程的身份、本来就放行,所以要用普通用户去试;绑物理网卡是为了绕开隧道路由,模拟"漏出去"
 if [ "$direct_ok" = 1 ]; then
   dc=$(sudo -u "$U" curl -s --interface "$dip" -m 6 -o /dev/null -w '%{http_code}' http://1.1.1.1/cdn-cgi/trace 2>/dev/null || true)

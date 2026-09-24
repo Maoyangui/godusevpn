@@ -8,12 +8,21 @@ import (
 	"golang.org/x/sys/windows"
 )
 
+// dnsBlocks 两条拦 DNS 的过滤器(出站 IPv4 / IPv6 各一条,带条件),标志是 flag。
+func dnsBlocks(flag wtFwpmFilterFlags) []filterInfo {
+	return []filterInfo{
+		{layer: cFWPM_LAYER_ALE_AUTH_CONNECT_V4, name: dnsBlockName4, action: cFWP_ACTION_BLOCK, flags: flag, conds: 4},
+		{layer: cFWPM_LAYER_ALE_AUTH_CONNECT_V6, name: dnsBlockName6, action: cFWP_ACTION_BLOCK, flags: flag, conds: 4},
+	}
+}
+
 func TestBootGuardCoversRequiresEnabledBlockingLayer(t *testing.T) {
 	layers := ourLayers()
 	fs := make([]filterInfo, 0, len(layers))
 	for _, layer := range layers {
 		fs = append(fs, filterInfo{layer: layer, action: cFWP_ACTION_BLOCK})
 	}
+	fs = append(fs, dnsBlocks(0)...)
 	if bootGuardCovers(fs) {
 		t.Fatal("non-boot filters must not satisfy boot guard")
 	}
@@ -35,6 +44,7 @@ func TestGuardCoversRequiresEveryLayerAndFlag(t *testing.T) {
 	for i, layer := range layers {
 		fs[i] = filterInfo{layer: layer, action: cFWP_ACTION_BLOCK, flags: cFWPM_FILTER_FLAG_PERSISTENT}
 	}
+	fs = append(fs, dnsBlocks(cFWPM_FILTER_FLAG_PERSISTENT)...)
 	if !guardCovers(fs, cFWPM_FILTER_FLAG_PERSISTENT) {
 		t.Fatal("complete persistent blocking set should pass")
 	}
@@ -131,7 +141,7 @@ func TestPersistentGuardReadyIgnoresBootTimeSet(t *testing.T) {
 		for _, l := range layers {
 			fs = append(fs, filterInfo{layer: l, action: cFWP_ACTION_BLOCK, flags: flag})
 		}
-		return fs
+		return append(fs, dnsBlocks(flag)...)
 	}
 
 	t.Run("运行期那组齐了、开机那组一条都没有:算就绪", func(t *testing.T) {
@@ -160,6 +170,88 @@ func TestPersistentGuardReadyIgnoresBootTimeSet(t *testing.T) {
 		}
 		if persistentGuardReady(fs) {
 			t.Fatal("被 BFE 标成 DISABLED 的过滤器不拦任何包,不能算保护")
+		}
+	})
+}
+
+// 持久闸拦 DNS(见 blockDNS):完整性判定要认得出三件事 ——
+//   - 带条件的拦截(比如拦 DNS 那条)不能顶替"这一层全拦":否则出站层的全拦丢了也看不出来;
+//   - 两条拦 DNS 缺一条就不算齐(从没有它们的旧版升上来,守护进程据此按当前设置重装);
+//   - 拦 DNS 那条被停用、或者挂错了层,也不算。
+func TestGuardCoversNeedsUnconditionalBlockAndDNS(t *testing.T) {
+	const p = cFWPM_FILTER_FLAG_PERSISTENT
+	full := func() []filterInfo {
+		var fs []filterInfo
+		for _, l := range ourLayers() {
+			fs = append(fs, filterInfo{layer: l, action: cFWP_ACTION_BLOCK, flags: p})
+		}
+		return append(fs, dnsBlocks(p)...)
+	}
+	if !guardCovers(full(), p) {
+		t.Fatal("全拦齐了、两条拦 DNS 也在,应当算齐")
+	}
+
+	t.Run("出站 IPv4 的全拦丢了、只剩拦 DNS", func(t *testing.T) {
+		var fs []filterInfo
+		for _, f := range full() {
+			if f.layer == cFWPM_LAYER_ALE_AUTH_CONNECT_V4 && f.conds == 0 {
+				continue
+			}
+			fs = append(fs, f)
+		}
+		if guardCovers(fs, p) {
+			t.Fatal("拦 DNS 带条件,不能当成这一层全拦")
+		}
+	})
+
+	for _, name := range []string{dnsBlockName4, dnsBlockName6} {
+		t.Run("缺 "+name, func(t *testing.T) {
+			var fs []filterInfo
+			for _, f := range full() {
+				if f.name != name {
+					fs = append(fs, f)
+				}
+			}
+			if guardCovers(fs, p) {
+				t.Fatalf("少了 %s 还算齐:隧道断开时 DNS 能经局域网放行出去", name)
+			}
+		})
+	}
+
+	t.Run("拦 DNS 被停用", func(t *testing.T) {
+		fs := full()
+		for i := range fs {
+			if fs[i].name == dnsBlockName4 {
+				fs[i].flags |= cFWPM_FILTER_FLAG_DISABLED
+			}
+		}
+		if guardCovers(fs, p) {
+			t.Fatal("被停用的拦 DNS 不拦任何包")
+		}
+	})
+
+	t.Run("拦 DNS 挂错了层", func(t *testing.T) {
+		fs := full()
+		for i := range fs {
+			if fs[i].name == dnsBlockName6 {
+				fs[i].layer = cFWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V6
+			}
+		}
+		if guardCovers(fs, p) {
+			t.Fatal("拦 DNS 要在出站层")
+		}
+	})
+
+	t.Run("开机那组同样要求", func(t *testing.T) {
+		var fs []filterInfo
+		for _, l := range ourLayers() {
+			fs = append(fs, filterInfo{layer: l, action: cFWP_ACTION_BLOCK, flags: cFWPM_FILTER_FLAG_BOOTTIME})
+		}
+		if bootGuardCovers(fs) {
+			t.Fatal("开机那组没有拦 DNS 也算齐了")
+		}
+		if !bootGuardCovers(append(fs, dnsBlocks(cFWPM_FILTER_FLAG_BOOTTIME)...)) {
+			t.Fatal("开机那组齐了却判不齐")
 		}
 	})
 }

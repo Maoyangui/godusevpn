@@ -33,6 +33,9 @@ func guardRules(spec GuardSpec) string {
 	if spec.TunAddr6 != "" {
 		fmt.Fprintf(&b, "pass out quick from %s\n", spec.TunAddr6)
 	}
+	// 拦 DNS(53 / 853):必须在局域网放行前面。隧道断开时系统的 DNS 查询要是能发给路由器(私网地址),
+	// 就经路由器出了隧道。回环、root(守护进程)、隧道地址上的 DNS 都在上面放行了。
+	b.WriteString(dnsBlockRule)
 	if spec.LAN {
 		fmt.Fprintf(&b, "pass out quick to { %s }\n", strings.Join(privateV4, ", "))
 		fmt.Fprintf(&b, "pass out quick to { %s }\n", strings.Join(privateV6, ", "))
@@ -42,6 +45,9 @@ func guardRules(spec GuardSpec) string {
 	b.WriteString("block drop out quick all\n")
 	return b.String()
 }
+
+// dnsBlockRule pf 里拦 DNS 的那一条。
+const dnsBlockRule = "block drop out quick proto { tcp, udp } from any to any port { 53, 853 }\n"
 
 var pfTokenRe = regexp.MustCompile(`Token\s*:\s*(\d+)`)
 

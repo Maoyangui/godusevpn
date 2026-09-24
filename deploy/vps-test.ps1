@@ -212,10 +212,30 @@ if ($null -ne $ours) {
 if ($script:directOK) { $d = Direct-Http; Check "绑物理网卡的直连被拦" ($d -and $d -notmatch '^[23]') "http=$d(网卡 $physIp)" }
 try { $tc = (& curl.exe -s -m 15 -o NUL -w "%{http_code}" "https://1.1.1.1/cdn-cgi/trace") } catch { $tc = "000" }
 Check "经隧道照常" ($tc -eq "200") "http=$tc"
+# 闸里加了"拦 DNS"(权重高于局域网放行、低于隧道地址):经隧道的 DNS 不能被它误伤 ——
+# 系统 DNS 照常拿到 fake-ip;应用直接问 8.8.8.8 也照常被劫持(包的本机地址是隧道地址,在它上面放行)。
+ipconfig /flushdns | Out-Null
+$gd = (Resolve-DnsName -Name "www.google.com" -Type A -DnsOnly -ErrorAction SilentlyContinue | Where-Object { $_.Type -eq "A" } | Select-Object -First 1).IPAddress
+Check "严格全局下系统 DNS 照常(fake-ip)" ($gd -match '^198\.1[89]\.') "$gd"
+$g8 = (Resolve-DnsName -Name "www.google.com" -Type A -Server 8.8.8.8 -DnsOnly -ErrorAction SilentlyContinue | Where-Object { $_.Type -eq "A" } | Select-Object -First 1).IPAddress
+Check "严格全局下直接问 8.8.8.8 也照常被劫持" ($g8 -match '^198\.1[89]\.') "$g8"
+Check "闸里有拦 DNS 的规则" (($null -ne $ours) -and ($script:wfpStateText -match 'block dns \(ipv4\)') -and ($script:wfpStateText -match 'block dns \(ipv6\)')) ""
 # 闸是持久的:服务停了也必须还在拦。这是 m29 绑服务名之后失效的那条性质,直接停服务实测。
 & $svc stop | Out-Null
 Start-Sleep -Seconds 3
 if ($script:directOK) { $d2 = Direct-Http; Check "服务停止后闸仍在拦直连" ($d2 -and $d2 -notmatch '^[23]') "http=$d2" }
+# 隧道断开的空档里 DNS 不许经局域网放行出去(物理网卡的 DNS 通常就是路由器,私网地址)。服务停着,往一个没人用的
+# 私网地址发 TCP:53 端口要被防火墙当场拒绝(连接立刻失败);80 端口按局域网放行照常发出去,没人应答、等到超时。
+# 两个一比,拦的正是 DNS 端口,不是整个地址 —— 80 那一路不超时的话,这一项判不了,按失败报。
+function Tcp-Probe($port) {
+  $sw = [Diagnostics.Stopwatch]::StartNew()
+  & curl.exe -s -o NUL --connect-timeout 3 -m 5 "telnet://10.255.255.1:$port" 2>$null
+  return @{ rc = $LASTEXITCODE; ms = $sw.ElapsedMilliseconds }
+}
+$p80 = Tcp-Probe 80
+$p53 = Tcp-Probe 53
+Check "服务停着时私网 80 端口照常发出(局域网放行在,对照)" ($p80.rc -eq 28) ("curl=" + $p80.rc + " " + $p80.ms + "ms")
+Check "服务停着时私网 53 端口被当场拒绝(拦 DNS 压在局域网放行上面)" (($p53.rc -ne 28) -and ($p53.rc -ne 0) -and ($p53.ms -lt 2000)) ("curl=" + $p53.rc + " " + $p53.ms + "ms")
 & $svc start | Out-Null
 $stb = Wait-Status "connected" 60
 Check "服务重启后自动恢复连接(落盘的连接意愿)" ($stb -match "状态:\s+connected") ($stb.Trim() -replace "`r?`n", " | ")
