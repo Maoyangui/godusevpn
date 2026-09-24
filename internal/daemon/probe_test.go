@@ -89,3 +89,39 @@ func itoa(n int) string {
 	b, _ := json.Marshal(n)
 	return string(b)
 }
+
+// 被取消了(比如测速途中闸开了):还没开始的探测一个都不再发 —— 解析一开头就会发出查询,不能只靠超时。
+func TestProbeDirectSendsNothingWhenCanceled(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	accepted := make(chan struct{}, 16)
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			accepted <- struct{}{}
+			c.Close()
+		}
+	}()
+	port := ln.Addr().(*net.TCPAddr).Port
+	p := &profile.Profile{Tags: []string{"a", "b"}, Outbounds: []json.RawMessage{
+		json.RawMessage(`{"type":"trojan","tag":"a","server":"127.0.0.1","server_port":` + itoa(port) + `,"password":"p"}`),
+		json.RawMessage(`{"type":"anytls","tag":"b","server":"127.0.0.1","server_port":` + itoa(port) + `,"password":"p"}`),
+	}}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	res := probeDirect(ctx, p, nil, nil)
+	select {
+	case <-accepted:
+		t.Fatal("已取消还发了探测")
+	case <-time.After(300 * time.Millisecond):
+	}
+	if len(res) != 0 {
+		t.Fatalf("已取消不该有结果: %v", res)
+	}
+}

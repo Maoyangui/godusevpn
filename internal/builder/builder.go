@@ -56,6 +56,8 @@ const (
 	// SealedBootstrapDoH 全局禁直连下「本地 DNS」若被设成 system,给节点域名解析用的加密替身(按地址连,不用再解析它自己)。
 	// 守护进程直连拉订阅时同样用它(见 daemon.directHTTP)。
 	SealedBootstrapDoH = "223.5.5.5"
+	// RemoteBootstrapDoH 全局禁直连下「远程 DNS」填的是域名时,经代理解析它用的公共 DoH(按地址连)。
+	RemoteBootstrapDoH = "1.1.1.1"
 )
 
 // ModeName 设置里的模式 → 内核 Clash API 里的模式名。
@@ -166,7 +168,14 @@ func buildConfig(in Input, rep *Report) ([]byte, error) {
 	servers := []any{systemDNS}
 	remote := obj("type", "https", "tag", "remote", "server", s.RemoteDNS, "detour", "proxy")
 	if !settings.IsIP(s.RemoteDNS) {
-		remote["domain_resolver"] = "system"
+		if s.NoDirect && s.Mode == settings.ModeGlobal {
+			// 全局禁直连下 system 是按地址直连的公共 DoH:拿它解析远程 DNS 服务器自己的域名,就是在隧道外问了一次
+			// "这个用户用的是哪家远程解析"。远程 DNS 本来就经代理,它的域名也经代理解析(按地址连的公共 DoH)。
+			servers = append(servers, obj("type", "https", "tag", "remote-boot", "server", RemoteBootstrapDoH, "detour", "proxy"))
+			remote["domain_resolver"] = "remote-boot"
+		} else {
+			remote["domain_resolver"] = "system"
+		}
 	}
 	servers = append(servers, remote)
 	// 「本地 DNS」在全局模式下只剩一个用处:给节点服务器自己的域名做解析(default_domain_resolver)。

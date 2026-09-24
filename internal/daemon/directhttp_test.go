@@ -3,7 +3,9 @@ package daemon
 import (
 	"context"
 	"errors"
+	"io"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"strings"
 	"testing"
@@ -39,8 +41,8 @@ func TestDirectHTTPUsesDoHWhenGuardArmed(t *testing.T) {
 		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, "https://sub.example.invalid/x", nil)
 		_, err := c.Do(req)
 		cancel()
-		if err == nil || !strings.Contains(err.Error(), "经 DoH 解析 sub.example.invalid") {
-			t.Fatalf("「本地 DNS」=%s:应当经 DoH 解析(并因为 127.0.0.1 上没有 DoH 而失败),得到 %v", local, err)
+		if err == nil || !strings.Contains(err.Error(), "经 DoH 解析 sub.example.invalid") || !strings.Contains(err.Error(), "127.0.0.1:443/dns-query") {
+			t.Fatalf("「本地 DNS」=%s:应当向 127.0.0.1 发 DoH(并因为那里没有 DoH 而失败),得到 %v", local, err)
 		}
 	}
 }
@@ -61,7 +63,7 @@ func TestFetchProfileWithoutCoreUsesDirectHTTP(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	_, err := d.fetchProfile(ctx, "https://sub.example.invalid/x")
-	if err == nil || !strings.Contains(err.Error(), "经 DoH 解析") {
+	if err == nil || !strings.Contains(err.Error(), "127.0.0.1:443/dns-query") {
 		t.Fatalf("内核没跑时拉订阅应当经 DoH 解析,得到 %v", err)
 	}
 }
@@ -91,5 +93,68 @@ func TestFillMissingRuleSetsUsesSelfHTTP(t *testing.T) {
 	}
 	if !strings.Contains(string(b), "geosite-zz-test") || !strings.Contains(string(b), errSealed.Error()) {
 		t.Fatalf("补规则集应当被闸挡住、不直连,日志:\n%s", b)
+	}
+}
+
+// 闸没开时给的客户端不是一次定终身:闸开了以后的新请求被拒;读到一半闸开了,剩下的不再读。
+func TestSelfHTTPStopsWhenGuardArmsMidway(t *testing.T) {
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, "hello")
+		w.(http.Flusher).Flush()
+		select {
+		case <-release:
+		case <-r.Context().Done():
+		}
+		_, _ = io.WriteString(w, "world")
+	}))
+	defer srv.Close()
+	defer close(release)
+
+	d := newPolicyTestDaemon(t)
+	c, err := d.SelfHTTP(10 * time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := c.Get(srv.URL)
+	if err != nil {
+		t.Fatalf("闸没开时应当照常直连: %v", err)
+	}
+	defer resp.Body.Close()
+	buf := make([]byte, 5)
+	if _, err := io.ReadFull(resp.Body, buf); err != nil || string(buf) != "hello" {
+		t.Fatalf("前半截: %q %v", buf, err)
+	}
+
+	d.mu.Lock()
+	d.guardOn = true
+	d.mu.Unlock()
+	if _, err := resp.Body.Read(buf); !errors.Is(err, errArmedMidway) {
+		t.Fatalf("闸开了还在隧道外接着读: %v", err)
+	}
+	if _, err := c.Get(srv.URL); err == nil || !strings.Contains(err.Error(), errArmedMidway.Error()) {
+		t.Fatalf("闸开了以后同一个客户端的新请求应当被拒: %v", err)
+	}
+}
+
+// 未连接时的测速跑到一半闸开了(用户点了连接):cancelOnGuard 要把它取消。
+func TestCancelOnGuard(t *testing.T) {
+	d := newPolicyTestDaemon(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	stop := d.cancelOnGuard(ctx, cancel)
+	defer stop()
+	select {
+	case <-ctx.Done():
+		t.Fatal("闸没开不该取消")
+	case <-time.After(300 * time.Millisecond):
+	}
+	d.mu.Lock()
+	d.guardOn = true
+	d.mu.Unlock()
+	select {
+	case <-ctx.Done():
+	case <-time.After(2 * time.Second):
+		t.Fatal("闸开了 2 秒还没取消")
 	}
 }

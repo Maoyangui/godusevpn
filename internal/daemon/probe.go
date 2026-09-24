@@ -79,6 +79,9 @@ func probeDirect(ctx context.Context, p *profile.Profile, onEach func(tag string
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
+			if ctx.Err() != nil {
+				return // 被取消了(比如闸开了):还没开始的一个都不再发 —— 解析一开头就会发出查询,不能只靠超时
+			}
 			tctx, cancel := context.WithTimeout(ctx, probeTimeout)
 			defer cancel()
 			var d time.Duration
@@ -113,7 +116,7 @@ func probeDirect(ctx context.Context, p *profile.Profile, onEach func(tag string
 		}(e)
 	}
 	wg.Wait()
-	if len(fallback) > 0 {
+	if len(fallback) > 0 && ctx.Err() == nil {
 		got, err := core.Probe(ctx, p.Outbounds, fallback, "", onEach)
 		if err != nil {
 			// 以前这里失败是完全静默的:界面上那批节点永远没有数字,用户看到的是"点了没反应"。

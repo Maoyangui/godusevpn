@@ -47,3 +47,14 @@ func TestUpdateCheckUsesBackendClient(t *testing.T) {
 		t.Fatalf("后端没有 SelfHTTP 时应当用各函数自己的默认值:c=%v err=%v", c, err)
 	}
 }
+
+// 这会儿不许出去(闸开着、隧道没起来)时,自动更新检查不白占"上次检查"的时间:连上之后那一次照常查。
+func TestPokeUpdateNotNowKeepsLastCheck(t *testing.T) {
+	s := New(sealedBackend{}, Options{})
+	before := time.Now().Add(-time.Hour)
+	s.lastCheck = before
+	s.pokeUpdate(false)
+	if !s.lastCheck.Equal(before) {
+		t.Fatalf("被拒的那次不该记成查过:lastCheck=%v", s.lastCheck)
+	}
+}

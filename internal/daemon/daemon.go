@@ -1709,7 +1709,10 @@ func (d *Daemon) registerHandlers() {
 			if d.guardArmed() {
 				return nil, errors.New("全局禁直连的闸还开着、隧道还没起来:这时候不做直连测速(会从本机直接发探测包)。等连上后再测,或先断开连接")
 			}
+			// 测速途中用户点了连接、闸开了:剩下的探测一律停下 —— 它们都从本机直连出去(系统解析、ICMP、TCP、临时实例)
+			stop := d.cancelOnGuard(ctx, cancel)
 			res = probeDirect(ctx, p, set, d.logf)
+			stop()
 		}
 		// 存一份拷贝,别和返回值共用一个 map:返回值交给控制口在锁外序列化(遍历),而下一次测速每测出一个就往
 		// d.delays 里写 —— 同一个 map 一边遍历一边写是不可恢复的 fatal error,服务进程直接退出。界面连点两次

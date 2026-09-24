@@ -24,6 +24,11 @@ func TestBuiltConfigPassesDryRun(t *testing.T) {
 		s.IPv6, s.AdBlock, s.TUNStack, s.RemoteDNS, s.LocalDNS = true, true, "gvisor", "dns.google", "system"
 		return s
 	}(), func() settings.Settings {
+		// 全局禁直连 + 远程 DNS 是域名:它的域名经代理的 remote-boot 解析(builder),内核要认这份配置
+		s := settings.Default()
+		s.Mode, s.NoDirect, s.RemoteDNS, s.LocalDNS = settings.ModeGlobal, true, "dns.google", "system"
+		return s
+	}(), func() settings.Settings {
 		s := settings.Default()
 		s.TUN, s.FakeIP = false, false
 		return s

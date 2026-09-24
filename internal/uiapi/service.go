@@ -38,6 +38,12 @@ type selfHTTP interface {
 	SelfHTTP(timeout time.Duration) (*http.Client, error)
 }
 
+// notNowError 后端说这会儿不许出去(不是网络错误)。
+type notNowError struct{ err error }
+
+func (e notNowError) Error() string { return e.err.Error() }
+func (e notNowError) Unwrap() error { return e.err }
+
 // httpClient 访问外网用的客户端;nil 表示用各函数自己的默认值(后端没有 SelfHTTP 时)。
 func (s *Service) httpClient(timeout time.Duration) (*http.Client, error) {
 	if h, ok := s.b.(selfHTTP); ok {
@@ -604,10 +610,20 @@ func (s *Service) pokeUpdate(force bool) {
 		s.mu.Unlock()
 		return
 	}
-	s.lastCheck = time.Now()
+	prev, stamped := s.lastCheck, time.Now()
+	s.lastCheck = stamped
 	s.mu.Unlock()
 	rel, err := s.checkUpdate(false)
 	if err != nil {
+		// 这会儿不许出去(闸开着、隧道没起来):不算查过,连上之后那一次照常查,不用干等一小时
+		var nn notNowError
+		if errors.As(err, &nn) {
+			s.mu.Lock()
+			if s.lastCheck.Equal(stamped) {
+				s.lastCheck = prev
+			}
+			s.mu.Unlock()
+		}
 		return
 	}
 	s.mu.Lock()
@@ -624,7 +640,7 @@ func (s *Service) checkUpdate(manual bool) (*update.Release, error) {
 	defer cancel()
 	client, err := s.httpClient(20 * time.Second)
 	if err != nil {
-		return nil, err
+		return nil, notNowError{err}
 	}
 	rel, err := update.Check(cctx, buildinfo.Version, true, client)
 	if err != nil {

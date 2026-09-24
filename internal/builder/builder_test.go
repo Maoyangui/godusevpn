@@ -162,9 +162,32 @@ func TestIPv6OnAndOptions(t *testing.T) {
 	if c.Outbounds[0]["default"] != "台湾2" || c.Experimental.ClashAPI["default_mode"] != "Global" {
 		t.Fatalf("选中节点 / 模式没带上: %v %v", c.Outbounds[0]["default"], c.Experimental.ClashAPI["default_mode"])
 	}
+	// 全局禁直连下:远程 DNS 是域名时,它的域名经代理解析(remote-boot,按地址连),不走隧道外的 system
+	var boot bool
 	for _, sv := range c.DNS.Servers {
+		if sv["tag"] == "remote" && sv["domain_resolver"] != "remote-boot" {
+			t.Fatalf("全局禁直连下远程 DNS 的域名要经代理解析,得到 %v", sv["domain_resolver"])
+		}
+		if sv["tag"] == "remote-boot" {
+			boot = true
+			if sv["detour"] != "proxy" || sv["server"] != RemoteBootstrapDoH {
+				t.Fatalf("remote-boot 要经代理、按地址连: %v", sv)
+			}
+		}
+	}
+	if !boot {
+		t.Fatal("缺 remote-boot")
+	}
+	// 不是禁直连时照旧用 system
+	s2 := s
+	s2.NoDirect = false
+	c2, _ := build(t, s2)
+	for _, sv := range c2.DNS.Servers {
 		if sv["tag"] == "remote" && sv["domain_resolver"] != "system" {
-			t.Fatal("DoH 是域名时要给它配解析器")
+			t.Fatalf("禁直连关着时远程 DNS 的域名照旧用 system 解析,得到 %v", sv["domain_resolver"])
+		}
+		if sv["tag"] == "remote-boot" {
+			t.Fatal("禁直连关着时不该有 remote-boot")
 		}
 	}
 }
