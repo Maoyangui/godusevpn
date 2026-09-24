@@ -98,6 +98,7 @@ const (
 	markPartial = "GODUSEVPN-PARTIAL: "
 	markFailed  = "GODUSEVPN-FAILED: "
 	markGone    = "GODUSEVPN-GONE: "
+	markCorrupt = "GODUSEVPN-CORRUPT: " // 还原时备份里有几行无效(已挪到 .bad),不算失败
 )
 
 // psMark 从脚本输出里取出某个记号后面的内容;没有就返回空串。
@@ -127,6 +128,10 @@ func RestoreNICIPv6() error {
 	// m29 在 $ErrorActionPreference='Stop' 下让它中断整个循环,于是**排在它后面的网卡一张都不还原**,
 	// 而且 Go 侧提前 return 让备份永远删不掉 —— 用户的 IPv6 被永久关着,产品也永远卸不干净。
 	// 这里逐张 try/catch:网卡已经不在了就当无需还原,只有"网卡在、但还原失败"才留在备份里下次重试。
+	//
+	// 备份行无效(手工改过、被截断、两行同名)的也不算失败:那几行的原值已经随文件一起丢了,留在备份里
+	// 只会让还原永远"失败"、备份永远删不掉、卸载永远跑不完。挪到 .bad 留证、如实告警、不挡任何事 ——
+	// 和 Linux / macOS 整份损坏时的 nicBackupCorrupt 一个路数(0.7.3 及以前这里还是留着当失败)。
 	script := `
 $ErrorActionPreference = 'Stop'
 $f = '` + psQuote(nicBackup()) + `'
@@ -135,12 +140,12 @@ $seen = @{}
 $left = @()
 $failed = @()
 $gone = @()
+$corrupt = @()
 foreach ($line in $lines) {
   if ([string]::IsNullOrWhiteSpace($line)) { continue }
   $p = $line -split "` + "\t" + `", -1
   if ($p.Count -ne 2 -or [string]::IsNullOrWhiteSpace($p[0]) -or $p[1] -notmatch '^(True|False)$' -or $seen.ContainsKey($p[0])) {
-    $failed += ('备份行无效: ' + $line)
-    $left += $line
+    $corrupt += $line
     continue
   }
   $seen[$p[0]] = $true
@@ -169,6 +174,10 @@ if ($left.Count -gt 0) {
 } else {
   Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue
 }
+if ($corrupt.Count -gt 0) {
+  try { Add-Content -LiteralPath ($f + '.bad') -Value $corrupt -Encoding UTF8 } catch {}
+  Write-Output ('GODUSEVPN-CORRUPT: ' + $corrupt.Count)
+}
 if ($failed.Count -gt 0) { Write-Output ('GODUSEVPN-FAILED: ' + ($failed -join '; ')) }
 if ($gone.Count -gt 0) { Write-Output ('GODUSEVPN-GONE: ' + ($gone -join ', ')) }
 `
@@ -179,8 +188,16 @@ if ($gone.Count -gt 0) { Write-Output ('GODUSEVPN-GONE: ' + ($gone -join ', ')) 
 	if f := psMark(out, markFailed); f != "" {
 		return fmt.Errorf("还原网卡 IPv6: %s", f)
 	}
+	var warns []string
+	if n := psMark(out, markCorrupt); n != "" {
+		warns = append(warns, "网卡 IPv6 备份里有 "+n+" 行无效,已挪到 "+nicBackup()+".bad。那几行记的原始状态没了 —— "+
+			"如果某些网卡的 IPv6 现在是关着的,需要手动在「网络适配器属性」里把「Internet 协议版本 6」勾回来")
+	}
 	if g := psMark(out, markGone); g != "" {
-		setNICWarning("这些网卡已经不在了,当作无需还原: " + g)
+		warns = append(warns, "这些网卡已经不在了,当作无需还原: "+g)
+	}
+	if len(warns) > 0 {
+		setNICWarning(strings.Join(warns, ";"))
 	}
 	// 脚本里已经删过一次;这里兜一下,免得脚本那步被杀掉之后下次启动反复还原。
 	if err := os.Remove(nicBackup()); err != nil && !os.IsNotExist(err) {

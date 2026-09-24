@@ -1,9 +1,12 @@
 ﻿# 佛跳墙 真机验收脚本(在 Windows VPS 上以管理员 PowerShell 运行)
 #   .\vps-test.ps1 -Sub "https://面板/sub/用户名" [-Bin "C:\godusevpn"]
 # 步骤:装服务 → 设订阅 → 连接 → 检查 TUN 网卡、默认路由、fake-ip、DNS 劫持、出口 IP、IPv6 阻断、三态模式 → 断开 → 检查清理。
+# 给了 -LegacyBin(0.6.25-m29 ~ 0.7.1 的裸二进制目录)再多跑一段:装旧版、连上严格全局、不断开直接原地升级,
+# 验闸换到新一代提供者、升级前后都拦着直连、停服务闸仍在。
 param(
   [Parameter(Mandatory = $true)][string]$Sub,
   [string]$Bin = "C:\godusevpn",
+  [string]$LegacyBin = "",
   [switch]$KeepInstalled
 )
 $ErrorActionPreference = "Continue"
@@ -18,14 +21,14 @@ function Check($name, $ok, $detail) {
   if ($ok) { Write-Host ("[PASS] {0}  {1}" -f $name, $detail) -ForegroundColor Green }
   else { Write-Host ("[FAIL] {0}  {1}" -f $name, $detail) -ForegroundColor Red; $script:fail++ }
 }
-function Wait-Status($want, $seconds) {
+function Wait-Status($want, $seconds, $c = $cli) { # $c:用哪个命令行去问(旧版升级那段用旧版的)
   $deadline = (Get-Date).AddSeconds($seconds)
   while ((Get-Date) -lt $deadline) {
-    $out = & $cli status 2>&1 | Out-String
+    $out = & $c status 2>&1 | Out-String
     if ($out -match "状态:\s+$want") { return $out }
     Start-Sleep -Seconds 1
   }
-  return (& $cli status 2>&1 | Out-String)
+  return (& $c status 2>&1 | Out-String)
 }
 function Public-IP4() {
   ipconfig /flushdns | Out-Null
@@ -50,6 +53,22 @@ Write-Host "连接前默认出口网卡地址: $physIp"
 function Direct-Http() { # 绑物理网卡发一个明文请求,返回状态码;被闸拦下时是 000
   if (-not $physIp) { return "" }
   try { return (& curl.exe -s --interface $physIp -m 6 -o NUL -w "%{http_code}" "http://1.1.1.1/cdn-cgi/trace") } catch { return "000" }
+}
+function Get-WfpProviders() { # BFE 状态里名叫 godusevpn 的提供者(两代都叫这个名);整份状态文本留在 $script:wfpStateText 给 GUID 检查用
+  $stateXml = Join-Path $env:TEMP "godusevpn-wfpstate.xml"
+  Remove-Item $stateXml -ErrorAction SilentlyContinue
+  & netsh wfp show state file="$stateXml" | Out-Null
+  $script:wfpStateText = ""
+  if (-not (Test-Path $stateXml)) { return $null }
+  $script:wfpStateText = [System.IO.File]::ReadAllText($stateXml).ToLower()
+  $wfp = New-Object System.Xml.XmlDocument # [xml] 转换多行数组会报"已有 DocumentElement",用 Load 读整个文件
+  $wfp.Load($stateXml)
+  return @($wfp.SelectNodes("//providers/item") | Where-Object { $_.displayData.name -eq "godusevpn" })
+}
+function Providers-Detail($p) {
+  if ($null -eq $p) { return "(读不到 WFP 状态)" }
+  if ($p.Count -eq 0) { return "(没有我们的提供者)" }
+  return (($p | ForEach-Object { "key=" + $_.providerKey + " serviceName=[" + $_.serviceName + "]" }) -join ", ")
 }
 
 Write-Host "== 1. 安装服务" -ForegroundColor Cyan
@@ -95,16 +114,11 @@ $gs = & $svc guard status 2>&1 | Out-String
 Check "闸开着(WFP 过滤器非空)" ($gs -match "开着") $gs.Trim()
 # 提供者绝不能绑 Windows 服务名:绑了的话服务一停,BFE 就把它名下全部过滤器置为 DISABLED,
 # 而且服务 ACL 允许普通用户启停 —— 任何本机账户一句 sc stop 就能关掉闸。这里直接看 BFE 的状态。
-$stateXml = Join-Path $env:TEMP "godusevpn-wfpstate.xml"
-Remove-Item $stateXml -ErrorAction SilentlyContinue
-& netsh wfp show state file="$stateXml" | Out-Null
-$bound = "(读不到 WFP 状态)"
-if (Test-Path $stateXml) {
-  $wfp = New-Object System.Xml.XmlDocument # [xml] 转换多行数组会报"已有 DocumentElement",用 Load 读整个文件
-  $wfp.Load($stateXml)
-  $ours = @($wfp.SelectNodes("//providers/item") | Where-Object { $_.displayData.name -eq "godusevpn" })
-  if ($ours.Count -gt 0) { $bound = ($ours | ForEach-Object { "serviceName=[" + $_.serviceName + "]" }) -join ", " }
+$ours = Get-WfpProviders
+$bound = Providers-Detail $ours
+if ($null -ne $ours) {
   Check "WFP 提供者存在且没有绑服务名" (($ours.Count -gt 0) -and -not ($ours | Where-Object { -not [string]::IsNullOrEmpty($_.serviceName) })) $bound
+  Check "闸挂在第二代提供者下" ($script:wfpStateText -match '6f6d9e2e-3a41-4b8e-9d55-676f64757365') ""
 } else { Check "WFP 提供者没有绑服务名" $false $bound }
 if ($script:directOK) { $d = Direct-Http; Check "绑物理网卡的直连被拦" ($d -and $d -notmatch '^[23]') "http=$d(网卡 $physIp)" }
 try { $tc = (& curl.exe -s -m 15 -o NUL -w "%{http_code}" "https://1.1.1.1/cdn-cgi/trace") } catch { $tc = "000" }
@@ -157,6 +171,12 @@ $nodes = & $cli nodes 2>&1 | Out-String
 Check "节点列表" ($nodes -match "\*") ($nodes.Trim() -replace "`r?`n", " | ")
 
 Write-Host "== 6. 断开与清理" -ForegroundColor Cyan
+$script:nicBroken = $false
+if ($script:nicInjected -and (Test-Path $nicb)) {
+  # 临断开前再塞一行无效的:还原脚本要把它挪到 .bad 并告警,而不是永远留在备份里让还原"失败"、备份删不掉
+  Add-Content -Path $nicb -Value "this line is broken on purpose" -Encoding UTF8
+  $script:nicBroken = $true
+}
 & $cli disconnect | Out-Null
 Start-Sleep -Seconds 3
 $tun2 = Get-NetAdapter | Where-Object { $_.Name -like "*godusevpn*" -and $_.Status -eq "Up" }
@@ -169,11 +189,75 @@ if ($script:nicInjected) {
   $slog = Join-Path $env:ProgramData "godusevpn\logs\service.log"
   $gone = if (Test-Path $slog) { @(Select-String -Path $slog -Pattern "已经不在了" -SimpleMatch).Count } else { 0 }
   Check "服务日志记下了已消失的网卡" ($gone -gt 0) "matches=$gone"
+  if ($script:nicBroken) {
+    $bad = $nicb + ".bad"
+    Check "无效的备份行挪到了 .bad" ((Test-Path $bad) -and (((Get-Content $bad) -join "|") -match "broken on purpose")) ($(if (Test-Path $bad) { (Get-Content $bad) -join " | " } else { "no .bad" }))
+    $corr = if (Test-Path $slog) { @(Select-String -Path $slog -Pattern "行无效" -SimpleMatch).Count } else { 0 }
+    Check "服务日志记下了无效的备份行" ($corr -gt 0) "matches=$corr"
+    Remove-Item $bad -ErrorAction SilentlyContinue
+  }
 }
 if (-not $KeepInstalled) {
   & $svc uninstall | Out-Null
   Check "服务已卸载" ((& $svc status) -eq "not-installed") (& $svc status)
 }
+
+if ($LegacyBin -and -not $KeepInstalled) {
+  Write-Host "== 7. 从绑服务名的旧版原地升级(不断开):闸换到新一代提供者,升级前后都拦着直连" -ForegroundColor Cyan
+  $lsvc = Join-Path $LegacyBin "godusevpn-svc.exe"
+  $lcli = Join-Path $LegacyBin "godusevpn-cli.exe"
+  if (-not (Test-Path $lsvc)) { Check "旧版二进制存在" $false $lsvc }
+  else {
+    & $lsvc install | Out-Null
+    $lv = (& $lcli version 2>&1 | Out-String).Trim()
+    Check "旧版服务装上" ((& $lsvc status) -eq "running") $lv
+    & $lcli profile $Sub 2>&1 | Out-Null
+    & $lcli connect | Out-Null
+    Wait-Status "connected" 60 $lcli | Out-Null
+    & $lcli mode global | Out-Null
+    Start-Sleep -Seconds 2
+    $sl = Wait-Status "connected" 30 $lcli
+    Check "旧版进入严格全局模式" (($sl -match "状态:\s+connected") -and ($sl -match "模式:\s+global")) ($sl.Trim() -replace "`r?`n", " | ")
+    $lp = Get-WfpProviders
+    # 场景前提:旧版的提供者确实绑着服务名、用的是第一代 GUID。不成立的话下面"换代"什么都没验到,所以按失败报
+    Check "旧版的提供者绑着服务名(场景前提)" (($null -ne $lp) -and ($lp.Count -gt 0) -and -not ($lp | Where-Object { [string]::IsNullOrEmpty($_.serviceName) })) (Providers-Detail $lp)
+    Check "旧版的提供者用的是第一代 GUID(场景前提)" ($script:wfpStateText -match '6f6d9e2c-3a41-4b8e-9d55-676f64757365') ""
+    if ($script:directOK) { $ld = Direct-Http; Check "旧版闸拦着直连" ($ld -and $ld -notmatch '^[23]') "http=$ld" }
+    # 原地升级,照安装器的流程:旧版 stop → 新版 install(沿用服务对象、改可执行文件路径、启动),全程不点断开
+    & $lsvc stop | Out-Null
+    Start-Sleep -Seconds 2
+    if ($script:directOK) { $lg = Direct-Http; Write-Host "  (旧版停服务期间绑物理网卡直连 http=$lg:绑服务名的旧版固有的窗口,升级本身消不掉;新版装好后不再有)" }
+    & $svc install | Out-Null
+    $su = Wait-Status "connected" 60
+    Check "新版接管后自动恢复连接" ($su -match "状态:\s+connected") ($su.Trim() -replace "`r?`n", " | ")
+    Start-Sleep -Seconds 2
+    $np = Get-WfpProviders
+    Check "升级后只剩一个提供者且没绑服务名" (($null -ne $np) -and ($np.Count -eq 1) -and [string]::IsNullOrEmpty($np[0].serviceName)) (Providers-Detail $np)
+    Check "第一代提供者已收掉" ($script:wfpStateText -and ($script:wfpStateText -notmatch '6f6d9e2c-3a41-4b8e-9d55-676f64757365')) ""
+    Check "第一代子层已收掉" ($script:wfpStateText -and ($script:wfpStateText -notmatch '6f6d9e2d-3a41-4b8e-9d55-676f64757365')) ""
+    Check "第二代提供者在" ($script:wfpStateText -match '6f6d9e2e-3a41-4b8e-9d55-676f64757365') ""
+    $gs3 = & $svc guard status 2>&1 | Out-String
+    Check "升级后闸开着" ($gs3 -match "开着") $gs3.Trim()
+    if ($script:directOK) { $ud = Direct-Http; Check "升级后绑物理网卡的直连被拦" ($ud -and $ud -notmatch '^[23]') "http=$ud" }
+    try { $tc2 = (& curl.exe -s -m 15 -o NUL -w "%{http_code}" "https://1.1.1.1/cdn-cgi/trace") } catch { $tc2 = "000" }
+    Check "升级后经隧道照常" ($tc2 -eq "200") "http=$tc2"
+    & $svc stop | Out-Null
+    Start-Sleep -Seconds 3
+    if ($script:directOK) { $ud2 = Direct-Http; Check "升级后停服务闸仍在拦(新一代提供者不绑服务名)" ($ud2 -and $ud2 -notmatch '^[23]') "http=$ud2" }
+    & $svc start | Out-Null
+    Wait-Status "connected" 60 | Out-Null
+    & $cli mode rule | Out-Null
+    Start-Sleep -Seconds 2
+    $gs4 = & $svc guard status 2>&1 | Out-String
+    Check "切回规则模式后闸清空(升级场景)" ($gs4 -match "没开") $gs4.Trim()
+    $ep = Get-WfpProviders
+    Check "撤闸后两代提供者都不在" (($null -ne $ep) -and ($ep.Count -eq 0) -and ($script:wfpStateText -notmatch '6f6d9e2[cdef]-3a41-4b8e-9d55-676f64757365')) (Providers-Detail $ep)
+    & $cli disconnect | Out-Null
+    Start-Sleep -Seconds 3
+    & $svc uninstall | Out-Null
+    Check "服务已卸载(升级场景)" ((& $svc status) -eq "not-installed") (& $svc status)
+  }
+} elseif (-not $LegacyBin) { Write-Host "  (没给 -LegacyBin:跳过「从旧版原地升级」那一段)" }
 Write-Host ""
 if ($fail -eq 0) { Write-Host "全部通过" -ForegroundColor Green } else {
   Write-Host "$fail 项失败" -ForegroundColor Red

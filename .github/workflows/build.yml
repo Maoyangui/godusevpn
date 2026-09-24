@@ -72,12 +72,24 @@ jobs:
       # 在这台真 Windows 上把服务装起来、建隧道、切到严格全局模式:WFP 闸拦不拦得住绑物理网卡的直连、
       # 提供者有没有绑服务名、停服务后闸还在不在、网卡 IPv6 的停用 / 还原脚本(含备份里有已消失网卡)能不能跑通。
       # 这些只有真机能验;没配 TEST_SUB_URL 机密时只编译不验收(外部 PR 拿不到机密)。
-      - name: 真机验收(WFP 闸、停服务闸仍在、网卡 IPv6 还原)
+      # 另取一份绑了服务名的旧版(0.7.1)裸二进制:验"从旧版原地升级不断开 —— 闸换到新一代提供者,升级前后都拦着直连"。
+      - name: 取旧版(0.7.1)做原地升级验收
+        if: env.TEST_SUB_URL != ''
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download v0.7.1 -R ${{ github.repository }} -p "godusevpn-0.7.1-windows-x64-bin.zip" -D legacy
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          Expand-Archive legacy\godusevpn-0.7.1-windows-x64-bin.zip -DestinationPath legacy\bin -Force
+          Get-ChildItem legacy\bin
+
+      - name: 真机验收(WFP 闸、停服务闸仍在、网卡 IPv6 还原、从旧版原地升级)
         if: env.TEST_SUB_URL != ''
         shell: pwsh
         run: |
           $ErrorActionPreference = "Continue"
-          & .\deploy\vps-test.ps1 -Sub $env:TEST_SUB_URL -Bin (Resolve-Path dist\amd64).Path
+          & .\deploy\vps-test.ps1 -Sub $env:TEST_SUB_URL -Bin (Resolve-Path dist\amd64).Path -LegacyBin (Resolve-Path legacy\bin).Path
           exit $LASTEXITCODE
 
       - name: Fetch WebView2 installers

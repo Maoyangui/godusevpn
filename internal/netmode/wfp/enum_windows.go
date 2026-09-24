@@ -15,7 +15,6 @@ var (
 	procFwpmFilterDeleteByKey0       = modfwpuclnt.NewProc("FwpmFilterDeleteByKey0")
 	procFwpmSubLayerDeleteByKey0     = modfwpuclnt.NewProc("FwpmSubLayerDeleteByKey0")
 	procFwpmProviderDeleteByKey0     = modfwpuclnt.NewProc("FwpmProviderDeleteByKey0")
-	procFwpmProviderGetByKey0        = modfwpuclnt.NewProc("FwpmProviderGetByKey0")
 )
 
 // windows_GUID 给本包自己写的文件用的别名,免得每处都写全名。
@@ -71,23 +70,6 @@ func fwpmProviderDeleteByKey0(engine uintptr, key *windows.GUID) error {
 	return callProc(procFwpmProviderDeleteByKey0, engine, uintptr(unsafe.Pointer(key)))
 }
 
-// providerServiceBound 现存的提供者是不是绑在某个 Windows 服务上(FWPM_PROVIDER0.serviceName 非空)。
-// 绑了的话,服务一不运行,BFE 就把它名下的全部过滤器标成 DISABLED —— 为什么绝不能绑见 baseProvider。
-//
-// 返回 (绑着吗, 问出来了吗)。导出找不到、提供者不存在、调用失败,一律报 false, false:
-// 拿不准就当没绑。这个查询只用来决定要不要收拾旧账,绝不能因为查不清楚就去动用户已经生效的闸。
-func providerServiceBound(engine uintptr, key *windows.GUID) (bound, known bool) {
-	if err := procFwpmProviderGetByKey0.Find(); err != nil {
-		return false, false
-	}
-	var p *wtFwpmProvider0
-	if err := callProc(procFwpmProviderGetByKey0, engine, uintptr(unsafe.Pointer(key)), uintptr(unsafe.Pointer(&p))); err != nil || p == nil {
-		return false, false
-	}
-	defer fwpmFreeMemory0(unsafe.Pointer(&p))
-	return p.serviceName != nil, true
-}
-
 // ourLayers 我们放过滤器的六个层:出站 / 入站 × IPv4 / IPv6,外加 IP 转发 × IPv4 / IPv6(热点共享经本机转发的流量)。
 // 少列一层就会漏删:撤闸、卸载之后那一层的过滤器永远留着。
 func ourLayers() []windows.GUID {
@@ -104,9 +86,9 @@ type filterInfo struct {
 	action wtFwpActionType
 }
 
-// ourFilters 枚举我们的全部过滤器(持久的、开机的、禁用的都算)。不按提供者做模板,而是把四个层里
-// 的过滤器全拉出来,凡提供者是我们的、或挂在我们子层下的都算 —— 这样哪怕某条没带提供者,撤闸时也
-// 不会漏掉它,子层就一定删得掉。
+// ourFilters 枚举我们的全部过滤器(持久的、开机的、禁用的都算)。不按提供者做模板,而是把六个层里
+// 的过滤器全拉出来,凡提供者是我们的、或挂在我们子层下的都算(两代都认,见 isOurs)—— 这样哪怕某条
+// 没带提供者,撤闸时也不会漏掉它,子层就一定删得掉。
 func ourFilters(session uintptr) ([]filterInfo, error) {
 	var out []filterInfo
 	for _, layer := range ourLayers() {
@@ -129,7 +111,7 @@ func ourFilters(session uintptr) ([]filterInfo, error) {
 				break
 			}
 			for _, f := range unsafe.Slice(entries, n) {
-				ours := f.subLayerKey == sublayerKey || (f.providerKey != nil && *f.providerKey == providerKey)
+				ours := isOurs(f.subLayerKey, f.providerKey)
 				if !ours {
 					continue
 				}

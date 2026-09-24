@@ -147,6 +147,7 @@ function applyTheme(theme) {
 }
 function svcText(st) {
   if (st.service) return t('svc.running');
+  if (st.svcState === 'no-permission') return t('svc.noPermission'); // 服务在跑,只是当前账户没登记为控制用户
   if (st.svcState === 'not-installed') return t('svc.notInstalled');
   if (st.svcState === 'starting') return t('svc.starting');
   return t('svc.down');

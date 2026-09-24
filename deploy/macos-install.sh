@@ -46,12 +46,13 @@ fi
 # macOS 这边 Stop() 是先 needRoot 再 launchctl bootout:作业正在退出、或者 launchd 拒绝时会返回非零。
 # 这里是 set -e —— m29 去掉 || true 之后,这一下就能让整个升级脚本无声退出,
 # 用户看到的只是"跑完了但版本没变"。(m28 这一行本来是 uninstall,不是 stop。)
-# 至于"还在不在跑",不用 status 去猜:覆盖正在运行的可执行文件时系统会返回 ETXTBSY,那才是真的还占着。
+# 至于"还在不在跑",不必猜也不必判:install(1) 先删旧文件再建新文件,正在跑的旧进程继续用旧的 inode,
+# 不会撞上 ETXTBSY;真正让新版本生效的是后面 install 子命令的重启。写不进多半是权限不够。
 if [ -x /usr/local/bin/godusevpn ]; then /usr/local/bin/godusevpn stop >/dev/null 2>&1 || true; fi
 mkdir -p /usr/local/bin
 if ! install -m 755 "$SRC/godusevpn" /usr/local/bin/godusevpn; then
-  echo "写不进 /usr/local/bin/godusevpn,升级中止。"
-  echo "提示 Text file busy 的话说明旧的后台服务还占着这个文件,先手动停掉再重跑:"
+  echo "写不进 /usr/local/bin/godusevpn,升级中止(多半是权限不够;要用 sudo 跑)。"
+  echo "万一提示 Text file busy,先手动停掉旧服务再重跑:"
   echo "  sudo /usr/local/bin/godusevpn stop"
   exit 1
 fi

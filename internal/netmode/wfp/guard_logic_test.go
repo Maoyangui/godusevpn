@@ -2,7 +2,11 @@
 
 package wfp
 
-import "testing"
+import (
+	"testing"
+
+	"golang.org/x/sys/windows"
+)
 
 func TestBootGuardCoversRequiresEnabledBlockingLayer(t *testing.T) {
 	layers := ourLayers()
@@ -58,6 +62,42 @@ func TestBaseProviderIsNotBoundToAService(t *testing.T) {
 	}
 	if p.providerKey != providerKey {
 		t.Fatal("提供者 GUID 变了:恢复命令与卸载程序都靠这个固定 GUID 找对象")
+	}
+}
+
+// 两代 GUID:第二代是现役,第一代只用来认出并收掉旧对象。两代的值都钉死 ——
+// 第一代改了就认不出 m29 那几版留下的对象(升级后旧闸永远留在系统里);
+// 第二代改回第一代就又得走"先删光再重建"那条有空窗的路。
+func TestGuardGenerations(t *testing.T) {
+	d4 := [8]byte{0x9d, 0x55, 0x67, 0x6f, 0x64, 0x75, 0x73, 0x65}
+	wantLegacyP := windows.GUID{Data1: 0x6f6d9e2c, Data2: 0x3a41, Data3: 0x4b8e, Data4: d4}
+	wantLegacyS := windows.GUID{Data1: 0x6f6d9e2d, Data2: 0x3a41, Data3: 0x4b8e, Data4: d4}
+	if legacyProviderKey != wantLegacyP || legacySublayerKey != wantLegacyS {
+		t.Fatal("第一代 GUID 变了:m29 那几版(0.6.25-m29 ~ 0.7.1)留下的提供者 / 子层 / 过滤器就认不出来了")
+	}
+	if providerKey == legacyProviderKey || sublayerKey == legacySublayerKey {
+		t.Fatal("现役 GUID 和第一代相同:换代换到同一个 GUID 上,升级又得先删光过滤器再重建,中间没有闸")
+	}
+	if base.provider != providerKey || base.filters != sublayerKey {
+		t.Fatal("base 没指向现役这一代:新过滤器会装到旧提供者名下")
+	}
+	other := windows.GUID{Data1: 0x11111111}
+	for _, c := range []struct {
+		name string
+		sub  windows.GUID
+		prov *windows.GUID
+		want bool
+	}{
+		{"现役子层", sublayerKey, nil, true},
+		{"第一代子层", legacySublayerKey, nil, true},
+		{"现役提供者", other, &providerKey, true},
+		{"第一代提供者", other, &legacyProviderKey, true},
+		{"别人的子层、没提供者", other, nil, false},
+		{"别人的子层、别人的提供者", other, &other, false},
+	} {
+		if got := isOurs(c.sub, c.prov); got != c.want {
+			t.Fatalf("isOurs(%s) = %v,想要 %v", c.name, got, c.want)
+		}
 	}
 }
 

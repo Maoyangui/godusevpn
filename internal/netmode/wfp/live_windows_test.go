@@ -69,13 +69,16 @@ func TestLivePersistentGuard(t *testing.T) {
 	if n3 != 0 {
 		t.Fatalf("撤闸后应归零,得 %d", n3)
 	}
-	// 按固定 GUID 查(按名字查会撞上正在跑的旧版服务那个动态会话的提供者)
+	// 按固定 GUID 查(按名字查会撞上正在跑的旧版服务那个动态会话的提供者);两代都不该留下
 	out, _ = exec.Command("netsh", "wfp", "show", "state", "file=-").Output()
-	if strings.Contains(strings.ToLower(string(out)), "6f6d9e2c-3a41-4b8e-9d55-676f64757365") {
-		t.Fatal("撤闸后提供者还在")
-	}
-	if strings.Contains(strings.ToLower(string(out)), "6f6d9e2d-3a41-4b8e-9d55-676f64757365") {
-		t.Fatal("撤闸后子层还在")
+	state := strings.ToLower(string(out))
+	for _, g := range []struct{ id, what string }{
+		{"6f6d9e2e-3a41-4b8e-9d55-676f64757365", "提供者"}, {"6f6d9e2f-3a41-4b8e-9d55-676f64757365", "子层"},
+		{"6f6d9e2c-3a41-4b8e-9d55-676f64757365", "第一代提供者"}, {"6f6d9e2d-3a41-4b8e-9d55-676f64757365", "第一代子层"},
+	} {
+		if strings.Contains(state, g.id) {
+			t.Fatalf("撤闸后%s还在", g.what)
+		}
 	}
 	t.Log("撤闸后过滤器 0 条,提供者已删")
 }

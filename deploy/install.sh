@@ -50,12 +50,13 @@ fi
 #
 # 也不要拿 `godusevpn status` 去判"还在不在跑":Entware(梅林这类路由器)那边的 QueryStatus 是
 # `pidof godusevpn`,而此刻正在跑这条命令的**就是** godusevpn 自己 —— 它永远报 running,
-# 升级会被永久挡死。改用一个不会自指的判据:直接写文件,Linux / macOS 在覆盖正在运行的可执行文件时
-# 会返回 ETXTBSY(Text file busy),那才是真的"还占着"。
+# 升级会被永久挡死。其实也不必判:install(1) 是先删掉旧文件再建一个新文件(GNU / BSD 都这样,
+# BusyBox 打开失败后也会删了重试),正在跑的旧进程继续用旧的 inode,不会撞上 ETXTBSY;写不进多半是
+# 权限不够或分区只读。真正让新版本生效的是下面的 `install` 子命令,它会重启服务。
 if [ -x "$BIN_DIR/godusevpn" ]; then "$BIN_DIR/godusevpn" stop >/dev/null 2>&1 || true; fi
 if ! install -m 755 "$SRC" "$BIN_DIR/godusevpn"; then
-  echo "写不进 $BIN_DIR/godusevpn,升级中止。"
-  echo "提示 Text file busy 的话说明旧的后台服务还占着这个文件,先手动停掉再重跑:"
+  echo "写不进 $BIN_DIR/godusevpn,升级中止(多半是权限不够或分区只读;要用 root 跑)。"
+  echo "万一提示 Text file busy,是这套 install 没有先删旧文件:先手动停掉旧服务再重跑:"
   echo "  $BIN_DIR/godusevpn stop"
   exit 1
 fi

@@ -32,7 +32,7 @@ const testURL = "http://www.gstatic.com/generate_204"
 // UIState 推给页面与托盘的一份快照:服务在不在、服务给的状态、实时速度、界面偏好。
 type UIState struct {
 	Service   bool            `json:"service"`  // 控制管道可达
-	SvcState  string          `json:"svcState"` // running / stopped / not-installed / unknown(服务管理器视角)
+	SvcState  string          `json:"svcState"` // running / stopped / not-installed / unknown(服务管理器视角);no-permission = 服务在跑但当前账户没登记为控制用户
 	View      ipc.StateView   `json:"view"`
 	Up        int64           `json:"up"`        // 字节/秒
 	Down      int64           `json:"down"`      // 字节/秒
@@ -189,6 +189,12 @@ func (a *App) refresh() {
 		a.state.Up, a.state.Down = 0, 0
 	}
 	a.state.SvcState = svc.QueryStatus()
+	if errors.Is(err, ipc.ErrNoPermission) {
+		// 服务在跑、管道也在,只是当前账户不在控制名单里(同一台电脑上的第二个 Windows 账户)。
+		// 服务管理器视角它是 running,页面若一边照 svcState 说"服务运行中"、一边照 service=false 灰掉按钮,
+		// 用户只会以为服务坏了。这里把它单独标出来,页面与托盘据此显示"账户没登记"。
+		a.state.SvcState = "no-permission"
+	}
 	a.state.Lang, a.state.Theme = a.prefs.Lang, a.prefs.Theme
 	st := a.state
 	justConnected := st.View.State.Status == "connected" && a.lastStatus != "connected"

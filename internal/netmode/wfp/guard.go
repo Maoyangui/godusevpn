@@ -32,11 +32,30 @@ type baseObjects struct {
 }
 
 // 固定 GUID:换进程、换版本都不变,恢复命令与卸载程序靠它找对象。
+//
+// 这是**第二代**(0.7.4 起)。第一代(…2c / …2d)在 m29 那几版(0.6.25-m29 ~ 0.7.1)被绑上了服务名
+// (见 baseProvider),而 WFP 的提供者建好就改不了,只能删了重建;删提供者得先删掉引用它的子层,
+// 删子层得先删光子层里的过滤器 —— 全按同一个 GUID 做,中间必然有一段没有闸,以前只能等用户下次
+// 断开时才换。换一代 GUID 就没有这个问题:建新提供者、新子层、装新过滤器、删旧过滤器放在**同一个事务**里,
+// BFE 原子地提交;旧子层与旧提供者此时已没人引用,随后再收掉(dropLegacyBase)。两代的过滤器 ourFilters 都认。
 var (
-	providerKey = windows.GUID{Data1: 0x6f6d9e2c, Data2: 0x3a41, Data3: 0x4b8e, Data4: [8]byte{0x9d, 0x55, 0x67, 0x6f, 0x64, 0x75, 0x73, 0x65}}
-	sublayerKey = windows.GUID{Data1: 0x6f6d9e2d, Data2: 0x3a41, Data3: 0x4b8e, Data4: [8]byte{0x9d, 0x55, 0x67, 0x6f, 0x64, 0x75, 0x73, 0x65}}
+	providerKey = windows.GUID{Data1: 0x6f6d9e2e, Data2: 0x3a41, Data3: 0x4b8e, Data4: [8]byte{0x9d, 0x55, 0x67, 0x6f, 0x64, 0x75, 0x73, 0x65}}
+	sublayerKey = windows.GUID{Data1: 0x6f6d9e2f, Data2: 0x3a41, Data3: 0x4b8e, Data4: [8]byte{0x9d, 0x55, 0x67, 0x6f, 0x64, 0x75, 0x73, 0x65}}
 	base        = &baseObjects{provider: providerKey, filters: sublayerKey}
+
+	// 第一代的 GUID:只用来认出并收掉旧对象,绝不再往它名下装任何东西。
+	legacyProviderKey = windows.GUID{Data1: 0x6f6d9e2c, Data2: 0x3a41, Data3: 0x4b8e, Data4: [8]byte{0x9d, 0x55, 0x67, 0x6f, 0x64, 0x75, 0x73, 0x65}}
+	legacySublayerKey = windows.GUID{Data1: 0x6f6d9e2d, Data2: 0x3a41, Data3: 0x4b8e, Data4: [8]byte{0x9d, 0x55, 0x67, 0x6f, 0x64, 0x75, 0x73, 0x65}}
 )
+
+// isOurs 一条过滤器是不是我们的:挂在两代任一子层下、或提供者是两代任一。
+// 少认一代就会漏删:升级后旧一代的过滤器永远留在系统里,撤闸 / 卸载之后直连仍然被拦。
+func isOurs(subLayer windows.GUID, provider *windows.GUID) bool {
+	if subLayer == sublayerKey || subLayer == legacySublayerKey {
+		return true
+	}
+	return provider != nil && (*provider == providerKey || *provider == legacyProviderKey)
+}
 
 // Spec 闸的参数。
 type Spec struct {
@@ -97,36 +116,24 @@ func baseProvider(dd *wtFwpmDisplayData0) wtFwpmProvider0 {
 	return wtFwpmProvider0{providerKey: providerKey, displayData: *dd, flags: fwpProviderFlagPersistent}
 }
 
-// dropLegacyServiceBoundProvider 把升级前遗留的、绑了服务名的提供者删掉,好让 ensureBase 重建一个不绑的。
+// dropLegacyBase 收掉第一代的子层与提供者。只在第一代的过滤器已经删光之后调(Enable 的持久事务提交后、
+// Disable 删完过滤器后),否则 BFE 会按"还被引用"拒绝。它们名下已经没有任何过滤器,留着不影响闸,
+// 删不掉也只是收尾没做完:返回警告,绝不能让开闸因为收拾旧账而失败,否则用户只能去关「全局禁直连」。
 //
-// 只在此刻一条过滤器都没有时才做。原因见 Disable 的注释:换提供者必须"先删过滤器并提交、
-// 再删子层与提供者",同一个事务里删子层会被 BFE 判成还被引用。两个事务之间是没有闸的 ——
-// 闸本来就没开的时候做,才不会凭空制造一个直连窗口。闸开着就原样留下并告警,等用户下次断开
-// (Disable 会连提供者一起删)自然换掉。
-//
-// 任何一步失败都只返回警告:开闸这件事绝不能因为收拾旧账而失败,否则用户只能去关「全局禁直连」。
-func dropLegacyServiceBoundProvider(s uintptr) string {
-	bound, known := providerServiceBound(s, &providerKey)
-	if !known || !bound {
-		return ""
-	}
-	keys, err := ourFilterKeys(s)
-	if err != nil {
-		return "旧版遗留的提供者绑着服务名(服务一停闸就失效),这次没换掉: " + err.Error()
-	}
-	if len(keys) != 0 {
-		return "旧版遗留的提供者绑着服务名(服务一停闸就失效);闸正开着,换它会有一瞬没有保护,已留到下次断开时处理"
-	}
+// 第一代提供者在 m29 那几版被绑上了服务名(服务一停,它名下全部过滤器被 BFE 置为 DISABLED)。
+// 0.7.2 / 0.7.3 只能等用户下次断开时才换掉;现在 Enable 在一个事务里把过滤器换到第二代名下,
+// 这里只剩收尾,升级过程中没有不设防的窗口。
+func dropLegacyBase(s uintptr) string {
 	if err := runTransaction(s, func(s uintptr) error {
-		if err := fwpmSubLayerDeleteByKey0(s, &sublayerKey); err != nil && !notFound(err) {
+		if err := fwpmSubLayerDeleteByKey0(s, &legacySublayerKey); err != nil && !notFound(err) {
 			return wrapErr(err)
 		}
-		if err := fwpmProviderDeleteByKey0(s, &providerKey); err != nil && !notFound(err) {
+		if err := fwpmProviderDeleteByKey0(s, &legacyProviderKey); err != nil && !notFound(err) {
 			return wrapErr(err)
 		}
 		return nil
 	}); err != nil {
-		return "旧版遗留的提供者绑着服务名(服务一停闸就失效),这次没换掉: " + err.Error()
+		return "旧一代的子层 / 提供者没收掉(闸不受影响,下次开闸再试): " + err.Error()
 	}
 	return ""
 }
@@ -221,11 +228,12 @@ func Enable(spec Spec) (warn string, err error) {
 		return "", err
 	}
 	defer fwpmEngineClose0(s)
-	legacyWarn := dropLegacyServiceBoundProvider(s)
 	if err = runTransaction(s, func(s uintptr) error {
 		if err := ensureBase(s); err != nil {
 			return err
 		}
+		// 两代的过滤器一起删:从 m29 那几版升上来时,旧一代(绑了服务名)的过滤器和新一代的在同一个
+		// 事务里换掉,BFE 原子提交,升级过程中没有不设防的窗口。
 		if err := deleteOurFilters(s); err != nil {
 			return err
 		}
@@ -234,6 +242,7 @@ func Enable(spec Spec) (warn string, err error) {
 	}); err != nil {
 		return "", fmt.Errorf("全局禁直连过滤器事务回滚,保留旧保护: %w", err)
 	}
+	legacyWarn := dropLegacyBase(s)
 	if err := runTransaction(s, func(s uintptr) error {
 		curFlags = cFWPM_FILTER_FLAG_BOOTTIME
 		return installSet(s, spec, false, false)
@@ -324,17 +333,22 @@ func Disable() error {
 		return fmt.Errorf("撤闸后仍有 %d 条过滤器", len(left))
 	}
 	if err := runTransaction(s, func(s uintptr) error {
-		if err := fwpmSubLayerDeleteByKey0(s, &sublayerKey); err != nil && !notFound(err) {
-			if inUse(err) {
-				return fmt.Errorf("过滤器已全部删除(闸已撤),但子层还被别的对象引用,删不掉: %w", err)
+		// 两代的子层与提供者都收掉(旧一代在升级后可能还留着空壳)。子层引用提供者,先删子层。
+		for _, k := range []*windows.GUID{&sublayerKey, &legacySublayerKey} {
+			if err := fwpmSubLayerDeleteByKey0(s, k); err != nil && !notFound(err) {
+				if inUse(err) {
+					return fmt.Errorf("过滤器已全部删除(闸已撤),但子层还被别的对象引用,删不掉: %w", err)
+				}
+				return wrapErr(err)
 			}
-			return wrapErr(err)
 		}
-		if err := fwpmProviderDeleteByKey0(s, &providerKey); err != nil && !notFound(err) {
-			if inUse(err) {
-				return fmt.Errorf("过滤器已全部删除(闸已撤),但提供者还被别的对象引用,删不掉: %w", err)
+		for _, k := range []*windows.GUID{&providerKey, &legacyProviderKey} {
+			if err := fwpmProviderDeleteByKey0(s, k); err != nil && !notFound(err) {
+				if inUse(err) {
+					return fmt.Errorf("过滤器已全部删除(闸已撤),但提供者还被别的对象引用,删不掉: %w", err)
+				}
+				return wrapErr(err)
 			}
-			return wrapErr(err)
 		}
 		return nil
 	}); err != nil {

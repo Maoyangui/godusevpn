@@ -36,8 +36,8 @@ type trayUI struct {
 func newTray(a *App) *trayUI { return &trayUI{app: a} }
 
 var trayText = map[string]map[string]string{
-	"zh": {"show": "显示主窗口", "connect": "连接", "disconnect": "断开", "mode": "模式", "rule": "规则", "global": "全局", "direct": "直连", "quit": "退出", "svcdown": "服务未运行", "upgrade": "升级到", "guardfix": "恢复网络(解除禁直连闸)"},
-	"en": {"show": "Show window", "connect": "Connect", "disconnect": "Disconnect", "mode": "Mode", "rule": "Rule", "global": "Global", "direct": "Direct", "quit": "Quit", "svcdown": "Service not running", "upgrade": "Update to", "guardfix": "Restore network (lift no-direct guard)"},
+	"zh": {"show": "显示主窗口", "connect": "连接", "disconnect": "断开", "mode": "模式", "rule": "规则", "global": "全局", "direct": "直连", "quit": "退出", "svcdown": "服务未运行", "upgrade": "升级到", "guardfix": "恢复网络(解除禁直连闸)", "svcnoperm": "服务在跑,但当前账户没登记为控制用户"},
+	"en": {"show": "Show window", "connect": "Connect", "disconnect": "Disconnect", "mode": "Mode", "rule": "Rule", "global": "Global", "direct": "Direct", "quit": "Quit", "svcdown": "Service not running", "upgrade": "Update to", "guardfix": "Restore network (lift no-direct guard)", "svcnoperm": "Service running, but this account is not registered as a controller"},
 }
 
 func (t *trayUI) tr(key string) string {
@@ -153,6 +153,9 @@ func (t *trayUI) update(st UIState) {
 	status := "off"
 	tip := buildinfo.DisplayName
 	switch {
+	case !st.Service && st.SvcState == "no-permission":
+		status = "err"
+		tip += " · " + t.tr("svcnoperm")
 	case !st.Service:
 		status = "err"
 		tip += " · " + t.tr("svcdown")
