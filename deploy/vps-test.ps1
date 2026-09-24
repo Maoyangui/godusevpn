@@ -119,8 +119,8 @@ $stg = Wait-Status "connected" 15
 Check "切到严格全局模式且连接仍在" (($stg -match "状态:\s+connected") -and ($stg -match "模式:\s+global")) ($stg.Trim() -replace "`r?`n", " | ")
 $gs = & $svc guard status 2>&1 | Out-String
 Check "闸开着(WFP 过滤器非空)" ($gs -match "开着") $gs.Trim()
-# 提供者绝不能绑 Windows 服务名:绑了的话服务一停,BFE 就把它名下全部过滤器置为 DISABLED,
-# 而且服务 ACL 允许普通用户启停 —— 任何本机账户一句 sc stop 就能关掉闸。这里直接看 BFE 的状态。
+# 提供者不绑 Windows 服务名:绑了的话,闸能不能跨过开机取决于服务的启动类型(不是自动启动,开机时 BFE
+# 就把它名下的过滤器停用)。停服务本身不影响(已实测,见 installer-upgrade-test.ps1)。这里直接看 BFE 的状态。
 $ours = Get-WfpProviders
 $bound = Providers-Detail $ours
 if ($null -ne $ours) {
@@ -232,16 +232,16 @@ if ($LegacyBin -and -not $KeepInstalled) {
     if ($script:directOK) { $ld = Direct-Http; Check "旧版闸拦着直连" ($ld -and $ld -notmatch '^[23]') "http=$ld" }
     # 原地升级,照安装器的流程:趁旧服务还在,先用新版 exe 把闸装到第二代提供者下(guard arm,放行的是旧服务 exe 的路径)
     # → 旧版 stop → 新版 install(沿用服务对象、改可执行文件路径、启动),全程不点断开。
-    # 旧版的提供者绑着服务名,stop 一发出它的过滤器就全部失效;guard arm 就是为了让这一段仍然有闸。
+    # guard arm 是多一道保险:这一段闸的有无不再依赖旧版本的行为(实测旧版停服务并不会让它的闸失效)。
     $arm = & $svc guard arm --self="$lsvc" 2>&1 | Out-String
     Check "停旧服务前先按第二代预装闸" ($arm -match "已按第二代提供者装上") $arm.Trim()
     $ap = Get-WfpProviders
     Check "预装后第二代提供者在(旧一代可能仍并存)" ($script:wfpStateText -match '6f6d9e2e-3a41-4b8e-9d55-676f64757365') (Providers-Detail $ap)
     & $lsvc stop | Out-Null
     Start-Sleep -Seconds 2
-    if ($script:directOK) { # 这就是绑服务名的旧版原本的窗口:旧过滤器被 BFE 置为 DISABLED;预装的第二代必须还在拦。多采几次,免得只撞上网卡重绑的那一瞬
+    if ($script:directOK) { # 旧服务停止、新服务还没起来的这一段,直连必须仍被拦。多采几次,免得只撞上网卡重绑的那一瞬
       $lg = @(); for ($i = 0; $i -lt 3; $i++) { $lg += (Direct-Http); Start-Sleep -Seconds 1 }
-      Check "旧服务停止期间直连仍被拦(预装的第二代闸在顶着)" (@($lg | Where-Object { $_ -match '^[23]' }).Count -eq 0) ("http=" + ($lg -join ","))
+      Check "旧服务停止期间直连仍被拦" (@($lg | Where-Object { $_ -match '^[23]' }).Count -eq 0) ("http=" + ($lg -join ","))
     }
     & $svc install | Out-Null
     $su = Wait-Status "connected" 60

@@ -115,8 +115,7 @@ jobs:
           Get-ChildItem dist\installer
 
       # 用**真正的安装包**从 0.7.1 原地升级(不断开),后台持续绑物理网卡打直连,断言一次都没通。
-      # 另带两段测量(如实打印,见 deploy/installer-upgrade-test.ps1):绑服务名的提供者停服务后还拦不拦;
-      # 服务停着时重启 BFE(相当于开机时重新加载持久规则)闸还拦不拦 —— 后者按断言算。
+      # 另带一段测量(如实打印,见 deploy/installer-upgrade-test.ps1):绑服务名的提供者停服务后还拦不拦。
       - name: 真机验收(用安装包从 0.7.1 原地升级,全程直连一次都不能通)
         if: env.TEST_SUB_URL != ''
         shell: pwsh
@@ -128,7 +127,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit 1 }
           $new = @(Get-ChildItem dist\installer -Filter "*-windows-x64-setup.exe")
           if ($new.Count -ne 1) { Write-Host "找不到唯一的新版 x64 安装包"; Get-ChildItem dist\installer; exit 1 }
-          & .\deploy\installer-upgrade-test.ps1 -Sub $env:TEST_SUB_URL -OldSetup (Resolve-Path legacy-setup\godusevpn-0.7.1-windows-x64-setup.exe).Path -NewSetup $new[0].FullName -NewBin (Resolve-Path dist\amd64).Path -BfeRestart
+          & .\deploy\installer-upgrade-test.ps1 -Sub $env:TEST_SUB_URL -OldSetup (Resolve-Path legacy-setup\godusevpn-0.7.1-windows-x64-setup.exe).Path -NewSetup $new[0].FullName -NewBin (Resolve-Path dist\amd64).Path
           exit $LASTEXITCODE
 
       - name: Collect

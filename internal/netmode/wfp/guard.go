@@ -34,7 +34,7 @@ type baseObjects struct {
 // 固定 GUID:换进程、换版本都不变,恢复命令与卸载程序靠它找对象。
 //
 // 这是**第二代**(0.7.4 起)。第一代(…2c / …2d)在 m29 那几版(0.6.25-m29 ~ 0.7.1)被绑上了服务名
-// (见 baseProvider),而 WFP 的提供者建好就改不了,只能删了重建;删提供者得先删掉引用它的子层,
+// (为什么不绑见 baseProvider),而 WFP 的提供者建好就改不了,只能删了重建;删提供者得先删掉引用它的子层,
 // 删子层得先删光子层里的过滤器 —— 全按同一个 GUID 做,中间必然有一段没有闸,以前只能等用户下次
 // 断开时才换。换一代 GUID 就没有这个问题:建新提供者、新子层、装新过滤器、删旧过滤器放在**同一个事务**里,
 // BFE 原子地提交;旧子层与旧提供者此时已没人引用,随后再收掉(dropLegacyBase)。两代的过滤器 ourFilters 都认。
@@ -105,13 +105,19 @@ func openSession() (uintptr, error) {
 
 // baseProvider 造我们的 WFP 提供者。
 //
-// **绝对不要给它填 serviceName。** FWPM_PROVIDER0.serviceName 的语义是"这套策略只在这个
-// Windows 服务运行时有效":服务一不在 Running,BFE 就把该提供者名下的**全部**过滤器标成
-// FWPM_FILTER_FLAG_DISABLED。而本包存在的全部意义就是闸要在进程之外活着(见包注释)——
-// 服务停止、崩溃待重启、升级换文件、开机后 BFE 起来到服务被 SCM 拉起来那一段,恰恰是闸唯一
-// 有用的时刻。更要命的是服务 ACL 有意开放给已登录用户启停(internal/svc.userStartStopSDDL,
-// 托盘「退出」要用),绑上服务名等于任何普通用户一句 sc stop godusevpn 就能关掉「全局禁直连」,
-// 全程不弹 UAC。m29 的 f183df1 绑过一次,这里钉死:serviceName 必须是 nil。
+// **不给它填 serviceName。**
+//
+// FWPM_PROVIDER0.serviceName 的真实语义(微软文档原文 + 真机实测,2026-09-24):**在 BFE 启动时**,
+// 挂了服务名、而那个服务不是"自动启动"的提供者,它名下的过滤器被停用(提供者带上 FWPM_PROVIDER_FLAG_DISABLED)。
+// 服务**停止**本身不影响:CI 上装 0.7.1(挂着服务名)、连上严格全局、sc stop 之后 5 秒 / 25 秒,
+// 0 条过滤器被停用、绑物理网卡的直连全拦。用户那台 Win10 19045 在 0.7.2(不挂服务名)下带着闸真实重启过一次,
+// 重启后我们的提供者没有 DISABLED 标志;同机微软挂在 IKEEXT / PolicyAgent(非自动启动)上的提供者则带着。
+// 文档里"没挂服务名也会被停用"那半句,真机上没有复现。
+//
+// 所以绑上服务名的代价是:闸能不能跨过开机,取决于 godusevpn 服务的启动类型。管理员(或别的软件)把它改成
+// 手动 / 禁用、或者服务对象被删而闸没撤,下次开机 BFE 一起来闸就失效,而且没人会发现。不绑就没有这层依赖。
+// 0.7.2 去掉绑定时写的理由("服务一停闸就失效、普通用户 sc stop 就能关闸")是错的,已被上面的实测否定;
+// 结论(不绑)不变。m29 的 f183df1 绑过一次,这里钉住:serviceName 必须是 nil。
 func baseProvider(dd *wtFwpmDisplayData0) wtFwpmProvider0 {
 	return wtFwpmProvider0{providerKey: providerKey, displayData: *dd, flags: fwpProviderFlagPersistent}
 }
@@ -120,11 +126,10 @@ func baseProvider(dd *wtFwpmDisplayData0) wtFwpmProvider0 {
 // Disable 删完过滤器后),否则 BFE 会按"还被引用"拒绝。它们名下已经没有任何过滤器,留着不影响闸,
 // 删不掉也只是收尾没做完:返回警告,绝不能让开闸因为收拾旧账而失败,否则用户只能去关「全局禁直连」。
 //
-// 第一代提供者在 m29 那几版被绑上了服务名(服务一停,它名下全部过滤器被 BFE 置为 DISABLED)。
+// 第一代提供者在 m29 那几版被绑上了服务名(闸能不能跨过开机就取决于服务的启动类型,见 baseProvider)。
 // 0.7.2 / 0.7.3 只能等用户下次断开时才换掉;现在 Enable 在一个事务里把过滤器换到第二代名下,
-// 这里只剩收尾:换提供者这一步不再有空窗。注意这堵不住"旧服务停止 → 新服务起来"那一段(旧过滤器
-// 被 BFE 置为 DISABLED,新进程还没跑到 Enable):那一段由安装器在停旧服务之前用新版 exe 跑
-// guard arm(guardfix.Arm)提前把第二代装上来堵。
+// 这里只剩收尾,换提供者这一步没有空窗。(停旧服务不会让旧过滤器失效,实测见 baseProvider;
+// 安装器另在停旧服务之前跑 guard arm 预装第二代,是多一道保险。)
 func dropLegacyBase(s uintptr) string {
 	if err := runTransaction(s, func(s uintptr) error {
 		if err := fwpmSubLayerDeleteByKey0(s, &legacySublayerKey); err != nil && !notFound(err) {
@@ -235,8 +240,7 @@ func Enable(spec Spec) (warn string, err error) {
 			return err
 		}
 		// 两代的过滤器一起删:从 m29 那几版升上来时,旧一代(绑了服务名)的过滤器和新一代的在同一个
-		// 事务里换掉,BFE 原子提交 —— 换提供者这一步没有不设防的窗口。停旧服务到新服务起来那一段
-		// 不归这里管,见 guardfix.Arm。
+		// 事务里换掉,BFE 原子提交 —— 换提供者这一步没有不设防的窗口。
 		if err := deleteOurFilters(s); err != nil {
 			return err
 		}

@@ -1,16 +1,12 @@
 ﻿# 佛跳墙 真机验收:用**真正的安装包**从旧版原地升级(不断开),全程在后台持续绑物理网卡打直连,断言一次都没通。
-#   .\installer-upgrade-test.ps1 -Sub <订阅> -OldSetup <0.7.1 安装包> -NewSetup <新安装包> -NewBin <新版裸二进制目录> [-BfeRestart]
+#   .\installer-upgrade-test.ps1 -Sub <订阅> -OldSetup <0.7.1 安装包> -NewSetup <新安装包> -NewBin <新版裸二进制目录>
 #
-# 另带两段**测量**(把结果如实打出来,不预设结论):
-#   测量一  0.6.25-m29 ~ 0.7.1 的防火墙提供者绑着服务名。0.7.2 起的修复都建立在"服务一停,BFE 就把它名下的过滤器
-#          全部停用"这个前提上,但这个前提从没在真机上直接看过。这里装 0.7.1、连上严格全局、直接 sc stop,
-#          分两个时间点打直连,并用新版的 guard status 数一下被系统标成停用的过滤器有几条。
-#   测量二  (-BfeRestart)"电脑重启也不能漏"。微软文档(FWPM_PROVIDER0 / FWPM_FILTER0)原文:提供者**没有**挂服务名、
-#          或挂的服务不是自动启动时,它名下的过滤器**在 BFE 启动时**被停用。开机时 BFE 先起来、我们的服务后起来,
-#          中间这一段就看这条规则。这里模拟开机:停掉 BFE(连带停掉依赖它的我们的服务)再只把 BFE 启动起来,
-#          我们的服务先不启动,全程采样看直连漏不漏,并数被停用的条数。0.7.1(挂服务名、服务自动启动)与
-#          新版(0.7.2 起不挂服务名)各测一遍。BFE 的服务权限谁都没有"停止"权,管理员有"改权限"权:
-#          临时给管理员加上停止权,测完改回去(CI 跑机是一次性的)。
+# 另带一段**测量**(如实打印,不判成败):装 0.7.1(提供者挂着服务名)、连上严格全局、sc stop,5 秒与 25 秒
+# 两个时间点各打几次直连,并用新版的 guard status 数被系统标成停用的过滤器条数。2026-09-24 第一次实测:
+# 0 条被停用、直连全拦 —— "绑服务名 → 服务一停闸就失效"这个说法不成立,真实语义见 internal/netmode/wfp 的 baseProvider。
+#
+# 做不到的:模拟开机(BFE 重新加载持久规则、我们的服务还没起来)。运行中的 Windows 上 BFE 停不下来 ——
+# 它的依赖服务 mpssvc(Windows 防火墙)不接受停止控制,改了服务权限也一样。开机这一段只能靠真重启验证。
 #
 # 清理不走卸载程序:它在卸载末尾用普通 MsgBox 问"要不要删数据",/SUPPRESSMSGBOXES 压不住,静默卸载会卡在那里。
 # 直接跑服务的 uninstall(卸载程序做的也是这一步)。
@@ -18,8 +14,7 @@ param(
   [Parameter(Mandatory = $true)][string]$Sub,
   [Parameter(Mandatory = $true)][string]$OldSetup,
   [Parameter(Mandatory = $true)][string]$NewSetup,
-  [Parameter(Mandatory = $true)][string]$NewBin,
-  [switch]$BfeRestart
+  [Parameter(Mandatory = $true)][string]$NewBin
 )
 $ErrorActionPreference = "Continue"
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
@@ -114,52 +109,6 @@ function Provider-Flags() { # 我们的提供者各带哪些标志(FWPM_PROVIDER
   if ($p.Count -eq 0) { return "(没有我们的提供者)" }
   return (($p | ForEach-Object { "key=" + $_.providerKey + " serviceName=[" + $_.serviceName + "] flags=[" + ((@($_.flags.item) | Where-Object { $_ }) -join "+") + "]" }) -join ", ")
 }
-function Grant-AdminStop($name) { # 管理员缺停止权(WP)就临时加上;返回原来的 DACL,没改返回空串
-  $orig = ((& sc.exe sdshow $name) | Where-Object { $_ -match '^D:' } | Select-Object -First 1)
-  if (-not $orig) { return "" }
-  $orig = $orig.Trim()
-  $patched = [regex]::Replace($orig, '\(A;;([A-Z]+);;;BA\)', { param($m) if ($m.Groups[1].Value -match 'WP') { $m.Value } else { '(A;;' + $m.Groups[1].Value + 'WP;;;BA)' } })
-  if ($patched -eq $orig) { return "" }
-  & sc.exe sdset $name $patched | Out-Null
-  return $orig
-}
-function Running-Dependents($name, $seen) { # 递归列出正在运行的依赖服务
-  foreach ($d in @((Get-Service $name).DependentServices)) {
-    if ($d.Status -eq 'Running' -and -not $seen.Contains($d.Name)) { [void]$seen.Add($d.Name); Running-Dependents $d.Name $seen }
-  }
-}
-function Restart-Bfe() { # 停掉 BFE(连带依赖它的服务)再只启动 BFE。返回 @{ ok; log }:ok = 确实看到它停下又起来了
-  $log = @()
-  $seen = New-Object System.Collections.Generic.HashSet[string]
-  Running-Dependents "BFE" $seen
-  $log += "running-dependents=" + (@($seen) -join ",")
-  $restore = @{}
-  foreach ($n in @("BFE") + @($seen)) { $o = Grant-AdminStop $n; if ($o) { $restore[$n] = $o } }
-  $log += "granted-stop=" + (@($restore.Keys) -join ",")
-  $stopped = $false; $started = $false
-  try { Stop-Service -Name BFE -Force -ErrorAction Stop; $stopped = ((Get-Service BFE).Status -eq 'Stopped'); $log += "stop=" + (Get-Service BFE).Status } catch { $log += "stopErr=" + $_.Exception.Message }
-  Start-Sleep -Seconds 2
-  try { Start-Service -Name BFE -ErrorAction Stop; $started = ((Get-Service BFE).Status -eq 'Running'); $log += "start=" + (Get-Service BFE).Status } catch { $log += "startErr=" + $_.Exception.Message }
-  foreach ($n in @($restore.Keys)) { & sc.exe sdset $n $restore[$n] | Out-Null } # 权限改回去
-  return @{ ok = ($stopped -and $started); log = ($log -join "; ") }
-}
-function Measure-BootWindow($label) { # 模拟开机:BFE 重新起来、我们的服务还没起来。采样 + 数被停用的过滤器
-  Write-Host "== 测量二($label):BFE 重新加载持久规则、我们的服务还没起来(相当于开机那一段),闸还拦不拦" -ForegroundColor Cyan
-  Note "重启 BFE 前($label)" ((GuardProbe) + ";" + (Provider-Flags))
-  $s = Start-Sampler "bfe-$label"
-  Start-Sleep -Seconds 2
-  $b = Restart-Bfe
-  Note "重启 BFE($label)" $b.log
-  Check "BFE 确实停下又起来了($label)" $b.ok $b.log
-  $svcState = & $svc status
-  Start-Sleep -Seconds 10
-  $r = Stop-Sampler $s
-  $after = Direct-Many 4
-  Note "BFE 起来后、我们的服务=$svcState($label)" ((GuardProbe) + ";" + (Provider-Flags))
-  Note "采样($label)" ("BFE 停启期间与之后 10 秒:采样 " + $r.total + " 次,通 " + $r.open + " 次" + $(if ($r.open) { ":" + (($r.openLines | Select-Object -First 10) -join "; ") } else { "" }) + ";之后 " + ($after -join ","))
-  foreach ($n in @("mpssvc", "IKEEXT", "PolicyAgent", "iphlpsvc", "SharedAccess")) { Start-Service -Name $n -ErrorAction SilentlyContinue } # 依赖 BFE 被连带停掉的系统服务拉回来(我们的服务由调用方决定何时起)
-  return @{ ok = $b.ok; open = $r.open + (Count-Open $after); total = $r.total }
-}
 function Cleanup($tag) {
   & $cli mode rule 2>&1 | Out-Null
   & $cli disconnect 2>&1 | Out-Null
@@ -210,19 +159,13 @@ Start-Sleep -Seconds 20
 $b = Direct-Many 4
 Note "sc stop 后 25 秒" ("直连 " + ($b -join ",") + ";" + (GuardProbe))
 $leak1 = (Count-Open $a) + (Count-Open $b)
-if ($leak1 -gt 0) { Note "结论" "绑服务名的提供者在服务停止后失效(直连漏了 $leak1 次)—— 0.7.2 起的修复针对的是真问题" }
-else { Note "结论" "服务停止后直连全程被拦 —— 这台机器上没有复现「绑服务名 → 服务一停闸就失效」" }
+if ($leak1 -gt 0) { Note "结论" ("绑服务名的提供者在服务停止后失效(直连漏了 " + $leak1 + " 次)—— 和 2026-09-24 的实测不一致,要查") }
+else { Note "结论" "服务停止后直连全程被拦、0 条被停用 —— 与 2026-09-24 的实测一致:停服务不会让绑服务名的提供者失效" }
 & sc.exe start godusevpn | Out-Null
 $st = Wait-Status "connected" 60
 Check "0.7.1 服务重新起来并连上" ($st -match "状态:\s+connected") (OneLine $st)
-if ($BfeRestart) {
-  $m1 = Measure-BootWindow "0.7.1 挂服务名"
-  & sc.exe start godusevpn | Out-Null
-  $st = Wait-Status "connected" 60
-  Check "0.7.1 服务在 BFE 测量后重新起来并连上" ($st -match "状态:\s+connected") (OneLine $st)
-}
 
-Write-Host "== 2. 0.7.1 → 新版原地升级(安装包在停旧服务前预装第二代闸),直连一次都不能通" -ForegroundColor Cyan
+Write-Host "== 2. 0.7.1 → 新版原地升级(不断开),直连一次都不能通" -ForegroundColor Cyan
 $s = Start-Sampler "upgrade"
 Start-Sleep -Seconds 3
 $rc = Run-Setup $NewSetup "new"
@@ -243,14 +186,6 @@ Start-Sleep -Seconds 3
 $d = Direct-Http
 Check "升级后停服务闸仍在拦" ($d -and $d -notmatch '^[23]') ("http=" + $d + ";" + (GuardProbe))
 
-if ($BfeRestart) {
-  & $svc start | Out-Null
-  Wait-Status "connected" 60 | Out-Null
-  $m2 = Measure-BootWindow "新版不挂服务名"
-  if ($m1 -and $m1.ok -and $m2.ok) {
-    Note "对照结论" ("开机那一段:0.7.1(挂服务名)通 " + $m1.open + " 次 / 采样 " + $m1.total + ";新版(不挂服务名)通 " + $m2.open + " 次 / 采样 " + $m2.total)
-  }
-}
 & $svc start | Out-Null
 $st = Wait-Status "connected" 60
 Check "新版服务重新起来并连上" ($st -match "状态:\s+connected") (OneLine $st)

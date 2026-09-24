@@ -48,14 +48,13 @@ func TestGuardCoversRequiresEveryLayerAndFlag(t *testing.T) {
 	}
 }
 
-// 提供者绝不能绑 Windows 服务名。FWPM_PROVIDER0.serviceName 一旦非空,服务不在 Running 时
-// BFE 就把该提供者名下的全部过滤器标成 DISABLED —— 持久闸不再持久,而且服务 ACL 是有意开放给
-// 已登录用户启停的(托盘「退出」要用),于是任何普通用户一句 sc stop godusevpn 就能关掉
-// 「全局禁直连」,不弹 UAC。m29 的 f183df1 绑过一次,这条钉住。
+// 提供者不绑 Windows 服务名。绑了的话,开机时 BFE 会看那个服务是不是自动启动,不是就把提供者名下的
+// 过滤器全部停用 —— 闸能不能跨过重启就取决于服务的启动类型(被改成手动 / 禁用、服务对象被删都会让闸
+// 下次开机失效)。停服务本身不影响,已实测(见 baseProvider 的注释)。m29 的 f183df1 绑过一次,这条钉住。
 func TestBaseProviderIsNotBoundToAService(t *testing.T) {
 	p := baseProvider(&wtFwpmDisplayData0{})
 	if p.serviceName != nil {
-		t.Fatal("WFP 提供者绑上了服务名:服务一停,它名下的过滤器会被 BFE 置为 DISABLED,闸等于没了")
+		t.Fatal("WFP 提供者绑上了服务名:闸能不能跨过开机就取决于服务的启动类型,服务一旦不是自动启动,下次开机 BFE 就把它名下的过滤器全部停用")
 	}
 	if p.flags&fwpProviderFlagPersistent == 0 {
 		t.Fatal("WFP 提供者不是持久的:进程退出 / 崩溃 / 重启之后闸就没了")

@@ -328,7 +328,7 @@ func (d *Daemon) reconcileGuard() {
 		if s.NoDirect && s.Mode == settings.ModeGlobal {
 			// 设置说就该有闸、闸也确实在:按当前设置原地重装(事务内替换,不放宽任何保护)。
 			// 不重装的话,从 0.6.25-m29 ~ 0.7.1 升上来的机器闸会一直挂在绑了服务名的第一代提供者下,
-			// 直到用户手动点一次连接 —— 这段时间任何本机账户 sc stop 一下闸就失效。
+			// 直到用户手动点一次连接 —— 这段时间闸能不能跨过开机取决于服务的启动类型(见 wfp.baseProvider)。
 			d.applyGuard("连接状态不可读,闸一直在,已按当前设置重装")
 			return
 		}
