@@ -55,15 +55,22 @@ function Direct-Http() { # 绑物理网卡发一个明文请求,返回状态码;
   try { return (& curl.exe -s --interface $physIp -m 6 -o NUL -w "%{http_code}" "http://1.1.1.1/cdn-cgi/trace") } catch { return "000" }
 }
 function Get-WfpProviders() { # BFE 状态里名叫 godusevpn 的提供者(两代都叫这个名);整份状态文本留在 $script:wfpStateText 给 GUID 检查用
+  # 返回:$null = 读不到 / 解析不了;空数组 = 读到了但没有我们的提供者。空数组必须用 ,@() 返回,
+  # 否则 PowerShell 把空数组展开成"什么都没输出",调用方拿到的是 $null,"没有提供者"就和"读不到"分不清了。
   $stateXml = Join-Path $env:TEMP "godusevpn-wfpstate.xml"
   Remove-Item $stateXml -ErrorAction SilentlyContinue
   & netsh wfp show state file="$stateXml" | Out-Null
   $script:wfpStateText = ""
   if (-not (Test-Path $stateXml)) { return $null }
-  $script:wfpStateText = [System.IO.File]::ReadAllText($stateXml).ToLower()
-  $wfp = New-Object System.Xml.XmlDocument # [xml] 转换多行数组会报"已有 DocumentElement",用 Load 读整个文件
-  $wfp.Load($stateXml)
-  return @($wfp.SelectNodes("//providers/item") | Where-Object { $_.displayData.name -eq "godusevpn" })
+  $raw = [System.IO.File]::ReadAllText($stateXml)
+  $script:wfpStateText = $raw.ToLower()
+  # netsh 写出来的不是一份规范的 XML:文件里有不止一个根元素,XmlDocument.Load 会抛"multiple root elements"。
+  # 去掉 <?xml ?> 声明后整份包进一个自造的根里再解析,几个根都成了子元素,XPath //providers/item 照样能找到。
+  $body = [regex]::Replace($raw, '<\?xml[^>]*\?>', '')
+  $wfp = New-Object System.Xml.XmlDocument
+  try { $wfp.LoadXml("<godusevpn-wrap>" + $body + "</godusevpn-wrap>") } catch { Write-Host "  (WFP 状态 XML 解析失败: $($_.Exception.Message))"; return $null }
+  $found = @($wfp.SelectNodes("//providers/item") | Where-Object { $_.displayData.name -eq "godusevpn" })
+  return ,$found
 }
 function Providers-Detail($p) {
   if ($null -eq $p) { return "(读不到 WFP 状态)" }
@@ -226,7 +233,10 @@ if ($LegacyBin -and -not $KeepInstalled) {
     # 原地升级,照安装器的流程:旧版 stop → 新版 install(沿用服务对象、改可执行文件路径、启动),全程不点断开
     & $lsvc stop | Out-Null
     Start-Sleep -Seconds 2
-    if ($script:directOK) { $lg = Direct-Http; Write-Host "  (旧版停服务期间绑物理网卡直连 http=$lg:绑服务名的旧版固有的窗口,升级本身消不掉;新版装好后不再有)" }
+    if ($script:directOK) { # 只记录不断言:这是绑服务名的旧版固有的窗口,升级本身消不掉;新版装好后不再有。多采几次,免得只撞上网卡重绑的那一瞬
+      $lg = @(); for ($i = 0; $i -lt 3; $i++) { $lg += (Direct-Http); Start-Sleep -Seconds 1 }
+      Write-Host ("  (旧版停服务期间绑物理网卡直连 http=" + ($lg -join ",") + ":绑服务名的旧版固有的窗口,升级本身消不掉;新版装好后不再有)")
+    }
     & $svc install | Out-Null
     $su = Wait-Status "connected" 60
     Check "新版接管后自动恢复连接" ($su -match "状态:\s+connected") ($su.Trim() -replace "`r?`n", " | ")
