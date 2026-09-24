@@ -280,6 +280,8 @@ func (d *Daemon) appliedGuardSpec() netmode.GuardSpec {
 // applyGuard 装闸并把结果记进状态与日志;持久闸或开机闸任一失败都保持未就绪，
 // 由 prepare/start 的隐私前置检查拒绝启动数据面。
 func (d *Daemon) applyGuard(okMsg string) {
+	// 装闸之前先把只在闸没开时才做的直连动作取消掉:闸放行本服务,装好以后它们再发出的都是隧道外的包
+	d.cancelDirect()
 	spec := d.guardSpec()
 	d.mu.Lock()
 	previousOn, previousSpec := d.guardOn, d.guardApplied

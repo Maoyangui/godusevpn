@@ -19,6 +19,9 @@ import (
 )
 
 type Input struct {
+	// SelfProcess 运行内核的那个进程的名字(桌面:godusevpn-svc.exe / godusevpn)。全局禁直连下"节点服务器直连"
+	// 那几条规则只放它自己(见下面节点规则的注释);空 = 不知道,按老样子不限定进程。Android 用的是本应用的包名。
+	SelfProcess string
 	Profile     *profile.Profile
 	Settings    settings.Settings
 	DataDir     string // cache.db 放这里
@@ -246,7 +249,8 @@ func buildConfig(in Input, rep *Report) ([]byte, error) {
 			// 网关模式(Linux 软路由):经本机转发的局域网流量由 sing-box 用 nftables 直接导入(比策略路由快),需要内核带 nftables
 			tun["auto_redirect"] = true
 		}
-		if android && len(s.BypassApps) > 0 {
+		// 全局禁直连下不排除:排除出去的应用整个绕过 VPN,就是隧道外的流量(见下面路由规则处的说明)
+		if android && len(s.BypassApps) > 0 && !(s.NoDirect && s.Mode == settings.ModeGlobal) {
 			tun["exclude_package"] = s.BypassApps // 这些应用整个不进 VPN(VpnService.addDisallowedApplication)
 		}
 		inbounds = append(inbounds, tun)
@@ -268,7 +272,11 @@ func buildConfig(in Input, rep *Report) ([]byte, error) {
 		obj("protocol", "dns", "action", "hijack-dns"),
 		obj("port", 53, "action", "hijack-dns"), // 不走系统解析、自己发 53 的程序也收进来,不泄漏
 	}
-	if len(s.BypassApps) > 0 {
+	// 全局禁直连:隧道以外只剩节点连接本身、回环、(局域网直通开着时的)局域网 —— 按进程 / 按应用直连、网关模式
+	// 里设成"直连"的设备,这时都不生效(照样走隧道)。它们是给规则模式配的;在严格全局下直连出去,闸又放行本服务,
+	// 就是隧道外的流量。
+	sealed := s.NoDirect && s.Mode == settings.ModeGlobal
+	if len(s.BypassApps) > 0 && !sealed {
 		rules = append(rules, obj(procKey, s.BypassApps, "outbound", "direct")) // 指定进程 / 应用直连,放在最前
 	}
 	// 局域网设备策略(网关模式):按来源 IP 强制直连 / 拒绝 / 代理,放在模式分支之前,任何模式下都成立
@@ -281,6 +289,9 @@ func buildConfig(in Input, rep *Report) ([]byte, error) {
 			byMode[d.Mode] = append(byMode[d.Mode], d.IP+cidrSuffix(d.IP))
 		}
 		for _, mode := range []string{"reject", "direct", "proxy"} {
+			if mode == "direct" && sealed {
+				continue // 严格全局下设备的"直连"不生效(见上)
+			}
 			if ips := byMode[mode]; len(ips) > 0 {
 				if mode == "reject" {
 					rules = append(rules, obj("source_ip_cidr", ips, "action", "reject"))
@@ -307,18 +318,34 @@ func buildConfig(in Input, rep *Report) ([]byte, error) {
 	// 真机上实测过:hysteria2(UDP)那些没事,anytls(TCP)那些每次测速都在绕圈。
 	// 只放行"这台服务器上的这些端口",不是整台服务器:面板、订阅地址、落地页常和节点同一个 IP,
 	// 按整个 IP 放行会把它们也变成直连,用户在全局模式下会莫名其妙地把面板暴露给本地网络。
+	//
+	// 全局禁直连下这几条只放内核自己(SelfProcess):规则本身只看目的地址和端口,不限定是谁发的 —— 用户去往和节点
+	// 同域名 / 同地址、同端口的连接也会命中。CDN 节点很常见(server 写优选域名 www.visa.com、或 Cloudflare 的共享
+	// 地址,端口 443),浏览器一打开同一个站点、或恰好解析到同一地址的别的站点,就从本服务直连出去了,闸放行本服务。
+	// 限定成内核自己的进程,绕圈照样避开,用户的连接照常走隧道。只在严格全局下这么做:别的模式本来就有直连,
+	// 按进程查找对每条连接都有开销(路由器上尤其)。
+	var self map[string]any
+	if sealed && in.SelfProcess != "" {
+		self = map[string]any{procKey: []string{in.SelfProcess}}
+	}
+	withSelf := func(r map[string]any) map[string]any {
+		for k, v := range self {
+			r[k] = v
+		}
+		return r
+	}
 	for _, n := range nodeAddrs(in.Profile) {
 		r := obj("port", n.Ports, "outbound", "direct")
 		if n.IsIP {
 			r["ip_cidr"] = []string{n.Host}
-			rules = append(rules, r)
+			rules = append(rules, withSelf(r))
 			continue
 		}
 		r["domain"] = []string{n.Host}
-		rules = append(rules, r)
+		rules = append(rules, withSelf(r))
 		// 一条规则里的字段是"与"的关系,域名和地址盖不到一条里,只能再来一条
 		if cidrs := hostCIDRs(in.NodeIPs[n.Host]); len(cidrs) > 0 {
-			rules = append(rules, obj("ip_cidr", cidrs, "port", n.Ports, "outbound", "direct"))
+			rules = append(rules, withSelf(obj("ip_cidr", cidrs, "port", n.Ports, "outbound", "direct")))
 		}
 	}
 	dr := s.DefaultRules

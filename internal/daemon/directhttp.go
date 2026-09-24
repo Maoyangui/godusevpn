@@ -144,3 +144,33 @@ func (d *Daemon) cancelOnGuard(ctx context.Context, cancel context.CancelFunc) (
 	var once sync.Once
 	return func() { once.Do(func() { close(done) }) }
 }
+
+// holdDirect 登记一个只在闸没开时才做的直连动作的取消函数,返回注销函数。
+func (d *Daemon) holdDirect(cancel context.CancelFunc) (release func()) {
+	d.mu.Lock()
+	if d.directHeld == nil {
+		d.directHeld = map[uint64]context.CancelFunc{}
+	}
+	d.directSeq++
+	id := d.directSeq
+	d.directHeld[id] = cancel
+	d.mu.Unlock()
+	return func() {
+		d.mu.Lock()
+		delete(d.directHeld, id)
+		d.mu.Unlock()
+	}
+}
+
+// cancelDirect 取消所有登记着的直连动作(装闸之前调)。
+func (d *Daemon) cancelDirect() {
+	d.mu.Lock()
+	held := make([]context.CancelFunc, 0, len(d.directHeld))
+	for _, c := range d.directHeld {
+		held = append(held, c)
+	}
+	d.mu.Unlock()
+	for _, c := range held {
+		c()
+	}
+}

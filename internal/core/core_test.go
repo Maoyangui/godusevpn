@@ -27,6 +27,7 @@ func TestBuiltConfigPassesDryRun(t *testing.T) {
 		// 全局禁直连 + 远程 DNS 是域名:它的域名经代理的 remote-boot 解析(builder),内核要认这份配置
 		s := settings.Default()
 		s.Mode, s.NoDirect, s.RemoteDNS, s.LocalDNS = settings.ModeGlobal, true, "dns.google", "system"
+		s.BypassApps = []string{"steam.exe"} // 严格全局下不生效(builder 会摘掉)
 		return s
 	}(), func() settings.Settings {
 		s := settings.Default()
@@ -47,7 +48,7 @@ func TestBuiltConfigPassesDryRun(t *testing.T) {
 		s.Selected = "hk"
 		return s
 	}()} {
-		raw, err := builder.Build(builder.Input{Profile: p, Settings: s, DataDir: t.TempDir(), ClashSecret: "x"})
+		raw, err := builder.Build(builder.Input{Profile: p, Settings: s, DataDir: t.TempDir(), ClashSecret: "x", SelfProcess: "godusevpn-svc.exe"}) // 严格全局那组的节点规则带进程限定,内核要认
 		if err != nil {
 			t.Fatal(err)
 		}

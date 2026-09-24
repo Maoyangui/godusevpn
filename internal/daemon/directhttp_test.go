@@ -158,3 +158,23 @@ func TestCancelOnGuard(t *testing.T) {
 		t.Fatal("闸开了 2 秒还没取消")
 	}
 }
+
+// 装闸之前(applyGuard 开头调 cancelDirect)要同步取消登记着的直连动作;注销过的不再被取消。
+func TestCancelDirectCancelsHeld(t *testing.T) {
+	d := newPolicyTestDaemon(t)
+	ctxA, cancelA := context.WithCancel(context.Background())
+	defer cancelA()
+	ctxB, cancelB := context.WithCancel(context.Background())
+	defer cancelB()
+	releaseA := d.holdDirect(cancelA)
+	defer releaseA()
+	releaseB := d.holdDirect(cancelB)
+	releaseB() // 已经做完的
+	d.cancelDirect()
+	if ctxA.Err() == nil {
+		t.Fatal("登记着的直连动作没被取消")
+	}
+	if ctxB.Err() != nil {
+		t.Fatal("已注销的不该再被取消")
+	}
+}

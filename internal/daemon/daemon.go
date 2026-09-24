@@ -112,7 +112,10 @@ type Daemon struct {
 
 	missingSets []builder.MissingRuleSet // 上一次生成配置时本地没有、因此摘掉了的规则集(界面要提示,连上之后要去补)
 	fillingSets bool                     // 补规则集的活正在跑,别叠第二份
-	tunnel      ipc.TunnelView           // 会话看护的记录(见 session_policy.go)
+	// directHeld 只在闸没开时才做的直连动作(未连接时的测速)登记的取消函数;applyGuard 装闸之前先全部取消
+	directHeld map[uint64]context.CancelFunc
+	directSeq  uint64
+	tunnel     ipc.TunnelView // 会话看护的记录(见 session_policy.go)
 }
 
 type persisted struct {
@@ -594,7 +597,7 @@ func (d *Daemon) prepare(ctx context.Context) ([]byte, error) {
 	}
 	clashPort := d.pickClashPort(s.ClashPort)
 	cfg, rep, err := builder.BuildEx(builder.Input{Profile: p, Settings: s, DataDir: paths.DataDir(), ClashSecret: d.secret, RuleSetDir: paths.RuleSets(),
-		ClashPort: clashPort, NodeIPs: resolveNodeHosts(ctx, p, d.bootResolver(s))})
+		ClashPort: clashPort, NodeIPs: resolveNodeHosts(ctx, p, d.bootResolver(s)), SelfProcess: selfProcess()})
 	if err != nil {
 		return nil, state.Errf(state.CodeConfig, "生成配置: %v", err)
 	}
@@ -1706,10 +1709,14 @@ func (d *Daemon) registerHandlers() {
 			// 未连接:直连量到节点服务器的往返。但「全局禁直连」的闸还开着的时候不做 —— 那说明用户想连着、
 			// 内核只是暂时没起来(在重启 / 在退避),这时从本机直接发 DNS 查询、ICMP、TCP 握手出去,
 			// 正是闸要挡的那种东西;闸只按进程放行本服务,拦不住自己。等隧道起来经出站测,或者用户断开后再测。
+			// 先登记、再判闸:装闸前(applyGuard 开头)会同步取消登记过的,顺序反过来就有一个空当
+			release := d.holdDirect(cancel)
+			defer release()
 			if d.guardArmed() {
 				return nil, errors.New("全局禁直连的闸还开着、隧道还没起来:这时候不做直连测速(会从本机直接发探测包)。等连上后再测,或先断开连接")
 			}
-			// 测速途中用户点了连接、闸开了:剩下的探测一律停下 —— 它们都从本机直连出去(系统解析、ICMP、TCP、临时实例)
+			// 测速途中用户点了连接:装闸前就被取消(holdDirect),剩下的探测一律不再发 —— 它们都从本机直连出去
+			// (系统解析、ICMP、TCP、临时实例)。cancelOnGuard 再兜一层。
 			stop := d.cancelOnGuard(ctx, cancel)
 			res = probeDirect(ctx, p, set, d.logf)
 			stop()
