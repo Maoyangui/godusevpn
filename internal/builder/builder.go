@@ -53,8 +53,9 @@ const (
 	fakeIP6       = "fc00::/18"
 	ruleSetBase   = "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/"
 	ruleSetIPBase = "https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/"
-	// sealedBootstrapDoH 全局禁直连下「本地 DNS」若被设成 system,给节点域名解析用的加密替身(按地址连,不用再解析它自己)。
-	sealedBootstrapDoH = "223.5.5.5"
+	// SealedBootstrapDoH 全局禁直连下「本地 DNS」若被设成 system,给节点域名解析用的加密替身(按地址连,不用再解析它自己)。
+	// 守护进程直连拉订阅时同样用它(见 daemon.directHTTP)。
+	SealedBootstrapDoH = "223.5.5.5"
 )
 
 // ModeName 设置里的模式 → 内核 Clash API 里的模式名。
@@ -160,7 +161,7 @@ func buildConfig(in Input, rep *Report) ([]byte, error) {
 	// 全局禁直连开着时这一步也不能走明文 53:换成按地址连的加密公共 DoH,和下面 localDNS 的替身是同一台。
 	systemDNS := obj("type", "local", "tag", "system")
 	if s.NoDirect && s.Mode == settings.ModeGlobal {
-		systemDNS = obj("type", "https", "tag", "system", "server", sealedBootstrapDoH)
+		systemDNS = obj("type", "https", "tag", "system", "server", SealedBootstrapDoH)
 	}
 	servers := []any{systemDNS}
 	remote := obj("type", "https", "tag", "remote", "server", s.RemoteDNS, "detour", "proxy")
@@ -173,7 +174,7 @@ func buildConfig(in Input, rep *Report) ([]byte, error) {
 	// 换成加密的公共 DoH(按地址连,不再需要任何别的解析)。规则 / 直连模式不改,那本来就不承诺不直连。
 	localDNS := s.LocalDNS
 	if localDNS == "system" && s.NoDirect && s.Mode == settings.ModeGlobal {
-		localDNS = sealedBootstrapDoH
+		localDNS = SealedBootstrapDoH
 	}
 	if localDNS == "system" {
 		servers = append(servers, obj("type", "local", "tag", "local"))

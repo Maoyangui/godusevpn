@@ -244,7 +244,10 @@ func printPanel(s settings.Settings, pw string) {
 		for _, ip := range locals {
 			fmt.Printf("  http://%s:%s/   (局域网 / 内网)\n", ip, port)
 		}
-		if pub := publicIPv4(); pub != "" && !contains(locals, pub) {
+		// 闸在的时候不去问公网回显服务:root 被闸放行,这一问就是从隧道外直连出去(升级 / 重装时闸通常还在)
+		if n, _ := netmode.GuardStatus(); n > 0 {
+			fmt.Println("  (全局禁直连的闸开着:不去查公网地址)")
+		} else if pub := publicIPv4(); pub != "" && !contains(locals, pub) {
 			fmt.Printf("  http://%s:%s/   (公网;云主机要在安全组 / 防火墙放行 TCP %s)\n", pub, port, port)
 		}
 		fmt.Printf("  http://127.0.0.1:%s/   (本机)\n", port)

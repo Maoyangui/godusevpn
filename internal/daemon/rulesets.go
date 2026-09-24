@@ -38,8 +38,8 @@ func (d *Daemon) MissingRuleSets() []builder.MissingRuleSet {
 	return append([]builder.MissingRuleSet(nil), d.missingSets...)
 }
 
-// fillMissingRuleSets 连上之后把缺的规则集下回来。走的是守护进程自己的 HTTP 客户端 ——
-// 此刻隧道已经通了,它的流量也走隧道,所以拿得到 GitHub。
+// fillMissingRuleSets 连上之后把缺的规则集下回来。客户端见 SelfHTTP:全局禁直连的闸开着时经代理出站 ——
+// 只开混合端口(TUN 关)时服务自己的连接不进隧道,直连就是隧道外流量;闸没开照常。
 // 全下完也不重启内核:那会让用户刚连上就断一下。下次连接自然就带上了。
 func (d *Daemon) fillMissingRuleSets() {
 	d.mu.Lock()
@@ -68,9 +68,13 @@ func (d *Daemon) fillMissingRuleSets() {
 		if _, found := ruleset.Find(root, m.Tag); found {
 			continue // 别的路径已经补上了
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-		err := ruleset.Fetch(ctx, d.directHTTP(), root, m.Tag, m.URL)
-		cancel()
+		// 闸开着时经代理出站(只开混合端口时服务自己的连接不进隧道,直连就是隧道外流量);闸没开照常
+		client, err := d.SelfHTTP(60 * time.Second)
+		if err == nil {
+			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+			err = ruleset.Fetch(ctx, client, root, m.Tag, m.URL)
+			cancel()
+		}
 		if err != nil {
 			d.logf("规则集 %s 补下载失败(下次连接时再试): %v", m.Tag, err)
 			continue

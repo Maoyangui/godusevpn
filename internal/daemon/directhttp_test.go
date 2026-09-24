@@ -2,58 +2,94 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"net/http"
+	"os"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/Maoyangui/godusevpn/internal/builder"
 	"github.com/Maoyangui/godusevpn/internal/settings"
 )
 
-// 禁直连下,服务自己直连拉订阅时的域名解析必须走 DoH(从本服务进程发出),不能交给系统解析器:
-// Windows 上系统解析由 svchost 发包,闸不放行它(被"拦 DNS"挡下);放行时又是明文发给路由器。
-func TestDirectHTTPUsesDoHWhenSealed(t *testing.T) {
+// 闸开着时,服务自己直连拉订阅的域名解析必须走 DoH(从本服务进程发出),不能交给系统解析器:
+// Windows 上系统解析由 svchost 发包,闸不放行它(被"拦 DNS"挡下);Linux / macOS 上守护进程是 root,闸放行它,
+// 明文查询会直接出去。闸没开时行为不变。
+func TestDirectHTTPUsesDoHWhenGuardArmed(t *testing.T) {
+	old := sealedDoH
+	sealedDoH = "127.0.0.1" // 替身也换成连不上的地址:报错里要能看出走的是 DoH,而不是系统解析
+	t.Cleanup(func() { sealedDoH = old })
+
 	d := newPolicyTestDaemon(t)
 	d.http = &http.Client{Timeout: 30 * time.Second}
-
 	d.settings.NoDirect, d.settings.Mode = true, settings.ModeGlobal
-	d.settings.LocalDNS = "127.0.0.1" // DoH 连不上:报错里要能看出走的是 DoH,而不是系统解析
-	c := d.directHTTP()
-	if c == d.http {
-		t.Fatal("禁直连下还在用系统解析的客户端")
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, "https://sub.example.invalid/x", nil)
-	_, err := c.Do(req)
-	if err == nil || !strings.Contains(err.Error(), "经 DoH 解析 sub.example.invalid") {
-		t.Fatalf("应当经 DoH 解析(并因为 127.0.0.1 上没有 DoH 而失败),得到 %v", err)
-	}
 
-	d.settings.LocalDNS = "system"
 	if d.directHTTP() != d.http {
-		t.Fatal("「本地 DNS」是 system 时没有加密解析可用,应当照旧")
+		t.Fatal("闸没开时行为不该变")
 	}
-	d.settings.LocalDNS = "127.0.0.1"
-	d.settings.Mode = settings.ModeRule
-	if d.directHTTP() != d.http {
-		t.Fatal("不是全局模式时行为不该变")
-	}
-	d.settings.Mode, d.settings.NoDirect = settings.ModeGlobal, false
-	if d.directHTTP() != d.http {
-		t.Fatal("禁直连关着时行为不该变")
+	d.guardOn = true
+	for _, local := range []string{"127.0.0.1", "system", "dns.example.invalid"} {
+		d.settings.LocalDNS = local
+		c := d.directHTTP()
+		if c == d.http {
+			t.Fatalf("「本地 DNS」=%s:闸开着还在用系统解析的客户端", local)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, "https://sub.example.invalid/x", nil)
+		_, err := c.Do(req)
+		cancel()
+		if err == nil || !strings.Contains(err.Error(), "经 DoH 解析 sub.example.invalid") {
+			t.Fatalf("「本地 DNS」=%s:应当经 DoH 解析(并因为 127.0.0.1 上没有 DoH 而失败),得到 %v", local, err)
+		}
 	}
 }
 
-// 接线:内核没跑时拉订阅要用 directHTTP(禁直连下经 DoH 解析)。
+// 替身和生成配置时用的是同一台。
+func TestSealedDoHMatchesBuilder(t *testing.T) {
+	if sealedDoH != builder.SealedBootstrapDoH {
+		t.Fatalf("sealedDoH=%s,生成配置用的是 %s", sealedDoH, builder.SealedBootstrapDoH)
+	}
+}
+
+// 接线:内核没跑时拉订阅要用 directHTTP。
 func TestFetchProfileWithoutCoreUsesDirectHTTP(t *testing.T) {
 	d := newPolicyTestDaemon(t)
 	d.http = &http.Client{Timeout: 30 * time.Second}
 	d.settings.NoDirect, d.settings.Mode, d.settings.LocalDNS = true, settings.ModeGlobal, "127.0.0.1"
+	d.guardOn = true
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	_, err := d.fetchProfile(ctx, "https://sub.example.invalid/x")
 	if err == nil || !strings.Contains(err.Error(), "经 DoH 解析") {
 		t.Fatalf("内核没跑时拉订阅应当经 DoH 解析,得到 %v", err)
+	}
+}
+
+// 服务自己访问外网(更新检查、下载安装包、补规则集):闸开着而内核没跑时不许从本机直连出去;闸没开照常。
+// 闸开着且内核在跑时经代理出站(那一支要真起内核,由真机验收覆盖)。
+func TestSelfHTTPRefusesDirectWhenGuardArmed(t *testing.T) {
+	d := newPolicyTestDaemon(t)
+	if c, err := d.SelfHTTP(time.Second); err != nil || c == nil {
+		t.Fatalf("闸没开时应当照常给客户端:%v", err)
+	}
+	d.guardOn = true
+	if c, err := d.SelfHTTP(time.Second); !errors.Is(err, errSealed) || c != nil {
+		t.Fatalf("闸开着、内核没跑时不该给直连客户端:c=%v err=%v", c, err)
+	}
+}
+
+// 接线:补规则集走 SelfHTTP —— 闸开着、内核没跑时报"不从本机直连出去",而不是去直连。
+func TestFillMissingRuleSetsUsesSelfHTTP(t *testing.T) {
+	d := newPolicyTestDaemon(t)
+	d.guardOn = true
+	d.missingSets = []builder.MissingRuleSet{{Tag: "geosite-zz-test", URL: "https://rules.example.invalid/zz.srs"}}
+	d.fillMissingRuleSets() // 里面先等 3 秒
+	b, err := os.ReadFile(d.log.Path())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), "geosite-zz-test") || !strings.Contains(string(b), errSealed.Error()) {
+		t.Fatalf("补规则集应当被闸挡住、不直连,日志:\n%s", b)
 	}
 }

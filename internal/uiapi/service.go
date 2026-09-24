@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -29,6 +30,20 @@ const testURL = "http://www.gstatic.com/generate_204"
 type Backend interface {
 	Dispatch(method string, params json.RawMessage) (any, error)
 	Logf(format string, a ...any)
+}
+
+// selfHTTP 后端要是给得出"服务自己访问外网"的客户端,更新检查与下载安装包就用它:Linux / macOS 的守护进程以 root
+// 跑,全局禁直连的闸按 root 放行,默认客户端直连出去就是隧道外流量(见 daemon.SelfHTTP)。
+type selfHTTP interface {
+	SelfHTTP(timeout time.Duration) (*http.Client, error)
+}
+
+// httpClient 访问外网用的客户端;nil 表示用各函数自己的默认值(后端没有 SelfHTTP 时)。
+func (s *Service) httpClient(timeout time.Duration) (*http.Client, error) {
+	if h, ok := s.b.(selfHTTP); ok {
+		return h.SelfHTTP(timeout)
+	}
+	return nil, nil
 }
 
 // Options 各平台不同的那几件事。
@@ -607,7 +622,11 @@ func (s *Service) pokeUpdate(force bool) {
 func (s *Service) checkUpdate(manual bool) (*update.Release, error) {
 	cctx, cancel := context.WithTimeout(s.ctx, 30*time.Second)
 	defer cancel()
-	rel, err := update.Check(cctx, buildinfo.Version, true, nil)
+	client, err := s.httpClient(20 * time.Second)
+	if err != nil {
+		return nil, err
+	}
+	rel, err := update.Check(cctx, buildinfo.Version, true, client)
 	if err != nil {
 		return nil, err
 	}
@@ -633,7 +652,11 @@ func (s *Service) applyUpdate(ctx context.Context) error {
 	defer func() { s.mu.Lock(); s.updating = false; s.mu.Unlock() }()
 	dir := filepath.Join(os.TempDir(), "godusevpn-update")
 	_ = os.RemoveAll(dir)
-	path, err := update.Download(ctx, rel, dir, nil, func(done, total int64) {
+	client, err := s.httpClient(30 * time.Minute)
+	if err != nil {
+		return err
+	}
+	path, err := update.Download(ctx, rel, dir, client, func(done, total int64) {
 		s.Broadcast("update-progress", map[string]int64{"done": done, "total": total})
 	})
 	if err != nil {
