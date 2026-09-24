@@ -63,12 +63,32 @@ $script:crashMark = '^(panic: |fatal error:|Exception 0x|goroutine \d+ \[|runtim
 function Crash-Lines() { $t = New-CrashText; return ,@($t | Where-Object { $_ -match $script:crashMark }) }
 function Stderr-Other() { $t = New-CrashText; return ,@($t | Where-Object { $_ -notmatch $script:crashMark }) }
 # 失败时的现场:直接读日志文件(服务可能已经卸掉或崩了,不能再靠命令行去问服务),再列服务管理器事件
+# crash.log 里每处崩溃标志("Exception 0x…"、"fatal error:"、"panic: ")往后 120 行:出事的协程和它的 Go 调用栈
+# 在最前面,后面跟着上千行别的协程 —— 只看文件末尾会把它们截掉(v0.7.5 那次就只剩别的协程)。
+function Crash-Heads($p) {
+  $all = @(Get-Content $p -Encoding UTF8)
+  $hits = @()
+  for ($i = 0; $i -lt $all.Count; $i++) { if ($all[$i] -match '^(Exception 0x|fatal error:|panic: )') { $hits += $i } }
+  if ($hits.Count -eq 0) { $all | Select-Object -Last 60; return }
+  foreach ($h in @($hits | Select-Object -Last 3)) {
+    $e = [Math]::Min($all.Count - 1, $h + 119)
+    Write-Host ("---- 第 {0} 行起 ----" -f ($h + 1)) -ForegroundColor Cyan
+    $all[$h..$e]
+  }
+}
 function Dump-Evidence() {
-  foreach ($n in @(@("service.log", 300), @("core.log", 80), @("crash.log", 200))) {
+  foreach ($n in @(@("service.log", 300), @("core.log", 80))) {
     $p = Join-Path $script:logDir $n[0]
     if (Test-Path $p) {
       Write-Host ("== {0}(最近 {1} 行)" -f $n[0], $n[1]) -ForegroundColor Cyan
       Get-Content $p -Tail $n[1] -Encoding UTF8
+    }
+  }
+  foreach ($n in @("crash.log.1", "crash.log")) {
+    $p = Join-Path $script:logDir $n
+    if ((Test-Path $p) -and ((Get-Item $p).LastWriteTime -ge $script:t0)) {
+      Write-Host ("== {0}(这次验收期间写过;崩溃标志往后的部分)" -f $n) -ForegroundColor Cyan
+      Crash-Heads $p
     }
   }
   Write-Host "== 服务管理器事件(本次验收期间)" -ForegroundColor Cyan

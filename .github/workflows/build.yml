@@ -108,6 +108,18 @@ jobs:
           & .\deploy\vps-test.ps1 -Sub $env:TEST_SUB_URL -Bin (Resolve-Path dist\amd64).Path -LegacyBin (Resolve-Path legacy\bin).Path
           exit $LASTEXITCODE
 
+      # 严格全局下反复"停服务 → 起服务 → 自动重连":v0.7.5 的真机验收里两次抓到服务刚连上就崩(DLL 里写空指针的
+      # 访问违例),普通验收一次运行只重启一两回,难得撞上。这里连着重启,撞上就失败并打出崩溃现场(见脚本头注释)。
+      - name: 重启压力(严格全局下反复重启,服务不许崩)
+        if: env.TEST_SUB_URL != ''
+        shell: pwsh
+        timeout-minutes: 15
+        run: |
+          $ErrorActionPreference = "Continue"
+          $global:LASTEXITCODE = 97 # 哨兵:脚本没跑起来时别当成 0
+          & .\deploy\restart-stress.ps1 -Sub $env:TEST_SUB_URL -Bin (Resolve-Path dist\amd64).Path -Rounds 30
+          exit $LASTEXITCODE
+
       - name: Fetch WebView2 installers
         shell: bash
         run: |
