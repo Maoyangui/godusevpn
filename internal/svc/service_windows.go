@@ -133,11 +133,22 @@ func Uninstall() error {
 		return fmt.Errorf("打开服务: %w", err)
 	}
 	defer s.Close()
-	// 删之前必须停稳。DeleteService 对还在跑的服务只做"标记删除"、照样返回成功,进程接着跑:调用方(svc uninstall)
-	// 撤闸到这里之间要是有人打开客户端把服务拉了起来,而以前这里只发一次 Stop、结果不看(启动中的服务会拒收),
-	// 活着的守护进程就会按"想连"把调用方随后的第二次撤闸装回去,接着程序被删,留下一道谁都撤不掉的闸。
-	// 停不下来就不删,返回错误让卸载中止。
-	if err := stopHard(s, 60*time.Second); err != nil {
+	return stopAndDelete(s, 60*time.Second)
+}
+
+// deleter 是 stopAndDelete 用到的 *mgr.Service 方法;抽出来好在测试里用假的服务驱动。
+type deleter interface {
+	stopper
+	Delete() error
+}
+
+// stopAndDelete 停稳、删除、再停稳。
+// 删之前必须停稳。DeleteService 对还在跑的服务只做"标记删除"、照样返回成功,进程接着跑:调用方(svc uninstall)
+// 撤闸到这里之间要是有人打开客户端把服务拉了起来,而以前这里只发一次 Stop、结果不看(启动中的服务会拒收),
+// 活着的守护进程就会按"想连"把调用方随后的第二次撤闸装回去,接着程序被删,留下一道谁都撤不掉的闸。
+// 停不下来就不删,返回错误让卸载中止。
+func stopAndDelete(s deleter, timeout time.Duration) error {
+	if err := stopHard(s, timeout); err != nil {
 		return fmt.Errorf("服务停不下来,没有删除: %w", err)
 	}
 	// 已经被标记删除(别处 sc delete 过、服务管理器还开着句柄):句柄一关它就没了,算卸掉了
@@ -146,7 +157,7 @@ func Uninstall() error {
 	}
 	// 删完再确认一次:上面停稳到 Delete 之间要是又有人拉起了它,它还活着。标记删除以后 StartService 一律失败
 	// (ERROR_SERVICE_MARKED_FOR_DELETE),所以这里停稳就是永久停稳,调用方的第二次撤闸不会再被装回去。
-	if err := stopHard(s, 60*time.Second); err != nil {
+	if err := stopHard(s, timeout); err != nil {
 		return fmt.Errorf("服务已标记删除,但还在运行、停不下来: %w", err)
 	}
 	return nil
@@ -162,31 +173,36 @@ type stopper interface {
 var stopPoll, stopResend = 300 * time.Millisecond, 2 * time.Second
 
 // stopHard 用这个句柄把服务停下来,确认真停稳了(Stopped)才返回 nil。
-// 启动中(START_PENDING)的服务不接受 Stop,ControlService 返回 ERROR_SERVICE_CANNOT_ACCEPT_CTRL;以前只发一次就干等,
+// 启动中(START_PENDING)的服务不接受 Stop:ControlService 失败,错误码按微软文档的错误表是 ERROR_SERVICE_CANNOT_ACCEPT_CTRL,
+// 按同一页的状态表是 ERROR_INVALID_SERVICE_CONTROL(文档自相矛盾,两个都当"现在不收")。以前只发一次就干等,
 // 等来的是一个跑起来的服务。这里在它"运行 / 启动中"时重发。被接受的 Stop 几毫秒内就会让守护进程报"停止中"
 // (Execute 收到 Stop 第一件事就是报 StopPending),所以发出后过了 2 秒还在"运行 / 启动中",就是又被人拉起了
-// 一个新实例,再发。不对同一个实例连发:x/sys 的服务循环在处理 Stop 期间不再收新的控制命令,多发的那条会卡住。
+// 一个新实例,再发。不对同一个实例连发:x/sys(v0.47.0 svc/service.go)的服务循环把 Stop 交给 Execute 之后,
+// Execute 在收尾期间不再读命令,循环最多再收下一条就不收了;之后到的(以及循环退出后到的)会堵在 ctlHandler 上,
+// 卡住整个进程的控制分发线程,发命令的一方要等到服务管理器超时。
 func stopHard(s stopper, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	var sent time.Time
-	var lastErr error
 	for {
+		var cause error // 只记这一轮的:超时时报最近一轮的原因,不报早先已经过去的
 		st, err := s.Query()
 		switch {
 		case err != nil:
-			lastErr = err
+			cause = err
 		case st.State == svc.Stopped:
 			return nil
 		case (st.State == svc.Running || st.State == svc.StartPending) && time.Since(sent) > stopResend:
 			if _, err := s.Control(svc.Stop); err == nil {
 				sent = time.Now()
-			} else if !errors.Is(err, windows.ERROR_SERVICE_NOT_ACTIVE) && !errors.Is(err, windows.ERROR_SERVICE_CANNOT_ACCEPT_CTRL) {
-				lastErr = err
+			} else if !errors.Is(err, windows.ERROR_SERVICE_NOT_ACTIVE) &&
+				!errors.Is(err, windows.ERROR_SERVICE_CANNOT_ACCEPT_CTRL) &&
+				!errors.Is(err, windows.ERROR_INVALID_SERVICE_CONTROL) {
+				cause = err
 			}
 		}
 		if !time.Now().Before(deadline) {
-			if lastErr != nil {
-				return fmt.Errorf("服务停止超时: %w", lastErr)
+			if cause != nil {
+				return fmt.Errorf("服务停止超时: %w", cause)
 			}
 			return errors.New("服务停止超时")
 		}
