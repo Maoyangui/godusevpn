@@ -83,14 +83,23 @@ func main() {
 		}
 		fmt.Println("服务已安装并启动:", svc.DisplayName)
 	case "register-controller":
-		// 把一个 Windows 账户加进控制管道的名单(需要管理员身份;托盘在权限不足时会提权来调它)。
-		// 不带参数就登记当前交互会话的用户;带参数可以是 SID 或账户名。
+		// 把一个 Windows 账户加进控制管道的名单(需要管理员身份;界面与托盘的「登记本账户」提权来调它)。
+		// 不带参数就登记当前交互会话的用户;带参数可以是 SID 或账户名。管道的 ACL 在服务监听时算一次,
+		// 所以要重启服务才生效;带 --restart 就顺手重启(闸是持久的、第二代不绑服务名,重启不撤闸)。
 		var regErr error
+		target, restart := "", false
+		for _, a := range os.Args[2:] {
+			if a == "--restart" {
+				restart = true
+			} else if target == "" {
+				target = a
+			}
+		}
 		switch {
-		case len(os.Args) > 2 && strings.HasPrefix(os.Args[2], "S-"):
-			regErr = ipc.RegisterControllerOwnerSID(os.Args[2])
-		case len(os.Args) > 2:
-			regErr = ipc.RegisterControllerOwnerName(os.Args[2])
+		case strings.HasPrefix(target, "S-"):
+			regErr = ipc.RegisterControllerOwnerSID(target)
+		case target != "":
+			regErr = ipc.RegisterControllerOwnerName(target)
 		default:
 			regErr = ipc.RegisterControllerOwner()
 		}
@@ -98,7 +107,17 @@ func main() {
 			fail(fmt.Errorf("登记控制用户失败: %w", regErr))
 		}
 		fmt.Println("已登记。名单里现在有:", strings.Join(ipc.ControllerOwnerSIDs(), ", "))
-		fmt.Println("重启服务后生效:godusevpn-svc.exe stop && godusevpn-svc.exe start")
+		if !restart {
+			fmt.Println("重启服务后生效:godusevpn-svc.exe stop && godusevpn-svc.exe start")
+			return
+		}
+		if err := svc.Stop(); err != nil {
+			fail(fmt.Errorf("已登记,但停止服务失败(手动重启服务或重启电脑后生效): %w", err))
+		}
+		if err := svc.Start(); err != nil {
+			fail(fmt.Errorf("已登记,服务已停止但启动失败: %w", err))
+		}
+		fmt.Println("服务已重启,登记生效")
 	case "uninstall":
 		// 闸是持久的,卸载要撤掉,不然文件删了闸还在、机器一直断网。先停服务再撤,
 		// 并且只有确认闸和 IPv6 都清理成功后才删除服务对象；失败时保留保护与可重试状态。
@@ -155,8 +174,24 @@ func main() {
 			} else {
 				fmt.Printf("闸:开着(%d 条过滤器;隧道以外的流量一律拦下)\n", n)
 			}
+		case "arm":
+			// 升级用:安装器在停旧服务之前用**新版** exe 跑一次,趁旧服务还在把闸装到第二代提供者下(见 guardfix.Arm)。
+			// --self=<服务 exe 路径>:要放行的是安装后那个路径上的服务,不是临时目录里的这个进程。
+			self := ""
+			for _, a := range os.Args[3:] {
+				if strings.HasPrefix(a, "--self=") {
+					self = strings.Trim(strings.TrimPrefix(a, "--self="), "\"")
+				}
+			}
+			text, _, err := guardfix.Arm(self)
+			if err != nil {
+				// 不挡安装:新服务起来后 reconcileGuard 会重装。退出码非零只是让安装日志看得出来。
+				fmt.Println("升级前预装闸失败(不影响安装,新服务起来后会重装):", err)
+				os.Exit(1)
+			}
+			fmt.Println(text)
 		default:
-			fmt.Println("用法: godusevpn-svc guard clear | status")
+			fmt.Println("用法: godusevpn-svc guard clear | status | arm [--self=<服务 exe 路径>]")
 			os.Exit(2)
 		}
 	case "start":

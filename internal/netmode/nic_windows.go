@@ -31,6 +31,9 @@ func nicBackup() string { return filepath.Join(paths.DataDir(), "nic-ipv6-backup
 // 备份是**并进去**而不是覆盖:已有备份说明上次停了还没还原(重建配置重连时守护进程故意不还原,
 // 或者连接期间又冒出一张新网卡),这时候原来那些网卡都是关着的,整份重记会记成一片"关",
 // 最后什么都开不回来;而整份跳过又会漏掉新网卡的原始状态,那张就被永久关着了。只补没记过的那些才两头都对。
+//
+// 同理,备份里某一行无效(手工改坏、截断、同名两行)也只能剔掉那一行:0.7.3 及以前是整份挪到 .bad 再重记,
+// 于是我们之前关掉的网卡全被记成"本来就是关的",永远开不回来。无效行挪到 .bad、告警,其余照旧。
 func DisableNICIPv6(tunName string) error {
 	script := `
 $ErrorActionPreference = 'Stop'
@@ -38,23 +41,23 @@ $tun = '` + psQuote(tunName) + `'
 $all = @(Get-NetAdapterBinding -ComponentID ms_tcpip6 | Where-Object { $_.Name -ne $tun })
 $b = '` + psQuote(nicBackup()) + `'
 $known = @{}
-$bad = $false
+$corrupt = @()
 $old = @()
 if (Test-Path -LiteralPath $b) {
-  $old = @(Get-Content -Encoding utf8 -LiteralPath $b)
-  foreach ($line in $old) {
+  foreach ($line in @(Get-Content -Encoding utf8 -LiteralPath $b)) {
+    if ([string]::IsNullOrWhiteSpace($line)) { continue }
     $p = $line -split "` + "\t" + `", -1
-    if ($p.Count -ne 2 -or [string]::IsNullOrWhiteSpace($p[0]) -or $p[1] -notmatch '^(True|False)$' -or $known.ContainsKey($p[0])) { $bad = $true; break }
+    if ($p.Count -ne 2 -or [string]::IsNullOrWhiteSpace($p[0]) -or $p[1] -notmatch '^(True|False)$' -or $known.ContainsKey($p[0])) { $corrupt += $line; continue }
     $known[$p[0]] = $true
+    $old += $line
   }
 }
-if ($bad) {
-  Move-Item -LiteralPath $b -Destination ($b + '.bad') -Force -ErrorAction SilentlyContinue
-  Write-Output 'GODUSEVPN-PARTIAL: 网卡 IPv6 备份文件已损坏,已挪到 nic-ipv6-backup.txt.bad。里面记的原始状态没了 —— 如果某些网卡的 IPv6 现在是关着的,需要手动在「网络适配器属性」里把「Internet 协议版本 6」勾回来。这一轮不动任何网卡。'
-  exit 0
+if ($corrupt.Count -gt 0) {
+  try { Add-Content -LiteralPath ($b + '.bad') -Value $corrupt -Encoding UTF8; Write-Output ('GODUSEVPN-CORRUPT: ' + $corrupt.Count) }
+  catch { Write-Output ('GODUSEVPN-CORRUPT-LOST: ' + $corrupt.Count) }
 }
 $new = @($all | Where-Object { -not $known.ContainsKey($_.Name) } | ForEach-Object { $_.Name + "` + "\t" + `" + $_.Enabled })
-if ($new.Count -gt 0) {
+if ($new.Count -gt 0 -or $corrupt.Count -gt 0) {
   $tmp = $b + '.tmp'
   $utf8 = New-Object System.Text.UTF8Encoding($false)
   $fs = New-Object System.IO.FileStream($tmp, [System.IO.FileMode]::Create, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
@@ -82,23 +85,44 @@ if ($failed.Count -gt 0) { Write-Output ('GODUSEVPN-PARTIAL: ' + ($failed -join 
 	if err != nil {
 		return nicResult(tunName, []string{fmt.Sprintf("%v(%s)", err, out)})
 	}
+	corrupt := nicCorruptWarning(out)
+	var res error
 	if p := psMark(out, markPartial); p != "" {
 		// 有网卡没停成(在脚本跑的这几秒里被拔掉 / 被系统销毁,或者驱动不让改绑定)。
 		// m29 在这里整体抛错,而 prepare 拿它当连接前置 —— 于是一张 Wi-Fi Direct 虚拟网卡的生灭
 		// 就能让人连不上。交给 nicResult:真有公网 v6 露在外面才算失败。
-		return nicResult(tunName, []string{p})
+		res = nicResult(tunName, []string{p})
+	} else {
+		setNICWarning("")
 	}
-	setNICWarning("")
-	return nil
+	if corrupt != "" {
+		setNICWarning(joinWarn(NICWarning(), corrupt))
+	}
+	return res
+}
+
+// nicCorruptWarning 脚本报了"备份里有几行无效"时给用户的那句话;没有就是空串。
+// 挪到 .bad 成功与否分开说:挪失败的那几行原值真的丢了,不能骗人说"已挪到 .bad"。
+func nicCorruptWarning(out string) string {
+	if n := psMark(out, markCorrupt); n != "" {
+		return "网卡 IPv6 备份里有 " + n + " 行无效,已挪到 " + nicBackup() + ".bad。那几行记的原始状态没了 —— " +
+			"如果某些网卡的 IPv6 现在是关着的,需要手动在「网络适配器属性」里把「Internet 协议版本 6」勾回来"
+	}
+	if n := psMark(out, markCorruptLost); n != "" {
+		return "网卡 IPv6 备份里有 " + n + " 行无效,已从备份里剔掉(挪到 .bad 也失败,内容没保住)。那几行记的原始状态没了 —— " +
+			"如果某些网卡的 IPv6 现在是关着的,需要手动在「网络适配器属性」里把「Internet 协议版本 6」勾回来"
+	}
+	return ""
 }
 
 // runPS 脚本里用这两个记号把"部分失败"和"网卡已消失"带回来 —— PowerShell 的退出码只有一个,
 // 区分不了"整件事崩了"和"有几张网卡没动成",而这两者在这里的处理完全不同。
 const (
-	markPartial = "GODUSEVPN-PARTIAL: "
-	markFailed  = "GODUSEVPN-FAILED: "
-	markGone    = "GODUSEVPN-GONE: "
-	markCorrupt = "GODUSEVPN-CORRUPT: " // 还原时备份里有几行无效(已挪到 .bad),不算失败
+	markPartial     = "GODUSEVPN-PARTIAL: "
+	markFailed      = "GODUSEVPN-FAILED: "
+	markGone        = "GODUSEVPN-GONE: "
+	markCorrupt     = "GODUSEVPN-CORRUPT: "      // 备份里有几行无效(已挪到 .bad),不算失败
+	markCorruptLost = "GODUSEVPN-CORRUPT-LOST: " // 同上,但挪到 .bad 失败了,那几行没保住
 )
 
 // psMark 从脚本输出里取出某个记号后面的内容;没有就返回空串。
@@ -163,6 +187,11 @@ foreach ($line in $lines) {
     }
   }
 }
+if ($corrupt.Count -gt 0) {
+  # 先把无效行留证、再动备份:反过来的话中间被杀掉,那几行就无声无息没了
+  try { Add-Content -LiteralPath ($f + '.bad') -Value $corrupt -Encoding UTF8; Write-Output ('GODUSEVPN-CORRUPT: ' + $corrupt.Count) }
+  catch { Write-Output ('GODUSEVPN-CORRUPT-LOST: ' + $corrupt.Count) }
+}
 if ($left.Count -gt 0) {
   $tmp = $f + '.tmp'
   $utf8 = New-Object System.Text.UTF8Encoding($false)
@@ -174,10 +203,6 @@ if ($left.Count -gt 0) {
 } else {
   Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue
 }
-if ($corrupt.Count -gt 0) {
-  try { Add-Content -LiteralPath ($f + '.bad') -Value $corrupt -Encoding UTF8 } catch {}
-  Write-Output ('GODUSEVPN-CORRUPT: ' + $corrupt.Count)
-}
 if ($failed.Count -gt 0) { Write-Output ('GODUSEVPN-FAILED: ' + ($failed -join '; ')) }
 if ($gone.Count -gt 0) { Write-Output ('GODUSEVPN-GONE: ' + ($gone -join ', ')) }
 `
@@ -185,19 +210,22 @@ if ($gone.Count -gt 0) { Write-Output ('GODUSEVPN-GONE: ' + ($gone -join ', ')) 
 	if err != nil {
 		return fmt.Errorf("还原网卡 IPv6: %w(%s)", err, out)
 	}
-	if f := psMark(out, markFailed); f != "" {
-		return fmt.Errorf("还原网卡 IPv6: %s", f)
-	}
+	// 告警先记:无效行只在这一次脚本里报(它们已经从备份里剔掉了),要是先因 FAILED 返回,这句就永远没人看见。
 	var warns []string
-	if n := psMark(out, markCorrupt); n != "" {
-		warns = append(warns, "网卡 IPv6 备份里有 "+n+" 行无效,已挪到 "+nicBackup()+".bad。那几行记的原始状态没了 —— "+
-			"如果某些网卡的 IPv6 现在是关着的,需要手动在「网络适配器属性」里把「Internet 协议版本 6」勾回来")
+	if w := nicCorruptWarning(out); w != "" {
+		warns = append(warns, w)
 	}
 	if g := psMark(out, markGone); g != "" {
 		warns = append(warns, "这些网卡已经不在了,当作无需还原: "+g)
 	}
 	if len(warns) > 0 {
 		setNICWarning(strings.Join(warns, ";"))
+	}
+	if f := psMark(out, markFailed); f != "" {
+		if len(warns) > 0 {
+			return fmt.Errorf("还原网卡 IPv6: %s(另外:%s)", f, strings.Join(warns, ";"))
+		}
+		return fmt.Errorf("还原网卡 IPv6: %s", f)
 	}
 	// 脚本里已经删过一次;这里兜一下,免得脚本那步被杀掉之后下次启动反复还原。
 	if err := os.Remove(nicBackup()); err != nil && !os.IsNotExist(err) {

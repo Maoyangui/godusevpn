@@ -212,7 +212,7 @@ function renderDrawerState() {
     }));
   }
   $('#ds-dot').className = 'dot ' + (on ? 'on' : (st === 'error' || !state.service) ? 'err' : '');
-  $('#ds-state').textContent = state.service ? t('st.' + st) : t('svc.down');
+  $('#ds-state').textContent = state.service ? t('st.' + st) : svcText(state);
   $('#ds-time').textContent = on && v.uptime ? fmtDuration(v.uptime) : '';
   const auto = v.node === 'auto' || !v.node;
   const name = auto ? (v.autoNow || t('node.auto')) : v.node;
@@ -324,12 +324,31 @@ function renderOnboard(el) {
   $('#ob-url').addEventListener('keydown', e => { if (e.key === 'Enter') submit(); });
   setTimeout(() => $('#ob-url').focus(), 120);
 }
+// svcBanner 服务连不上时的横幅。"账户没权限"和"服务没在跑"是两回事:前者服务好好的,只是这个账户
+// 不在名单里(Windows)或不是管理员(macOS)。这时绝不能给「修复」—— 修复走 uninstall + install,
+// 会把别的账户正在用的闸撤掉、网卡 IPv6 还原,而本账户照样连不上。Windows 上给「登记本账户」。
+function svcBanner(idRepair, idRegister, extra) {
+  if (state.service) return '';
+  if (state.svcState === 'no-permission') {
+    const reg = state.canRegister && !window.__web && !window.__android ? `<button class="btn sm" id="${idRegister}">${t('banner.register')}</button>` : '';
+    return `<div class="banner" data-kind="noperm"><span class="grow">${t('banner.noPermission')} ${esc(state.svcHint || '')}</span>${reg}</div>`;
+  }
+  // 修复按钮只在桌面端有意义(网页面板和安卓没有 RepairService),别画一颗点了只会报错的按钮
+  const fix = window.__web || window.__android ? '' : `<button class="btn sm" id="${idRepair}">${t('banner.repair')}</button>`;
+  return `<div class="banner" data-kind="down"><span class="grow">${t('banner.svcDown')}${extra || ''}</span>${fix}</div>`;
+}
+function bannerKind(b) { return b.firstChild ? (b.firstChild.dataset.kind || 'down') : ''; }
+function wireBanner(b, idRepair, idRegister) {
+  const rb = b.querySelector('#' + idRepair); if (rb) rb.addEventListener('click', repairService);
+  const rg = b.querySelector('#' + idRegister); if (rg) rg.addEventListener('click', registerController);
+}
 function updateOnboardSvc() {
   const b = $('#ob-svc'); if (!b || !state) return;
-  // 修复按钮只在桌面端有意义(网页面板和安卓没有 RepairService),别画一颗点了只会报错的按钮
-  const fix = window.__web || window.__android ? '' : `<button class="btn sm" id="ob-repair">${t('banner.repair')}</button>`;
-  b.innerHTML = state.service ? '' : `<div class="banner"><span class="grow">${t('banner.svcDown')}</span>${fix}</div>`;
-  const rb = b.querySelector('#ob-repair'); if (rb) rb.addEventListener('click', repairService);
+  const html = svcBanner('ob-repair', 'ob-register', '');
+  const want = state.service ? '' : (state.svcState === 'no-permission' ? 'noperm' : 'down');
+  if (want === bannerKind(b)) return;
+  b.innerHTML = html;
+  wireBanner(b, 'ob-repair', 'ob-register');
 }
 
 // ---- 地区牌子 ----
@@ -564,7 +583,7 @@ function updateHome() {
   $('#s-time').textContent = on && v.uptime ? fmtDuration(v.uptime) : '–';
   const quiet = on && !err;
   $('#status').hidden = quiet;
-  $('#status').textContent = state.service ? t('st.' + st) : t('svc.down');
+  $('#status').textContent = state.service ? t('st.' + st) : svcText(state);
   $('#status-sub').hidden = !err;
   $('#status-sub').textContent = err;
   // 全局禁直连的闸:开着就亮一颗小盾;该开却没开成(防火墙不可用之类)标成警告
@@ -609,13 +628,12 @@ function updateHome() {
   $('#pk-node-v').textContent = auto ? t('pick.auto') : cleanName(v.node);
   $('#pk-node-ms').textContent = '';
   const b = $('#home-banner');
-  const wantBanner = !state.service;
-  if (wantBanner !== !!b.firstChild) { // 只有横幅出现/消失时才动 DOM,免得每次推送都把按钮换掉
-    const fix = window.__web || window.__android ? '' : `<button class="btn sm" id="repair">${t('banner.repair')}</button>`;
+  const want = state.service ? '' : (state.svcState === 'no-permission' ? 'noperm' : 'down');
+  if (want !== bannerKind(b)) { // 只有横幅出现/消失/换种类时才动 DOM,免得每次推送都把按钮换掉
     const vs = state.view && state.view.settings;
-    const stuck = wantBanner && !window.__android && vs && vs.noDirect && state.view.mode === 'global' && state.view.state.wanted ? ' ' + t('banner.guardStuck') : '';
-    b.innerHTML = wantBanner ? `<div class="banner"><span class="grow">${t('banner.svcDown')}${esc(stuck)}</span>${fix}</div>` : '';
-    const rb = b.querySelector('#repair'); if (rb) rb.addEventListener('click', repairService); // 只在横幅里找:关于页也有个 #repair
+    const stuck = want === 'down' && !window.__android && vs && vs.noDirect && state.view.mode === 'global' && state.view.state.wanted ? ' ' + t('banner.guardStuck') : '';
+    b.innerHTML = svcBanner('repair', 'register', esc(stuck));
+    wireBanner(b, 'repair', 'register'); // 只在横幅里找:关于页也有个 #repair
   }
 }
 
@@ -636,6 +654,9 @@ async function pasteInto(sel) {
 }
 async function repairService() {
   try { await App().RepairService(); toast(t('about.repairDone'), 'ok'); } catch (e) { toast(errText(e), 'err'); }
+}
+async function registerController() {
+  try { await App().RegisterController(); toast(t('banner.registerDone'), 'ok'); } catch (e) { toast(errText(e), 'err'); }
 }
 
 // ---- 首页三个面板 ----

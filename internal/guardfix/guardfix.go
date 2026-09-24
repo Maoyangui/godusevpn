@@ -8,18 +8,69 @@ package guardfix
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
+	"os"
 	"strings"
 	"time"
 
+	"github.com/Maoyangui/godusevpn/internal/builder"
 	"github.com/Maoyangui/godusevpn/internal/ipc"
 	"github.com/Maoyangui/godusevpn/internal/netmode"
 	"github.com/Maoyangui/godusevpn/internal/paths"
 	"github.com/Maoyangui/godusevpn/internal/settings"
 	"github.com/Maoyangui/godusevpn/internal/svc"
 )
+
+// Arm 升级前的离线预装:安装器在停掉旧服务**之前**,用解到临时目录的新版 exe 跑一次,把闸装到第二代提供者下。
+//
+// 0.6.25-m29 ~ 0.7.1 的提供者绑着服务名:旧服务一停,BFE 就把它名下的全部过滤器置为 DISABLED,直到新服务
+// 起来并跑到 Enable 之前,六个层上都没有拦截规则 —— 换文件、注册服务、进程启动这一段,直连明文出去。
+// Enable 里的换代事务只消掉了"换提供者"那一步的空窗,堵不住这一段。所以趁旧服务还在跑就先把第二代装上:
+// 第二代不绑服务名,旧服务停了它照样拦;旧守护进程发现"闸不见了"会把第一代重装回来,两代并存、都是 BLOCK、
+// 放行的东西一样,不漏也不多拦;新服务起来后 Enable 再把两代一并换成干净的第二代。
+//
+// 只在"落盘的意愿是连着 + 全局模式 + 禁直连"时动手(和守护进程启动时 reconcileGuard 的判据一致);
+// 设置或状态读不出来、条件不满足,一律什么都不做 —— 这是升级路上的加固,绝不能因为它把安装挡住,
+// 也绝不能在用户没开闸的机器上凭空装闸。selfPath 是要放行的服务 exe 路径(安装后那个位置;升级时新旧路径相同)。
+func Arm(selfPath string) (text string, armed bool, err error) {
+	s, err := settings.Load(paths.Settings())
+	if err != nil {
+		return "设置读不出来,不动闸: " + err.Error(), false, nil
+	}
+	b, err := os.ReadFile(paths.State())
+	if err != nil {
+		return "连接状态读不出来,不动闸: " + err.Error(), false, nil
+	}
+	var p struct {
+		Wanted bool `json:"wanted"`
+	}
+	if err := json.Unmarshal(b, &p); err != nil {
+		return "连接状态损坏,不动闸: " + err.Error(), false, nil
+	}
+	if !p.Wanted || !s.NoDirect || s.Mode != settings.ModeGlobal {
+		return "不是严格全局模式下连着的机器,不动闸", false, nil
+	}
+	spec := netmode.GuardSpec{
+		TunName:  builder.TunName,
+		TunAddr4: strings.Split(builder.TunAddr4, "/")[0],
+		TunAddr6: strings.Split(builder.TunAddr6, "/")[0],
+		LAN:      s.LANBypass,
+		Gateway:  s.NetMode == settings.NetGateway,
+		SelfPath: selfPath,
+	}
+	if err := netmode.ApplyGuard(spec); err != nil {
+		return "", false, err
+	}
+	n, _ := netmode.GuardStatus()
+	note := ""
+	if w := netmode.GuardWarning(); w != "" {
+		note = "(" + w + ")"
+	}
+	return fmt.Sprintf("闸已按第二代提供者装上(%d 条过滤器)%s", n, note), true, nil
+}
 
 // Clear 撤闸。返回给用户看的一句话,以及网络是不是真的恢复了。
 //

@@ -53,6 +53,6 @@ sudo rm -rf /Applications/godusevpn.app /usr/local/bin/godusevpn
 sudo sh deploy/macos-test.sh <订阅地址>
 ```
 
-共 32 项;CI 每次提交都在 GitHub 的苹果芯片跑机上真跑一遍,另加一步把 `.app` 装进 `/Applications` 打开看它能不能活下来。
+共 53 项;CI 每次提交都在 GitHub 的苹果芯片跑机上真跑一遍,另加一步把 `.app` 装进 `/Applications` 打开看它能不能活下来。
 
 相关:[[日常使用]] · [[排障]]

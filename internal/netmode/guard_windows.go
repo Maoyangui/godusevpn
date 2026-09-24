@@ -24,6 +24,7 @@ var (
 func ApplyGuard(spec GuardSpec) error {
 	var s wfp.Spec
 	s.LAN = spec.LAN
+	s.SelfPath = spec.SelfPath
 	if a, err := netip.ParseAddr(spec.TunAddr4); err == nil && a.Is4() {
 		s.Tun4 = a.As4()
 	} else {

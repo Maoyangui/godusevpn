@@ -325,6 +325,13 @@ func (d *Daemon) reconcileGuard() {
 		if n, err := netmode.GuardStatus(); err == nil && n == 0 {
 			return
 		}
+		if s.NoDirect && s.Mode == settings.ModeGlobal {
+			// 设置说就该有闸、闸也确实在:按当前设置原地重装(事务内替换,不放宽任何保护)。
+			// 不重装的话,从 0.6.25-m29 ~ 0.7.1 升上来的机器闸会一直挂在绑了服务名的第一代提供者下,
+			// 直到用户手动点一次连接 —— 这段时间任何本机账户 sc stop 一下闸就失效。
+			d.applyGuard("连接状态不可读,闸一直在,已按当前设置重装")
+			return
+		}
 		d.setGuard(true, "连接状态不可读,保留全局禁直连保护")
 		d.logf("全局禁直连:连接状态不可读,不撤闸")
 		return

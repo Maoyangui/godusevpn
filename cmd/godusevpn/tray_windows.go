@@ -36,8 +36,8 @@ type trayUI struct {
 func newTray(a *App) *trayUI { return &trayUI{app: a} }
 
 var trayText = map[string]map[string]string{
-	"zh": {"show": "显示主窗口", "connect": "连接", "disconnect": "断开", "mode": "模式", "rule": "规则", "global": "全局", "direct": "直连", "quit": "退出", "svcdown": "服务未运行", "upgrade": "升级到", "guardfix": "恢复网络(解除禁直连闸)", "svcnoperm": "服务在跑,但当前账户没登记为控制用户"},
-	"en": {"show": "Show window", "connect": "Connect", "disconnect": "Disconnect", "mode": "Mode", "rule": "Rule", "global": "Global", "direct": "Direct", "quit": "Quit", "svcdown": "Service not running", "upgrade": "Update to", "guardfix": "Restore network (lift no-direct guard)", "svcnoperm": "Service running, but this account is not registered as a controller"},
+	"zh": {"show": "显示主窗口", "connect": "连接", "disconnect": "断开", "mode": "模式", "rule": "规则", "global": "全局", "direct": "直连", "quit": "退出", "svcdown": "服务未运行", "upgrade": "升级到", "guardfix": "恢复网络(解除禁直连闸)", "svcnoperm": "服务在跑,但当前账户没登记为控制用户;点「恢复网络」可登记"},
+	"en": {"show": "Show window", "connect": "Connect", "disconnect": "Disconnect", "mode": "Mode", "rule": "Rule", "global": "Global", "direct": "Direct", "quit": "Quit", "svcdown": "Service not running", "upgrade": "Update to", "guardfix": "Restore network (lift no-direct guard)", "svcnoperm": "Service running, but this account is not registered as a controller; use Restore network to register"},
 }
 
 func (t *trayUI) tr(key string) string {
@@ -117,6 +117,12 @@ func (t *trayUI) onReady() {
 	t.quitItem.Click(async(func() { t.app.QuitApp() }))
 	// 恢复网络:服务活着就关掉「全局禁直连」的开关(闸随之撤);服务不在就提权跑恢复命令,直接删过滤器
 	t.guardFix.Click(async(func() {
+		if st := t.app.GetState(); !st.Service && st.SvcState == "no-permission" {
+			// 服务活着、只是这个账户连不上:离线 guard clear 会删掉别的账户正在用的闸,而守护进程随后又装回来 ——
+			// 一段无闸窗口、什么也没修好。正确的动作是把本账户登记进名单,之后想断开就能在界面里断。
+			_ = t.app.RegisterController()
+			return
+		}
 		if t.app.GetState().Service {
 			var v ipc.StateView
 			if err := t.app.call(ipc.MGetState, nil, &v); err == nil && v.Guard == "" && v.GuardError == "" {

@@ -31,17 +31,20 @@ const testURL = "http://www.gstatic.com/generate_204"
 
 // UIState 推给页面与托盘的一份快照:服务在不在、服务给的状态、实时速度、界面偏好。
 type UIState struct {
-	Service   bool            `json:"service"`  // 控制管道可达
-	SvcState  string          `json:"svcState"` // running / stopped / not-installed / unknown(服务管理器视角);no-permission = 服务在跑但当前账户没登记为控制用户
-	View      ipc.StateView   `json:"view"`
-	Up        int64           `json:"up"`        // 字节/秒
-	Down      int64           `json:"down"`      // 字节/秒
-	TotalUp   int64           `json:"totalUp"`   // 本次连接累计上行(内核停了归零)
-	TotalDown int64           `json:"totalDown"` // 本次连接累计下行
-	Lang      string          `json:"lang"`
-	Theme     string          `json:"theme"` // system / light / dark
-	Version   string          `json:"version"`
-	Update    *update.Release `json:"update,omitempty"` // 有新版本时带上
+	Service  bool   `json:"service"`  // 控制管道可达
+	SvcState string `json:"svcState"` // running / stopped / not-installed / unknown(服务管理器视角);no-permission = 服务在跑但当前账户没权限连控制口
+	// SvcHint no-permission 时给用户的一句话,各平台不同(Windows 是登记账户,macOS 是要管理员组);CanRegister = 界面能替用户登记(Windows)
+	SvcHint     string          `json:"svcHint,omitempty"`
+	CanRegister bool            `json:"canRegister,omitempty"`
+	View        ipc.StateView   `json:"view"`
+	Up          int64           `json:"up"`        // 字节/秒
+	Down        int64           `json:"down"`      // 字节/秒
+	TotalUp     int64           `json:"totalUp"`   // 本次连接累计上行(内核停了归零)
+	TotalDown   int64           `json:"totalDown"` // 本次连接累计下行
+	Lang        string          `json:"lang"`
+	Theme       string          `json:"theme"` // system / light / dark
+	Version     string          `json:"version"`
+	Update      *update.Release `json:"update,omitempty"` // 有新版本时带上
 }
 
 // uiPrefs 托盘客户端自己的偏好(和服务的设置分开,放当前用户目录)。
@@ -189,11 +192,14 @@ func (a *App) refresh() {
 		a.state.Up, a.state.Down = 0, 0
 	}
 	a.state.SvcState = svc.QueryStatus()
+	a.state.SvcHint, a.state.CanRegister = "", false
 	if errors.Is(err, ipc.ErrNoPermission) {
-		// 服务在跑、管道也在,只是当前账户不在控制名单里(同一台电脑上的第二个 Windows 账户)。
-		// 服务管理器视角它是 running,页面若一边照 svcState 说"服务运行中"、一边照 service=false 灰掉按钮,
-		// 用户只会以为服务坏了。这里把它单独标出来,页面与托盘据此显示"账户没登记"。
+		// 服务在跑、控制口也在,只是当前账户没权限连:Windows 上是不在控制名单里(同一台电脑的第二个账户),
+		// macOS 上是 socket 只对管理员组开放。服务管理器视角它是 running,页面若一边说"服务运行中"、
+		// 一边照 service=false 挂出"服务没有运行 + 修复",用户只会去点「修复」—— 而修复走的是 uninstall,
+		// 会把主账户正在用的闸撤掉、网卡 IPv6 还原。这里单独标出来,页面、托盘、RepairService 都据此分支。
 		a.state.SvcState = "no-permission"
+		a.state.SvcHint, a.state.CanRegister = noPermissionHint()
 	}
 	a.state.Lang, a.state.Theme = a.prefs.Lang, a.prefs.Theme
 	st := a.state
@@ -713,6 +719,11 @@ func (a *App) SetTheme(theme string) {
 
 // RepairService 以管理员身份重新注册并启动后台服务(弹一次 UAC)。
 func (a *App) RepairService() error {
+	if st := a.GetState(); st.SvcState == "no-permission" {
+		// 服务没坏,是这个账户没权限。「修复」= uninstall + install,会把别的账户正在用的闸撤掉、网卡 IPv6 还原,
+		// 而且 install 见名单已有人就不会再登记本账户 —— 白拆一次隧道,问题原样。
+		return errors.New("NO_PERMISSION: " + st.SvcHint)
+	}
 	exe, err := os.Executable()
 	if err != nil {
 		return err
@@ -733,6 +744,28 @@ func (a *App) RepairService() error {
 		time.Sleep(time.Second)
 	}
 	return runElevated(svcExe, "install")
+}
+
+// RegisterController 把当前 Windows 账户登记为控制用户并重启服务(提权跑 register-controller --restart)。
+// 闸是持久的、第二代提供者不绑服务名,重启服务不撤闸;隧道按落盘的意愿自动重连。别的平台没有名单机制,直接报不支持。
+func (a *App) RegisterController() error {
+	if !a.GetState().CanRegister {
+		return errors.New("NO_PERMISSION: " + a.GetState().SvcHint)
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	svcExe, err := serviceBinary(filepath.Dir(exe))
+	if err != nil {
+		return err
+	}
+	if err := runElevated(svcExe, "register-controller --restart"); err != nil {
+		return err
+	}
+	time.Sleep(2 * time.Second)
+	go a.refresh()
+	return nil
 }
 
 // ReadClipboard 读系统剪贴板文本,给"粘贴"按钮用;失败返回空串。

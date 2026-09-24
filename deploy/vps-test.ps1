@@ -230,12 +230,18 @@ if ($LegacyBin -and -not $KeepInstalled) {
     Check "旧版的提供者绑着服务名(场景前提)" (($null -ne $lp) -and ($lp.Count -gt 0) -and -not ($lp | Where-Object { [string]::IsNullOrEmpty($_.serviceName) })) (Providers-Detail $lp)
     Check "旧版的提供者用的是第一代 GUID(场景前提)" ($script:wfpStateText -match '6f6d9e2c-3a41-4b8e-9d55-676f64757365') ""
     if ($script:directOK) { $ld = Direct-Http; Check "旧版闸拦着直连" ($ld -and $ld -notmatch '^[23]') "http=$ld" }
-    # 原地升级,照安装器的流程:旧版 stop → 新版 install(沿用服务对象、改可执行文件路径、启动),全程不点断开
+    # 原地升级,照安装器的流程:趁旧服务还在,先用新版 exe 把闸装到第二代提供者下(guard arm,放行的是旧服务 exe 的路径)
+    # → 旧版 stop → 新版 install(沿用服务对象、改可执行文件路径、启动),全程不点断开。
+    # 旧版的提供者绑着服务名,stop 一发出它的过滤器就全部失效;guard arm 就是为了让这一段仍然有闸。
+    $arm = & $svc guard arm --self="$lsvc" 2>&1 | Out-String
+    Check "停旧服务前先按第二代预装闸" ($arm -match "已按第二代提供者装上") $arm.Trim()
+    $ap = Get-WfpProviders
+    Check "预装后第二代提供者在(旧一代可能仍并存)" ($script:wfpStateText -match '6f6d9e2e-3a41-4b8e-9d55-676f64757365') (Providers-Detail $ap)
     & $lsvc stop | Out-Null
     Start-Sleep -Seconds 2
-    if ($script:directOK) { # 只记录不断言:这是绑服务名的旧版固有的窗口,升级本身消不掉;新版装好后不再有。多采几次,免得只撞上网卡重绑的那一瞬
+    if ($script:directOK) { # 这就是绑服务名的旧版原本的窗口:旧过滤器被 BFE 置为 DISABLED;预装的第二代必须还在拦。多采几次,免得只撞上网卡重绑的那一瞬
       $lg = @(); for ($i = 0; $i -lt 3; $i++) { $lg += (Direct-Http); Start-Sleep -Seconds 1 }
-      Write-Host ("  (旧版停服务期间绑物理网卡直连 http=" + ($lg -join ",") + ":绑服务名的旧版固有的窗口,升级本身消不掉;新版装好后不再有)")
+      Check "旧服务停止期间直连仍被拦(预装的第二代闸在顶着)" (@($lg | Where-Object { $_ -match '^[23]' }).Count -eq 0) ("http=" + ($lg -join ","))
     }
     & $svc install | Out-Null
     $su = Wait-Status "connected" 60

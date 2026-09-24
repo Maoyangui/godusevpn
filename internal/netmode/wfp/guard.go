@@ -122,7 +122,9 @@ func baseProvider(dd *wtFwpmDisplayData0) wtFwpmProvider0 {
 //
 // 第一代提供者在 m29 那几版被绑上了服务名(服务一停,它名下全部过滤器被 BFE 置为 DISABLED)。
 // 0.7.2 / 0.7.3 只能等用户下次断开时才换掉;现在 Enable 在一个事务里把过滤器换到第二代名下,
-// 这里只剩收尾,升级过程中没有不设防的窗口。
+// 这里只剩收尾:换提供者这一步不再有空窗。注意这堵不住"旧服务停止 → 新服务起来"那一段(旧过滤器
+// 被 BFE 置为 DISABLED,新进程还没跑到 Enable):那一段由安装器在停旧服务之前用新版 exe 跑
+// guard arm(guardfix.Arm)提前把第二代装上来堵。
 func dropLegacyBase(s uintptr) string {
 	if err := runTransaction(s, func(s uintptr) error {
 		if err := fwpmSubLayerDeleteByKey0(s, &legacySublayerKey); err != nil && !notFound(err) {
@@ -233,7 +235,8 @@ func Enable(spec Spec) (warn string, err error) {
 			return err
 		}
 		// 两代的过滤器一起删:从 m29 那几版升上来时,旧一代(绑了服务名)的过滤器和新一代的在同一个
-		// 事务里换掉,BFE 原子提交,升级过程中没有不设防的窗口。
+		// 事务里换掉,BFE 原子提交 —— 换提供者这一步没有不设防的窗口。停旧服务到新服务起来那一段
+		// 不归这里管,见 guardfix.Arm。
 		if err := deleteOurFilters(s); err != nil {
 			return err
 		}
