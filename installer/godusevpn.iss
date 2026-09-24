@@ -150,6 +150,8 @@ begin
   if FileExists(ExpandConstant('{app}\godusevpn-svc.exe')) then
     if (not Exec(ExpandConstant('{app}\godusevpn-svc.exe'), 'uninstall', '', SW_HIDE, ewWaitUntilTerminated, rc)) or (rc <> 0) then
     begin
+      // 中止之前把服务拉回来:界面已经被关掉、服务可能已停,严格全局下闸还在而隧道没了,整机会一直断网
+      Exec(ExpandConstant('{app}\godusevpn-svc.exe'), 'start', '', SW_HIDE, ewWaitUntilTerminated, rc);
       // 先说清楚再中止:Abort 不带"Runtime error"那种英文前缀,静默卸载时对话框也会被 /SUPPRESSMSGBOXES 压住
       SuppressibleMsgBox('无法解除佛跳墙的全局禁直连闸,卸载已中止 —— 现在删掉程序的话机器会一直断网且无法恢复。'#13#10#13#10'原程序与「恢复网络」工具都保留着:先用开始菜单里的「恢复网络」(右键以管理员身份运行)把闸解除,再来卸载。', mbCriticalError, MB_OK, IDOK);
       Abort;

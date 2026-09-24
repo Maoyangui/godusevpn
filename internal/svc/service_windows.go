@@ -137,7 +137,11 @@ func Uninstall() error {
 		_, _ = s.Control(svc.Stop)
 		waitState(s, svc.Stopped, 20*time.Second)
 	}
-	return s.Delete()
+	// 已经被标记删除(别处 sc delete 过、服务管理器还开着句柄):句柄一关它就没了,算卸掉了
+	if err := s.Delete(); err != nil && !errors.Is(err, windows.ERROR_SERVICE_MARKED_FOR_DELETE) {
+		return err
+	}
+	return nil
 }
 
 func Start() error {
