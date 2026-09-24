@@ -69,7 +69,7 @@ func (d *Daemon) fillMissingRuleSets() {
 			continue // 别的路径已经补上了
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-		err := ruleset.Fetch(ctx, d.http, root, m.Tag, m.URL)
+		err := ruleset.Fetch(ctx, d.directHTTP(), root, m.Tag, m.URL)
 		cancel()
 		if err != nil {
 			d.logf("规则集 %s 补下载失败(下次连接时再试): %v", m.Tag, err)

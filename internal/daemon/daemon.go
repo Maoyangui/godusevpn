@@ -476,11 +476,12 @@ func (d *Daemon) noteFetchErr(id string, err error) {
 }
 
 // fetchProfile 拉订阅:内核在跑时先经当前代理;失败就经 auto 组再试三次;auto 也不行走直连。
-// 这条回退链只用于刷新订阅,不影响任何其它流量,也不改用户选中的节点。内核没跑时直接用系统网络。
+// 这条回退链只用于刷新订阅,不影响任何其它流量,也不改用户选中的节点。内核没跑时直接用系统网络
+// (禁直连下域名改经 DoH 解析,见 directHTTP)。
 // 订阅无效 / 到期这类错误不换路径,直接返回。
 func (d *Daemon) fetchProfile(ctx context.Context, url string) (*profile.Profile, error) {
 	if !d.core.Running() {
-		return d.fetchWith(ctx, url, d.http)
+		return d.fetchWith(ctx, url, d.directHTTP())
 	}
 	routes := []string{"proxy", "auto", "auto", "auto", "direct"} // 当前代理一次、auto 三次、最后直连
 	var last error
