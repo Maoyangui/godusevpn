@@ -428,6 +428,21 @@ func TestIPv6CapturedEvenWhenDisabled(t *testing.T) {
 	}
 }
 
+// 关 IPv6 = 全链路禁用,被按进程直连的程序也不例外:它写 IPv6 字面量的连接要被拒,不能从物理网卡直接出 v6
+// (「连接时停用网卡 IPv6」被关掉时,网卡上还挂着公网 v6)。IPv4 照旧直连。
+func TestBypassAppsNoIPv6(t *testing.T) {
+	s := settings.Default()
+	s.BypassApps = []string{"qbittorrent.exe"}
+	c, _ := build(t, s)
+	proc := "/opt/qbittorrent/qbittorrent.exe"
+	if out, at := route(t, c, "Rule", conn{dst: "2001:db8::1", proc: proc}); out != "reject" {
+		t.Fatalf("按进程直连的程序用 IPv6 字面量连接应被拒,实际走了 %s(规则 %d)", out, at)
+	}
+	if out, _ := route(t, c, "Rule", conn{dst: "93.184.216.34", proc: proc}); out != "direct" {
+		t.Fatalf("按进程直连的程序的 IPv4 连接照旧直连,实际 %s", out)
+	}
+}
+
 // 默认规则可改:改成"国内也走代理、其余直连"后配置要跟着变;还原后回到出厂。
 func TestDefaultRulesConfigurable(t *testing.T) {
 	s := settings.Default()

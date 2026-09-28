@@ -55,3 +55,40 @@ func TestGatewayMode(t *testing.T) {
 		t.Fatal("本机模式不该有网关相关配置")
 	}
 }
+
+// 关 IPv6 时设备策略同样要守"全链路禁 IPv6":强制代理的设备,域名要先经远程 DNS 按 ipv4_only 解析再交给节点
+// (否则节点自己解析、解析出 AAAA 就走 IPv6 出去);直连的设备写 IPv6 字面量也要被拒,不能从路由器直接出 v6。
+func TestGatewayDevicesNoIPv6(t *testing.T) {
+	s := settings.Default()
+	s.NetMode = settings.NetGateway
+	s.Devices = []settings.Device{
+		{Name: "电视", MAC: "aa:bb:cc:dd:ee:01", IP: "10.99.0.20", Mode: "direct"},
+		{Name: "手机", MAC: "aa:bb:cc:dd:ee:02", IP: "10.99.0.21", Mode: "proxy"},
+	}
+	for _, mode := range []string{settings.ModeRule, settings.ModeGlobal} {
+		s.Mode = mode
+		c, _ := build(t, s)
+		clash := ModeName(mode)
+		v := routeV(t, c, clash, conn{dst: "www.example.com", src: "10.99.0.21", answers: []string{"93.184.216.34", "2606:2800:220:1::1"}})
+		if v.out != "proxy" || v.server != "remote" || len(v.resolved) != 1 || !v.resolved[0].Is4() {
+			t.Fatalf("%s:强制代理的设备应经远程 DNS 只解析出 IPv4 再走代理,实际 %+v", mode, v)
+		}
+		for _, src := range []string{"10.99.0.20", "10.99.0.21"} {
+			if out, at := route(t, c, clash, conn{dst: "2001:db8::1", src: src}); out != "reject" {
+				t.Fatalf("%s:设备 %s 的 IPv6 字面量连接应被拒,实际走了 %s(规则 %d)", mode, src, out, at)
+			}
+		}
+		if mode == settings.ModeRule {
+			if out, _ := route(t, c, clash, conn{dst: "93.184.216.34", src: "10.99.0.20"}); out != "direct" {
+				t.Fatalf("直连设备的 IPv4 连接照旧直连,实际 %s", out)
+			}
+		}
+	}
+
+	// 开着 IPv6 时不加这一步:节点用不用 IPv6 由它自己定
+	s.Mode, s.IPv6 = settings.ModeRule, true
+	c, _ := build(t, s)
+	if v := routeV(t, c, "Rule", conn{dst: "www.example.com", src: "10.99.0.21"}); v.out != "proxy" || v.server != "" {
+		t.Fatalf("开 IPv6 时强制代理的设备不该另外指定解析: %+v", v)
+	}
+}

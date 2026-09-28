@@ -272,6 +272,11 @@ func buildConfig(in Input, rep *Report) ([]byte, error) {
 		obj("protocol", "dns", "action", "hijack-dns"),
 		obj("port", 53, "action", "hijack-dns"), // 不走系统解析、自己发 53 的程序也收进来,不泄漏
 	}
+	if !s.IPv6 {
+		// 直接写 IPv6 字面量的连接也堵住。排在按进程直连、设备策略这些直连规则前面:否则被直连的进程 / 设备
+		// 照样能用 IPv6 从物理网卡出去。要在 DNS 劫持之后,发往 v6 地址 53 端口的查询仍得收进内核。
+		rules = append(rules, obj("ip_version", 6, "action", "reject"))
+	}
 	// 全局禁直连:隧道以外只剩节点连接本身、回环、(局域网直通开着时的)局域网 —— 按进程 / 按应用直连、网关模式
 	// 里设成"直连"的设备,这时都不生效(照样走隧道)。它们是给规则模式配的;在严格全局下直连出去,闸又放行本服务,
 	// 就是隧道外的流量。
@@ -292,12 +297,19 @@ func buildConfig(in Input, rep *Report) ([]byte, error) {
 			if mode == "direct" && sealed {
 				continue // 严格全局下设备的"直连"不生效(见上)
 			}
-			if ips := byMode[mode]; len(ips) > 0 {
-				if mode == "reject" {
-					rules = append(rules, obj("source_ip_cidr", ips, "action", "reject"))
-				} else {
-					rules = append(rules, obj("source_ip_cidr", ips, "outbound", mode))
-				}
+			ips := byMode[mode]
+			switch {
+			case len(ips) == 0:
+			case mode == "reject":
+				rules = append(rules, obj("source_ip_cidr", ips, "action", "reject"))
+			case mode == "proxy" && !s.IPv6:
+				// 强制代理的设备不走下面那条通用的 resolve(那条要按 DNS 规则走,规则模式下国内域名会交给直连的本地 DNS):
+				// 这里先经远程 DNS(经代理)按 ipv4_only 解析,再交给代理 —— 否则节点拿到域名自己解析,解析出 AAAA 就走 IPv6 出去
+				rules = append(rules,
+					obj("source_ip_cidr", ips, "action", "resolve", "server", "remote", "strategy", "ipv4_only"),
+					obj("source_ip_cidr", ips, "outbound", mode))
+			default:
+				rules = append(rules, obj("source_ip_cidr", ips, "outbound", mode))
 			}
 		}
 	}
@@ -305,9 +317,7 @@ func buildConfig(in Input, rep *Report) ([]byte, error) {
 		// 先按 ipv4_only 把目标域名解析成 IPv4(fake-ip 只是给客户端的占位,这里查的是真实地址),
 		// 之后不管直连还是经代理,拿到的都是 IPv4;否则代理服务器会自己解析出 AAAA 走 IPv6 出去。
 		// 解析走 DNS 规则:国内域名本地 DoH、其余远程 DoH(经代理),路由器查询不会返回 fake-ip。
-		rules = append(rules,
-			obj("action", "resolve", "strategy", "ipv4_only"),
-			obj("ip_version", 6, "action", "reject")) // 直接写 IPv6 字面量的连接也堵住
+		rules = append(rules, obj("action", "resolve", "strategy", "ipv4_only"))
 	} else {
 		rules = append(rules, obj("action", "resolve")) // 开 IPv6 也要先解析,否则 IP 类规则(geoip、IP 段)对域名连接不生效
 	}
