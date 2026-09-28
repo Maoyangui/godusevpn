@@ -656,8 +656,27 @@ func (d *Daemon) start(cfg []byte) error {
 			return state.Errf(state.CodePrivacyGuard, "建立系统网络保护失败,拒绝启动数据面: %v", err)
 		}
 	}
+	// 内核启动时先读缓存里记着的模式与选中节点、盖过配置(见 core.PresetCache),起之前按这份配置对齐
+	d.mu.Lock()
+	var tags []string
+	if d.prepared != nil {
+		tags = d.prepared.Tags
+	}
+	d.mu.Unlock()
+	mode, sel := builder.ModeName(s.Mode), builder.DefaultSelected(tags, s.Selected)
+	if err := core.PresetCache(builder.CachePath(paths.DataDir()), mode, "proxy", sel); err != nil {
+		d.logf("内核缓存里的模式 / 节点没对齐,起来之后再纠正: %v", err)
+	}
 	if err := d.core.Start(cfg); err != nil {
 		return d.classifyStart(err)
+	}
+	// 上面没对齐成时的兜底:按缓存里的旧模式 / 旧节点起来了就立刻纠正,并掐掉这一瞬间建起来的连接
+	if now, _, _ := d.core.Group("proxy"); now != sel || !strings.EqualFold(d.core.Mode(), mode) {
+		was := now + " / " + d.core.Mode()
+		_ = d.core.Select("proxy", sel)
+		_ = d.core.SetMode(mode)
+		_ = d.core.CloseAllConnections()
+		d.logf("内核按缓存里记着的「%s」起来了,已纠正为「%s / %s」", was, sel, mode)
 	}
 	// 最后一次检查覆盖“配置验证后闸被外部清掉/网卡状态变化”的竞态。
 	// 失败立即停掉刚启动的内核；stop() 在仍想连接时会保留保护状态。
@@ -676,9 +695,6 @@ func (d *Daemon) start(cfg []byte) error {
 	d.clashPort.Store(int32(d.preparedClashPortValue())) // 界面按它连 Clash API;同理要等真起来了才算数
 	d.markProbed()                                       // sing-box 启动时(PostStart)自己会把 auto 组全测一轮,定时测速从这时候起算
 	d.guardTunUp()
-	if s.Selected != "" {
-		_ = d.core.Select("proxy", s.Selected) // 内核里的当前节点跟着设置走(cache_file 也会记,双保险)
-	}
 	// 连上就先测一次当前节点,再查一次出口地址:首页那两项要马上有数,
 	// 不然延迟得等到第一次健康检查(三分钟后),出口地址则一直空着。
 	// (自动选择时不用在这里叫 auto 组测一轮:sing-box 的 urltest 组 PostStart 会自己把全部成员测一遍。)
