@@ -596,15 +596,15 @@ func (d *Daemon) prepare(ctx context.Context) ([]byte, error) {
 		d.resolveDeviceIPs(&s) // 设备策略按当前 IP 生效
 	}
 	clashPort := d.pickClashPort(s.ClashPort)
-	cfg, rep, err := builder.BuildEx(builder.Input{Profile: p, Settings: s, DataDir: paths.DataDir(), ClashSecret: d.secret, RuleSetDir: paths.RuleSets(),
+	cfg, rep, skipped, err := buildValid(d.core, builder.Input{Profile: p, Settings: s, DataDir: paths.DataDir(), ClashSecret: d.secret, RuleSetDir: paths.RuleSets(),
 		ClashPort: clashPort, NodeIPs: resolveNodeHosts(ctx, p, d.bootResolver(s)), SelfProcess: selfProcess()})
+	for tag, why := range skipped {
+		d.logf("节点「%s」本客户端建不起来,这次连接先跳过它: %s", tag, why)
+	}
 	if err != nil {
-		return nil, state.Errf(state.CodeConfig, "生成配置: %v", err)
+		return nil, err
 	}
 	d.noteMissingRuleSets(rep.Missing)
-	if err := d.core.Validate(cfg); err != nil {
-		return nil, state.Errf(state.CodeConfig, "配置校验失败: %v", err)
-	}
 	// Do not publish a rendered config if a concurrent settings update raced
 	// with the long subscription/build phase. The state machine will retry with
 	// the current policy, keeping DNS/route/privacy settings coherent.
@@ -628,6 +628,40 @@ func (d *Daemon) prepare(ctx context.Context) ([]byte, error) {
 	d.preparedConfigHash = sha256.Sum256(cfg)
 	d.mu.Unlock()
 	return cfg, nil
+}
+
+// buildValid 生成配置并干跑。整份校验不过时,逐个节点单独构造,把内核建不起来的剔掉(skipped:tag → 原因)
+// 再生成一次 —— 订阅里混一个 naive、SSR 之类本构建没有的节点,不该让其它节点全都连不上。
+// 剔掉的只是这一轮配置里的;订阅缓存、节点列表照旧是完整的。
+func buildValid(c *core.Core, in builder.Input) (cfg []byte, rep builder.Report, skipped map[string]string, err error) {
+	if cfg, rep, err = builder.BuildEx(in); err != nil {
+		return nil, rep, nil, state.Errf(state.CodeConfig, "生成配置: %v", err)
+	}
+	verr := c.Validate(cfg)
+	if verr == nil {
+		return cfg, rep, nil, nil
+	}
+	skipped = c.Unbuildable(in.Profile.Outbounds)
+	var keep []string
+	for _, t := range in.Profile.Tags {
+		if _, bad := skipped[t]; !bad {
+			keep = append(keep, t)
+		}
+	}
+	switch {
+	case len(skipped) == 0:
+		return nil, rep, nil, state.Errf(state.CodeConfig, "配置校验失败: %v", verr)
+	case len(keep) == 0:
+		return nil, rep, skipped, state.Errf(state.CodeConfig, "订阅里的节点本客户端都建不起来: %v", verr)
+	}
+	in.Profile = in.Profile.Subset(keep)
+	if cfg, rep, err = builder.BuildEx(in); err != nil {
+		return nil, rep, skipped, state.Errf(state.CodeConfig, "生成配置: %v", err)
+	}
+	if err := c.Validate(cfg); err != nil {
+		return nil, rep, skipped, state.Errf(state.CodeConfig, "配置校验失败: %v", err)
+	}
+	return cfg, rep, skipped, nil
 }
 
 // start 启动内核;失败按原因归类。

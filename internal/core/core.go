@@ -168,6 +168,30 @@ func (c *Core) Validate(raw []byte) error {
 	return box.Close()
 }
 
+// Unbuildable 逐个节点单独干跑一遍(只构造、不启动、不联网),返回内核建不起来的那些:tag → 原因。
+// 订阅里只要混一个本构建建不起来的节点(naive、SSR、1.13 起移除的 wireguard 出站、ss 的 rc4……),
+// 整份配置就校验不过、一个节点都连不上;守护进程拿它找出坏的那几个剔掉。
+func (c *Core) Unbuildable(outbounds []json.RawMessage) map[string]string {
+	bad := map[string]string{}
+	for _, o := range outbounds {
+		var head struct {
+			Tag string `json:"tag"`
+		}
+		if json.Unmarshal(o, &head) != nil {
+			continue
+		}
+		raw, err := json.Marshal(map[string]any{"log": map[string]any{"disabled": true},
+			"outbounds": []any{o, map[string]any{"type": "direct", "tag": "direct"}}})
+		if err == nil {
+			err = c.Validate(raw)
+		}
+		if err != nil {
+			bad[head.Tag] = err.Error()
+		}
+	}
+	return bad
+}
+
 // Start 启动;已在运行则报错。
 func (c *Core) Start(raw []byte) error {
 	c.mu.Lock()
