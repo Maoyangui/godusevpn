@@ -1992,11 +1992,20 @@ func (d *Daemon) registerHandlers() {
 			return nil, errors.New("没有这条订阅")
 		}
 		if s.ActiveProfile != in.ID {
+			prevID := s.ActiveProfile
 			s.ActiveProfile = in.ID
 			if err := d.setSettings(s); err != nil {
 				return nil, err
 			}
 			if err := d.restart(); err != nil {
+				// 新订阅没备出配置,旧内核照跑:设置也退回去,和正在跑的对得上。不退的话界面列的是新订阅的节点,
+				// 之后任何一次重建都按新订阅来,它拉不到就一直退避
+				if cur := d.getSettings(); cur.ActiveProfile == in.ID {
+					cur.ActiveProfile = prevID
+					if rerr := d.setSettings(cur); rerr != nil {
+						d.logf("切换订阅失败后退回原订阅也失败: %v", rerr)
+					}
+				}
 				return nil, &ipc.CallError{Code: state.CodeOf(err), Msg: "切换订阅失败,保持当前连接: " + err.Error()}
 			}
 		}
@@ -2011,34 +2020,46 @@ func (d *Daemon) registerHandlers() {
 		if err != nil {
 			return nil, err
 		}
-		s := d.getSettings()
-		idx := -1
-		for i, sp := range s.Profiles {
-			if sp.ID == in.ID {
-				idx = i
+		find := func(s settings.Settings) int {
+			for i, sp := range s.Profiles {
+				if sp.ID == in.ID {
+					return i
+				}
 			}
+			return -1
 		}
+		s := d.getSettings()
+		idx := find(s)
 		if idx < 0 {
 			return nil, errors.New("没有这条订阅")
 		}
-		urlChanged := false
-		if n := strings.TrimSpace(in.Name); n != "" {
-			s.Profiles[idx].Name = n
-		}
-		if u := strings.TrimSpace(in.URL); u != "" && u != s.Profiles[idx].URL {
+		u := strings.TrimSpace(in.URL)
+		urlChanged := u != "" && u != s.Profiles[idx].URL
+		var np *profile.Profile
+		if urlChanged {
 			if !settings.ValidURL(u) {
 				return nil, errors.New("订阅地址必须以 http:// 或 https:// 开头")
 			}
+			// 先用新地址拉一次,拉不到就什么都不改(和添加订阅一样)。先存后拉的话,新地址拉不到时它已经落盘、
+			// 缓存却还是旧地址的,之后任何一次重建都因为"缓存和地址对不上"硬失败,连旧缓存都不用
+			var err error
+			if np, err = d.fetchProfile(context.Background(), u); err != nil {
+				return nil, &ipc.CallError{Code: state.CodeOf(err), Msg: err.Error()}
+			}
+			if s = d.getSettings(); find(s) < 0 { // 拉的这段时间里订阅可能被删了
+				return nil, errors.New("没有这条订阅")
+			}
+			idx = find(s)
 			s.Profiles[idx].URL = u
-			urlChanged = true
+		}
+		if n := strings.TrimSpace(in.Name); n != "" {
+			s.Profiles[idx].Name = n
 		}
 		if err := d.setSettings(s); err != nil {
 			return nil, err
 		}
 		if urlChanged {
-			if _, err := d.refreshProfile(context.Background(), in.ID); err != nil {
-				return nil, &ipc.CallError{Code: state.CodeOf(err), Msg: err.Error()}
-			}
+			d.setProfileCache(in.ID, np)
 			if s.ActiveProfile == in.ID {
 				if err := d.restart(); err != nil {
 					return nil, &ipc.CallError{Code: state.CodeOf(err), Msg: "新地址的配置生成失败,保持当前连接: " + err.Error()}
