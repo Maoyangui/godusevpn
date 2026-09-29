@@ -592,6 +592,8 @@ function updateHome() {
   const gp = $('#guard-pill');
   // 闸开着但有异常(比如转发层没放行隧道网卡)和闸根本没开成是两回事,标题要分开说
   if (v.guardError) { gp.hidden = false; gp.className = 'guard-pill warn'; gp.innerHTML = ICON_WARN + `<span>${t(v.guard === 'on' ? 'home.guardWarn' : 'home.guardErr')} · ${esc(v.guardError)}</span>`; }
+  // 闸开着、但平台这一层保护不完整(Android 没开「阻止未经 VPN 的连接」、Windows 开机那组没装全):同样标成警告,不亮绿盾
+  else if (v.guard === 'on' && v.guardNote) { gp.hidden = false; gp.className = 'guard-pill warn'; gp.innerHTML = ICON_WARN + `<span>${t('home.guardWarn')} · ${esc(v.guardNote)}</span>`; }
   else if (v.guard === 'on') { gp.hidden = false; gp.className = 'guard-pill'; gp.innerHTML = ICON_SHIELD + `<span>${t('home.guard')}</span>`; }
   else gp.hidden = true;
   // 有几张网卡动手前的 IPv6 状态丢了(备份坏了):一直挂着,直到用户点「知道了」。内容变了才重画,免得每次推送都换掉按钮
@@ -986,7 +988,7 @@ async function renderSettings(el) {
     `)}
     ${group(t('set.g.privacy'), `
       ${sw('f-ipv6', t('set.ipv6'), s.ipv6, t('set.ipv6Help'))}
-      ${sw('f-nodirect', t('set.noDirect'), s.noDirect, t('set.noDirectHelp'))}
+      ${sw('f-nodirect', t('set.noDirect'), s.noDirect, t(state.platform === 'android' ? 'set.noDirectHelpAndroid' : 'set.noDirectHelp'))}
       ${state.platform === 'android' ? `<div class="srow"><div class="lbl">${t('set.vpnAlways')}<div>${t('set.vpnAlwaysHelp')}</div></div><button class="btn sm" id="f-vpnalways">${t('set.vpnAlwaysOpen')}</button></div>` : ''}
       ${state.platform === 'android' ? '' : `<div class="srow"><div class="lbl">${t('set.nicv6')} <span class="tag warn">${t('set.nicv6Tag')}</span><div>${t('set.nicv6Help')}</div></div><label class="switch"><input type="checkbox" id="f-nicv6" ${s.disableNicIpv6 ? 'checked' : ''}></label></div>`}
     `)}

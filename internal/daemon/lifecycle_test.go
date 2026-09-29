@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Maoyangui/godusevpn/internal/netmode"
 	"github.com/Maoyangui/godusevpn/internal/settings"
@@ -244,5 +245,23 @@ func TestRecoverRouteLogPromisesNothing(t *testing.T) {
 	fn := funcBody(t, readSource(t, "startfail.go"), "func (d *Daemon) recoverRoute(ctx context.Context) bool {")
 	if strings.Contains(fn, "自动用回") {
 		t.Fatal("没有切回逻辑,日志不能说恢复后会自动用回去")
+	}
+}
+
+// 闸开着、但平台这一层保护不完整(Android 没开 lockdown 等)时,界面要能标出来,不能照样亮绿盾。
+func TestStateViewCarriesGuardNote(t *testing.T) {
+	d := newPolicyTestDaemon(t)
+	d.guardOn = true
+	d.guardNote, d.guardNoteAt = "系统的「阻止未经 VPN 的连接」没开", time.Now()
+	if v := d.stateView(); v.Guard != "on" || v.GuardNote != d.guardNote {
+		t.Fatalf("闸开着且平台有保留:应带上 guardNote,得 %q / %q", v.Guard, v.GuardNote)
+	}
+	d.guardErr = "转发层没放行"
+	if v := d.stateView(); v.GuardNote != "" {
+		t.Fatal("已经有 guardError 时不再叠一句")
+	}
+	d.guardOn, d.guardErr = false, ""
+	if v := d.stateView(); v.GuardNote != "" {
+		t.Fatal("闸没开时不该带 guardNote")
 	}
 }

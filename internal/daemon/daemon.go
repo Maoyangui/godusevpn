@@ -78,6 +78,8 @@ type Daemon struct {
 	// tunUpPending 隧道网卡的转发层放行没成功(网卡还没注册好之类),下一次同步再试
 	tunUpPending atomic.Bool
 	guardErr     string     // 闸该开却没开成的原因
+	guardNote    string     // 闸开着时平台这一层保护的保留(见 guardNoteNow)
+	guardNoteAt  time.Time  // 上次问 GuardWarning 的时间
 	persistedOK  bool       // persisted 状态文件可被可靠读取;未知时不撤保护、不自动连接
 	connOpMu     sync.Mutex // MConnect / MDisconnect 串行:两者交错会让落盘意愿与状态机相反
 	// settingsOK 设置文件读出来了。读不出来时用的是默认值,而默认值(模式=规则)会让
@@ -1713,8 +1715,28 @@ func (d *Daemon) stateView() ipc.StateView {
 	}
 	v.GuardError = d.guardErr
 	d.mu.Unlock()
+	if v.Guard == "on" && v.GuardError == "" {
+		v.GuardNote = d.guardNoteNow()
+	}
 	v.NICLost = netmode.NICLossNote()
 	return v
+}
+
+// guardNoteNow 闸开着时平台这一层保护的保留(netmode.GuardWarning:Android 没开「阻止未经 VPN 的连接」时被杀 / 升级
+// 那段不受保护,Windows 开机那组没装全)。以前只写日志,首页照样亮绿盾。Android 上要问宿主,而状态一两秒推一次:
+// 10 秒内复用上一次的结果;用户去系统设置里打开之后,最多 10 秒界面就跟上。
+func (d *Daemon) guardNoteNow() string {
+	d.mu.Lock()
+	note, fresh := d.guardNote, time.Since(d.guardNoteAt) < 10*time.Second
+	d.mu.Unlock()
+	if fresh {
+		return note
+	}
+	note = netmode.GuardWarning()
+	d.mu.Lock()
+	d.guardNote, d.guardNoteAt = note, time.Now()
+	d.mu.Unlock()
+	return note
 }
 
 // ---- 控制接口 ----
