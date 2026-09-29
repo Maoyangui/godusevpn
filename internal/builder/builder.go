@@ -210,7 +210,8 @@ func buildConfig(in Input, rep *Report) ([]byte, error) {
 		obj("outbound", "any", "server", "local"), // 节点自己的域名:直连解析,不能绕圈
 		obj("clash_mode", "Direct", "server", "local"),
 	}
-	if rs.has("geosite-cn") {
+	if rs.has("geosite-cn") && s.DefaultRules.CN == settings.OutDirect {
+		// 国内域名交给直连的本地 DNS,只在默认规则「国内」是直连时:改成代理 / 拒绝后,它们的解析也不该从本机直连出去
 		dnsRules = append(dnsRules, obj("clash_mode", "Rule", "rule_set", []string{"geosite-cn"}, "server", "local"))
 	}
 	if s.FakeIP {

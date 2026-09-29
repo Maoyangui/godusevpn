@@ -466,6 +466,25 @@ func TestDefaultRulesConfigurable(t *testing.T) {
 	if c2.Route.Final != "proxy" {
 		t.Fatalf("还原后其余流量应走 proxy,实际 %q", c2.Route.Final)
 	}
+
+	// 国内域名交给直连的本地 DNS,只在「国内」是直连时;改成代理 / 拒绝后解析也不能从本机直连出去
+	cnLocal := func(c cfg) bool {
+		for _, r := range c.DNS.Rules {
+			if fmt.Sprint(r["rule_set"]) == "[geosite-cn]" && r["server"] == "local" {
+				return true
+			}
+		}
+		return false
+	}
+	if !cnLocal(c2) {
+		t.Fatal("「国内」直连时国内域名应由本地 DNS 解析")
+	}
+	for _, out := range []string{settings.OutProxy, settings.OutReject} {
+		s.DefaultRules.CN = out
+		if c3, _ := build(t, s); cnLocal(c3) {
+			t.Fatalf("「国内」= %s 时国内域名不该再交给直连的本地 DNS", out)
+		}
+	}
 }
 
 // macOS 上隧道网卡名只能是内核分配的 utunN:配置里写死 interface_name 会让内核直接起不来
