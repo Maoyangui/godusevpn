@@ -47,7 +47,10 @@ type Daemon struct {
 	nicOff            atomic.Bool  // 各网卡的 IPv6 绑定已由我们停掉、还没还原(和闸一样,跨内核重启 / 服务重启一直有效)
 	nicDisablePending atomic.Bool  // partial disable must be retried even before a public address appears
 	shuttingDown      atomic.Bool  // 服务正在停止:闸和网卡 IPv6 这段时间里一律不动(见 Run 的 ctx.Done)
-	nicMu             sync.Mutex   // syncNICIPv6 串行化:停用那一步要起 PowerShell,不能两个一起跑
+	// bootWanted 服务刚起、自动连接还没接上之前,"想不想连着"按落盘意愿算(见 wantConnected)。
+	// 这段时间状态机还没 Connect,光看 machine.Wanted() 会把"上次连着关的机"当成"不想连"。
+	bootWanted atomic.Bool
+	nicMu      sync.Mutex // syncNICIPv6 串行化:停用那一步要起 PowerShell,不能两个一起跑
 	// lastNICWarn 上一次打过的网卡 IPv6 告警。巡检每 30 秒跑一次,同一句话不重复刷日志;
 	// 但产生了就必须有人读到 —— 不然 setNICWarning 等于写进黑洞。
 	lastNICWarn string
@@ -185,6 +188,7 @@ func NewWithOptions(o Options) (*Daemon, error) {
 	prev := d.loadPersisted()
 	persistedTrusted := d.persistedStateOK()
 	strictPending := persistedTrusted && prev.Wanted && s.TUN && s.NoDirect && s.Mode == settings.ModeGlobal
+	d.bootWanted.Store(persistedTrusted && prev.Wanted && d.settingsTrusted())
 	if persistedTrusted && !strictPending && d.settingsTrusted() {
 		if err := netmode.UnprotectChecked(); err != nil {
 			d.logf("上次 DNS/路由保护尚未成功恢复,保留恢复依据并继续重试: %v", err)
@@ -259,6 +263,13 @@ func (d *Daemon) Close() error {
 // Run 起控制接口,按上次状态自动连接,定时刷新订阅;ctx 结束时全部停掉。
 func (d *Daemon) Run(ctx context.Context) error {
 	d.logf("%s 服务启动 v%s (%s/%s)", DisplayName, buildinfo.Version, runtime.GOOS, runtime.GOARCH)
+	// 闸是持久的:上次留下的,此刻就在拦。控制口开之前先按实物记成开着,别让对账完成前进来的测速、
+	// 拉订阅以为闸没开而从本服务直连出去(闸放行本服务);该撤该留由下面的对账决定。
+	if netmode.GuardInstallable() {
+		if n, err := netmode.GuardStatus(); err == nil && n > 0 {
+			d.setGuard(true, "")
+		}
+	}
 	if !d.noListen {
 		if err := d.server.Listen(); err != nil {
 			return fmt.Errorf("监听控制管道: %w", err)
@@ -270,11 +281,15 @@ func (d *Daemon) Run(ctx context.Context) error {
 	if netmode.NICIPv6Manageable() {
 		go d.nicIPv6Loop(ctx)
 	}
+	// 和 MConnect / MDisconnect 串行,锁里重读一次:对账这几秒里用户点了断开(已落盘不想连),就不能再自动连回去
+	d.connOpMu.Lock()
 	persisted := d.loadPersisted()
 	if d.persistedStateOK() && d.settingsTrusted() && persisted.Wanted {
 		d.logf("上次是已连接状态,自动连接")
 		d.machine.Connect()
 	}
+	d.bootWanted.Store(false) // 从这里起"想不想连着"交给状态机
+	d.connOpMu.Unlock()
 	t := time.NewTicker(10 * time.Minute)
 	defer t.Stop()
 	lastPrune := time.Now()
@@ -840,6 +855,14 @@ func needsPrivacyRebuild(prev, next settings.Settings) bool {
 		prev.DisableNICIPv6 != next.DisableNICIPv6 || prev.TUN != next.TUN
 }
 
+// protectionChanged 这次保存有没有动到闸 / 网卡 IPv6 所依据的设置。没动的保存(日志天数、规则组、
+// 测速间隔……)不同步闸和网卡 IPv6:服务刚起还没自动连上、或连接状态读不出来没自动连时,同步会拿
+// "没在连"去撤闸、还原 IPv6 —— 而用户只是改了一项和保护无关的设置。放宽只认改了这几项。
+func protectionChanged(prev, next settings.Settings) bool {
+	return prev.Mode != next.Mode || prev.NoDirect != next.NoDirect || prev.LANBypass != next.LANBypass ||
+		prev.NetMode != next.NetMode || prev.TUN != next.TUN || prev.IPv6 != next.IPv6 || prev.DisableNICIPv6 != next.DisableNICIPv6
+}
+
 // switchModeLive 经 Clash API 就地切模式,再掐掉已建立的连接让它们按新模式重连(切模式对老连接也生效)。
 // 只用于 needsPrivacyRebuild 为假的切换。SetMode 会把模式记进缓存,和 start() 起内核前的对齐一致。
 func (d *Daemon) switchModeLive(mode string) error {
@@ -917,7 +940,12 @@ func wantNICOff(s settings.Settings) bool {
 // (没点断开)。内核停了、崩了在重试、切订阅在重连、服务被杀、关机重启,只要这两条还成立就得一直关着 ——
 // 挡数据包挡不住"程序枚举网卡读走地址再报出去",地址一旦冒出来,哪怕只有几十秒也够被读走留到以后用。
 func (d *Daemon) nicIPv6Wanted() bool {
-	return wantNICOff(d.getSettings()) && d.machine.Wanted()
+	return wantNICOff(d.getSettings()) && d.wantConnected()
+}
+
+// wantConnected 用户此刻想不想连着:状态机的意愿;服务刚起、自动连接还没接上时按落盘意愿(bootWanted)。
+func (d *Daemon) wantConnected() bool {
+	return d.machine.Wanted() || d.bootWanted.Load()
 }
 
 // nicAction 该对网卡 IPv6 做什么。
@@ -951,8 +979,8 @@ func (d *Daemon) syncNICIPv6() error {
 	if d.shuttingDown.Load() {
 		return nil // 服务正在停止:不动网卡 IPv6(见 Run 的 ctx.Done)。下次启动由 reconcileNICIPv6 按落盘意愿对账
 	}
-	if !d.settingsTrusted() {
-		return nil // 同 syncGuard:设置不可信时不拿默认值去放宽保护
+	if !d.settingsTrusted() && d.wantConnected() {
+		return nil // 同 syncGuard:设置不可信、又想连着时不拿默认值去放宽保护(明确断开照常还原)
 	}
 	d.nicMu.Lock()
 	defer d.nicMu.Unlock()
@@ -1655,6 +1683,7 @@ func (d *Daemon) registerHandlers() {
 		if err := d.savePersisted(persisted{Wanted: false}); err != nil {
 			return nil, fmt.Errorf("保存断开状态失败,保护保持: %w", err)
 		}
+		d.bootWanted.Store(false) // 服务刚起、还没自动连上时点的断开同样算数
 		d.machine.Disconnect()
 		// 用户明确点了断开:隐私事务残留的 hold(回滚失败那种)不能再挡着撤闸,否则断了也断不干净
 		d.mu.Lock()
@@ -1690,9 +1719,11 @@ func (d *Daemon) registerHandlers() {
 			}
 			return d.stateView(), nil
 		}
-		d.syncGuard()
-		if err := d.syncNICIPv6(); err != nil {
-			return nil, err
+		if s.Mode != prev.Mode { // 再点一次当前模式不算"更换模式",不同步(见 protectionChanged)
+			d.syncGuard()
+			if err := d.syncNICIPv6(); err != nil {
+				return nil, err
+			}
 		}
 		return d.stateView(), nil
 	})
@@ -1896,6 +1927,7 @@ func (d *Daemon) registerHandlers() {
 				if err := d.savePersisted(persisted{Wanted: false}); err != nil {
 					return nil, err
 				}
+				d.bootWanted.Store(false)
 				d.machine.Disconnect()
 				d.syncGuard()
 				if err := d.syncNICIPv6(); err != nil {
@@ -2128,9 +2160,11 @@ func (d *Daemon) registerHandlers() {
 			}
 			return d.getSettings(), nil
 		}
-		d.syncGuard()
-		if err := d.syncNICIPv6(); err != nil { // 关掉「连接时停用网卡 IPv6」或打开 IPv6 时,这里把绑定还原回去
-			return nil, err
+		if protectionChanged(prev, next) {
+			d.syncGuard()
+			if err := d.syncNICIPv6(); err != nil { // 关掉「连接时停用网卡 IPv6」或打开 IPv6 时,这里把绑定还原回去
+				return nil, err
+			}
 		}
 		if !next.TUN {
 			if err := netmode.UnprotectChecked(); err != nil {

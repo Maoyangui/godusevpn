@@ -71,8 +71,8 @@ func TestNICIPv6FollowsWantedNotCoreRunning(t *testing.T) {
 	if contains(fn, "core.Running") {
 		t.Fatal("nicIPv6Wanted 里不该看内核在不在跑:它必须和闸一样只看用户的连接意愿")
 	}
-	if !contains(fn, "machine.Wanted") {
-		t.Fatal("nicIPv6Wanted 必须看 machine.Wanted():这才是和闸一致的那个判断")
+	if !contains(fn, "wantConnected()") || !contains(funcBody(t, src, "func (d *Daemon) wantConnected() bool {"), "machine.Wanted") {
+		t.Fatal("nicIPv6Wanted 必须看用户的连接意愿(wantConnected → machine.Wanted()):这才是和闸一致的那个判断")
 	}
 	stop := funcBody(t, src, "func (d *Daemon) stop() error {")
 	if contains(stop, "RestoreNICIPv6") {

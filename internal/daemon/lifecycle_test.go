@@ -2,10 +2,13 @@ package daemon
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/Maoyangui/godusevpn/internal/netmode"
+	"github.com/Maoyangui/godusevpn/internal/settings"
 	"github.com/Maoyangui/godusevpn/internal/state"
 )
 
@@ -88,4 +91,111 @@ func TestGuardFailureDoesNotBlockDataPlane(t *testing.T) {
 func TestStartPresetsCacheBeforeCore(t *testing.T) {
 	fn := funcBody(t, readDaemonSource(t), "func (d *Daemon) start(cfg []byte) error {")
 	before(t, fn, "core.PresetCache(", "d.core.Start(cfg)", "缓存里的旧模式 / 旧节点会在内核启动时盖过配置")
+}
+
+// handlerBody 控制口处理器(registerHandlers 里的闭包)的源码:从 h(<方法>, 到它的 "\n\t})"。
+func handlerBody(t *testing.T, src, method string) string {
+	t.Helper()
+	return blockAfterSep(t, src, "h(ipc."+method+", func(", "\n\t})")
+}
+
+func blockAfterSep(t *testing.T, src, marker, end string) string {
+	t.Helper()
+	i := strings.Index(src, marker)
+	if i < 0 {
+		t.Fatalf("找不到 %q —— 代码改了,这条测试要跟着更新", marker)
+	}
+	rest := src[i:]
+	if j := strings.Index(rest, end); j >= 0 {
+		return rest[:j]
+	}
+	return rest
+}
+
+func readSource(t *testing.T, name string) string {
+	t.Helper()
+	b, err := os.ReadFile(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strings.ReplaceAll(string(b), "\r\n", "\n")
+}
+
+// 只有改了闸 / 网卡 IPv6 所依据的设置,保存时才同步它们。
+func TestProtectionChanged(t *testing.T) {
+	base := settings.Default()
+	if protectionChanged(base, base) {
+		t.Fatal("什么都没改")
+	}
+	for name, mut := range map[string]func(*settings.Settings){
+		"日志天数": func(s *settings.Settings) { s.LogDays = 30 },
+		"规则组":  func(s *settings.Settings) { s.RuleGroups = []settings.RuleGroup{{Name: "x"}} },
+		"测速间隔": func(s *settings.Settings) { s.ProbeMinutes = 9 },
+		"节点":   func(s *settings.Settings) { s.Selected = "hk" },
+	} {
+		s := base
+		mut(&s)
+		if protectionChanged(base, s) {
+			t.Fatalf("改%s和保护无关,不该同步闸和网卡 IPv6", name)
+		}
+	}
+	for name, mut := range map[string]func(*settings.Settings){
+		"模式":        func(s *settings.Settings) { s.Mode = settings.ModeGlobal },
+		"禁直连":       func(s *settings.Settings) { s.NoDirect = false },
+		"局域网直通":     func(s *settings.Settings) { s.LANBypass = false },
+		"网关模式":      func(s *settings.Settings) { s.NetMode = settings.NetGateway },
+		"TUN":       func(s *settings.Settings) { s.TUN = false },
+		"IPv6":      func(s *settings.Settings) { s.IPv6 = true },
+		"停用网卡 IPv6": func(s *settings.Settings) { s.DisableNICIPv6 = false },
+	} {
+		s := base
+		mut(&s)
+		if !protectionChanged(base, s) {
+			t.Fatalf("改%s会影响闸或网卡 IPv6,要同步", name)
+		}
+	}
+}
+
+// 服务刚起、自动连接还没接上时,"想不想连着"按落盘意愿:否则这几秒里的同步会把上次连着关的机当成不想连。
+func TestWantConnectedDuringBoot(t *testing.T) {
+	d := newPolicyTestDaemon(t)
+	d.settings.Mode, d.settings.NoDirect = settings.ModeGlobal, true
+	if d.GuardWanted() || d.nicIPv6Wanted() {
+		t.Fatal("没连、也不是刚启动:不该要闸")
+	}
+	d.bootWanted.Store(true)
+	if !d.GuardWanted() {
+		t.Fatal("上次连着关的机、自动连接还没接上:闸该留着")
+	}
+	if d.nicIPv6Wanted() != netmode.NICIPv6Manageable() {
+		t.Fatal("上次连着关的机、自动连接还没接上:网卡 IPv6 该关着")
+	}
+}
+
+// 启动窗口与和保护无关的保存:这几条要真装 / 撤闸才走得到,本机不能跑,钉源码结构。
+func TestGuardSyncWiring(t *testing.T) {
+	src := readDaemonSource(t)
+	run := funcBody(t, src, "func (d *Daemon) Run(ctx context.Context) error {")
+	before(t, run, "netmode.GuardStatus()", "d.server.Listen()", "控制口开之前按实物把闸记成开着")
+	before(t, run, "d.connOpMu.Lock()", "d.machine.Connect()", "自动连接和断开串行,锁里重读落盘意愿")
+	before(t, run, "d.machine.Connect()", "d.bootWanted.Store(false)", "自动连接接上之后才把意愿交给状态机")
+	disc := handlerBody(t, src, "MDisconnect")
+	before(t, disc, "d.bootWanted.Store(false)", "d.syncGuard()", "刚启动时点的断开也要能撤闸")
+	set := handlerBody(t, src, "MSetSettings")
+	before(t, set, "if protectionChanged(prev, next) {\n\t\t\td.syncGuard()", "d.syncNICIPv6()", "和保护无关的保存不同步闸与网卡 IPv6")
+	if strings.Count(set, "d.syncGuard()") != 1 {
+		t.Fatal("MSetSettings 里只该有 protectionChanged 下那一处 syncGuard")
+	}
+	mode := handlerBody(t, src, "MSetMode")
+	if !strings.Contains(mode, "if s.Mode != prev.Mode {") || strings.Index(mode, "if s.Mode != prev.Mode {") > strings.LastIndex(mode, "d.syncGuard()") {
+		t.Fatal("再点一次当前模式不该同步闸与网卡 IPv6")
+	}
+	for fn, body := range map[string]string{
+		"syncGuard":   funcBody(t, readSource(t, "refresh.go"), "func (d *Daemon) syncGuard() {"),
+		"syncNICIPv6": funcBody(t, src, "func (d *Daemon) syncNICIPv6() error {"),
+	} {
+		if !strings.Contains(body, "!d.settingsTrusted() && d.wantConnected()") {
+			t.Fatalf("%s:设置读不出来时只在想连着时保持现状,明确断开要照常撤", fn)
+		}
+	}
 }

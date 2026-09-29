@@ -155,7 +155,7 @@ func (d *Daemon) needRebuildFor(tag string) bool {
 // 内核停了、崩了、在重启,只要这三条还成立,闸就该在。Android 的 VPN 接口按它决定要不要留着。
 func (d *Daemon) GuardWanted() bool {
 	s := d.getSettings()
-	return s.NoDirect && s.Mode == settings.ModeGlobal && d.machine.Wanted()
+	return s.NoDirect && s.Mode == settings.ModeGlobal && d.wantConnected()
 }
 
 func (d *Daemon) guardSpec() netmode.GuardSpec {
@@ -174,9 +174,10 @@ func (d *Daemon) syncGuard() {
 	if d.shuttingDown.Load() {
 		return // 服务正在停止:闸不动(见 Run 的 ctx.Done)。下次启动由 reconcileGuard 按落盘意愿对账
 	}
-	if !d.settingsTrusted() {
-		// 设置读不出来时手上是默认值(模式=规则),据此判出来的"不该有闸"是猜的,不是用户的意思。
+	if !d.settingsTrusted() && d.wantConnected() {
+		// 设置读不出来时手上是默认值(模式=规则),想连着时据此判出来的"不该有闸"是猜的,不是用户的意思。
 		// 保持现状:该有的闸留着,不该有的也不去装。用户保存一次设置就恢复正常。
+		// 用户明确断开(不想连)时该不该有闸和设置无关,照常撤 —— 不然断开也撤不掉,只剩「恢复网络」。
 		return
 	}
 	d.guardMu.Lock()
@@ -354,8 +355,11 @@ func (d *Daemon) reconcileGuard() {
 		if err := netmode.ClearGuard(); err != nil {
 			d.setGuard(true, "撤闸失败: "+err.Error())
 			d.logf("全局禁直连:上次残留的闸清不掉,直连仍被拦: %v", err)
-		} else if w := netmode.GuardWarning(); w != "" {
-			d.logf("全局禁直连:%s", w)
+		} else {
+			d.setGuard(false, "") // Run 开头按实物记成了开着
+			if w := netmode.GuardWarning(); w != "" {
+				d.logf("全局禁直连:%s", w)
+			}
 		}
 		return
 	}
