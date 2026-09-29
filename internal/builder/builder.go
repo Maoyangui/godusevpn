@@ -9,6 +9,7 @@ import (
 	"errors"
 	"net/netip"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
@@ -290,7 +291,9 @@ func buildConfig(in Input, rep *Report) ([]byte, error) {
 	// 就是隧道外的流量。
 	sealed := s.NoDirect && s.Mode == settings.ModeGlobal
 	if len(s.BypassApps) > 0 && !sealed {
-		rules = append(rules, obj(procKey, s.BypassApps, "outbound", "direct")) // 指定进程 / 应用直连,放在最前
+		r := procCond(procKey, s.BypassApps)
+		r["outbound"] = "direct"
+		rules = append(rules, r) // 指定进程 / 应用直连,放在最前
 	}
 	// 局域网设备策略(网关模式):按来源 IP 强制直连 / 拒绝 / 代理,放在模式分支之前,任何模式下都成立
 	if s.NetMode == settings.NetGateway {
@@ -450,11 +453,11 @@ func groupRule(g settings.RuleGroup, tags []string, rs *ruleSetPicker, procKey s
 	var parts []any
 	for _, typ := range []string{settings.RuleDomain, settings.RuleDomainSuffix, settings.RuleDomainKeyword, settings.RuleDomainRegex, settings.RuleIPCIDR, settings.RuleProcess} {
 		if v := lists[typ]; len(v) > 0 {
-			key := typ
 			if typ == settings.RuleProcess {
-				key = procKey // Android 上"进程名"条件填的是应用包名
+				parts = append(parts, procCond(procKey, v)) // Android 上"进程名"条件填的是应用包名
+			} else {
+				parts = append(parts, obj(typ, v))
 			}
-			parts = append(parts, obj(key, v))
 		}
 	}
 	if len(ports) > 0 {
@@ -687,6 +690,20 @@ var publicCIDRs = func() []string {
 	}
 	return out
 }()
+
+// procCond 用户填的进程名条件(按进程直连、规则组)。桌面上写成不分大小写的 process_path_regex:
+// Windows / macOS 的文件名本来就不分大小写,用户写 discord.exe,系统报出来的是 Discord.exe,
+// process_name 精确查表就对不上,而且没有任何提示。Android 的应用包名照旧精确匹配。
+func procCond(procKey string, names []string) map[string]any {
+	if procKey != "process_name" {
+		return obj(procKey, names)
+	}
+	re := make([]string, len(names))
+	for i, n := range names {
+		re[i] = `(?i)(^|[\\/])` + regexp.QuoteMeta(n) + `$`
+	}
+	return obj("process_path_regex", re)
+}
 
 // excludeHole 网段 from 挖掉 hole 之后剩下的那些网段。
 func excludeHole(from, hole string) []string {

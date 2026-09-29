@@ -3,6 +3,7 @@ package builder
 import (
 	"encoding/json"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/Maoyangui/godusevpn/internal/profile"
@@ -84,7 +85,7 @@ func TestSealedDirectOnlyForNodeConnections(t *testing.T) {
 		t.Fatal("严格全局下设备的\"直连\"不该生效")
 	}
 	for _, r := range rs {
-		if v, ok := r["process_name"].([]any); ok && len(v) == 1 && v[0] == "steam.exe" {
+		if v, ok := r["process_path_regex"].([]any); ok && len(v) == 1 && strings.Contains(v[0].(string), "steam") {
 			t.Fatal("严格全局下按进程直连不该生效")
 		}
 	}
@@ -124,7 +125,7 @@ func TestSealedDirectOnlyForNodeConnections(t *testing.T) {
 		}
 		found := false
 		for _, r := range rs {
-			if v, ok := r["process_name"].([]any); ok && len(v) == 1 && v[0] == "steam.exe" {
+			if v, ok := r["process_path_regex"].([]any); ok && len(v) == 1 && strings.Contains(v[0].(string), "steam") {
 				found = true
 			}
 		}

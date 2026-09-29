@@ -58,7 +58,7 @@ func TestRuleGroupsRendered(t *testing.T) {
 	}
 
 	game := findRule(c, func(r map[string]any) bool {
-		return r["type"] == "logical" && r["outbound"] == "direct" && strings.Contains(fmt.Sprint(r["rules"]), "game.exe")
+		return r["type"] == "logical" && r["outbound"] == "direct" && strings.Contains(fmt.Sprint(r["rules"]), "game")
 	})
 	if game == nil || !strings.Contains(raw, `"1.2.3.4/32"`) || !strings.Contains(raw, `"find_process": true`) {
 		t.Fatalf("进程 + IP 直连组没渲染对: %v %s", game, raw)

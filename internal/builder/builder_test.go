@@ -347,19 +347,38 @@ func TestBypassAppsRule(t *testing.T) {
 	s := settings.Default()
 	s.BypassApps = []string{"steam.exe", "qbittorrent.exe"}
 	c, raw := build(t, s)
-	var found bool
-	for _, r := range c.Route.Rules {
-		if r["outbound"] == "direct" && r["process_name"] != nil {
-			found = true
-		}
+	if !strings.Contains(raw, "\"find_process\": true") {
+		t.Fatalf("按进程直连应开 find_process: %s", raw)
 	}
-	if !found || !strings.Contains(raw, "\"find_process\": true") {
-		t.Fatalf("按进程直连应有 process_name 规则并开 find_process: %s", raw)
+	// 进程名不分大小写(Windows / macOS 的文件名本来就不分):写 steam.exe,系统报 Steam.exe 也要命中;
+	// 只按文件名比,别的程序路径里带着这个名字不算
+	for _, tc := range []struct {
+		proc, want string
+	}{
+		{"C:/Program Files (x86)/Steam/Steam.exe", "direct"},
+		{"/opt/qBittorrent/QBITTORRENT.EXE", "direct"},
+		{"C:/Program Files/Other/notsteam.exe", "proxy"},
+		{"C:/steam.exe/other.exe", "proxy"},
+	} {
+		if out, _ := route(t, c, "Rule", conn{dst: "93.184.216.34", proc: tc.proc}); out != tc.want {
+			t.Errorf("%s 应走 %s,实际 %s", tc.proc, tc.want, out)
+		}
 	}
 	s.BypassApps = nil
 	_, raw = build(t, s)
-	if strings.Contains(raw, "process_name") || strings.Contains(raw, "find_process") {
+	if strings.Contains(raw, "process_") || strings.Contains(raw, "find_process") {
 		t.Fatal("没有进程规则时不该开 find_process")
+	}
+}
+
+// 规则组里的进程名条件同样不分大小写。
+func TestRuleGroupProcessCaseInsensitive(t *testing.T) {
+	s := settings.Default()
+	s.RuleGroups = []settings.RuleGroup{{Name: "游戏", Enabled: true, Outbound: settings.OutDirect,
+		Rules: []settings.Rule{{Type: settings.RuleProcess, Value: "game.exe"}}}}
+	c, _ := build(t, s)
+	if out, _ := route(t, c, "Rule", conn{dst: "93.184.216.34", proc: "D:/Games/Game.EXE"}); out != "direct" {
+		t.Fatalf("规则组的进程名应不分大小写,实际 %s", out)
 	}
 }
 
