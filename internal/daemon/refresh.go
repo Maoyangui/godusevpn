@@ -244,11 +244,11 @@ func (d *Daemon) syncGuard() {
 	}
 }
 
-// guardArmed 闸此刻开着(按守护进程自己的记录)。
+// guardArmed 闸此刻开着(按守护进程自己的记录),或者正在装(见 cancelDirect):直连动作一律按开着处理。
 func (d *Daemon) guardArmed() bool {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	return d.guardOn
+	return d.guardOn || d.guardArming
 }
 
 // guardRedoReason 闸已经开着时,要不要重装、为什么。返回空串 = 不用动。
@@ -281,8 +281,10 @@ func (d *Daemon) appliedGuardSpec() netmode.GuardSpec {
 // applyGuard 装闸并把结果记进状态与日志;失败时如实记着(界面标「禁直连未生效」),
 // 隧道照常起(见 guardReady),health 每轮原地重试。
 func (d *Daemon) applyGuard(okMsg string) {
-	// 装闸之前先把只在闸没开时才做的直连动作取消掉:闸放行本服务,装好以后它们再发出的都是隧道外的包
+	// 装闸之前先把只在闸没开时才做的直连动作取消掉:闸放行本服务,装好以后它们再发出的都是隧道外的包。
+	// 从这一刻起到装完,新来的直连动作也按"闸开着"拒掉(guardArming),不然装闸那几百毫秒里开始的照样出去。
 	d.cancelDirect()
+	defer d.endArming()
 	spec := d.guardSpec()
 	d.mu.Lock()
 	previousOn, previousSpec := d.guardOn, d.guardApplied

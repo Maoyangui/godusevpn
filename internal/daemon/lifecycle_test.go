@@ -172,6 +172,21 @@ func TestWantConnectedDuringBoot(t *testing.T) {
 	}
 }
 
+// 装闸那几百毫秒里(持久那组已生效、guardOn 还没置真)新来的直连动作也要按闸开着拒掉。
+func TestArmingCountsAsArmed(t *testing.T) {
+	d := newPolicyTestDaemon(t)
+	d.cancelDirect() // applyGuard 开头
+	release := d.holdDirect(func() {})
+	defer release()
+	if !d.guardArmed() {
+		t.Fatal("正在装闸时新来的直连测速没被拦住")
+	}
+	d.endArming() // 装失败、原来也没闸
+	if d.guardArmed() {
+		t.Fatal("装完了还当闸开着")
+	}
+}
+
 // 启动窗口与和保护无关的保存:这几条要真装 / 撤闸才走得到,本机不能跑,钉源码结构。
 func TestGuardSyncWiring(t *testing.T) {
 	src := readDaemonSource(t)

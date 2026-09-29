@@ -73,6 +73,7 @@ type Daemon struct {
 	running                    *profile.Profile            // 正在跑的内核是按哪份订阅生成的;刷新后拿它和缓存比,决定动不动隧道
 	prepared                   *profile.Profile            // prepare 刚按它生成了配置、内核还没起:start 成功后转成 running
 	guardOn                    bool                        // 「全局禁直连」的闸此刻开着
+	guardArming                bool                        // 正在装闸(applyGuard 取消直连动作起到装完为止):直连动作按"闸开着"处理
 	// tunUpPending 隧道网卡的转发层放行没成功(网卡还没注册好之类),下一次同步再试
 	tunUpPending atomic.Bool
 	guardErr     string     // 闸该开却没开成的原因
