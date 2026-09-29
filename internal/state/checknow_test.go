@@ -211,6 +211,21 @@ func TestCheckNowStaleKickDroppedOnConnect(t *testing.T) {
 	waitUntil(t, func() bool { healths, _, _, _ := f.counts(); return healths == 1 }, "连着时 CheckNow 没触发检查")
 }
 
+// 起内核时守护进程发现闸没装上:隧道照常起(不起只会全部直连),同时 CheckNow 让 health 马上报 Degraded、
+// 原地重装。这一下是对这条新连接的判定,不能当成"断开期间攒下的"丢掉。
+func TestCheckNowFromStartCounts(t *testing.T) {
+	f := &kickDeps{}
+	deps := f.deps()
+	var m *Machine
+	deps.Start = func([]byte) error { m.CheckNow(); return nil }
+	m = New(deps)
+	f.m = m
+	m.Connect()
+	defer m.Disconnect()
+	waitUntil(t, func() bool { healths, _, _, _ := f.counts(); return healths == 1 },
+		"起内核时敲的 CheckNow 被丢掉了:闸没装上要等三分钟后的常规检查才报出来、才开始重装")
+}
+
 func TestCheckNowWhenNotConnected(t *testing.T) {
 	f := &kickDeps{}
 	m := New(f.deps())

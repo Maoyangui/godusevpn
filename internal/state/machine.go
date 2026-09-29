@@ -146,6 +146,15 @@ func (m *Machine) CheckNow() {
 	}
 }
 
+// dropKick 起内核之前把攒下的 kick 作废:那是对上一条连接的判定,新连接不该凭它平白多查一次。
+// 放在 Start 之前而不是 watch 开头:Start 自己发现隐私保护没完全就绪时会 CheckNow,那一下要算数。
+func (m *Machine) dropKick() {
+	select {
+	case <-m.kick:
+	default:
+	}
+}
+
 func (m *Machine) Snapshot() Snapshot {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -285,6 +294,7 @@ func (m *Machine) RestartChecked(rollback func() error) error {
 	}
 	m.stopLoop()
 	m.set(Starting, nil)
+	m.dropKick()
 	if err = m.d.Start(cfg); err != nil {
 		_ = m.d.Stop()
 		if rollback != nil {
@@ -365,6 +375,7 @@ func (m *Machine) run(ctx context.Context, started bool) {
 			}
 			if err == nil {
 				m.set(Starting, nil)
+				m.dropKick()
 				err = m.d.Start(cfg)
 			}
 			if err != nil {
@@ -432,11 +443,6 @@ func (m *Machine) watch(ctx context.Context) (bool, error) {
 	defer health.Stop()
 	fails := 0
 	tried := false // 这一轮不健康期间已经叫过一次自救了
-	// 断开期间攒下的 kick 作废:那是对上一条连接的判定,新连接刚起来不该平白多查一次
-	select {
-	case <-m.kick:
-	default:
-	}
 	// 一次健康检查。返回 true = 该重建连接了(内核死了、或这条线路救不回来)。
 	check := func() (bool, error) {
 		if m.d.Health == nil {

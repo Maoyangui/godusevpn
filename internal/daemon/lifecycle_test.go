@@ -46,6 +46,43 @@ func TestHealthIgnoresNodeInDirectMode(t *testing.T) {
 	}
 }
 
+// blockAfter fn 里从 marker 起到这个 if 块结束(第一个同级的 "\n\t}")为止。
+func blockAfter(t *testing.T, fn, marker string) string {
+	t.Helper()
+	i := strings.Index(fn, marker)
+	if i < 0 {
+		t.Fatalf("找不到 %q —— 代码改了,这条测试要跟着更新", marker)
+	}
+	rest := fn[i:]
+	if j := strings.Index(rest, "\n\t}"); j >= 0 {
+		return rest[:j]
+	}
+	return rest
+}
+
+// 闸装不上 / 查不清时不能拒绝起数据面:不起隧道,流量就全部从物理网卡直连;起着 strict_route 的隧道只会更少。
+// 启动前只让网卡 IPv6 类(确证在漏、停用没做成)挡连接;起来之后核查没过也不拆隧道,叫状态机马上检查、原地修。
+// 这几处要真起内核、真装闸才能走到,不能在装着产品的机器上跑,只能钉源码结构。
+func TestGuardFailureDoesNotBlockDataPlane(t *testing.T) {
+	src := readDaemonSource(t)
+	prep := funcBody(t, src, "func (d *Daemon) prepare(ctx context.Context) ([]byte, error) {")
+	if strings.Contains(prep, "ensurePrivacyReady()") || !strings.Contains(prep, "d.nicReady()") {
+		t.Fatal("prepare 启动前只该用网卡类核查挡连接")
+	}
+	if strings.Contains(blockAfter(t, prep, "d.guardReady()"), "return") {
+		t.Fatal("prepare:闸类核查没过只能记下来,不能拒绝起数据面")
+	}
+	start := funcBody(t, src, "func (d *Daemon) start(cfg []byte) error {")
+	before(t, start, "d.nicReady()", "d.core.Start(cfg)", "启动前只该用网卡类核查挡连接")
+	if strings.Index(start, "ensurePrivacyReady()") < strings.Index(start, "d.core.Start(cfg)") {
+		t.Fatal("start:内核起来之前不该再跑包含闸类的完整核查")
+	}
+	post := blockAfter(t, start, "d.ensurePrivacyReady()")
+	if strings.Contains(post, "core.Stop") || strings.Contains(post, "return") || !strings.Contains(post, "CheckNow") {
+		t.Fatal("start:起来之后核查没过不能拆隧道,要叫状态机马上检查、原地修")
+	}
+}
+
 // 内核启动时先读缓存里记着的模式与选中节点、盖过配置(core.PresetCache 那条测试钉着 sing-box 的这个行为)。
 // 守护进程必须在起内核之前把缓存对齐到这一轮配置,不能只在起来之后再 Select —— 那时 TUN 已经在收流量了。
 func TestStartPresetsCacheBeforeCore(t *testing.T) {

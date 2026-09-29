@@ -277,8 +277,8 @@ func (d *Daemon) appliedGuardSpec() netmode.GuardSpec {
 	return d.guardApplied
 }
 
-// applyGuard 装闸并把结果记进状态与日志;持久闸或开机闸任一失败都保持未就绪，
-// 由 prepare/start 的隐私前置检查拒绝启动数据面。
+// applyGuard 装闸并把结果记进状态与日志;失败时如实记着(界面标「禁直连未生效」),
+// 隧道照常起(见 guardReady),health 每轮原地重试。
 func (d *Daemon) applyGuard(okMsg string) {
 	// 装闸之前先把只在闸没开时才做的直连动作取消掉:闸放行本服务,装好以后它们再发出的都是隧道外的包
 	d.cancelDirect()
@@ -293,7 +293,7 @@ func (d *Daemon) applyGuard(okMsg string) {
 		d.guardApplied = previousSpec
 		d.mu.Unlock()
 		d.setGuard(previousOn, err.Error())
-		d.logf("全局禁直连:开闸失败,拒绝启动数据面: %v", err)
+		d.logf("全局禁直连:开闸失败(隧道照常建立,稍后重试): %v", err)
 		return
 	}
 	d.mu.Lock()

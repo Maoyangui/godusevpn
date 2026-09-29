@@ -574,8 +574,11 @@ func (d *Daemon) prepare(ctx context.Context) ([]byte, error) {
 	if err := d.syncNICIPv6(); err != nil {
 		return nil, err
 	}
-	if err := d.ensurePrivacyReady(); err != nil {
+	if err := d.nicReady(); err != nil {
 		return nil, err
+	}
+	if err := d.guardReady(); err != nil {
+		d.logf("全局禁直连未就绪,隧道照常建立(不建只会让流量全部直连),连上后继续重装: %v", err)
 	}
 	a, p := d.activeProfile()
 	if a == nil {
@@ -644,7 +647,8 @@ func (d *Daemon) start(cfg []byte) error {
 	}
 	// 网卡 IPv6 的停用不在这里做:它跟的是"用户想不想连着"而不是"内核在不在跑"(见 syncNICIPv6),
 	// prepare() 里已经对齐过了 —— 那也正好在内核启动之前,改协议绑定会让网卡重新走一遍协议栈,不该去抖刚建好的隧道。
-	if err := d.ensurePrivacyReady(); err != nil {
+	// 闸类问题不挡启动(见 guardReady),起来之后交给 health 报 Degraded 并原地重装。
+	if err := d.nicReady(); err != nil {
 		return err
 	}
 	s := d.getSettings()
@@ -678,11 +682,11 @@ func (d *Daemon) start(cfg []byte) error {
 		_ = d.core.CloseAllConnections()
 		d.logf("内核按缓存里记着的「%s」起来了,已纠正为「%s / %s」", was, sel, mode)
 	}
-	// 最后一次检查覆盖“配置验证后闸被外部清掉/网卡状态变化”的竞态。
-	// 失败立即停掉刚启动的内核；stop() 在仍想连接时会保留保护状态。
+	// 再核查一次(配置验证后闸被外部清掉 / 网卡状态变了)。没过也不拆刚起来的隧道 —— 拆了只会更漏
+	// (见 state.Machine.watch);叫状态机马上做一次健康检查,由它报 Degraded、health 原地修。
 	if err := d.ensurePrivacyReady(); err != nil {
-		_ = d.core.Stop()
-		return err
+		d.logf("隧道已起来,但隐私保护没完全就绪,马上原地修: %v", err)
+		d.machine.CheckNow()
 	}
 	if err := d.preparedMatchesCurrent(cfg); err != nil {
 		_ = d.core.Stop()
@@ -1114,9 +1118,20 @@ func privacyChecks(installable, persistent bool) (guard, boot bool) {
 	return installable, installable && persistent
 }
 
-// ensurePrivacyReady 是数据面启动前的最后一道硬检查。保护状态未知、闸状态查不到、
-// 网卡 IPv6 仍有公网地址时，宁可连接失败并退避，也不能让数据面以不完整的隐私保护运行。
+// ensurePrivacyReady 隐私保护的运行期核查(health 每轮都跑):闸与网卡 IPv6,闸类在前。
 func (d *Daemon) ensurePrivacyReady() error {
+	if err := d.guardReady(); err != nil {
+		return err
+	}
+	return d.nicReady()
+}
+
+// guardReady 闸类核查:该开的闸有没有开着、规格对不对、查不查得到。
+//
+// 这一类**不挡**数据面启动:闸装不上时拒绝起隧道,等于既没闸也没隧道,全部流量直连 —— 起着
+// strict_route 的隧道只会让直连更少。闸已在而查不清时,起不起隧道都不漏,不起只是白断网。
+// 所以 prepare / start 只把它记下来,隧道照常起,由 health 报 Degraded 并原地重装(界面标「禁直连未生效」)。
+func (d *Daemon) guardReady() error {
 	s := d.getSettings()
 	checkGuard, checkBoot := privacyChecks(netmode.GuardInstallable(), netmode.GuardPersistentSupported())
 	if s.NoDirect && s.Mode == settings.ModeGlobal && d.machine.Wanted() && checkGuard {
@@ -1151,6 +1166,11 @@ func (d *Daemon) ensurePrivacyReady() error {
 			return state.Errf(state.CodePrivacyGuard, "全局禁直连闸未安装")
 		}
 	}
+	return nil
+}
+
+// nicReady 网卡 IPv6 类核查。启动前没过就拒绝起数据面(只认"确证在漏"及停用没做成,见下)。
+func (d *Daemon) nicReady() error {
 	if d.nicIPv6Wanted() {
 		if d.nicDisablePending.Load() {
 			return state.Errf(state.CodePrivacyNIC, "网卡 IPv6 停用操作尚未完整成功")
