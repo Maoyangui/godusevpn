@@ -89,6 +89,27 @@ func TestRuleGroupsRendered(t *testing.T) {
 	}
 }
 
+// 设置里收的 geosite 类别名(含 ! 和 @,如 geolocation-!cn、google@cn),本地有规则集时就得用上,不能报缺失。
+func TestGeositeNamesWithBangAndAt(t *testing.T) {
+	s := settings.Default()
+	s.RuleGroups = []settings.RuleGroup{{Name: "国外", Enabled: true, Outbound: settings.OutProxy,
+		Rules: []settings.Rule{{Type: settings.RuleGeosite, Value: "geolocation-!cn"}, {Type: settings.RuleGeosite, Value: "google@cn"}}}}
+	if err := s.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	raw, rep, err := BuildEx(Input{Profile: sampleProfile(), Settings: s, DataDir: t.TempDir(), ClashSecret: "sec",
+		RuleSetDir: ruleSetRoot(t, "geosite-geolocation-!cn", "geosite-google@cn")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rep.Missing) != 0 {
+		t.Fatalf("本地已有的规则集被报成缺失: %v", rep.Missing)
+	}
+	if !strings.Contains(string(raw), `"geosite-geolocation-!cn"`) || !strings.Contains(string(raw), `"geosite-google@cn"`) {
+		t.Fatalf("规则组没用上这两个规则集: %s", raw)
+	}
+}
+
 func TestIPv6OnStillResolvesForIPRules(t *testing.T) {
 	s := settings.Default()
 	s.IPv6 = true
