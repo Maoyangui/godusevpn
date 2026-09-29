@@ -21,7 +21,7 @@ import (
 )
 
 type Input struct {
-	// SelfProcess 运行内核的那个进程的名字(桌面:godusevpn-svc.exe / godusevpn)。全局禁直连下"节点服务器直连"
+	// SelfProcess 运行内核的那个进程的名字(桌面:godusevpn-svc.exe / godusevpn)。全局模式下"节点服务器直连"
 	// 那几条规则只放它自己(见下面节点规则的注释);空 = 不知道,按老样子不限定进程。Android 用的是本应用的包名。
 	SelfProcess string
 	Profile     *profile.Profile
@@ -331,13 +331,13 @@ func buildConfig(in Input, rep *Report) ([]byte, error) {
 	// 只放行"这台服务器上的这些端口",不是整台服务器:面板、订阅地址、落地页常和节点同一个 IP,
 	// 按整个 IP 放行会把它们也变成直连,用户在全局模式下会莫名其妙地把面板暴露给本地网络。
 	//
-	// 全局禁直连下这几条只放内核自己(SelfProcess):规则本身只看目的地址和端口,不限定是谁发的 —— 用户去往和节点
+	// 全局模式下这几条只放内核自己(SelfProcess):规则本身只看目的地址和端口,不限定是谁发的 —— 用户去往和节点
 	// 同域名 / 同地址、同端口的连接也会命中。CDN 节点很常见(server 写优选域名 www.visa.com、或 Cloudflare 的共享
-	// 地址,端口 443),浏览器一打开同一个站点、或恰好解析到同一地址的别的站点,就从本服务直连出去了,闸放行本服务。
-	// 限定成内核自己的进程,绕圈照样避开,用户的连接照常走隧道。只在严格全局下这么做:别的模式本来就有直连,
-	// 按进程查找对每条连接都有开销(路由器上尤其)。
+	// 地址,端口 443),浏览器一打开同一个站点、或恰好解析到同一地址的别的站点,就从本服务直连出去了(禁直连开着时闸还放行本服务)。
+	// 限定成内核自己的进程,绕圈照样避开,用户的连接照常走隧道;网关模式下局域网设备去节点地址的连接没有本机进程,也走隧道。
+	// 规则 / 直连模式不加:那本来就有直连,按进程查找对每条连接都有开销(路由器上尤其)。
 	var self map[string]any
-	if sealed && in.SelfProcess != "" {
+	if s.Mode == settings.ModeGlobal && in.SelfProcess != "" {
 		self = map[string]any{procKey: []string{in.SelfProcess}}
 	}
 	withSelf := func(r map[string]any) map[string]any {
