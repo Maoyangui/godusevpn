@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -88,5 +89,40 @@ func TestSelectProfileRollsBackOnFailure(t *testing.T) {
 	}
 	if got := d.getSettings().ActiveProfile; got != "p1" {
 		t.Fatalf("切换失败要退回原订阅,实际 %s", got)
+	}
+}
+
+// 同一条订阅正在刷新时再来一次(界面超时后用户重点、定时刷新撞上):等那一次的结果,不另走一遍回退链
+// —— 严格全局下每多走一遍,最后一跳就多一次直连。
+func TestRefreshProfileCoalesces(t *testing.T) {
+	var hits atomic.Int32
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hits.Add(1)
+		<-release
+		_, _ = w.Write([]byte(subBody))
+	}))
+	defer srv.Close()
+	d := profileOpsDaemon(t)
+	d.settings.Profiles = []settings.Profile{{ID: "p1", Name: "一", URL: srv.URL + "/sub"}}
+	d.settings.ActiveProfile = "p1"
+
+	errs := make(chan error, 2)
+	for i := 0; i < 2; i++ {
+		go func() { _, err := d.refreshProfile(context.Background(), "p1"); errs <- err }()
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for hits.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	time.Sleep(100 * time.Millisecond) // 给第二次一点时间:没合并的话它此刻也已经打到服务端了
+	close(release)
+	for i := 0; i < 2; i++ {
+		if err := <-errs; err != nil {
+			t.Fatal(err)
+		}
+	}
+	if n := hits.Load(); n != 1 {
+		t.Fatalf("同一条订阅并发刷新打了 %d 次服务端,应合并成 1 次", n)
 	}
 }

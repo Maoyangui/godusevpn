@@ -70,6 +70,7 @@ type Daemon struct {
 	profiles                   map[string]*profile.Profile // 订阅 id → 节点缓存
 	fetchErr                   map[string]string           // 订阅 id → 最近一次拉取失败原因
 	fetchLink                  map[string]string           // 订阅 id → 拉取失败(404)时面板随响应给的「选购 / 续费」地址
+	refreshing                 map[string]*refreshCall     // 订阅 id → 正在跑的那次刷新:同一条订阅不叠第二条回退链
 	running                    *profile.Profile            // 正在跑的内核是按哪份订阅生成的;刷新后拿它和缓存比,决定动不动隧道
 	prepared                   *profile.Profile            // prepare 刚按它生成了配置、内核还没起:start 成功后转成 running
 	guardOn                    bool                        // 「全局禁直连」的闸此刻开着
@@ -553,9 +554,40 @@ func (d *Daemon) fetchWith(ctx context.Context, url string, client *http.Client)
 	}
 }
 
+// refreshCall 一次进行中的订阅刷新;done 关掉之后 err 就是它的结果。
+type refreshCall struct {
+	done chan struct{}
+	err  error
+}
+
 // refreshProfile 拉指定订阅并更新缓存,返回节点是否有变化。
+//
+// 同一条订阅已经在刷新时不另起一条:回退链最长两分多钟,界面等不及报超时,用户再点一次、定时刷新又撞上,
+// 每一次都会从头再走一遍"代理 → auto → 直连",严格全局下就是多一次直连。后来的等那一次的结果,
+// 只报成败、不报"有变化"(变化由发起的那一方处理,免得重连两遍)。
 func (d *Daemon) refreshProfile(ctx context.Context, id string) (changed bool, err error) {
 	d.mu.Lock()
+	if c := d.refreshing[id]; c != nil {
+		d.mu.Unlock()
+		select {
+		case <-c.done:
+			return false, c.err
+		case <-ctx.Done():
+			return false, ctx.Err()
+		}
+	}
+	c := &refreshCall{done: make(chan struct{})}
+	if d.refreshing == nil {
+		d.refreshing = map[string]*refreshCall{}
+	}
+	d.refreshing[id] = c
+	defer func() {
+		c.err = err
+		d.mu.Lock()
+		delete(d.refreshing, id)
+		d.mu.Unlock()
+		close(c.done)
+	}()
 	var url string
 	for _, p := range d.settings.Profiles {
 		if p.ID == id {
