@@ -16,6 +16,8 @@ import (
 	"github.com/Maoyangui/godusevpn/internal/profile"
 	"github.com/Maoyangui/godusevpn/internal/ruleset"
 	"github.com/Maoyangui/godusevpn/internal/settings"
+
+	"go4.org/netipx"
 )
 
 type Input struct {
@@ -358,8 +360,12 @@ func buildConfig(in Input, rep *Report) ([]byte, error) {
 			rules = append(rules, withSelf(obj("ip_cidr", cidrs, "port", n.Ports, "outbound", "direct")))
 		}
 	}
-	dr := s.DefaultRules
-	rules = append(rules, withOutbound(obj("ip_is_private", true), dr.Private))
+	if s.LANBypass {
+		// 全局模式里去局域网的连接只在「局域网直通」开着时直连 —— 和闸的局域网放行跟同一个开关;关着就照样走隧道。
+		// 私网段的 IP 字面量这时本来就不进 TUN,走到这里的是经混合端口来的、和域名解析出来全是局域网地址的(NAS 的域名)。
+		// 它不是默认规则「私网」(那条只在规则模式生效,在下面)。
+		rules = append(rules, withOutbound(lanDest(obj("clash_mode", "Global")), settings.OutDirect))
+	}
 	rules = append(rules,
 		obj("clash_mode", "Direct", "outbound", "direct"),
 		obj("clash_mode", "Global", "outbound", "proxy"),
@@ -377,6 +383,9 @@ func buildConfig(in Input, rep *Report) ([]byte, error) {
 		}
 		rules = append(rules, r)
 	}
+	// 默认规则(私网 → 国内 → 其余):排在用户规则组之后,同样只在规则模式下走到
+	dr := s.DefaultRules
+	rules = append(rules, withOutbound(lanDest(), dr.Private))
 	if len(adSets) > 0 {
 		rules = append(rules, obj("rule_set", adSets, "action", "reject"))
 	}
@@ -639,6 +648,39 @@ func nodeAddrs(p *profile.Profile) []nodeServer {
 	}
 	return out
 }
+
+// lanDest 目的地址"全是"局域网 / 私网地址才命中;extra 是要一并满足的条件。
+//
+// 不能只写 ip_is_private:目的地是域名时,它拿 resolve 解析出来的整组地址判,**有一个**不是公网就算命中,
+// 而直连出站会把这组地址挨个拨过去。恶意域名在 A 记录里混一个 0.0.0.0 / 10.x,本该走代理的连接就命中"私网直连",
+// 被直连到同组里的公网地址 —— 对方看到的是用户的真实 IP。再要求"没有一个是公网地址",混着公网地址的应答就落不进来;
+// IP 字面量的目的地判法不变。
+func lanDest(extra ...map[string]any) map[string]any {
+	var conds []any
+	for _, c := range extra {
+		conds = append(conds, c)
+	}
+	conds = append(conds, obj("ip_is_private", true), obj("ip_cidr", publicCIDRs, "invert", true))
+	return obj("type", "logical", "mode", "and", "rules", conds)
+}
+
+// publicCIDRs 公网地址全集:0.0.0.0/0 与 ::/0 减去局域网 / 私网段,给 lanDest 判"有没有公网地址"用。
+// 减掉的只能比 ip_is_private(sing 的 N.IsPublicAddr)认的非公网少、不能多 —— 多减一段,那段地址混进应答就又能被直连出去;
+// 所以 0.0.0.0、::、::1 没减(当公网看,只会让规则更严)。
+var publicCIDRs = func() []string {
+	var b netipx.IPSetBuilder
+	b.AddPrefix(netip.MustParsePrefix("0.0.0.0/0"))
+	b.AddPrefix(netip.MustParsePrefix("::/0"))
+	for _, p := range []string{"10.0.0.0/8", "127.0.0.0/8", "169.254.0.0/16", "172.16.0.0/12", "192.168.0.0/16", "224.0.0.0/4", "fc00::/7", "fe80::/10", "ff00::/8"} {
+		b.RemovePrefix(netip.MustParsePrefix(p))
+	}
+	set, _ := b.IPSet()
+	var out []string
+	for _, p := range set.Prefixes() {
+		out = append(out, p.String())
+	}
+	return out
+}()
 
 // withOutbound 给一条规则填出口:reject 是动作,其余是出站标签。默认规则的三项可配置,统一走这里。
 func withOutbound(rule map[string]any, out string) map[string]any {

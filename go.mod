@@ -11,6 +11,7 @@ require (
 	github.com/sagernet/sing-quic v0.7.0-beta.4
 	github.com/sagernet/sing-tun v0.9.0-beta.4
 	github.com/wailsapp/wails/v2 v2.15.0
+	go4.org/netipx v0.0.0-20231129151722-fdeea329fbba
 	golang.org/x/mobile v0.0.0-20260821190718-4776eadac327
 	golang.org/x/net v0.58.0
 	golang.org/x/sys v0.47.0
@@ -188,7 +189,6 @@ require (
 	go.uber.org/zap v1.27.1 // indirect
 	go.uber.org/zap/exp v0.3.0 // indirect
 	go4.org/mem v0.0.0-20240501181205-ae6ca9944745 // indirect
-	go4.org/netipx v0.0.0-20231129151722-fdeea329fbba // indirect
 	golang.org/x/crypto v0.55.0 // indirect
 	golang.org/x/exp v0.0.0-20260410095643-746e56fc9e2f // indirect
 	golang.org/x/mod v0.39.0 // indirect

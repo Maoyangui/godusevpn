@@ -2,6 +2,7 @@ package core
 
 import (
 	"encoding/json"
+	"runtime"
 	"testing"
 
 	"github.com/Maoyangui/godusevpn/internal/builder"
@@ -40,6 +41,15 @@ func TestBuiltConfigPassesDryRun(t *testing.T) {
 			{Name: "广告", Enabled: true, Outbound: settings.OutReject, Rules: []settings.Rule{{Type: settings.RuleDomainKeyword, Value: "adservice"}}},
 			{Name: "游戏", Enabled: true, Outbound: settings.OutDirect, Rules: []settings.Rule{{Type: settings.RuleProcess, Value: "game.exe"}, {Type: settings.RuleIPCIDR, Value: "1.2.3.0/24"}}},
 			{Name: "单条", Enabled: true, Outbound: "auto", Rules: []settings.Rule{{Type: settings.RuleDomain, Value: "one.example"}}},
+		}
+		return s
+	}(), func() settings.Settings {
+		// 局域网直通关着 + 网关设备:强制代理的设备带指定服务器的 resolve,内核要认(auto_redirect 只有 Linux 建得起来)
+		s := settings.Default()
+		s.LANBypass = false
+		if runtime.GOOS == "linux" {
+			s.NetMode = settings.NetGateway
+			s.Devices = []settings.Device{{ID: "a", IP: "10.99.0.21", Mode: "proxy"}, {ID: "b", IP: "10.99.0.22", Mode: "reject"}}
 		}
 		return s
 	}(), func() settings.Settings {

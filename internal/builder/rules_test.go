@@ -1,6 +1,7 @@
 package builder
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -56,7 +57,9 @@ func TestRuleGroupsRendered(t *testing.T) {
 		t.Fatalf("拒绝出口应渲染成 action reject: %v", ad)
 	}
 
-	game := findRule(c, func(r map[string]any) bool { return r["type"] == "logical" && r["outbound"] == "direct" })
+	game := findRule(c, func(r map[string]any) bool {
+		return r["type"] == "logical" && r["outbound"] == "direct" && strings.Contains(fmt.Sprint(r["rules"]), "game.exe")
+	})
 	if game == nil || !strings.Contains(raw, `"1.2.3.4/32"`) || !strings.Contains(raw, `"find_process": true`) {
 		t.Fatalf("进程 + IP 直连组没渲染对: %v %s", game, raw)
 	}

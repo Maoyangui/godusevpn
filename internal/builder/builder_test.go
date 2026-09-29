@@ -451,16 +451,14 @@ func TestDefaultRulesConfigurable(t *testing.T) {
 	if c.Route.Final != "direct" {
 		t.Fatalf("其余流量应走 direct,实际 %q", c.Route.Final)
 	}
-	var privReject, cnProxy bool
+	privReject, _ := route(t, c, "Rule", conn{dst: "192.168.1.1"})
+	var cnProxy bool
 	for _, r := range c.Route.Rules {
-		if r["ip_is_private"] == true && r["action"] == "reject" {
-			privReject = true
-		}
 		if fmt.Sprint(r["rule_set"]) == "[geosite-cn geoip-cn]" && r["outbound"] == "proxy" {
 			cnProxy = true
 		}
 	}
-	if !privReject || !cnProxy {
+	if privReject != "reject" || !cnProxy {
 		t.Fatalf("默认规则没按设置生成: priv=%v cn=%v %s", privReject, cnProxy, raw)
 	}
 	s.DefaultRules = settings.FactoryDefaultRules()
