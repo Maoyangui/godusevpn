@@ -12,6 +12,7 @@ import (
 	"os"
 	"slices"
 	"strings"
+	"time"
 )
 
 const Schema = 4
@@ -137,11 +138,38 @@ func (s Settings) Save(path string) error {
 	if err != nil {
 		return err
 	}
+	// 先落盘再改名:断电时宁可是旧文件,也不能是一份截断的(读不出来就退回默认值,见 Load)
 	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, b, 0o600); err != nil {
+	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		return err
+	}
+	if _, err = f.Write(b); err == nil {
+		err = f.Sync()
+	}
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		_ = os.Remove(tmp)
 		return err
 	}
 	return os.Rename(tmp, path)
+}
+
+// Preserve 把读不出来的设置文件另存一份(<path>.bad-<时间>),返回另存的路径;文件不存在返回空串。
+// Load 失败时拿到的是默认值,第一次保存就会把原文件整份覆盖 —— 订阅、规则组、设备策略全没了。
+// 覆盖之前先留一份,用户或开发者还能从里面把东西捞回来。
+func Preserve(path string) (string, error) {
+	b, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	bak := path + ".bad-" + time.Now().Format("20060102-150405")
+	return bak, os.WriteFile(bak, b, 0o600)
 }
 
 // Active 当前订阅(没有返回 nil)。

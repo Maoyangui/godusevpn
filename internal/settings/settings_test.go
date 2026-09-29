@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -137,5 +138,26 @@ func TestCloneIsDeep(t *testing.T) {
 	c.RuleGroups[0].Rules[0].Value = "b.com"
 	if s.Profiles[0].URL != "https://x/sub/token" || s.BypassApps[0] != "steam.exe" || s.RuleGroups[0].Rules[0].Value != "a.com" {
 		t.Fatalf("Clone 改副本不能影响原设置: %+v", s)
+	}
+}
+
+// 读不出来的设置文件在被覆盖前另存一份;不存在就什么都不做。
+func TestPreserve(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "settings.json")
+	if bak, err := Preserve(p); err != nil || bak != "" {
+		t.Fatalf("文件不存在时不该另存:%q %v", bak, err)
+	}
+	if err := os.WriteFile(p, []byte("{坏了"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	bak, err := Preserve(p)
+	if err != nil || !strings.HasPrefix(bak, p+".bad-") {
+		t.Fatalf("应另存为 .bad-<时间>:%q %v", bak, err)
+	}
+	if b, _ := os.ReadFile(bak); string(b) != "{坏了" {
+		t.Fatal("另存的内容不对")
+	}
+	if b, _ := os.ReadFile(p); string(b) != "{坏了" {
+		t.Fatal("原文件不该被动")
 	}
 }

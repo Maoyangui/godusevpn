@@ -176,8 +176,8 @@ func NewWithOptions(o Options) (*Daemon, error) {
 		// Android 上开机 / 升级广播直接崩进程,而「恢复网络」的离线兜底同样依赖 settings.Load,闸也解不掉。
 		// 改成:照常起来(settings.Load 失败时返回的就是默认值),但把 settingsOK 记成 false ——
 		// 凡是会**放宽**保护的动作(撤闸、还原网卡 IPv6、还原 DNS/路由、自动连接)一律不做,
-		// 现状原样保留。用户在界面里保存一次设置,文件就被覆盖修好,一切恢复正常。
-		d.logf("设置读不出来,先用默认值起来,但不会动现有的隐私保护(去设置页保存一次即可修复): %v", err)
+		// 现状原样保留。用户在界面里保存一次设置,文件就被覆盖修好(覆盖前原文件另存为 .bad-<时间>)。
+		d.logf("设置读不出来,先用默认值起来,但不会动现有的隐私保护(去设置页保存一次即可修复,原文件会先另存一份): %v", err)
 	}
 	d.settings = s
 	d.settingsGeneration = 1
@@ -422,6 +422,19 @@ func (d *Daemon) setSettings(s settings.Settings) error {
 	}
 	d.configPublishMu.Lock()
 	defer d.configPublishMu.Unlock()
+	d.mu.Lock()
+	unreadable := !d.settingsOK
+	d.mu.Unlock()
+	if unreadable {
+		// 原文件读不出来、手上是默认值:这一存就把它整份覆盖。先另存一份,留不下就不存
+		bak, err := settings.Preserve(paths.Settings())
+		if err != nil {
+			return fmt.Errorf("原设置文件读不出来,另存一份失败,先不覆盖它: %w", err)
+		}
+		if bak != "" {
+			d.logf("原设置文件读不出来,已另存为 %s,现在按新设置覆盖", bak)
+		}
+	}
 	if err := s.Save(paths.Settings()); err != nil {
 		return err
 	}

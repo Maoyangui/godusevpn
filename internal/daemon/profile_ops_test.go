@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"sync/atomic"
 	"testing"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/Maoyangui/godusevpn/internal/ipc"
 	"github.com/Maoyangui/godusevpn/internal/logx"
+	"github.com/Maoyangui/godusevpn/internal/paths"
 	"github.com/Maoyangui/godusevpn/internal/settings"
 	"github.com/Maoyangui/godusevpn/internal/state"
 )
@@ -26,6 +28,7 @@ func profileOpsDaemon(t *testing.T) *Daemon {
 	d.coreLog = logx.New(filepath.Join(t.TempDir(), "core.log"), 1<<20, 1)
 	t.Cleanup(func() { _ = d.coreLog.Close() })
 	d.http = &http.Client{Timeout: 5 * time.Second}
+	d.settingsOK = true
 	return d
 }
 
@@ -124,5 +127,34 @@ func TestRefreshProfileCoalesces(t *testing.T) {
 	}
 	if n := hits.Load(); n != 1 {
 		t.Fatalf("同一条订阅并发刷新打了 %d 次服务端,应合并成 1 次", n)
+	}
+}
+
+// 设置文件读不出来时手上是默认值,第一次保存会把原文件整份覆盖(订阅、规则组、设备策略全没):覆盖前先另存一份。
+func TestSetSettingsPreservesUnreadableFile(t *testing.T) {
+	dir := t.TempDir() // Windows 上设置文件在数据目录里,两个都指过来
+	t.Setenv("GODUSEVPN_CONF", dir)
+	t.Setenv("GODUSEVPN_DATA", dir)
+	bad := []byte(`{"schema":4,"profiles":[{"id":"p1","name":"我的订阅","url":"https://sub.example/x"}],"mode":`) // 截断
+	if err := os.WriteFile(paths.Settings(), bad, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	d := profileOpsDaemon(t)
+	d.settingsOK = false
+	if err := d.setSettings(settings.Default()); err != nil {
+		t.Fatal(err)
+	}
+	baks, _ := filepath.Glob(paths.Settings() + ".bad-*")
+	if len(baks) != 1 {
+		t.Fatalf("覆盖前应当另存一份原文件,找到 %d 份", len(baks))
+	}
+	if b, _ := os.ReadFile(baks[0]); string(b) != string(bad) {
+		t.Fatal("另存的内容和原文件不一样")
+	}
+	if err := d.setSettings(settings.Default()); err != nil { // 文件已可信:之后的保存不再另存
+		t.Fatal(err)
+	}
+	if baks, _ = filepath.Glob(paths.Settings() + ".bad-*"); len(baks) != 1 {
+		t.Fatalf("文件可信之后的保存不该再另存,现在有 %d 份", len(baks))
 	}
 }
