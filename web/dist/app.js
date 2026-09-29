@@ -996,7 +996,7 @@ async function renderSettings(el) {
       ${sw('f-fakeip', t('set.fakeip'), s.fakeIp)}
     `)}
     ${group(t('set.g.route'), `
-      ${sw('f-ad', t('set.adblock'), s.adBlock)}
+      ${sw('f-ad', t('set.adblock'), s.adBlock, t('set.adblockHelp'))}
       <div class="srow"><div class="lbl">${t('set.rules')}<div>${t('set.rulesHelp', { n: (s.ruleGroups || []).length })}</div></div><button class="btn sm" id="f-rules">${t('set.rulesManage')}</button></div>
       <div class="field" style="margin:8px 0 12px"><label>${t('set.bypass')}</label><textarea id="f-bypass" placeholder="${t('rt.process_name.ph')}">${esc((s.bypassApps || []).join('\n'))}</textarea><span class="help">${t('set.bypassHelp')}</span></div>
     `)}
