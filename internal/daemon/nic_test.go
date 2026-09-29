@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"errors"
 	"os"
 	"strings"
 	"testing"
@@ -110,3 +111,28 @@ func funcBody(t *testing.T, src, sig string) string {
 }
 
 func contains(s, sub string) bool { return strings.Contains(s, sub) }
+
+// 连接状态读不出来时网卡 IPv6 的去留:意愿未知不放宽,只有"设置不要求严格全局、闸也确实不在"才还原。
+func TestKeepNICWhenIntentUnknown(t *testing.T) {
+	queryErr := errors.New("BFE 暂时不可用")
+	for _, c := range []struct {
+		name   string
+		strict bool
+		n      int
+		err    error
+		keep   bool
+	}{
+		{"严格全局 + 关 IPv6,闸不在(Linux / macOS 重启后必然如此)", true, 0, nil, true},
+		{"严格全局,闸还在", true, 5, nil, true},
+		{"非严格,闸还在(Windows 上说明上次连着)", false, 5, nil, true},
+		{"非严格,闸状态查不到:未知,不当成不在", false, 0, queryErr, true},
+		{"非严格,确认闸不在:按文档还原", false, 0, nil, false},
+	} {
+		if got := keepNICWhenIntentUnknown(c.strict, c.n, c.err); got != c.keep {
+			t.Fatalf("%s:得 %v,应 %v", c.name, got, c.keep)
+		}
+	}
+	if !contains(funcBody(t, readDaemonSource(t), "func (d *Daemon) reconcileNICIPv6() {"), "keepNICWhenIntentUnknown(") {
+		t.Fatal("reconcileNICIPv6 在连接状态不可读时要按 keepNICWhenIntentUnknown 判断")
+	}
+}

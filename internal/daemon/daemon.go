@@ -1091,14 +1091,15 @@ func (d *Daemon) reconcileNICIPv6() {
 		// "守护进程启动时也无条件还原一次,上次崩溃退出也不会把用户的 IPv6 永久关掉"不再成立:
 		// 备份还在,网卡就一直关着,而且没有任何自愈路径。
 		//
-		// 改用一个总是拿得到、而且比状态文件更能说明问题的信号:闸还在不在。闸是持久的,
-		// 它还在就说明上次是连着走的(严格全局模式),那就接着关着;闸不在就按文档还原回去 ——
-		// 下次连接时 syncNICIPv6 会重新关掉,不会因此漏。
-		if n, err := netmode.GuardStatus(); err == nil && n > 0 {
-			d.logf("网卡 IPv6:连接状态不可读,但闸还在,按上次连着关机处理,保持关闭")
+		// 但意愿未知时也不能放宽:见 keepNICWhenIntentUnknown。只有设置不要求严格全局、闸也确实不在,
+		// 才按文档还原回去 —— 下次连接时 syncNICIPv6 会重新关掉,不会因此漏。
+		s := d.getSettings()
+		n, err := netmode.GuardStatus()
+		if keepNICWhenIntentUnknown(s.NoDirect && s.Mode == settings.ModeGlobal && wantNICOff(s), n, err) {
+			d.logf("网卡 IPv6:连接状态不可读,设置是严格全局、或闸还在 / 查不到,保持现状")
 			return
 		}
-		d.logf("网卡 IPv6:连接状态不可读且闸不在,按文档还原回去(下次连接会重新停用)")
+		d.logf("网卡 IPv6:连接状态不可读、设置不要求严格全局、闸也不在,按文档还原回去(下次连接会重新停用)")
 		want = false
 	}
 	switch nicIPv6Action(want, on) {
@@ -1135,6 +1136,15 @@ func (d *Daemon) reconcileNICIPv6() {
 	d.nicOff.Store(true)
 	d.nicDisablePending.Store(false)
 	d.logf("网卡 IPv6:已停用(上次连着关的机)")
+}
+
+// keepNICWhenIntentUnknown 连接状态读不出来时,网卡 IPv6 要不要保持现状(不还原)。
+//
+// 意愿未知时不放宽。"闸还在就当上次连着"只在 Windows 上成立(闸跨重启);Linux / macOS 重启后闸必然不在,
+// 而 macOS 的 networksetup -setv6off 跨重启留着 —— 光看闸会由服务亲手把严格全局用户的 IPv6 打开。
+// 所以:设置是严格全局 + 关 IPv6、闸还在、或闸在不在都查不到,一律保持;明确断开、「恢复网络」照常还原。
+func keepNICWhenIntentUnknown(strict bool, guardN int, guardErr error) bool {
+	return strict || guardErr != nil || guardN > 0
 }
 
 // privacyChecks 决定启动前要核查哪些闸相关的不变量。
