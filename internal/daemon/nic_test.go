@@ -136,3 +136,17 @@ func TestKeepNICWhenIntentUnknown(t *testing.T) {
 		t.Fatal("reconcileNICIPv6 在连接状态不可读时要按 keepNICWhenIntentUnknown 判断")
 	}
 }
+
+// 巡检在锁外判完"该关",拿到锁时用户可能刚断开、断开那边刚还原完:必须在锁里复查,否则又把 IPv6 关回去、
+// 还记成"我们关着",之后没人再还原。(真停用网卡不能在本机跑,钉源码结构。)
+func TestNICLoopRechecksUnderLock(t *testing.T) {
+	loop := funcBody(t, readDaemonSource(t), "func (d *Daemon) nicIPv6Loop(ctx context.Context) {")
+	lock := strings.Index(loop, "d.nicMu.Lock()")
+	dis := strings.Index(loop, "netmode.DisableNICIPv6(")
+	if lock < 0 || dis < lock || !strings.Contains(loop[lock:dis], "!d.nicIPv6Wanted()") || !strings.Contains(loop[lock:dis], "shuttingDown") {
+		t.Fatal("nicIPv6Loop 拿到 nicMu 之后、停用之前要复查 nicIPv6Wanted() 与 shuttingDown")
+	}
+	if unlock := strings.Index(loop[dis:], "d.nicMu.Unlock()"); unlock < 0 || strings.Index(loop[dis:], "d.nicOff.Store(") > unlock {
+		t.Fatal("nicOff 的写入要留在锁里,免得盖掉 syncNICIPv6 刚写的")
+	}
+}

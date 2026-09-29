@@ -1325,15 +1325,24 @@ func (d *Daemon) nicIPv6Loop(ctx context.Context) {
 			d.logf("发现网卡上又有公网 IPv6 地址(多半是新接了一张网卡),重新停用")
 		}
 		d.nicMu.Lock()
+		// 拿到锁再判一次:上面判完到这里,用户可能已经点了断开、断开那边刚还原完 —— 不复查就又关回去,
+		// 还把 nicOff 记成真,之后再没有谁去还原。状态的写入也留在锁里,免得盖掉 syncNICIPv6 刚写的。
+		if d.shuttingDown.Load() || !d.nicIPv6Wanted() {
+			d.nicMu.Unlock()
+			fails, quiet = 0, false
+			continue
+		}
 		err := netmode.DisableNICIPv6(builder.TunName)
-		d.nicMu.Unlock()
 		if err != nil {
 			d.nicDisablePending.Store(true)
 			d.nicOff.Store(netmode.NICIPv6Off())
-			d.logf("停用新网卡的 IPv6 失败: %v", err)
 		} else {
 			d.nicOff.Store(true)
 			d.nicDisablePending.Store(false)
+		}
+		d.nicMu.Unlock()
+		if err != nil {
+			d.logf("停用新网卡的 IPv6 失败: %v", err)
 		}
 		// Force the running state machine to validate privacy immediately;
 		// a failed adapter operation must not leave the data plane serving
