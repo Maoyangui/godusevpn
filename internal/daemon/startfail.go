@@ -61,7 +61,8 @@ func (d *Daemon) classifyStart(err error) error {
 // (夜里被墙、机房掉线)。自动选择模式下内核的 urltest 组自己会换,轮不到这里。
 //
 // 做法是让 auto 组整测一轮,挑一个通的切过去 —— 切节点是就地生效的,不重启内核、不断隧道。
-// **不改设置里的 Selected**:用户挑的那个节点是他的意愿,等它活过来还要用;这里只是临时借一条路。
+// **不改设置里的 Selected**:用户挑的那个节点是他的意愿,下次重建连接(重连、重启服务)时仍按它来;
+// 这里只是临时借一条路。借过去之后不会自己切回。
 // 返回 true 表示确实换了,值得再给一轮观察期。
 func (d *Daemon) recoverRoute(ctx context.Context) bool {
 	s := d.getSettings()
@@ -99,6 +100,6 @@ func (d *Daemon) recoverRoute(ctx context.Context) bool {
 	_ = d.core.CloseAllConnections()
 	d.setPing(bestMs)
 	d.clearExit()
-	d.logf("临时换线:已切到「%s」(%d ms);设置里选的仍是「%s」,它恢复后会自动用回去", best, bestMs, s.Selected)
+	d.logf("临时换线:已切到「%s」(%d ms);设置里选的仍是「%s」,重新连接或手动再选它时才会用回它", best, bestMs, s.Selected)
 	return true
 }

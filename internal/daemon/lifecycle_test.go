@@ -238,3 +238,11 @@ func TestRefreshBeforeStart(t *testing.T) {
 	}
 	before(t, funcBody(t, src, "func (d *Daemon) start(cfg []byte) error {"), "d.core.Start(cfg)", "go d.maybeRefresh(", "连上之后要补上跳过的那次刷新")
 }
+
+// 临时换线借过去之后不会自己切回(用户还没拍板要不要切回):日志不能承诺"恢复后自动用回去"。
+func TestRecoverRouteLogPromisesNothing(t *testing.T) {
+	fn := funcBody(t, readSource(t, "startfail.go"), "func (d *Daemon) recoverRoute(ctx context.Context) bool {")
+	if strings.Contains(fn, "自动用回") {
+		t.Fatal("没有切回逻辑,日志不能说恢复后会自动用回去")
+	}
+}
