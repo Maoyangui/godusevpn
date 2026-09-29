@@ -245,7 +245,12 @@ func buildConfig(in Input, rep *Report) ([]byte, error) {
 		if s.LANBypass {
 			// 私网段与链路本地之外,168.63.129.16 是 Azure 平台地址(来宾代理、DNS、健康探测),进了隧道整台云主机就失联,一并排除
 			ex := []string{"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "169.254.0.0/16", "168.63.129.16/32", "224.0.0.0/4"}
-			ex = append(ex, "fc00::/7", "fe80::/10", "ff00::/8") // v6 的私网 / 链路本地 / 组播,同样留给局域网
+			ula := []string{"fc00::/7"} // v6 的私网 / 链路本地 / 组播,同样留给局域网
+			if s.FakeIP && s.IPv6 {
+				// v6 的 fake-ip 段在 fc00::/7 里:整段排除的话,发往 v6 假地址的连接进不了 TUN,从物理网卡发出去就没了
+				ula = excludeHole(ula[0], fakeIP6)
+			}
+			ex = append(append(ex, ula...), "fe80::/10", "ff00::/8")
 			tun["route_exclude_address"] = ex
 		}
 		if s.NetMode == settings.NetGateway {
@@ -682,6 +687,19 @@ var publicCIDRs = func() []string {
 	}
 	return out
 }()
+
+// excludeHole 网段 from 挖掉 hole 之后剩下的那些网段。
+func excludeHole(from, hole string) []string {
+	var b netipx.IPSetBuilder
+	b.AddPrefix(netip.MustParsePrefix(from))
+	b.RemovePrefix(netip.MustParsePrefix(hole))
+	set, _ := b.IPSet()
+	var out []string
+	for _, p := range set.Prefixes() {
+		out = append(out, p.String())
+	}
+	return out
+}
 
 // withOutbound 给一条规则填出口:reject 是动作,其余是出站标签。默认规则的三项可配置,统一走这里。
 func withOutbound(rule map[string]any, out string) map[string]any {

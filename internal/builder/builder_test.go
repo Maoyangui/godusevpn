@@ -3,6 +3,7 @@ package builder
 import (
 	"encoding/json"
 	"fmt"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -396,6 +397,40 @@ func TestAndroidPackageRules(t *testing.T) {
 	}
 	if runtime.GOOS != "android" && (strings.Contains(string(raw), "package_name") || strings.Contains(string(raw), "exclude_package")) {
 		t.Fatal("桌面配置不该出现 package_name / exclude_package")
+	}
+}
+
+// 开着 IPv6 + fake-ip + 局域网直通:v6 假地址段(fc00::/18)落在局域网的 fc00::/7 里,不能跟着被排除出隧道,
+// 否则发往 v6 假地址的连接从物理网卡发出去就没了;fc00::/7 其余部分照旧留给局域网。
+func TestFakeIP6NotExcludedFromTun(t *testing.T) {
+	s := settings.Default()
+	s.IPv6 = true
+	c, _ := build(t, s)
+	var ex []netip.Prefix
+	for _, in := range c.Inbounds {
+		if in["type"] == "tun" {
+			for _, v := range in["route_exclude_address"].([]any) {
+				ex = append(ex, netip.MustParsePrefix(v.(string)))
+			}
+		}
+	}
+	excluded := func(a string) bool {
+		for _, p := range ex {
+			if p.Contains(netip.MustParseAddr(a)) {
+				return true
+			}
+		}
+		return false
+	}
+	for _, a := range []string{"fc00::1", "fc00:3fff:ffff::1"} {
+		if excluded(a) {
+			t.Fatalf("v6 假地址 %s 被排除出隧道了: %v", a, ex)
+		}
+	}
+	for _, a := range []string{"fd12:3456::1", "fc00:4000::1", "fc01::1", "fe80::1", "192.168.1.1"} {
+		if !excluded(a) {
+			t.Fatalf("局域网地址 %s 应照旧留在隧道外: %v", a, ex)
+		}
 	}
 }
 
