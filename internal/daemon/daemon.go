@@ -600,9 +600,11 @@ func (d *Daemon) prepare(ctx context.Context) ([]byte, error) {
 	if a == nil {
 		return nil, state.Errf(state.CodeProfileMissing, "还没有添加订阅")
 	}
-	if p == nil || p.URL != a.URL || p.Stale(time.Duration(s.UpdateHours)*time.Hour) {
+	cacheOK := p != nil && p.URL == a.URL
+	stale := cacheOK && p.Stale(time.Duration(s.UpdateHours)*time.Hour)
+	if refreshBeforeStart(cacheOK, stale, s.NoDirect && s.Mode == settings.ModeGlobal) {
 		if _, err := d.refreshProfile(ctx, a.ID); err != nil {
-			if p == nil || p.URL != a.URL {
+			if !cacheOK {
 				return nil, err
 			}
 			d.logf("订阅刷新失败,先用缓存: %v", err)
@@ -610,6 +612,8 @@ func (d *Daemon) prepare(ctx context.Context) ([]byte, error) {
 			_, p = d.activeProfile()
 			d.logf("订阅「%s」已更新:%d 个节点", a.Name, len(p.Outbounds))
 		}
+	} else if stale {
+		d.logf("订阅缓存已过期:严格全局下先用缓存连上,再经代理刷新(当前代理 → auto → 最后才直连)")
 	}
 	if s.NetMode == settings.NetGateway {
 		d.resolveDeviceIPs(&s) // 设备策略按当前 IP 生效
@@ -647,6 +651,14 @@ func (d *Daemon) prepare(ctx context.Context) ([]byte, error) {
 	d.preparedConfigHash = sha256.Sum256(cfg)
 	d.mu.Unlock()
 	return cfg, nil
+}
+
+// refreshBeforeStart 起内核之前要不要先拉一次订阅。内核没跑时拉订阅只能从本服务直连,严格全局下
+// 这正是用户定的回退链(当前代理 → auto → 最后才直连)的最后一跳 —— 缓存能用(有、地址没变)时不该一上来
+// 就走它:先用缓存起隧道,连上后由 start 里的 maybeRefresh 经代理链刷新,节点变了 afterRefresh 会重连。
+// 没有能用的缓存(首次添加、改了地址)才只能先直连拉。非严格模式照旧:过期就先刷新,失败再用缓存。
+func refreshBeforeStart(cacheOK, stale, strict bool) bool {
+	return !cacheOK || (stale && !strict)
 }
 
 // start 启动内核;失败按原因归类。
@@ -727,6 +739,8 @@ func (d *Daemon) start(cfg []byte) error {
 		d.refreshExit(d.beginExit(d.currentNode()))
 	}()
 	go d.fillMissingRuleSets() // 隧道通了才去补规则集:直连多半拿不到 GitHub
+	// 缓存过期而起内核前没刷新的(严格全局,见 refreshBeforeStart),现在经代理链刷新
+	go d.maybeRefresh(context.Background())
 	if s.TUN {
 		if s.NetMode == settings.NetGateway {
 			if err := netmode.ApplyGateway(builder.TunName, lanInterfaces(), s.DNSHijack); err != nil {

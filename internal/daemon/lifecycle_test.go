@@ -214,3 +214,27 @@ func TestGuardSyncWiring(t *testing.T) {
 		}
 	}
 }
+
+// 严格全局下内核没起来时拉订阅只能直连;缓存能用就先用缓存连上,再经"当前代理 → auto → 直连"刷新。
+func TestRefreshBeforeStart(t *testing.T) {
+	for _, c := range []struct {
+		name                   string
+		cacheOK, stale, strict bool
+		want                   bool
+	}{
+		{"没有能用的缓存(首次 / 改了地址):只能先拉", false, false, true, true},
+		{"严格全局,缓存过期:先用缓存连上,连上后经代理刷新", true, true, true, false},
+		{"严格全局,缓存新鲜", true, false, true, false},
+		{"非严格,缓存过期:照旧先刷新", true, true, false, true},
+		{"非严格,缓存新鲜", true, false, false, false},
+	} {
+		if got := refreshBeforeStart(c.cacheOK, c.stale, c.strict); got != c.want {
+			t.Fatalf("%s:得 %v,应 %v", c.name, got, c.want)
+		}
+	}
+	src := readDaemonSource(t)
+	if !strings.Contains(funcBody(t, src, "func (d *Daemon) prepare(ctx context.Context) ([]byte, error) {"), "refreshBeforeStart(") {
+		t.Fatal("prepare 要按 refreshBeforeStart 决定起内核前拉不拉订阅")
+	}
+	before(t, funcBody(t, src, "func (d *Daemon) start(cfg []byte) error {"), "d.core.Start(cfg)", "go d.maybeRefresh(", "连上之后要补上跳过的那次刷新")
+}
