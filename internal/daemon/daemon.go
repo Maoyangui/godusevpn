@@ -751,6 +751,9 @@ func (d *Daemon) health(ctx context.Context) error {
 	if !d.core.Running() {
 		return state.Errf(state.CodeCoreCrash, "内核未运行")
 	}
+	// 直连模式下用户流量不经节点:节点通不通不是这条连接的健康问题。照测的话节点一挂(比如订阅到期)
+	// 就会降级 → 换线 → 重建,每隔几分钟停一次内核,把直连流量一起打断。
+	direct := strings.EqualFold(d.core.Mode(), builder.ModeName(settings.ModeDirect))
 	// 隐私保护是运行期不变量,不只是在启动时检查一次。新网卡、外部改了过滤器、IPv6 绑定又冒出来 ——
 	// 这些都在这里被发现。发现了就**原地修**:闸掉了重装、网卡 v6 冒出来再停用,隧道留着;
 	// 状态机把它报成 Degraded 而不是拆隧道(拆了只会更漏,见 state.Machine.watch)。
@@ -762,11 +765,16 @@ func (d *Daemon) health(ctx context.Context) error {
 		}
 		// 隐私没过也要探一次节点:节点挂了照样要走正常的阶梯(降级 → 换线 → 重建),
 		// 不能被隐私 Degraded 挡住,否则闸修不好的那段时间节点死了也没人管。
-		if _, err := d.core.URLTest(ctx, "proxy", builder.TestURL); err != nil {
-			d.setPing(0)
-			return state.Errf(state.CodeNodeDown, "当前节点不可用: %v", err)
+		if !direct {
+			if _, err := d.core.URLTest(ctx, "proxy", builder.TestURL); err != nil {
+				d.setPing(0)
+				return state.Errf(state.CodeNodeDown, "当前节点不可用: %v", err)
+			}
 		}
 		return perr
+	}
+	if direct {
+		return nil
 	}
 	ms, err := d.core.URLTest(ctx, "proxy", builder.TestURL)
 	if err != nil {
