@@ -787,8 +787,8 @@ func (d *Daemon) health(ctx context.Context) error {
 	return nil
 }
 
-// restart 重建配置重连:内核停了再起,隧道要断几秒,所以能就地改的(切节点、自动 / 手动、切模式、定时测速)
-// 都不走这里。网卡的 IPv6 绑定期间一直关着不动 —— 停 / 起各改一次协议绑定,网卡各重走一遍协议栈,
+// restart 重建配置重连:内核停了再起,隧道要断几秒,所以能就地改的(切节点、自动 / 手动、
+// 不跨严格全局边界的切模式、定时测速)都不走这里。网卡的 IPv6 绑定期间一直关着不动 —— 停 / 起各改一次协议绑定,网卡各重走一遍协议栈,
 // 三秒的重连会拖成六七秒,局域网也跟着抖;而且那几秒地址露出来就能被读走。
 func (d *Daemon) restart() error {
 	return d.machine.Restart()
@@ -817,6 +817,27 @@ func privacyRelaxes(prev, next settings.Settings) bool {
 		return true
 	}
 	return false
+}
+
+// needsPrivacyRebuild 运行中改了设置要不要整份重建(走 restartForPrivacySettings)。
+// 模式只经两处进配置:clash_api 的 default_mode,和"严格全局"(禁直连 + 全局)—— 密封 DNS、节点直连规则
+// 限定进程、闸都看它。没跨过严格全局边界的切模式,新旧配置只差 default_mode,经 Clash API 就地切,不断隧道。
+func needsPrivacyRebuild(prev, next settings.Settings) bool {
+	strict := func(s settings.Settings) bool { return s.NoDirect && s.Mode == settings.ModeGlobal }
+	return strict(prev) != strict(next) || prev.NoDirect != next.NoDirect || prev.IPv6 != next.IPv6 ||
+		prev.DisableNICIPv6 != next.DisableNICIPv6 || prev.TUN != next.TUN
+}
+
+// switchModeLive 经 Clash API 就地切模式,再掐掉已建立的连接让它们按新模式重连(切模式对老连接也生效)。
+// 只用于 needsPrivacyRebuild 为假的切换。SetMode 会把模式记进缓存,和 start() 起内核前的对齐一致。
+func (d *Daemon) switchModeLive(mode string) error {
+	if err := d.core.SetMode(builder.ModeName(mode)); err != nil {
+		return err
+	}
+	if err := d.core.CloseAllConnections(); err != nil {
+		d.logf("切模式后掐断旧连接失败(旧连接会按原模式继续): %v", err)
+	}
+	return nil
 }
 
 func (d *Daemon) restartForPrivacySettings(prev settings.Settings) error {
@@ -1634,8 +1655,10 @@ func (d *Daemon) registerHandlers() {
 			return nil, err
 		}
 		if d.core.Running() && s.Mode != prev.Mode {
-			if err := d.restartForPrivacySettings(prev); err != nil {
-				return nil, &ipc.CallError{Code: state.CodeOf(err), Msg: "切换模式失败,已保持旧配置与隐私保护: " + err.Error()}
+			if needsPrivacyRebuild(prev, s) || d.switchModeLive(s.Mode) != nil {
+				if err := d.restartForPrivacySettings(prev); err != nil {
+					return nil, &ipc.CallError{Code: state.CodeOf(err), Msg: "切换模式失败,已保持旧配置与隐私保护: " + err.Error()}
+				}
 			}
 			return d.stateView(), nil
 		}
@@ -2064,9 +2087,9 @@ func (d *Daemon) registerHandlers() {
 		if err := d.setSettings(next); err != nil {
 			return nil, err
 		}
-		// Mode / NoDirect 会改变密封 DNS 与全局闸的安全边界，运行中必须整份重建，
-		// 不能通过 Clash SetMode 只改内核运行标志。
-		if d.core.Running() && (next.Mode != prev.Mode || next.NoDirect != prev.NoDirect || next.IPv6 != prev.IPv6 || next.DisableNICIPv6 != prev.DisableNICIPv6 || next.TUN != prev.TUN) {
+		// 跨过严格全局边界(禁直连 + 全局)、或动了 IPv6 / TUN / 禁直连开关,会改变密封 DNS 与闸的安全边界,
+		// 运行中必须整份重建;边界没变的切模式在下面就地切。
+		if d.core.Running() && needsPrivacyRebuild(prev, next) {
 			if err := d.restartForPrivacySettings(prev); err != nil {
 				msg := "隐私设置切换失败,已保持旧配置与隐私保护: " + err.Error()
 				if privacyRelaxes(prev, next) {
@@ -2097,8 +2120,11 @@ func (d *Daemon) registerHandlers() {
 					return nil, &ipc.CallError{Code: state.CodeOf(err), Msg: "新设置的配置生成失败,保持当前连接: " + err.Error()}
 				}
 			} else {
-				if next.Mode != prev.Mode {
-					_ = d.core.SetMode(builder.ModeName(next.Mode))
+				if next.Mode != prev.Mode && d.switchModeLive(next.Mode) != nil {
+					if err := d.restart(); err != nil {
+						return nil, &ipc.CallError{Code: state.CodeOf(err), Msg: "切换模式失败,保持当前连接: " + err.Error()}
+					}
+					return d.getSettings(), nil
 				}
 				if next.Selected != prev.Selected {
 					if d.needRebuildFor(next.Selected) {
