@@ -19,22 +19,26 @@ import (
 //     查不出来就不算。m29 把"枚举失败"也当成漏,于是一次瞬时的系统调用失败就能让人连不上,
 //     而且没有任何自愈路径。
 func NICIPv6Leaking(tunName string) bool {
-	leaking, known := nicIPv6LeakState(tunName)
-	return leaking || !known
+	leakers, known := nicIPv6LeakState(tunName)
+	return len(leakers) > 0 || !known
 }
 
 // NICIPv6LeakConfirmed 确证此刻有网卡挂着公网 IPv6 地址。查不出来一律报 false。
-func NICIPv6LeakConfirmed(tunName string) bool {
-	leaking, known := nicIPv6LeakState(tunName)
-	return leaking && known
+func NICIPv6LeakConfirmed(tunName string) bool { return len(NICIPv6Leakers(tunName)) > 0 }
+
+// NICIPv6Leakers 此刻确证挂着公网 IPv6 地址的网卡 / 连接名。拒绝连接时要说清是哪几张:停用脚本够不着的接口
+// (拨号连接、Teredo 等隧道接口)只能手动关,不说名字用户无从下手,最后多半去关「连接时停用网卡 IPv6」。
+func NICIPv6Leakers(tunName string) []string {
+	leakers, _ := nicIPv6LeakState(tunName)
+	return leakers
 }
 
-// nicIPv6LeakState 返回 (看见了吗, 查清楚了吗)。
-// 只要有一张网卡看见了公网 v6,就是确凿的"在漏",不必管别的网卡查没查成。
-func nicIPv6LeakState(tunName string) (leaking, known bool) {
+// nicIPv6LeakState 返回 (看见挂着公网 v6 的网卡, 查清楚了吗)。
+// 只要看见了一张,就是确凿的"在漏",不必管别的网卡查没查成。
+func nicIPv6LeakState(tunName string) (leakers []string, known bool) {
 	ifs, err := net.Interfaces()
 	if err != nil {
-		return false, false
+		return nil, false
 	}
 	known = true
 	for _, in := range ifs {
@@ -44,10 +48,10 @@ func nicIPv6LeakState(tunName string) (leaking, known bool) {
 			continue
 		}
 		if ifaceLeaksIPv6(in.Name, in.Flags, addrs, tunName) {
-			return true, true
+			leakers = append(leakers, in.Name)
 		}
 	}
-	return false, known
+	return leakers, known
 }
 
 // ifaceLeaksIPv6 单张网卡算不算"漏着 v6"。拆出来是为了能用构造的数据做单测 —— 真机上没法说造一张网卡就造一张。

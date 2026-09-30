@@ -35,6 +35,14 @@
 
 隧道自己那张网卡**一律不动** —— 它要靠 v6 地址把 v6 接进来再拒绝,关了反而少一层。
 
+Windows 上有几类接口不在「网络适配器」列表里,程序停用不了,上面挂着公网 v6 时连接会被拒绝,错误里会点名是哪张:
+
+- **电脑直接 PPPoE 拨号**且运营商下发了 IPv6:到「网络连接」里那条拨号连接的属性 → 网络,取消勾选「Internet 协议版本 6」,重新拨号。
+- **Teredo**(`2001:0:` 开头,地址里编着你的公网 IPv4):管理员命令 `netsh interface teredo set state disabled`。
+- **6to4**(`2002:` 开头)/ **IP-HTTPS**:`netsh interface 6to4 set state disabled`、`netsh interface httpstunnel set interface client state=disabled`。
+
+这几条关掉之后程序不会替你开回来,要恢复就把对应命令里的 `disabled` 换成 `default`。
+
 ## 安全绳
 
 - 动手前把**每张网卡当时的状态**落盘,断开时按状态还原。

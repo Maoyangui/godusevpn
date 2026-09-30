@@ -47,9 +47,10 @@ func TestLeakPredicatesDisagreeOnUnknown(t *testing.T) {
 		{false, true, false, false}, // 查清楚了,没漏
 		{true, true, true, true},    // 查清楚了,在漏
 		{false, false, true, false}, // 没查清楚:要重试,但不能拒绝用户
+		{true, false, true, true},   // 看见了一张在漏、别的查不清:照样是确证
 	} {
 		maybe := c.leaking || !c.known
-		confirmed := c.leaking && c.known
+		confirmed := c.leaking
 		if maybe != c.wantMaybe || confirmed != c.wantConfirmed {
 			t.Fatalf("(leaking=%v known=%v) => (%v, %v),想要 (%v, %v)",
 				c.leaking, c.known, maybe, confirmed, c.wantMaybe, c.wantConfirmed)

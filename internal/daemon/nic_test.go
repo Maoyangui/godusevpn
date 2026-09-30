@@ -124,3 +124,21 @@ func TestNICLoopRechecksWantedUnderLock(t *testing.T) {
 		t.Fatal("nicIPv6Loop 拿到 nicMu 之后、停用之前没有重查 nicIPv6Wanted")
 	}
 }
+
+// 确证有网卡挂着公网 IPv6 时拒绝连接是对的,但得点名是哪几张:拨号连接、Teredo 这类停用脚本够不着的接口
+// 只能手动关,以前只说"物理网卡上仍挂着公网 IPv6",用户无从下手,只剩关掉「连接时停用网卡 IPv6」这条路。
+func TestNICLeakRefusalNamesAdapters(t *testing.T) {
+	msg := nicLeakMessage([]string{"宽带连接", "Teredo Tunneling Pseudo-Interface"})
+	for _, want := range []string{"宽带连接", "Teredo Tunneling Pseudo-Interface", "手动"} {
+		if !contains(msg, want) {
+			t.Fatalf("拒绝连接的话里没有 %q: %s", want, msg)
+		}
+	}
+	if contains(msg, "「连接时停用网卡 IPv6」这一项") {
+		t.Fatal("别把人往关掉隐私开关那儿引")
+	}
+	fn := funcBody(t, readDaemonSource(t), "func (d *Daemon) ensurePrivacyReady() error {")
+	if !contains(fn, "netmode.NICIPv6Leakers(") || !contains(fn, "nicLeakMessage(") {
+		t.Fatal("ensurePrivacyReady 拒绝连接时没点名是哪几张网卡")
+	}
+}

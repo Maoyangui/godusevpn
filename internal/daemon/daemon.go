@@ -1059,6 +1059,16 @@ func (d *Daemon) reconcileNICIPv6() {
 	d.logf("网卡 IPv6:已停用(上次连着关的机)")
 }
 
+// nicLeakMessage 确证有网卡挂着公网 IPv6 时说给用户的话:点名是哪几张。停用脚本够不着的接口(拨号连接、
+// Teredo 等隧道接口)只能手动关;不说名字用户无从下手,最后多半去关「连接时停用网卡 IPv6」—— 正是这道门要避免的。
+func nicLeakMessage(names []string) string {
+	if len(names) == 0 {
+		return "网卡上又冒出公网 IPv6 地址(这会儿查不到是哪张)"
+	}
+	return "这些网卡 / 连接上仍挂着公网 IPv6 地址,没能停用:" + strings.Join(names, "、") +
+		"。拨号连接、Teredo 等程序够不着的接口要手动关掉它的 IPv6(见文档「关于 IPv6」)"
+}
+
 // privacyChecks 决定启动前要核查哪些闸相关的不变量。
 //
 // installable=false 的平台(Android:闸就是宿主 VpnService 的接口,由系统持有)没有可核查的对象;
@@ -1116,8 +1126,8 @@ func (d *Daemon) ensurePrivacyReady() error {
 		// 这里是**拒绝连接**的门,必须用确证谓词:NICIPv6Leaking 把"枚举失败 / 某张网卡读不到地址"
 		// 也算成在漏,一次瞬时的系统调用失败就能让人连不上,而且没有自愈路径。
 		// 别处那几个 NICIPv6Leaking 是"要不要再跑一遍昂贵的停用脚本",宁可多跑,保持不变。
-		if netmode.NICIPv6LeakConfirmed(builder.TunName) {
-			return state.Errf(state.CodePrivacyNIC, "确认物理网卡上仍挂着公网 IPv6 地址")
+		if l := netmode.NICIPv6Leakers(builder.TunName); len(l) > 0 {
+			return state.Errf(state.CodePrivacyNIC, "%s", nicLeakMessage(l))
 		}
 	}
 	return nil
@@ -1243,7 +1253,7 @@ func (d *Daemon) nicIPv6Loop(ctx context.Context) {
 		fails++
 		if fails >= 3 && !quiet {
 			quiet = true
-			d.logf("连着几次都没能停掉这张网卡的 IPv6,改成每 10 分钟再试;先去设置里看看「连接时停用网卡 IPv6」这一项")
+			d.logf("连着几次都没能停掉网卡的 IPv6,改成每 10 分钟再试。%s", nicLeakMessage(netmode.NICIPv6Leakers(builder.TunName)))
 		}
 	}
 }
