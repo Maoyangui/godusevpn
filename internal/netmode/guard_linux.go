@@ -235,7 +235,10 @@ func dnsPortOnly(r netlink.Rule) bool {
 // unsealDNS 撤掉 sealDNS 装的规则和 routeDNSToTun 补的路由。只删我们那一条(按完整条件删),同优先级别人的不碰。
 func unsealDNS() {
 	for _, fam := range []int{unix.AF_INET, unix.AF_INET6} {
-		for i := 0; i < 16 && netlink.RuleDel(dnsRule(fam)) == nil; i++ {
+		for i := 0; i < 16; i++ { // 同一条可能被装过不止一次(老内核不去重),删到没有为止
+			if netlink.RuleDel(dnsRule(fam)) != nil {
+				break
+			}
 		}
 		routes, err := netlink.RouteListFiltered(fam, &netlink.Route{Table: dnsTable}, netlink.RT_FILTER_TABLE)
 		if err != nil {
