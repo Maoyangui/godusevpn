@@ -22,7 +22,9 @@ tun4() { ifconfig | awk '/^utun/{i=$1} /inet 172\.19\.0\.1 /{sub(":","",i); prin
 # ifaceFor 某个目标地址实际会从哪个网卡出去
 ifaceFor() { route -n get "$1" 2>/dev/null | awk '/interface:/{print $2; exit}'; }
 ifaceFor6() { route -n get -inet6 "$1" 2>/dev/null | awk '/interface:/{print $2; exit}'; }
-api() { curl -s --max-time 12 -X POST -H 'Content-Type: application/json' -d "${2:-[]}" "http://127.0.0.1:9800/api/$1"; }
+# 面板一律要密码(本机也一样):第 1 段设一个临时密码登录,会话存在 JAR 里,之后的页面接口都带着它调
+JAR=$(mktemp)
+api() { curl -s --max-time 12 -b "$JAR" -X POST -H 'Content-Type: application/json' -d "${2:-[]}" "http://127.0.0.1:9800/api/$1"; }
 # 比对状态要整词比:disconnected 里也含 connected,用 grep 会把"未连接"当成"已连接"
 wait_status() { i=0; while [ $i -lt "$2" ]; do "$BIN" status 2>/dev/null | awk -v s="$1" '/^状态:/{if ($2==s) f=1} END{exit f?0:1}' && return 0; sleep 1; i=$((i+1)); done; return 1; }
 
@@ -40,6 +42,13 @@ check "服务运行" "$("$BIN" status | head -1 | grep -c running)" "$("$BIN" st
 check "launchd 里能查到" "$(launchctl print system/com.maoyangui.godusevpn >/dev/null 2>&1 && echo 1 || echo 0)" "$(launchctl print system/com.maoyangui.godusevpn 2>/dev/null | awk '/state = /{print $3; exit}')"
 i=0; while [ $i -lt 15 ] && ! curl -s --max-time 2 http://127.0.0.1:9800/api/ping | grep -q version; do sleep 1; i=$((i+1)); done
 check "面板可达" "$(curl -s --max-time 5 http://127.0.0.1:9800/api/ping | grep -c version)" "$(curl -s --max-time 5 http://127.0.0.1:9800/api/ping)"
+# 没设密码时面板除了 ping 什么都不给:本机任何进程都能调它撤闸、改设置,控制口却只给 admin 组
+"$BIN" passwd "" >/dev/null 2>&1
+r=$(api GetSettings); check "没设密码时面板拒绝本机调用" "$(echo "$r" | grep -c NEED_PASSWORD)" "$(echo "$r" | cut -c1-60)"
+PW="gv$(date +%s)x"; "$BIN" passwd "$PW" >/dev/null
+r=$(api GetSettings); check "设了密码后没登录要 401" "$(echo "$r" | grep -c AUTH_REQUIRED)" "$(echo "$r" | cut -c1-60)"
+curl -s --max-time 5 -c "$JAR" -X POST -H 'Content-Type: application/json' -d "{\"password\":\"$PW\"}" http://127.0.0.1:9800/api/login >/dev/null
+r=$(api GetSettings); check "密码登录后能用" "$(echo "$r" | grep -c '"result"')" "$(echo "$r" | cut -c1-60)"
 # 图形界面是当前用户跑的,守护进程是 root 的 launchd:控制口必须让 admin 组连得上,
 # 否则界面打开只有一句"服务未运行"。这里就用普通用户身份问一次状态来验。
 U="${SUDO_USER:-$(stat -f %Su /dev/console 2>/dev/null)}"

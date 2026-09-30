@@ -20,7 +20,7 @@ curl -fsSL https://raw.githubusercontent.com/Maoyangui/godusevpn/master/deploy/i
 | 只给本机看 | `godusevpn settings webListen=127.0.0.1:9800` |
 | 服务开关 | `godusevpn install \| start \| stop \| status \| uninstall` |
 
-> 面板对外监听时**必须**有密码;没设密码的话,非本机来的请求一律挡掉(本机与命令行照常)。
+> 面板**必须**有密码才能用;没设密码的话面板一律不给用,本机来的也一样(命令行走控制口,照常)。
 
 ## 文件放在哪
 

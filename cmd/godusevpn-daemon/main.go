@@ -259,6 +259,8 @@ func printPanel(s settings.Settings, pw string) {
 		fmt.Println("面板密码:", pw, "(请记下;改密码用 godusevpn passwd)")
 	case s.WebPassword != "":
 		fmt.Println("面板密码: 已设置(忘了可用 godusevpn passwd 重设)")
+	default:
+		fmt.Println("面板密码: 还没设 —— 设了面板才能用:sudo godusevpn passwd")
 	}
 	if !s.WebPublic() {
 		fmt.Println("面板目前只允许本机访问;要在局域网其它设备上打开(路由器场景),执行:")

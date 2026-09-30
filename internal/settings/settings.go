@@ -56,7 +56,7 @@ type Settings struct {
 	LogLevel       string   `json:"logLevel"`     // debug | info | warn | error
 	LogDays        int      `json:"logDays"`      // 日志保留天数,超过自动删除;0 = 一直保留
 	WebListen      string   `json:"webListen"`    // Web 面板监听地址(Linux),如 127.0.0.1:9800 / 0.0.0.0:9800;空 = 不开面板
-	WebPassword    string   `json:"webPassword"`  // 面板密码的加盐哈希(salt$sha256);空 = 无密码,此时只允许监听回环地址
+	WebPassword    string   `json:"webPassword"`  // 面板密码的加盐哈希(salt$sha256);空 = 无密码,此时面板不给用
 	NetMode        string   `json:"netMode"`      // local | gateway(Linux 软路由:代理经本机转发的局域网流量),见 gateway.go
 	LANSubnets     []string `json:"lanSubnets"`   // 网关模式下的局域网网段;空 = 自动
 	DNSHijack      bool     `json:"dnsHijack"`    // 网关模式下劫持局域网设备的 DNS
