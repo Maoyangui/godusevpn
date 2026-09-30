@@ -152,6 +152,10 @@ dnsln=$(echo "$rules" | grep -nE 'block drop out quick .*port = (domain|53)' | h
 # pfctl 会把地址列表收成自动生成的表(<__automatic_…>),输出里不一定看得到字面的网段
 lanln=$(echo "$rules" | grep -nE 'pass out quick .*to (<__automatic|10\.0\.0\.0/8|192\.168\.0\.0/16|fe80::/10)' | head -1 | cut -d: -f1)
 check "pf 里拦 DNS、而且排在局域网放行前面" "$([ -n "$dnsln" ] && [ -n "$lanln" ] && [ "$dnsln" -lt "$lanln" ] && echo 1 || echo 0)" "拦 DNS 在第 ${dnsln:-无} 行,局域网放行在第 ${lanln:-无} 行;规则:$(echo "$rules" | tr '\n' ';' | cut -c1-700)"
+# SSDP / NAT-PMP 同样拦(本机程序靠它们能向路由器问到真实公网地址);DHCP 例外只放广播,ICMPv6 只放邻居发现
+check "pf 里拦 UPnP 发现 / NAT-PMP" "$(echo "$rules" | grep -cE 'block drop out quick .*port = (1900|ssdp|5351|nat-pmp)')" ""
+check "DHCP 例外只放广播" "$([ -z "$(echo "$rules" | grep -E 'port = (67|bootps)' | grep -v '255.255.255.255')" ] && echo 1 || echo 0)" "$(echo "$rules" | grep -E 'bootps|port = 67' | tr '\n' ';')"
+check "ICMPv6 例外只放邻居发现" "$([ -z "$(echo "$rules" | grep 'icmp6' | grep -v 'icmp6-type')" ] && echo 1 || echo 0)" "$(echo "$rules" | grep icmp6 | tr '\n' ';')"
 dq=$(dig +short +time=5 +tries=1 www.google.com A 2>/dev/null | head -1)
 check "严格全局下系统 DNS 照常(fake-ip)" "$(echo "$dq" | grep -cE '^198\.1[89]\.')" "$dq"
 # root 是守护进程的身份、本来就放行,所以要用普通用户去试;绑物理网卡是为了绕开隧道路由,模拟"漏出去"
@@ -163,6 +167,12 @@ fi
 tc=$(curl -s -m 15 -o /dev/null -w '%{http_code}' https://1.1.1.1/cdn-cgi/trace 2>/dev/null || true) # 明文 http 会被 301 到 https,拿 https 直接要 200
 check "经隧道照常" "$([ "$tc" = "200" ] && echo 1 || echo 0)" "http=${tc:-000}"
 gl=$(pub4); check "全局模式出口是节点" "$([ -n "$gl" ] && [ "$gl" != "$before" ] && echo 1 || echo 0)" "global=$gl 连接前=$before"
+# 别的程序把 pf 关掉(pfctl -d):锚点规则还在却不再生效,闸必须如实报"没开";重装时重新打开 pf
+pfctl -d >/dev/null 2>&1
+gs=$("$BIN" guard status 2>&1)
+check "pf 被关掉后闸如实报没开" "$(echo "$gs" | grep -c '没开')" "$gs"
+"$BIN" mode rule >/dev/null 2>&1; "$BIN" mode global >/dev/null 2>&1; sleep 2
+check "重装闸时重新打开了 pf" "$(pfctl -s info 2>/dev/null | grep -c 'Status: Enabled')" "$("$BIN" guard status 2>&1)"
 check "切回规则模式成功" "$("$BIN" mode rule >/dev/null 2>&1 && echo 1 || echo 0)" ""
 sleep 2
 check "切回规则模式后锚点清空" "$([ -z "$(pfctl -a com.apple/godusevpn -sr 2>/dev/null)" ] && echo 1 || echo 0)" "$(pfctl -a com.apple/godusevpn -sr 2>/dev/null | tr '\n' ';')"
