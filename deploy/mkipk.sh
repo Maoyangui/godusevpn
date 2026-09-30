@@ -33,10 +33,14 @@ if [ \$ok = 0 ]; then echo "这个包是给 $ARCH 的,本机是 \$m,请装对应
 [ -n "\$IPKG_INSTROOT" ] || /usr/bin/godusevpn install
 exit 0
 EOF
+# prerm 的失败要让 opkg 停下:uninstall 撤不掉闸时程序一删,闸就再没人能删,整台路由器连同局域网断网。
+# (opkg 只在 remove 时跑旧包的 prerm,升级不跑,不会在升级时撤闸。)
 cat > "$T/ctrl/prerm" <<'EOF'
 #!/bin/sh
-[ -n "$IPKG_INSTROOT" ] || /usr/bin/godusevpn uninstall >/dev/null 2>&1
-exit 0
+[ -n "$IPKG_INSTROOT" ] && exit 0
+/usr/bin/godusevpn uninstall && exit 0
+echo "godusevpn uninstall 没做完(见上),程序先不删:处理好再 opkg remove;实在要删,先 nft delete table inet godusevpn_guard" >&2
+exit 1
 EOF
 chmod 755 "$T/ctrl/postinst" "$T/ctrl/prerm"
 echo "2.0" > "$T/debian-binary"
