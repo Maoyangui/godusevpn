@@ -10,7 +10,6 @@ import (
 //
 //	NetMode    local(默认,只代理本机)| gateway(网关)
 //	LANSubnets 网关模式下视为局域网的网段;空 = 自动取本机非 TUN 网卡上的私网段
-//	DNSHijack  网关模式下把局域网设备发往本机 53 端口的查询劫持进内核(fake-ip、防泄漏);dnsmasq 只留 DHCP
 //	Devices    局域网设备策略:按 MAC 记,按当前 IP 生效;mode 为空 = 跟随规则,proxy / direct / reject = 强制
 const (
 	NetLocal   = "local"

@@ -693,7 +693,7 @@ func (d *Daemon) start(cfg []byte) error {
 	go d.fillMissingRuleSets() // 隧道通了才去补规则集:直连多半拿不到 GitHub
 	if s.TUN {
 		if s.NetMode == settings.NetGateway {
-			if err := netmode.ApplyGateway(builder.TunName, lanInterfaces(), s.DNSHijack); err != nil {
+			if err := netmode.ApplyGateway(builder.TunName, lanInterfaces()); err != nil {
 				d.logf("网关模式的 DNS 劫持规则失败(局域网设备的 DNS 不会被接管): %v", err)
 			}
 		}

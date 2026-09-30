@@ -8,5 +8,5 @@ func UnprotectChecked() error                   { return nil }
 func Unprotect()                                { _ = UnprotectChecked() }
 func RefreshProtect() (bool, error)             { return false, nil }
 func Protected() bool                           { return false }
-func ApplyGateway(string, []string, bool) error { return nil } // 网关模式只在 Linux 软路由上有
+func ApplyGateway(string, []string) error { return nil } // 网关模式只在 Linux 软路由上有
 func ClearGateway()                             {}

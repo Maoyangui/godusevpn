@@ -10,8 +10,8 @@ import "os/exec"
 
 const nftTable = "godusevpn"
 
-// ApplyGateway 目前只清理旧版本留下的表;参数保留给以后的 TProxy 模式。
-func ApplyGateway(string, []string, bool) error {
+// ApplyGateway 目前只清理旧版本留下的表;参数保留给以后的 TProxy 模式。局域网设备的 DNS 由 auto_redirect 接管,没有开关。
+func ApplyGateway(string, []string) error {
 	ClearGateway()
 	return nil
 }
