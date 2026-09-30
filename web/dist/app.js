@@ -986,7 +986,7 @@ async function renderSettings(el) {
     `)}
     ${group(t('set.g.privacy'), `
       ${sw('f-ipv6', t('set.ipv6'), s.ipv6, t('set.ipv6Help'))}
-      ${sw('f-nodirect', t('set.noDirect'), s.noDirect, t('set.noDirectHelp'))}
+      ${sw('f-nodirect', t('set.noDirect'), s.noDirect, t('set.noDirectHelp') + (state.platform === 'darwin' ? t('set.noDirectMacNote') : ''))}
       ${state.platform === 'android' ? `<div class="srow"><div class="lbl">${t('set.vpnAlways')}<div>${t('set.vpnAlwaysHelp')}</div></div><button class="btn sm" id="f-vpnalways">${t('set.vpnAlwaysOpen')}</button></div>` : ''}
       ${state.platform === 'android' ? '' : `<div class="srow"><div class="lbl">${t('set.nicv6')} <span class="tag warn">${t('set.nicv6Tag')}</span><div>${t('set.nicv6Help')}</div></div><label class="switch"><input type="checkbox" id="f-nicv6" ${s.disableNicIpv6 ? 'checked' : ''}></label></div>`}
     `)}
