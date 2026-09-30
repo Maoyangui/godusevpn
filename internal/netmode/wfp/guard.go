@@ -82,6 +82,18 @@ var (
 	curFlags wtFwpmFilterFlags // 正在装的这一批过滤器的标志(持久 / 开机),rules.go 里每条过滤器都带上
 )
 
+// blockFlags 本机那四层(ALE)拦截过滤器的标志。运行期那组再带上 CLEAR_ACTION_RIGHT,做成"否决":
+// 连着的时候 sing-tun 的严格路由在它自己的子层(权重和我们一样是最高)里按 exe 路径给内核进程装了硬放行,
+// 两个子层谁先判没有保证 —— 它先判的话,我们的普通拦截盖不过那条硬放行,同一个 exe 路径起的任何进程
+// (不论哪个账户)都能从物理网卡出去。否决只在我们这个子层判成"拦"时起作用:本服务、隧道地址、回环、
+// 局域网这些在我们这里先被放行的流量不受影响。开机那组不带(那时没有别的子层,BFE 也还没起来)。
+func blockFlags() wtFwpmFilterFlags {
+	if curFlags&cFWPM_FILTER_FLAG_PERSISTENT != 0 {
+		return curFlags | cFWPM_FILTER_FLAG_CLEAR_ACTION_RIGHT
+	}
+	return curFlags
+}
+
 func notFound(err error) bool {
 	return errors.Is(err, fwpEFilterNotFound) || errors.Is(err, fwpEProviderNotFound) || errors.Is(err, fwpESublayerNotFound) || errors.Is(err, fwpENotFound)
 }

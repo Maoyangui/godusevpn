@@ -3,10 +3,92 @@
 package wfp
 
 import (
+	"os"
+	"regexp"
+	"strings"
 	"testing"
 
 	"golang.org/x/sys/windows"
 )
+
+// sourceFunc 从本包某个源文件里取一个函数的函数体(到顶格的 "}" 为止)。只读源码,不碰系统。
+func sourceFunc(t *testing.T, file, sig string) string {
+	t.Helper()
+	b, err := os.ReadFile(file)
+	if err != nil {
+		t.Fatalf("读不到 %s: %v", file, err)
+	}
+	src := strings.ReplaceAll(string(b), "\r\n", "\n")
+	i := strings.Index(src, sig)
+	if i < 0 {
+		t.Fatalf("%s 里找不到 %q —— 函数被改名或改签名了,这条测试要跟着更新", file, sig)
+	}
+	rest := src[i:]
+	if j := strings.Index(rest, "\n}\n"); j >= 0 {
+		return rest[:j]
+	}
+	return rest
+}
+
+// 放行本服务那条是硬放行(CLEAR_ACTION_RIGHT)。只按 exe 路径的话,任何账户用同一个 exe 起的进程
+// (挂起启动再注入、设 GODUSEVPN_DATA 跑 run)都命中它,从物理网卡直连。钉住:还要比进程令牌,
+// 令牌要求只认 LocalSystem(服务本身)与启用状态的管理员组(提权的前台 run),只给"匹配过滤器"这一项权限。
+func TestPermitSelfRequiresPrivilegedToken(t *testing.T) {
+	body := sourceFunc(t, "rules.go", "func permitSelf(")
+	for _, want := range []string{"cFWPM_CONDITION_ALE_APP_ID", "cFWPM_CONDITION_ALE_USER_ID", "selfUserSDDL", "pin.Pin(userID)"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("permitSelf 里没有 %s:放行本服务又只按 exe 路径了(或条件值没钉住)", want)
+		}
+	}
+	aces := regexp.MustCompile(`\(([^)]*)\)`).FindAllStringSubmatch(selfUserSDDL, -1)
+	if !strings.HasPrefix(selfUserSDDL, "D:") || len(aces) == 0 {
+		t.Fatalf("令牌要求不是一条 DACL: %q", selfUserSDDL)
+	}
+	sids := map[string]bool{}
+	for _, a := range aces {
+		f := strings.Split(a[1], ";")
+		// CC = 0x1 = FWP_ACTRL_MATCH_FILTER:WFP 判 ALE_USER_ID 时拿进程令牌对这份描述符做访问检查,要的就是这一位
+		if len(f) != 6 || f[0] != "A" || f[2] != "CC" {
+			t.Fatalf("ACE %q 应当是只给 CC 的允许项", a[1])
+		}
+		sids[f[5]] = true
+	}
+	if !sids["SY"] {
+		t.Fatal("LocalSystem 不在名单里:服务自己连节点、拉订阅都会被自己的闸拦死")
+	}
+	if !sids["BA"] {
+		t.Fatal("管理员组不在名单里:提权终端里的前台 run 排障模式会被自己的闸拦死")
+	}
+	for s := range sids {
+		if s != "SY" && s != "BA" {
+			t.Fatalf("%s 也能命中放行本服务:普通用户起的同一个 exe 又能直连了", s)
+		}
+	}
+	if cFWP_ACTRL_MATCH_FILTER != 1 {
+		t.Fatal("FWP_ACTRL_MATCH_FILTER 不是 0x1,SDDL 里的 CC 对不上")
+	}
+}
+
+// 运行期那组的拦截要做成"否决"(CLEAR_ACTION_RIGHT):sing-tun 严格路由在它自己的最高权重子层里按 exe 路径
+// 给内核进程装了硬放行,它的子层先判时,普通拦截盖不过它,同一个 exe 路径起的任何进程都能出去。
+// 开机那组不带(那时没有别的子层)。
+func TestBlockFlagsVetoInPersistentSet(t *testing.T) {
+	saved := curFlags
+	defer func() { curFlags = saved }()
+	curFlags = cFWPM_FILTER_FLAG_PERSISTENT
+	if f := blockFlags(); f&cFWPM_FILTER_FLAG_PERSISTENT == 0 || f&cFWPM_FILTER_FLAG_CLEAR_ACTION_RIGHT == 0 {
+		t.Fatalf("运行期那组的拦截没做成否决: %#x", f)
+	}
+	curFlags = cFWPM_FILTER_FLAG_BOOTTIME
+	if f := blockFlags(); f != cFWPM_FILTER_FLAG_BOOTTIME {
+		t.Fatalf("开机那组的拦截标志被改了: %#x", f)
+	}
+	for file, sig := range map[string]string{"rules.go": "func blockAll(", "rules_dns.go": "func blockDNS("} {
+		if !strings.Contains(sourceFunc(t, file, sig), "blockFlags()") {
+			t.Fatalf("%s 的 %s 没用 blockFlags():这组拦截盖不过别的子层按 exe 路径的硬放行", file, sig)
+		}
+	}
+}
 
 // dnsBlocks 两条拦 DNS 的过滤器(出站 IPv4 / IPv6 各一条,带条件),标志是 flag。
 func dnsBlocks(flag wtFwpmFilterFlags) []filterInfo {

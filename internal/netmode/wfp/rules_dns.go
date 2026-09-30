@@ -55,7 +55,7 @@ func blockDNS(session uintptr, baseObjects *baseObjects, weight uint8) error {
 			layerKey:            l.layer,
 			subLayerKey:         baseObjects.filters,
 			weight:              filterWeight(weight),
-			flags:               curFlags,
+			flags:               blockFlags(),
 			numFilterConditions: uint32(len(conditions)),
 			filterCondition:     (*wtFwpmFilterCondition0)(unsafe.Pointer(&conditions[0])),
 			action: wtFwpmAction0{

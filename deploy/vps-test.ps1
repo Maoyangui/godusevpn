@@ -145,10 +145,19 @@ function Get-WfpProviders() { # BFE 状态里名叫 godusevpn 的提供者(两�
   # 去掉 <?xml ?> 声明后整份包进一个自造的根里再解析,几个根都成了子元素,XPath //providers/item 照样能找到。
   $body = [regex]::Replace($raw, '<\?xml[^>]*\?>', '')
   $wfp = New-Object System.Xml.XmlDocument
+  $script:wfpDoc = $null
   try { $wfp.LoadXml("<godusevpn-wrap>" + $body + "</godusevpn-wrap>") } catch { Write-Host "  (WFP 状态 XML 解析失败: $($_.Exception.Message))"; return $null }
+  $script:wfpDoc = $wfp
   $found = @($wfp.SelectNodes("//providers/item") | Where-Object { $_.displayData.name -eq "godusevpn" })
   return ,$found
 }
+# 上一次 Get-WfpProviders 读到的状态里,按显示名取过滤器(XML 节点)。读不到状态时返回 $null。
+function Wfp-Filters($name) {
+  if ($null -eq $script:wfpDoc) { return $null }
+  return ,@($script:wfpDoc.SelectNodes("//filters/item") | Where-Object { $_.displayData.name -eq $name })
+}
+function Filter-Fields($f) { return @($f.filterCondition.item | ForEach-Object { $_.fieldKey }) }
+function Filter-Flags($f) { return @($f.flags.item) }
 function Providers-Detail($p) {
   if ($null -eq $p) { return "(读不到 WFP 状态)" }
   if ($p.Count -eq 0) { return "(没有我们的提供者)" }
@@ -224,6 +233,14 @@ Check "严格全局下系统 DNS 照常(fake-ip)" ($gd -match '^198\.1[89]\.') "
 $g8 = (Resolve-DnsName -Name "www.google.com" -Type A -Server 8.8.8.8 -DnsOnly -ErrorAction SilentlyContinue | Where-Object { $_.Type -eq "A" } | Select-Object -First 1).IPAddress
 Check "严格全局下直接问 8.8.8.8 也照常被劫持" ($g8 -match '^198\.1[89]\.') "$g8"
 Check "闸里有拦 DNS 的规则" (($null -ne $ours) -and ($script:wfpStateText -match 'block dns \(ipv4\)') -and ($script:wfpStateText -match 'block dns \(ipv6\)')) ""
+# 放行本服务除了 exe 路径还要比进程令牌(只认 LocalSystem / 提权管理员):只按路径的话,任何账户用同一个 exe
+# 起的进程都能直连。服务自己照常连节点(上面"经隧道照常"、下面"服务重启后自动恢复连接")说明令牌要求没把它拦死。
+$ps = Wfp-Filters "Permit unrestricted outbound traffic for godusevpn service (IPv4)"
+Check "放行本服务同时比 exe 路径与进程令牌" (($null -ne $ps) -and ($ps.Count -gt 0) -and -not ($ps | Where-Object { ((Filter-Fields $_) -notcontains 'FWPM_CONDITION_ALE_USER_ID') -or ((Filter-Fields $_) -notcontains 'FWPM_CONDITION_ALE_APP_ID') })) ($(if ($ps) { ($ps | ForEach-Object { (Filter-Fields $_) -join '+' }) -join ', ' } else { '(读不到)' }))
+# 运行期的全拦是"否决"(CLEAR_ACTION_RIGHT):sing-tun 严格路由按 exe 路径的硬放行在另一个同权重子层里,盖不过它
+$ba = Wfp-Filters "Block all outbound (IPv4)"
+$ba = @($ba | Where-Object { $_ -and ((Filter-Flags $_) -contains 'FWPM_FILTER_FLAG_PERSISTENT') })
+Check "运行期的全拦是否决(带 CLEAR_ACTION_RIGHT)" (($ba.Count -gt 0) -and -not ($ba | Where-Object { (Filter-Flags $_) -notcontains 'FWPM_FILTER_FLAG_CLEAR_ACTION_RIGHT' })) (($ba | ForEach-Object { (Filter-Flags $_) -join '+' }) -join ', ')
 # 闸是持久的:服务停了也必须还在拦。这是 m29 绑服务名之后失效的那条性质,直接停服务实测。
 & $svc stop | Out-Null
 Start-Sleep -Seconds 3
