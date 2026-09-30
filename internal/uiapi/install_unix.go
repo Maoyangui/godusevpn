@@ -36,10 +36,13 @@ func installUpdate(b Backend, rel *update.Release, archive string) error {
 	_ = os.RemoveAll(filepath.Dir(archive))
 	b.Logf("已更新到 v%s,重启服务", rel.Version)
 	go func() {
-		time.Sleep(time.Second)
+		time.Sleep(time.Second) // 先让这次调用的回应回到页面
 		if svc.QueryStatus() == "running" {
-			_ = svc.Stop()
-			_ = svc.Start()
+			// 交给初始化系统去重启。以前在这里先 Stop 再 Start:Stop 把本进程自己停掉,Start 永远执行不到,
+			// 升级完服务一直停着(闸留着、隧道没了,软路由上整个局域网断网)。
+			if err := svc.Restart(); err != nil {
+				b.Logf("交给初始化系统重启失败,请手动重启服务: %v", err)
+			}
 		} else {
 			os.Exit(0) // 前台跑的:直接退出,由外面重新拉起
 		}

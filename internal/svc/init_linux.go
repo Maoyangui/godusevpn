@@ -112,7 +112,7 @@ USE_PROCD=1
 start_service() {
 	procd_open_instance
 	procd_set_param command %s run
-	procd_set_param respawn 3600 5 5
+	procd_set_param respawn 3600 5 0
 	procd_set_param stdout 1
 	procd_set_param stderr 1
 	procd_close_instance
@@ -220,6 +220,47 @@ func ctl(action string) error {
 }
 
 func Start() error { return ctl("start") }
+
+// Restart 让初始化系统重启本服务,交出去就返回。调用方可能正是这个服务自己(应用内升级换完文件):
+// 在本进程里先 Stop 再 Start,Stop 就把自己杀了,Start 永远轮不到,服务一直停着。
+func Restart() error {
+	if err := needRoot(); err != nil {
+		return err
+	}
+	k := detect()
+	if k != initSystemd && !exists(unitPath()) {
+		return errors.New("服务未安装")
+	}
+	argv, detach := restartCmd(k, unitPath())
+	if argv == nil {
+		return errors.New("没识别出初始化系统")
+	}
+	if !detach {
+		_, err := sh(argv[0], argv[1:]...)
+		return err
+	}
+	// procd / Entware 的 restart 是脚本里的 stop 再 start:脱离本进程跑(自成一个会话),本进程被停掉它也跑得完。
+	// Entware 的 stop 按进程名 killall godusevpn,这个脚本进程不叫这个名字,杀不到它。
+	c := exec.Command(argv[0], argv[1:]...)
+	c.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	if err := c.Start(); err != nil {
+		return err
+	}
+	return c.Process.Release()
+}
+
+// restartCmd 各初始化系统的重启命令,以及要不要脱离本进程去跑。
+// systemd 的 --no-block 把重启任务交给 systemd 自己,发起的进程被杀也照样执行完(KillMode=mixed 会连带杀掉
+// 本服务 cgroup 里的子进程,所以不能靠脱离子进程)。
+func restartCmd(k initKind, unit string) (argv []string, detach bool) {
+	switch k {
+	case initSystemd:
+		return []string{"systemctl", "--no-block", "restart", name}, false
+	case initProcd, initEntware:
+		return []string{unit, "restart"}, true
+	}
+	return nil, false
+}
 
 // Stop is idempotent so a first install can safely run the same fail-closed
 // upgrade path even when a binary was copied into place without a unit yet.
