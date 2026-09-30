@@ -189,11 +189,11 @@ func ensureBase(session uintptr) error {
 //
 // 权重(同一子层里大的先判,先命中的说了算):
 //
-//	15 放行本服务      14 放行回环、隧道地址      13 拦 DNS(53 / 853)
+//	15 放行本服务      14 放行回环、隧道地址      13 拦 DNS(53 / 853)、UPnP / NAT-PMP(1900 / 5351 / 5350)
 //	12 局域网、DHCP、邻居发现      0 其余全拦
 //
 // 拦 DNS 必须压在局域网放行上面(见 blockDNS),又必须在隧道地址、回环、本服务下面 —— 所以隧道地址和回环
-// 从 12 / 13 提到了 14。只影响 DNS 的先后,别的流量这几条规则的结果不变。
+// 从 12 / 13 提到了 14。只影响 DNS 的先后,别的流量这几条规则的结果不变。拦 UPnP / NAT-PMP 同理(见 blockUPnP)。
 func installSet(session uintptr, spec Spec, withSelf, withForward bool) error {
 	if withSelf {
 		if err := permitSelf(session, base, 15, spec.SelfPath); err != nil {
@@ -207,6 +207,9 @@ func installSet(session uintptr, spec Spec, withSelf, withForward bool) error {
 		return err
 	}
 	if err := blockDNS(session, base, 13); err != nil {
+		return err
+	}
+	if err := blockUPnP(session, base, 13); err != nil {
 		return err
 	}
 	if spec.LAN {
@@ -402,24 +405,28 @@ func Count() (int, error) {
 }
 
 // guardCovers 这一组(required 那个标志)齐不齐:我们保护的每一层都有一条生效的、**不带条件的**拦截(全拦),
-// 两个出站层还各有一条生效的拦 DNS。
+// 按端口拦的那几条(namedBlocks:两条拦 DNS、四条拦 UPnP / NAT-PMP)也都生效、挂在该挂的层上。
 //
 // 只认不带条件的拦截:拦 DNS 也是一条拦截,要是也算,出站层的全拦丢了也看不出来。
-// DNS 那两条也要在:少了它们,隧道断开的空档里 DNS 能经局域网放行出去(见 blockDNS)。从没有这两条的旧版
-// 升上来,这里判不齐,守护进程就会按当前设置重装。
+// 按端口拦的也要齐:少了拦 DNS,隧道断开的空档里 DNS 能经局域网放行出去(见 blockDNS);少了拦 UPnP / NAT-PMP,
+// 程序能经局域网放行向路由器问到公网 IPv4(见 blockUPnP)。从没有它们的旧版升上来,这里判不齐,
+// 守护进程就会按当前设置重装。
 func guardCovers(fs []filterInfo, required wtFwpmFilterFlags) bool {
 	covered := make(map[windows.GUID]bool, len(ourLayers()))
-	dns := map[windows.GUID]bool{}
+	named := map[string]bool{}
+	want := namedBlocks()
 	for _, f := range fs {
 		if f.flags&required == 0 || f.flags&cFWPM_FILTER_FLAG_DISABLED != 0 || f.action != cFWP_ACTION_BLOCK {
 			continue
 		}
-		switch {
-		case f.conds == 0:
+		if f.conds == 0 {
 			covered[f.layer] = true
-		case f.name == dnsBlockName4 && f.layer == cFWPM_LAYER_ALE_AUTH_CONNECT_V4,
-			f.name == dnsBlockName6 && f.layer == cFWPM_LAYER_ALE_AUTH_CONNECT_V6:
-			dns[f.layer] = true
+			continue
+		}
+		for _, b := range want {
+			if f.name == b.name && f.layer == b.layer {
+				named[b.name] = true
+			}
 		}
 	}
 	for _, layer := range ourLayers() {
@@ -427,7 +434,12 @@ func guardCovers(fs []filterInfo, required wtFwpmFilterFlags) bool {
 			return false
 		}
 	}
-	return dns[cFWPM_LAYER_ALE_AUTH_CONNECT_V4] && dns[cFWPM_LAYER_ALE_AUTH_CONNECT_V6]
+	for _, b := range want {
+		if !named[b.name] {
+			return false
+		}
+	}
+	return true
 }
 
 // PersistentGuardReady 核查的是**运行期**那组(PERSISTENT):它要覆盖我们保护的每一层。

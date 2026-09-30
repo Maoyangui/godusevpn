@@ -233,6 +233,7 @@ Check "严格全局下系统 DNS 照常(fake-ip)" ($gd -match '^198\.1[89]\.') "
 $g8 = (Resolve-DnsName -Name "www.google.com" -Type A -Server 8.8.8.8 -DnsOnly -ErrorAction SilentlyContinue | Where-Object { $_.Type -eq "A" } | Select-Object -First 1).IPAddress
 Check "严格全局下直接问 8.8.8.8 也照常被劫持" ($g8 -match '^198\.1[89]\.') "$g8"
 Check "闸里有拦 DNS 的规则" (($null -ne $ours) -and ($script:wfpStateText -match 'block dns \(ipv4\)') -and ($script:wfpStateText -match 'block dns \(ipv6\)')) ""
+Check "闸里有拦 UPnP / NAT-PMP 的规则(出入 × v4 / v6)" (($null -ne $ours) -and ($script:wfpStateText -match 'block upnp / nat-pmp outbound \(ipv4\)') -and ($script:wfpStateText -match 'block upnp / nat-pmp outbound \(ipv6\)') -and ($script:wfpStateText -match 'block upnp / nat-pmp inbound \(ipv4\)') -and ($script:wfpStateText -match 'block upnp / nat-pmp inbound \(ipv6\)')) ""
 # 放行本服务除了 exe 路径还要比进程令牌(只认 LocalSystem / 提权管理员):只按路径的话,任何账户用同一个 exe
 # 起的进程都能直连。服务自己照常连节点(上面"经隧道照常"、下面"服务重启后自动恢复连接")说明令牌要求没把它拦死。
 $ps = Wfp-Filters "Permit unrestricted outbound traffic for godusevpn service (IPv4)"
@@ -257,6 +258,18 @@ $p80 = Tcp-Probe 80
 $p53 = Tcp-Probe 53
 Check "服务停着时私网 80 端口照常发出(局域网放行在,对照)" ($p80.rc -eq 28) ("curl=" + $p80.rc + " " + $p80.ms + "ms")
 Check "服务停着时私网 53 端口被当场拒绝(拦 DNS 压在局域网放行上面)" (($p53.rc -ne 28) -and ($p53.rc -ne 0) -and ($p53.ms -lt 2000)) ("curl=" + $p53.rc + " " + $p53.ms + "ms")
+# UPnP 发现(SSDP 1900)与 NAT-PMP / PCP(5351)同样压在局域网放行上面:程序不能经局域网向路由器问公网 IPv4。
+# UDP 被闸拦下时 Send 当场报错;对照端口 5000 按局域网放行照常发出。对照没过就判不了,按失败报。
+function Udp-Probe($ip, $port) {
+  $u = New-Object System.Net.Sockets.UdpClient
+  try { [void]$u.Send([byte[]](0), 1, $ip, $port); return "sent" } catch { return ("error: " + $_.Exception.Message) } finally { $u.Close() }
+}
+$u5000 = Udp-Probe "10.255.255.1" 5000
+$u5351 = Udp-Probe "10.255.255.1" 5351
+$u1900 = Udp-Probe "239.255.255.250" 1900
+Check "服务停着时私网 UDP 5000 照常发出(局域网放行在,对照)" ($u5000 -eq "sent") $u5000
+Check "服务停着时 NAT-PMP / PCP(私网 UDP 5351)被拦" (($u5000 -eq "sent") -and ($u5351 -ne "sent")) $u5351
+Check "服务停着时 SSDP 发现(239.255.255.250:1900)被拦" (($u5000 -eq "sent") -and ($u1900 -ne "sent")) $u1900
 & $svc start | Out-Null
 $stb = Wait-Status "connected" 60
 Check "服务重启后自动恢复连接(落盘的连接意愿)" ($stb -match "状态:\s+connected") ($stb.Trim() -replace "`r?`n", " | ")
