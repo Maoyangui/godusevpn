@@ -804,5 +804,3 @@ func blockAll(session uintptr, baseObjects *baseObjects, weight uint8) error {
 
 	return nil
 }
-
-// Block all DNS traffic except towards specified DNS servers.

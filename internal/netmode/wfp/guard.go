@@ -3,8 +3,8 @@
 // Package wfp 在 Windows 过滤平台(WFP)里放一组过滤器,做「全局禁直连」的闸。
 //
 // 这个包改自 wireguard-windows 的 tunnel/firewall(MIT,Copyright (C) 2019-2021 WireGuard LLC,
-// 许可证全文见仓库 NOTICE):过滤器、系统调用与类型定义照搬,去掉了 DNS 限制与 Hyper-V 那两块,
-// 加了按局域网放行、按隧道地址放行,以及把对象改成持久的。
+// 许可证全文见仓库 NOTICE):过滤器、系统调用与类型定义照搬,去掉了原来"只许问指定 DNS 服务器"的限制与 Hyper-V 那块,
+// 加了按局域网放行、按隧道地址放行、拦 53 / 853 的 DNS(rules_dns.go),以及把对象改成持久的。
 //
 // 闸是持久的:提供者、子层、过滤器都带 PERSISTENT 标志,写进 BFE 的持久存储 —— 进程退出、被强杀、
 // 崩溃、升级换文件、机器重启,闸都还在;另有一组 BOOTTIME 过滤器,从内核网络初始化到 BFE 启动之间
