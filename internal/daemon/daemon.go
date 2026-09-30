@@ -1221,6 +1221,11 @@ func (d *Daemon) nicIPv6Loop(ctx context.Context) {
 			d.logf("发现网卡上又有公网 IPv6 地址(多半是新接了一张网卡),重新停用")
 		}
 		d.nicMu.Lock()
+		if !d.nicIPv6Wanted() {
+			// 等锁的工夫用户点了断开 / 关了开关:syncNICIPv6 刚按新意愿还原过,这时再停用就把刚开回的网卡又关上了
+			d.nicMu.Unlock()
+			continue
+		}
 		err := netmode.DisableNICIPv6(builder.TunName)
 		d.nicMu.Unlock()
 		if err != nil {

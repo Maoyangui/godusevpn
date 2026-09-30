@@ -57,7 +57,11 @@ function Write-Lines($path, $lines) {
 //
 // 待还原清单里的网卡再出现、而备份里还没有它:它现在关着是我们上次关的,原值按清单记成开着(见 nicPending)。
 func DisableNICIPv6(tunName string) error {
-	out, err := runPS(disableScript(tunName))
+	var out string
+	err := withNICLock(func() (err error) {
+		out, err = runPS(disableScript(tunName))
+		return err
+	})
 	if err != nil {
 		return nicResult(tunName, []string{fmt.Sprintf("%v(%s)", err, out)})
 	}
@@ -219,7 +223,14 @@ func psMark(out, mark string) string {
 // 两样都没有就什么都不做(没动过,别去碰用户自己的设置)。
 func RestoreNICIPv6() error {
 	if !fileExists(nicBackup()) && !fileExists(nicPending()) {
-		return nil
+		return nil // 没动过:连锁都不必拿
+	}
+	return withNICLock(restoreNICIPv6)
+}
+
+func restoreNICIPv6() error {
+	if !fileExists(nicBackup()) && !fileExists(nicPending()) {
+		return nil // 等锁的工夫,另一个进程已经还原完了
 	}
 	out, err := runPS(restoreScript())
 	if err != nil {

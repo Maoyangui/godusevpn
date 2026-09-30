@@ -110,3 +110,17 @@ func funcBody(t *testing.T, src, sig string) string {
 }
 
 func contains(s, sub string) bool { return strings.Contains(s, sub) }
+
+// nicIPv6Loop 先查"该不该关"、再排队拿 nicMu。等锁的工夫用户点了断开,syncNICIPv6 已经按新意愿还原过;
+// 拿到锁后不重查就会把刚开回的网卡又关上(还把备份重新写回),网卡 IPv6 就一直关着。
+func TestNICLoopRechecksWantedUnderLock(t *testing.T) {
+	fn := funcBody(t, readDaemonSource(t), "func (d *Daemon) nicIPv6Loop(ctx context.Context) {")
+	lock := strings.LastIndex(fn, "d.nicMu.Lock()")
+	dis := strings.Index(fn, "netmode.DisableNICIPv6(")
+	if lock < 0 || dis < lock {
+		t.Fatal("nicIPv6Loop 的结构变了:找不到先拿 nicMu 再停用的那一段,这条测试要跟着更新")
+	}
+	if !contains(fn[lock:dis], "d.nicIPv6Wanted()") {
+		t.Fatal("nicIPv6Loop 拿到 nicMu 之后、停用之前没有重查 nicIPv6Wanted")
+	}
+}
