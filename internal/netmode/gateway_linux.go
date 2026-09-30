@@ -1,4 +1,4 @@
-//go:build !windows && !android && !darwin
+//go:build linux && !android
 
 package netmode
 

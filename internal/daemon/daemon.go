@@ -1202,6 +1202,17 @@ func (d *Daemon) nicIPv6Loop(ctx context.Context) {
 		if d.tunUpPending.Load() && d.core.Running() {
 			d.guardTunUp()
 		}
+		// 顺带:连接时做的系统网络保护只按那一刻的状态做了一次 —— Linux 的回包规则按当时的地址(PPPoE 重拨、
+		// DHCP 换地址就对不上了),macOS 的 DNS 接管按当时的网络服务(新插的 USB 网卡、iPhone 共享没接进来)。变了就补做
+		if d.core.Running() && d.getSettings().TUN {
+			if redo, err := netmode.RefreshProtect(); redo {
+				if err != nil {
+					d.logf("本机地址 / 网络服务变了,重做系统网络保护没做完: %v", err)
+				} else {
+					d.logf("本机地址 / 网络服务变了,系统网络保护已按新的重做")
+				}
+			}
+		}
 		if !d.nicIPv6Wanted() {
 			fails, quiet = 0, false
 			continue

@@ -37,24 +37,30 @@ func Clear() (text string, ok bool) {
 	// 把 NoDirect 和 DisableNICIPv6 一起写成 false 并落盘,而用户只是想把 IPv6 还原回去。
 	// m28 在这里是分开处理的,本版照它来。
 	if n, err := netmode.GuardStatus(); err == nil && n == 0 {
+		// macOS 接管的系统 DNS、Linux 的回包路由和闸无关,闸不在它们也可能留着(比如连着关机、之后服务起不来):
+		// 那时 DNS 一直钉在隧道用的地址上。服务在跑就归它管(断开时它会还原),服务不在才由这里还原。
+		dns, dnsOK := restoreOrphanProtect()
 		if !netmode.NICIPv6Off() {
 			if lost := takeNICLoss(); lost != "" {
-				return "闸没有开着,网卡 IPv6 的备份也已清掉;但" + lost + " 两个隐私开关都没动。", true
+				return "闸没有开着,网卡 IPv6 的备份也已清掉;但" + lost + " " + dns + "两个隐私开关都没动。", dnsOK
 			}
-			return "闸没有开着,网卡 IPv6 也没被改过 —— 网络本来就是通的,没有改动任何设置。", true
+			if dns == "" {
+				return "闸没有开着,网卡 IPv6 也没被改过 —— 网络本来就是通的,没有改动任何设置。", true
+			}
+			return "闸没有开着,网卡 IPv6 也没被改过。" + dns + "两个隐私开关都没动。", dnsOK
 		}
 		incDetail := ""
 		if err := netmode.RestoreNICIPv6(); err != nil {
 			var inc *netmode.NICRestoreIncomplete
 			if !errors.As(err, &inc) {
-				return "闸本来就没开;网卡 IPv6 没能还原回去(" + err.Error() + ")。两个隐私开关都没动。", false
+				return "闸本来就没开;网卡 IPv6 没能还原回去(" + err.Error() + ")。" + dns + "两个隐私开关都没动。", false
 			}
 			incDetail = inc.Detail
 		}
 		if lost := orDefault(takeNICLoss(), incDetail); lost != "" {
-			return "闸本来就没开;网卡 IPv6 能还原的都还原了,但" + lost + " 两个隐私开关都没动。", true
+			return "闸本来就没开;网卡 IPv6 能还原的都还原了,但" + lost + " " + dns + "两个隐私开关都没动。", dnsOK
 		}
-		return "闸本来就没开;网卡上被停用的 IPv6 已还原。「全局禁直连」与「连接时停用网卡 IPv6」两个开关都没动。", true
+		return "闸本来就没开;网卡上被停用的 IPv6 已还原。" + dns + "「全局禁直连」与「连接时停用网卡 IPv6」两个开关都没动。", dnsOK
 	}
 
 	switchedOff, switchErr := switchOff()
@@ -128,6 +134,25 @@ func Clear() (text string, ok bool) {
 		return "禁直连闸已解除,网卡 IPv6 也还原了,网络恢复。已顺手关掉「全局禁直连」与「连接时停用网卡 IPv6」两个开关,免得服务一重连又装回来;要再用,去设置 → 隐私打开。" + note, true
 	}
 	return "禁直连闸已解除,直连恢复。要再开闸,启动服务并连接即可。" + note, true
+}
+
+// restoreOrphanProtect 服务不在时,还原它留下的系统 DNS(macOS)/ 回包路由(Linux)。返回给人看的一句(没做事就是空串)。
+func restoreOrphanProtect() (string, bool) {
+	if !netmode.Protected() || !serviceGone() {
+		return "", true
+	}
+	if err := netmode.UnprotectChecked(); err != nil {
+		return "服务没在运行,它接管的系统 DNS / 路由没能还原(" + err.Error() + "),下次启动服务时会自动再试。", false
+	}
+	return "服务没在运行,它接管的系统 DNS / 路由已按连接前的原值还原。", true
+}
+
+// serviceGone 控制口没人应答:没有守护进程在管这些系统设置。
+func serviceGone() bool {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	var s settings.Settings
+	return errors.Is(ipc.Call(ctx, ipc.MGetSettings, nil, &s), ipc.ErrNoService)
 }
 
 // takeNICLoss 取出"网卡原值丢失"的持久记录并删掉 —— 「恢复网络」的弹窗就是把它说给用户的地方。

@@ -28,3 +28,12 @@ func TestOnlyHijackDNS(t *testing.T) {
 		})
 	}
 }
+
+// 连着的时候用户删掉 / 改名了某个网络服务:它的 DNS 已经无从还原,要剔出备份,不能让它把整份备份永远卡住。
+func TestSplitGoneServices(t *testing.T) {
+	saved := map[string][]string{"Wi-Fi": nil, "USB 10/100 LAN": {"192.168.1.1"}, "Ethernet": {"1.1.1.1"}}
+	todo, gone := splitGone(saved, map[string]bool{"Wi-Fi": true, "Ethernet": true})
+	if len(todo) != 2 || todo["Ethernet"][0] != "1.1.1.1" || len(gone) != 1 || gone[0] != "USB 10/100 LAN" {
+		t.Fatalf("todo=%v gone=%v", todo, gone)
+	}
+}

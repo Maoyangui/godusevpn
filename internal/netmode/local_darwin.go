@@ -19,7 +19,9 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"sort"
 	"strings"
+	"sync"
 
 	"github.com/Maoyangui/godusevpn/internal/builder"
 	"github.com/Maoyangui/godusevpn/internal/paths"
@@ -28,8 +30,41 @@ import (
 // dnsBackup 连接前各网络服务的 DNS 原值:服务名 → 地址列表(空列表表示原本就是"跟随 DHCP")。
 func dnsBackup() string { return paths.DataDir() + "/dns-backup.json" }
 
+// protectMu 连接时接管、断开时还原、连着时补接新网络服务(RefreshProtect)三条路不能交错。
+var protectMu sync.Mutex
+
 // Protect 把系统 DNS 接进隧道。ipv6 参数用不上:隧道里的 DNS 服务按设置决定要不要回 AAAA。
 func Protect(_ string, _ bool) error {
+	protectMu.Lock()
+	defer protectMu.Unlock()
+	return protect()
+}
+
+// RefreshProtect 连着的时候冒出新的网络服务(第一次插的 USB 网卡、iPhone USB / 蓝牙共享)就把它也接进隧道:
+// 接管只在连上那一刻做一次,新服务的 DNS 仍是 DHCP 给的路由器,解析就绕过了隧道(严格全局下则被闸拦下、整机解析不了)。
+// 没在接管(没有备份)就什么都不做。返回这一轮有没有补接。
+func RefreshProtect() (bool, error) {
+	protectMu.Lock()
+	defer protectMu.Unlock()
+	b, err := os.ReadFile(dnsBackup())
+	if err != nil {
+		return false, nil
+	}
+	saved := map[string][]string{}
+	_ = json.Unmarshal(b, &saved) // 坏了也没关系:下面的 protect 会按"没有备份"重建
+	svcs, err := networkServices()
+	if err != nil {
+		return false, nil // 列不出服务:这一轮不动,半分钟后再看
+	}
+	for _, s := range svcs {
+		if _, ok := saved[s]; !ok {
+			return true, protect()
+		}
+	}
+	return false, nil
+}
+
+func protect() error {
 	svcs, err := networkServices()
 	if err != nil {
 		return err
@@ -61,27 +96,8 @@ func Protect(_ string, _ bool) error {
 	}
 	if !haveBackup || backupChanged {
 		// 先落盘再改:万一改到一半进程没了,下次启动还能照着还原。
-		b, err := json.Marshal(saved)
-		if err != nil {
-			return fmt.Errorf("序列化 DNS 备份: %w", err)
-		}
-		tmp := dnsBackup() + ".tmp"
-		f, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
-		if err != nil {
-			return fmt.Errorf("打开 DNS 备份: %w", err)
-		}
-		if _, err = f.Write(b); err == nil {
-			err = f.Sync()
-		}
-		if closeErr := f.Close(); err == nil {
-			err = closeErr
-		}
-		if err == nil {
-			err = os.Rename(tmp, dnsBackup())
-		}
-		if err != nil {
-			_ = os.Remove(tmp)
-			return fmt.Errorf("保存 DNS 备份: %w", err)
+		if err := writeDNSBackup(saved); err != nil {
+			return err
 		}
 	}
 	var errs []string
@@ -97,9 +113,37 @@ func Protect(_ string, _ bool) error {
 	return nil
 }
 
+func writeDNSBackup(saved map[string][]string) error {
+	b, err := json.Marshal(saved)
+	if err != nil {
+		return fmt.Errorf("序列化 DNS 备份: %w", err)
+	}
+	tmp := dnsBackup() + ".tmp"
+	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		return fmt.Errorf("打开 DNS 备份: %w", err)
+	}
+	if _, err = f.Write(b); err == nil {
+		err = f.Sync()
+	}
+	if closeErr := f.Close(); err == nil {
+		err = closeErr
+	}
+	if err == nil {
+		err = os.Rename(tmp, dnsBackup())
+	}
+	if err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("保存 DNS 备份: %w", err)
+	}
+	return nil
+}
+
 // UnprotectChecked 还原系统 DNS。没有备份就什么都不做(没接管过,别去动用户的设置)。
 // 失败时保留备份，调用方可以继续重试，避免把恢复依据删掉。
 func UnprotectChecked() error {
+	protectMu.Lock()
+	defer protectMu.Unlock()
 	b, err := os.ReadFile(dnsBackup())
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -114,8 +158,23 @@ func UnprotectChecked() error {
 		// 隧道 DNS 的服务,一律改回"跟随 DHCP"(macOS 的出厂状态),然后把坏备份挪走让它自愈。
 		return restoreHijackedDNSBlind()
 	}
+	// 备份里的网络服务可能已经被删掉或改名了(拔掉后删除的 USB 网卡)。那种"还原不了"其实是"没什么可还原",
+	// 以前却当成失败,一个消失的服务就让备份永远删不掉:之后每次断开都报还原失败,下一次接管还把旧值当原值沿用。
+	// 和网卡 IPv6 那边一样分清楚:服务不在了就剔出备份并告警,只有真失败的才留下来等下次重试。
+	live := map[string]bool{}
+	if svcs, err := networkServices(); err == nil {
+		for _, s := range svcs {
+			live[s] = true
+		}
+	} else {
+		for s := range saved {
+			live[s] = true // 列不出服务就别乱剔,当成都还在
+		}
+	}
+	todo, gone := splitGone(saved, live)
 	var errs []string
-	for s, addrs := range saved {
+	left := map[string][]string{}
+	for s, addrs := range todo {
 		args := []string{"-setdnsservers", s}
 		if len(addrs) == 0 {
 			args = append(args, "Empty") // 原本跟随 DHCP
@@ -124,16 +183,37 @@ func UnprotectChecked() error {
 		}
 		if out, err := exec.Command("networksetup", args...).CombinedOutput(); err != nil {
 			errs = append(errs, fmt.Sprintf("%s: %s", s, strings.TrimSpace(string(out))))
+			left[s] = addrs
 		}
 	}
-	if len(errs) > 0 {
+	flushDNS()
+	if len(left) > 0 {
+		_ = writeDNSBackup(left) // 还原好的和已经不在的剔出去,剩下的下次接着试
 		return fmt.Errorf("还原系统 DNS 失败: %s", strings.Join(errs, "; "))
 	}
-	flushDNS()
 	if err := os.Remove(dnsBackup()); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("删除 DNS 备份失败: %w", err)
 	}
+	if len(gone) > 0 {
+		setRouteWarning("这些网络服务已经不在了,系统 DNS 当作无需还原: " + strings.Join(gone, ", "))
+	} else {
+		setRouteWarning("")
+	}
 	return nil
+}
+
+// splitGone 把备份分成"服务还在、要还原的"和"服务已经不在的"。
+func splitGone(saved map[string][]string, live map[string]bool) (todo map[string][]string, gone []string) {
+	todo = map[string][]string{}
+	for s, addrs := range saved {
+		if live[s] {
+			todo[s] = addrs
+		} else {
+			gone = append(gone, s)
+		}
+	}
+	sort.Strings(gone)
+	return todo, gone
 }
 
 // restoreHijackedDNSBlind 没有可用备份时的兜底还原:把 DNS 仍指着隧道地址的网络服务改回跟随 DHCP。
@@ -181,6 +261,12 @@ func onlyHijackDNS(out string) bool {
 		n++
 	}
 	return n == 1
+}
+
+// Protected 系统 DNS 此刻是不是被我们接管着(有备份 = 接管过还没还原)。
+func Protected() bool {
+	_, err := os.Stat(dnsBackup())
+	return err == nil
 }
 
 // Unprotect 保持历史调用方的幂等接口；需要向用户报告结果的路径使用
