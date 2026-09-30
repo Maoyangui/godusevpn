@@ -41,6 +41,7 @@ type Input struct {
 	NodeIPs map[string][]string
 	Darwin  bool // 按 macOS 生成:隧道网卡名由内核分配(utunN),不能写死;不传时看运行平台
 	Android bool // 按 Android 生成:"进程名"是应用包名(package_name),按应用直连的应用整个绕过 VPN(exclude_package);不传时看运行平台
+	Linux   bool // 按 Linux 生成:内核出站带 RouteMark(route.default_mark);不传时看运行平台
 }
 
 const (
@@ -61,6 +62,9 @@ const (
 	SealedBootstrapDoH = "223.5.5.5"
 	// RemoteBootstrapDoH 全局禁直连下「远程 DNS」填的是域名时,经代理解析它用的公共 DoH(按地址连)。
 	RemoteBootstrapDoH = "1.1.1.1"
+	// RouteMark Linux 上内核出站套接字带的标记(route.default_mark);守护进程自己的直连也打它(netmode.SelfControl)。
+	// 全局禁直连的闸按它放行本服务,而不是放行整个 root。取在高位,避开 mwan3 / kube-proxy 常用的标记位。
+	RouteMark = 0x676f0000
 )
 
 // ModeName 设置里的模式 → 内核 Clash API 里的模式名。
@@ -117,6 +121,7 @@ func BuildEx(in Input) ([]byte, Report, error) {
 func buildConfig(in Input, rep *Report) ([]byte, error) {
 	android := in.Android || runtime.GOOS == "android"
 	darwin := in.Darwin || runtime.GOOS == "darwin"
+	linux := !android && !darwin && (in.Linux || runtime.GOOS == "linux")
 	procKey := "process_name" // 桌面按进程名分流;Android 没有进程名,按应用包名
 	if android {
 		procKey = "package_name"
@@ -376,6 +381,11 @@ func buildConfig(in Input, rep *Report) ([]byte, error) {
 	route := obj("rules", rules, "rule_set", rs.sets, "final", dr.Final, "auto_detect_interface", true, "default_domain_resolver", "local")
 	if findProcess {
 		route["find_process"] = true
+	}
+	// Linux:内核的出站一律带标记,闸靠它认出本服务(见 netmode/guard_linux.go)。和模式无关,切模式不用重建配置。
+	// 网关模式开着 TUN 时由 auto_redirect 给出站打它自己的标记,sing-box 不许两个同时设。
+	if linux && !(s.TUN && s.NetMode == settings.NetGateway) {
+		route["default_mark"] = RouteMark
 	}
 
 	cfg := obj(

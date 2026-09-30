@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"fmt"
+	"runtime"
 	"strings"
 
 	"github.com/Maoyangui/godusevpn/internal/builder"
@@ -383,13 +384,19 @@ func (d *Daemon) guardTunUp() {
 	}
 	if err := netmode.GuardTunUp(d.guardSpec()); err != nil {
 		d.tunUpPending.Store(true) // 网卡可能晚几秒才注册好:下一次同步、或半分钟一次的巡检再试
-		d.setGuard(true, "转发层没放行隧道网卡(只影响热点 / 网络共享,本机自己的流量不受影响): "+err.Error())
-		d.logf("全局禁直连:转发层没放行隧道网卡(只影响热点 / 网络共享,本机自己的流量不受影响): %v", err)
+		d.setGuard(true, tunUpFailText+err.Error())
+		d.logf("全局禁直连:%s%v", tunUpFailText, err)
 		return
 	}
 	d.tunUpPending.Store(false)
 	d.setGuard(true, "")
 }
+
+// tunUpFailText 隧道网卡起来之后那一步没做成时影响什么:Windows 是转发层的放行,Linux 是把 DNS 接进隧道的那条路由。
+var tunUpFailText = map[bool]string{
+	true:  "DNS 还没接进隧道(连着时发给路由器的 DNS 查询暂时解析不了,会自动重试): ",
+	false: "转发层没放行隧道网卡(只影响热点 / 网络共享,本机自己的流量不受影响): ",
+}[runtime.GOOS == "linux"]
 
 func (d *Daemon) setGuard(on bool, errText string) {
 	d.mu.Lock()

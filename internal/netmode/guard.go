@@ -19,7 +19,7 @@ type GuardSpec struct {
 	TunAddr4 string // 隧道 v4 地址(不带前缀长度):经隧道出去的包源地址就是它
 	TunAddr6 string // 隧道 v6 地址
 	LAN      bool   // 放行局域网 / 私网(打印机、NAS、路由器后台——不出网,不算漏)
-	Gateway  bool   // Linux 网关模式:经本机转发的局域网流量也只许走隧道
+	Gateway  bool   // Linux 网关模式:内核出站带的是 auto_redirect 的标记,闸要认它(转发的流量不论哪种模式都只许走隧道)
 }
 
 // 私网 / 本地段:这些目标不出网,闸放行它们。

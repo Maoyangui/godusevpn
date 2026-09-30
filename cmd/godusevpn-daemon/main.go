@@ -244,7 +244,7 @@ func printPanel(s settings.Settings, pw string) {
 		for _, ip := range locals {
 			fmt.Printf("  http://%s:%s/   (局域网 / 内网)\n", ip, port)
 		}
-		// 闸在的时候不去问公网回显服务:root 被闸放行,这一问就是从隧道外直连出去(升级 / 重装时闸通常还在)
+		// 闸在的时候不去问公网回显服务:macOS 上 root 被闸放行,这一问就是从隧道外直连出去(Linux 上会被拦、白等)(升级 / 重装时闸通常还在)
 		if n, _ := netmode.GuardStatus(); n > 0 {
 			fmt.Println("  (全局禁直连的闸开着:不去查公网地址)")
 		} else if pub := publicIPv4(); pub != "" && !contains(locals, pub) {
