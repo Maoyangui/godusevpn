@@ -330,8 +330,14 @@ if ($script:nicInjected) {
   Start-Sleep -Seconds 5
   Check "断开后网卡 IPv6 备份已清理(含那张不存在的网卡)" (-not (Test-Path $nicb)) ($(if (Test-Path $nicb) { (Get-Content $nicb) -join " | " } else { "" }))
   $slog = Join-Path $env:ProgramData "godusevpn\logs\service.log"
-  $gone = if (Test-Path $slog) { @(Select-String -Path $slog -Pattern "已经不在了" -SimpleMatch).Count } else { 0 }
+  $gone = if (Test-Path $slog) { @(Select-String -Path $slog -Pattern "还原时这些网卡不在" -SimpleMatch).Count } else { 0 }
   Check "服务日志记下了已消失的网卡" ($gone -gt 0) "matches=$gone"
+  # 不在的网卡不再丢掉:挪进待还原清单(它再出现时开回去),并落进"原值丢失"记录让首页 / 恢复网络说出来
+  $pend = Join-Path $env:ProgramData "godusevpn\nic-ipv6-pending.txt"
+  $lost = Join-Path $env:ProgramData "godusevpn\nic-ipv6-lost.txt"
+  Check "已消失的网卡挪进了待还原清单" ((Test-Path $pend) -and (((Get-Content $pend) -join "|") -match "ZZ-Gone-Adapter-For-Test")) ($(if (Test-Path $pend) { (Get-Content $pend) -join " | " } else { "no pending" }))
+  Check "已消失的网卡落进了持久提示" ((Test-Path $lost) -and (((Get-Content $lost -Encoding UTF8) -join "|") -match "ZZ-Gone-Adapter-For-Test")) ""
+  Remove-Item $pend, $lost -ErrorAction SilentlyContinue # 假网卡,别留给后面的段落和下一次验收
   if ($script:nicBroken) {
     $bad = $nicb + ".bad"
     Check "无效的备份行挪到了 .bad" ((Test-Path $bad) -and (((Get-Content $bad) -join "|") -match "broken on purpose")) ($(if (Test-Path $bad) { (Get-Content $bad) -join " | " } else { "no .bad" }))
