@@ -2,9 +2,11 @@ package profile
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -107,6 +109,29 @@ func TestFetchAddsFormatAndHandlesStatus(t *testing.T) {
 		t.Fatalf("缓存读回不一致: %v", err)
 	}
 }
+
+// 网络失败(超时、拒绝连接、TLS 失败)时 net/http 给的 *url.Error 带着完整请求地址,路径就是订阅令牌。
+// 这段文本会进界面、服务日志与诊断信息:只能留主机,看得出是在哪台面板上失败的。
+func TestFetchNetErrorHidesToken(t *testing.T) {
+	cl := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return nil, errors.New("connection refused")
+	})}
+	_, err := Fetch(context.Background(), "https://panel.example:2056/sub/SECRETTOKEN123", cl)
+	var fe *FetchError
+	if !asFetch(err, &fe) {
+		t.Fatalf("应返回 FetchError: %v", err)
+	}
+	if strings.Contains(fe.Msg, "SECRETTOKEN123") || strings.Contains(fe.Msg, "/sub/") || strings.Contains(fe.Msg, "format=json") {
+		t.Fatalf("错误文本带着订阅路径: %s", fe.Msg)
+	}
+	if !strings.Contains(fe.Msg, "https://panel.example:2056/***") || !strings.Contains(fe.Msg, "connection refused") {
+		t.Fatalf("主机或失败原因丢了: %s", fe.Msg)
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
 func asFetch(err error, target **FetchError) bool {
 	fe, ok := err.(*FetchError)

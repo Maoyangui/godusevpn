@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/Maoyangui/godusevpn/internal/buildinfo"
+	"github.com/Maoyangui/godusevpn/internal/redact"
 )
 
 // ErrNoNodes 订阅里一个节点都没有(面板给的是只有 direct 的空配置)。
@@ -215,12 +216,14 @@ func Fetch(ctx context.Context, rawURL string, client *http.Client) (*Profile, e
 	req.Header.Set("Accept", "application/json")
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, &FetchError{Msg: "拉取订阅失败: " + err.Error()}
+		// 网络错误是 *url.Error,文本带着完整请求地址(Get "https://面板/sub/<令牌>?format=json": …),
+		// 而这段文本会进界面、服务日志和诊断信息。地址只留协议与主机。
+		return nil, &FetchError{Msg: "拉取订阅失败: " + redact.Text(err.Error())}
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
 	if err != nil {
-		return nil, &FetchError{Msg: "读取订阅失败: " + err.Error()}
+		return nil, &FetchError{Msg: "读取订阅失败: " + redact.Text(err.Error())}
 	}
 	switch {
 	case resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusGone:

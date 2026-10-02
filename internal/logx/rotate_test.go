@@ -59,6 +59,54 @@ func TestPrune(t *testing.T) {
 	}
 }
 
+// 写进日志的每一行都先打码:拉订阅失败的错误原样带着完整订阅地址,日志页、日志目录、诊断包都会给人看。
+func TestPrintfRedacts(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "service.log")
+	r := New(p, 1<<20, 3)
+	r.Printf("INFO", "订阅经 %s 拉取失败: %v", "proxy", `拉取订阅失败: Get "https://panel.example:2056/sub/SECRETTOKEN?format=json": timeout`)
+	r.Close()
+	b, _ := os.ReadFile(p)
+	if contains(string(b), "SECRETTOKEN") || !contains(string(b), `Get "https://panel.example:2056/***": timeout`) {
+		t.Fatalf("日志里的订阅地址没打码: %s", b)
+	}
+}
+
+// 老版本写下、没打过码的几份:第一次打开时就地打码;不含地址的行一个字节不动,修改时间照旧(按时间清理靠它)。
+func TestScrubsOldLogs(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "service.log")
+	leak := "2026-09-21 10:00:00 INFO 订阅经 proxy 拉取失败: 拉取订阅失败: Get \"https://panel.example:2056/sub/SECRETTOKEN?format=json\": timeout\n"
+	plain := "2026-09-21 10:00:01 INFO 状态 → connected\n"
+	oldT := time.Now().Add(-3 * 24 * time.Hour).Truncate(time.Second)
+	for _, f := range []string{p, p + ".2"} {
+		if err := os.WriteFile(f, []byte(leak+plain), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		_ = os.Chtimes(f, oldT, oldT)
+	}
+	cleanOld := p + ".1"
+	_ = os.WriteFile(cleanOld, []byte(plain), 0o600)
+	_ = os.Chtimes(cleanOld, oldT, oldT)
+
+	r := New(p, 1<<20, 3)
+	r.Printf("INFO", "启动")
+	r.Close()
+	for _, f := range []string{p, p + ".1", p + ".2"} {
+		b, _ := os.ReadFile(f)
+		if contains(string(b), "SECRETTOKEN") || !contains(string(b), plain) {
+			t.Fatalf("%s 没打码或误伤了别的行:\n%s", f, b)
+		}
+	}
+	for _, f := range []string{p + ".1", p + ".2"} {
+		if st, _ := os.Stat(f); !st.ModTime().Equal(oldT) {
+			t.Fatalf("%s 的修改时间被改了: %v", f, st.ModTime())
+		}
+	}
+	if _, err := os.Stat(p + ".2.tmp"); err == nil {
+		t.Fatal("临时文件没清掉")
+	}
+}
+
 func contains(s, sub string) bool {
 	return len(sub) == 0 || (len(s) >= len(sub) && indexOf(s, sub) >= 0)
 }
