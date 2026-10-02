@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -83,4 +85,33 @@ func waitFor(t *testing.T, d time.Duration, cond func() bool, msg string) {
 		time.Sleep(5 * time.Millisecond)
 	}
 	t.Fatal(msg)
+}
+
+// 托盘「恢复网络」和开始菜单快捷方式走同一条路:提权跑 guard clear --popup(guardfix.Clear)。0.7.5 服务活着时
+// 只看守护进程内存里的闸状态、只关「全局禁直连」:设置文件读不出来时它报"没开"而过滤器都在,点了什么都不做也不说;
+// 网卡 IPv6 也不还原(审计 G057)。只看源码,不弹 UAC。
+func TestTrayRestoreNetworkUsesGuardClear(t *testing.T) {
+	b, err := os.ReadFile("tray_windows.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := strings.ReplaceAll(string(b), "\r\n", "\n")
+	i := strings.Index(src, "t.guardFix.Click(")
+	if i < 0 {
+		t.Fatal("找不到「恢复网络」的点击处理")
+	}
+	h := src[i:]
+	h = h[:strings.Index(h, "\n\t}))\n")]
+	if !strings.Contains(h, "restoreNetwork()") {
+		t.Fatal("托盘「恢复网络」没走 restoreNetwork(提权跑 guard clear)")
+	}
+	for _, bad := range []string{"MGetState", "SaveSettings", "NoDirect"} {
+		if strings.Contains(h, bad) {
+			t.Fatalf("托盘「恢复网络」又自己判闸 / 改开关了(%s):要和开始菜单的快捷方式走同一条路", bad)
+		}
+	}
+	j := strings.Index(src, "func restoreNetwork() error {")
+	if j < 0 || !strings.Contains(src[j:], `runElevated(p, "guard clear --popup")`) {
+		t.Fatal("restoreNetwork 没有提权跑 guard clear --popup")
+	}
 }
