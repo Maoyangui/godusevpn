@@ -1059,14 +1059,14 @@ func (d *Daemon) reconcileNICIPv6() {
 	d.logf("网卡 IPv6:已停用(上次连着关的机)")
 }
 
-// nicLeakMessage 确证有网卡挂着公网 IPv6 时说给用户的话:点名是哪几张。停用脚本够不着的接口(拨号连接、
-// Teredo 等隧道接口)只能手动关;不说名字用户无从下手,最后多半去关「连接时停用网卡 IPv6」—— 正是这道门要避免的。
+// nicLeakMessage 确证有网卡挂着公网 IPv6 时说给用户的话:点名是哪几张。拨号连接不是网卡、停用脚本改不到,
+// Teredo 这类隧道接口停用了也可能地址还在,都只能手动关;不说名字用户无从下手,最后多半去关「连接时停用网卡 IPv6」—— 正是这道门要避免的。
 func nicLeakMessage(names []string) string {
 	if len(names) == 0 {
 		return "网卡上又冒出公网 IPv6 地址(这会儿查不到是哪张)"
 	}
 	return "这些网卡 / 连接上仍挂着公网 IPv6 地址,没能停用:" + strings.Join(names, "、") +
-		"。拨号连接、Teredo 等程序够不着的接口要手动关掉它的 IPv6(见文档「关于 IPv6」)"
+		"。拨号连接、停用后地址仍在的 Teredo 等接口要手动关掉它的 IPv6(见文档「关于 IPv6」)"
 }
 
 // privacyChecks 决定启动前要核查哪些闸相关的不变量。

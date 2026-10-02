@@ -70,11 +70,18 @@ func DisableNICIPv6(tunName string) error {
 
 // disableScript 停用脚本。网卡名一律按 -ceq 精确比对后把绑定对象经管道交给 Disable-NetAdapterBinding:
 // -Name 在这组命令里是通配符(WQL LIKE)—— 「本地连接* 2」会连带匹配「本地连接 2」,名字带 [ ] 的又匹配不到自己。
+//
+// 列网卡带 -IncludeHidden:Teredo(地址里编着公网 IPv4)、6to4、IP-HTTPS、Wi-Fi Direct 虚拟网卡这些隐藏接口
+// 不在默认列表里,而判"确证在漏"的 net.Interfaces 看得见它们 —— 只停可见的那几张,隐藏接口上的公网 v6
+// 就既停不掉又挡着连接(审计 G003)。还原那边本来就在 -IncludeHidden 的列表里找,两边这才对称。
+// Not Present 的(拔掉的 USB 网卡留下的登记)跳过:它们没有地址,停了也不在复核里显示,只会每次报一条假的"没停成"。
 func disableScript(tunName string) string {
 	return psWriteLines + `
 $ErrorActionPreference = 'Stop'
 $tun = '` + psQuote(tunName) + `'
-$all = @(Get-NetAdapterBinding -ComponentID ms_tcpip6 | Where-Object { $_.Name -ne $tun })
+$absent = @{}
+foreach ($x in @(Get-NetAdapter -IncludeHidden)) { if ($x.Status -eq 'Not Present') { $absent[$x.Name] = $true } }
+$all = @(Get-NetAdapterBinding -ComponentID ms_tcpip6 -IncludeHidden | Where-Object { $_.Name -ne $tun -and -not $absent.ContainsKey($_.Name) })
 $b = '` + psQuote(nicBackup()) + `'
 $pf = '` + psQuote(nicPending()) + `'
 $known = @{}
@@ -120,7 +127,7 @@ foreach ($a in $all) {
   try { $a | Disable-NetAdapterBinding -ErrorAction Stop }
   catch { $failed += ($a.Name + ': ' + $_.Exception.Message) }
 }
-$now = @(Get-NetAdapterBinding -ComponentID ms_tcpip6)
+$now = @(Get-NetAdapterBinding -ComponentID ms_tcpip6 -IncludeHidden)
 foreach ($a in $all) {
   if (@($now | Where-Object { $_.Name -ceq $a.Name -and $_.Enabled }).Count -gt 0) { $failed += ($a.Name + ': 停用后仍是启用状态') }
 }

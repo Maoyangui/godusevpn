@@ -79,6 +79,14 @@ func TestNICScriptsMatchAdapterNamesExactly(t *testing.T) {
 		t.Fatal("还原脚本要先落待还原清单、再动备份:反过来的话中间被杀掉,挪进清单的那几行就没了")
 	}
 	d := disableScript("godusevpn")
+	// 停用也要看隐藏接口(Teredo、6to4、IP-HTTPS、Wi-Fi Direct):判"确证在漏"用的 net.Interfaces 看得见它们,
+	// 只停可见网卡的话,隐藏接口上的公网 v6 停不掉又挡着连接。停用前列网卡与停用后复核都要带上。
+	if strings.Count(d, "Get-NetAdapterBinding -ComponentID ms_tcpip6 -IncludeHidden") != 2 {
+		t.Fatal("停用脚本列网卡和停用后复核都要带 -IncludeHidden,否则隐藏接口上的公网 IPv6 停不掉")
+	}
+	if !strings.Contains(d, "Get-NetAdapter -IncludeHidden") || !strings.Contains(d, "'Not Present'") {
+		t.Fatal("停用脚本要跳过 Not Present 的网卡登记,否则每次连接都报一条假的\"没停成\"")
+	}
 	if !strings.Contains(d, "| Disable-NetAdapterBinding") || !strings.Contains(d, "pend.ContainsKey($_.Name)") {
 		t.Fatal("停用脚本没经管道停用、或没按待还原清单把再出现的网卡记成开着")
 	}

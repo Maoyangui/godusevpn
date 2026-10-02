@@ -197,6 +197,13 @@ $hij = Resolve-DnsName -Name "www.google.com" -Server 8.8.8.8 -Type A -ErrorActi
 Check "直接问 8.8.8.8 也被劫持(答案仍是 fake-ip)" ($hij -and $hij.IPAddress -like "198.1[89].*") ($(if ($hij) { $hij.IPAddress } else { "no answer" }))
 $aaaa = Resolve-DnsName -Name "www.google.com" -Type AAAA -ErrorAction SilentlyContinue | Where-Object { $_.Type -eq "AAAA" }
 Check "AAAA 为空(禁 IPv6)" ($null -eq $aaaa) ($(if ($aaaa) { ($aaaa | Select-Object -First 1).IPAddress } else { "" }))
+# 连接时停用网卡 IPv6 要连隐藏接口(Teredo、6to4、IP-HTTPS、Wi-Fi Direct)一起停:判"确证在漏"看得见它们(审计 G003)。
+# Not Present 的不算(不在场,没有地址);停不掉的会在每次连接时挂一条告警,这里先在真机上暴露出来。
+$absent6 = @{}
+foreach ($x in @(Get-NetAdapter -IncludeHidden)) { if ($x.Status -eq 'Not Present') { $absent6[$x.Name] = $true } }
+$tunNames = @($tun | ForEach-Object { $_.Name })
+$on6 = @(Get-NetAdapterBinding -ComponentID ms_tcpip6 -IncludeHidden | Where-Object { $_.Enabled -and $tunNames -notcontains $_.Name -and -not $absent6.ContainsKey($_.Name) } | ForEach-Object { $_.Name })
+Check "连着时除 TUN 外在场网卡(含隐藏接口)的 IPv6 绑定都已停用" ($on6.Count -eq 0) ($on6 -join ", ")
 
 Write-Host "== 3.7 全局禁直连(WFP 闸:绑物理网卡的直连被拦,经隧道照常;停服务闸仍在;切回规则模式闸清空)" -ForegroundColor Cyan
 # 正控制:规则模式下(闸没开)绑物理网卡的直连必须是通的(2xx / 3xx),否则探测本身跑不通,下面"被拦"的断言没有意义。

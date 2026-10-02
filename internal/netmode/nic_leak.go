@@ -26,8 +26,8 @@ func NICIPv6Leaking(tunName string) bool {
 // NICIPv6LeakConfirmed 确证此刻有网卡挂着公网 IPv6 地址。查不出来一律报 false。
 func NICIPv6LeakConfirmed(tunName string) bool { return len(NICIPv6Leakers(tunName)) > 0 }
 
-// NICIPv6Leakers 此刻确证挂着公网 IPv6 地址的网卡 / 连接名。拒绝连接时要说清是哪几张:停用脚本够不着的接口
-// (拨号连接、Teredo 等隧道接口)只能手动关,不说名字用户无从下手,最后多半去关「连接时停用网卡 IPv6」。
+// NICIPv6Leakers 此刻确证挂着公网 IPv6 地址的网卡 / 连接名。拒绝连接时要说清是哪几张:停用脚本改不到的拨号连接、
+// 停用后地址仍在的隧道接口只能手动关,不说名字用户无从下手,最后多半去关「连接时停用网卡 IPv6」。
 func NICIPv6Leakers(tunName string) []string {
 	leakers, _ := nicIPv6LeakState(tunName)
 	return leakers
