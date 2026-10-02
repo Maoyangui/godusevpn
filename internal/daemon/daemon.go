@@ -2126,16 +2126,5 @@ func (d *Daemon) registerHandlers() {
 		}
 		return logx.Tail(path, in.Lines), nil
 	})
-	h(ipc.MDiagnose, func(json.RawMessage) (any, error) {
-		_, p := d.activeProfile()
-		out := map[string]any{
-			"version": buildinfo.Version, "os": runtime.GOOS + "/" + runtime.GOARCH,
-			"state": d.stateView(), "dataDir": paths.DataDir(),
-			"serviceLog": logx.Tail(d.log.Path(), 100), "coreLog": logx.Tail(d.coreLog.Path(), 100),
-		}
-		if p != nil {
-			out["servers"] = p.Servers()
-		}
-		return out, nil
-	})
+	h(ipc.MDiagnose, func(json.RawMessage) (any, error) { return d.diagnose() })
 }

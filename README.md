@@ -177,7 +177,7 @@ godusevpn-cli nodes / select <节点> / test
 godusevpn-cli settings ipv6=on tunStack=system probeMinutes=5 logDays=14
 godusevpn-cli rules                            列出规则组
 godusevpn-cli logs 200 core
-godusevpn-cli diag                             导出诊断包(订阅地址已打码)
+godusevpn-cli diag                             打印诊断信息(订阅地址、凭据、访问记录已打码)
 godusevpn-svc uninstall
 ```
 
