@@ -44,5 +44,7 @@ func Ensure() error {
 // **每次启动都做一遍**,不是只在首次建目录时:老版本装出来的目录、手工建的目录、被别的程序改过权限的,
 // 都得在这一次修回来,否则老用户永远修不上。
 //
+// readers 是还能读 logs\ 与 diag\ 的账户(Windows 上登记的控制用户 SID):界面以登录用户身份复制诊断包、打开日志目录。
+//
 // 收不动不算致命(便携方式或非管理员身份跑的时候本来就收不动),调用方记一行日志就行。
-func Harden() error { return secureDataDir(DataDir()) }
+func Harden(readers ...string) error { return secureDataDir(DataDir(), readers) }

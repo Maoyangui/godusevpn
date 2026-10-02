@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"golang.org/x/sys/windows"
 )
 
 // 数据目录里有节点凭据、订阅地址和面板密码哈希。%ProgramData% 默认会把
@@ -35,29 +37,54 @@ func TestSecureDataDirRemovesInheritedAccess(t *testing.T) {
 }
 
 // 收紧不能把界面自己的活路堵死:界面是以**登录用户**身份跑的(非提权),它要把服务生成的
-// 诊断包复制到桌面,还要用资源管理器打开日志目录。一刀切收紧的话,这两个功能在升级之后就坏了 ——
-// 而诊断包恰恰是出问题时唯一的求助通道。
-//
-// 这两个目录里没有凭据:诊断包本来就是脱敏过的(config.redacted.json、订阅地址打码),
-// 日志里也只有域名、状态和错误,所以放开只读是安全的。
-func TestLogsAndDiagStayReadable(t *testing.T) {
+// 诊断包复制到桌面,还要用资源管理器打开日志目录 —— 而诊断包恰恰是出问题时唯一的求助通道。
+// 但只给登记的控制用户:0.7.5 给的是 BUILTIN\Users,内核日志里每条连接的目标域名就是一份浏览记录,
+// 同机别的账户都能读走(审计 G050)。
+func TestLogsAndDiagReadableOnlyByControllers(t *testing.T) {
 	setupDataDir(t)
-	if err := Harden(); err != nil {
+	tu, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil {
+		t.Fatal(err)
+	}
+	me := tu.User.Sid
+	account, domain, _, err := me.LookupAccount("")
+	if err != nil {
+		t.Skipf("查不到当前账户名: %v", err)
+	}
+	who := domain + `\` + account
+	if err := Harden(me.String()); err != nil {
 		t.Skipf("收紧权限失败(多半是没有管理员身份): %v", err)
 	}
 	for _, sub := range []string{Logs(), Diag()} {
 		got := icacls(t, sub)
-		if !strings.Contains(got, usersACE) {
-			t.Errorf("%s 普通用户读不了 —— 界面复制不出诊断包、也打不开日志:\n%s", sub, got)
+		if !strings.Contains(got, who) {
+			t.Errorf("%s 控制用户读不了 —— 界面复制不出诊断包、也打不开日志:\n%s", sub, got)
+		}
+		if strings.Contains(got, usersACE) {
+			t.Errorf("%s 还对所有标准用户开放:\n%s", sub, got)
 		}
 		// 父目录已经断了继承,这两个必须自己带一份权限,不能靠继承
 		if strings.Contains(got, "(I)") {
 			t.Errorf("%s 还在继承父目录的权限,父目录一收紧它就跟着进不去了:\n%s", sub, got)
 		}
 	}
-	// 根目录仍然不许普通用户进:凭据在那儿
-	if root := icacls(t, DataDir()); strings.Contains(root, usersACE) {
-		t.Errorf("数据目录根仍然对普通用户开放:\n%s", root)
+	// 根目录只有 SYSTEM 与管理员:凭据在那儿,控制用户也只能经服务
+	if root := icacls(t, DataDir()); strings.Contains(root, usersACE) || strings.Contains(root, who+":") {
+		t.Errorf("数据目录根对普通用户开放:\n%s", root)
+	}
+}
+
+// 格式不对的 SID 不能拼进描述符:一条坏的会让整份解析失败,连 SYSTEM 与管理员那两条也设不上。
+func TestReadableSDDLSkipsBadSIDs(t *testing.T) {
+	got := readableSDDL([]string{"S-1-5-21-1-2-3-1001", "S-1-5-x", ")(A;;GA;;;WD"})
+	if want := sddlPrivate + "(A;OICI;GRGX;;;S-1-5-21-1-2-3-1001)"; got != want {
+		t.Fatalf("得到 %s,应为 %s", got, want)
+	}
+	if _, err := windows.SecurityDescriptorFromString(got); err != nil {
+		t.Fatal(err)
+	}
+	if readableSDDL(nil) != sddlPrivate {
+		t.Fatal("没有控制用户时只留 SYSTEM 与管理员")
 	}
 }
 

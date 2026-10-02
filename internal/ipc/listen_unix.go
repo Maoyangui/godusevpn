@@ -24,6 +24,9 @@ func defaultSocketPath() string {
 // Address 控制口地址(诊断信息里显示用)。
 func Address() string { return SocketPath }
 
+// ControllerOwnerSIDs 控制用户名单只有 Windows 有;这里谁能控制由 socket 文件的权限管。
+func ControllerOwnerSIDs() []string { return nil }
+
 func listen() (net.Listener, error) {
 	if err := os.MkdirAll(filepath.Dir(SocketPath), 0o755); err != nil {
 		return nil, err

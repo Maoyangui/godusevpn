@@ -21,19 +21,28 @@ import (
 //
 // 但不能一收了之:界面是以**登录用户**的身份跑的(非提权),它要把服务生成的诊断包复制到桌面、
 // 还要用资源管理器打开日志目录。全收紧的话这两个功能在升级之后就坏了 —— 而诊断包恰恰是出问题时
-// 唯一的求助通道。所以 logs\ 与 diag\ 单独放开只读:
-// 诊断包本来就是脱敏的(config.redacted.json、订阅地址打码),日志里也没有凭据,
-// 这两样本来就是给人看、给人发的。
+// 唯一的求助通道。所以 logs\ 与 diag\ 单独给登记的控制用户只读(能用界面的就是他们,控制口认的也是这份名单)。
+// 0.7.5 放开给的是 BUILTIN\Users:内核日志里每条连接的目标域名就是一份浏览记录,同机别的账户不该读得到(审计 G050)。
 const (
 	// 只有 SYSTEM 与 Administrators。真正断掉继承的是下面 SetNamedSecurityInfo 那个
 	// PROTECTED_DACL_SECURITY_INFORMATION 标志 —— **少了它,继承来的 Users 读权限原样留着,
 	// 加再多 ACE 也盖不掉,看着像改了其实没改**。SDDL 里的 P 是把同一个意图再写明一次。
 	sddlPrivate = "D:P(A;OICI;GA;;;SY)(A;OICI;GA;;;BA)"
-	// 同上,再加 BUILTIN\Users 的只读(GR 读 + GX 进目录),给界面复制诊断包和打开日志用。
-	sddlReadable = "D:P(A;OICI;GA;;;SY)(A;OICI;GA;;;BA)(A;OICI;GRGX;;;BU)"
 )
 
-func secureDataDir(dir string) error {
+// readableSDDL logs\ 与 diag\ 的权限:sddlPrivate 再给每个控制用户只读(GR 读 + GX 进目录)。
+// 格式不对的 SID 跳过:拼进去会让整份描述符解析失败,连 SYSTEM 与管理员那两条也设不上。
+func readableSDDL(readers []string) string {
+	s := sddlPrivate
+	for _, sid := range readers {
+		if _, err := windows.StringToSid(sid); err == nil {
+			s += "(A;OICI;GRGX;;;" + sid + ")"
+		}
+	}
+	return s
+}
+
+func secureDataDir(dir string, readers []string) error {
 	if err := applyDACL(dir, sddlPrivate); err != nil {
 		return err
 	}
@@ -43,7 +52,7 @@ func secureDataDir(dir string) error {
 		if err := os.MkdirAll(sub, 0o700); err != nil {
 			return err
 		}
-		if err := applyDACL(sub, sddlReadable); err != nil {
+		if err := applyDACL(sub, readableSDDL(readers)); err != nil {
 			return err
 		}
 	}
