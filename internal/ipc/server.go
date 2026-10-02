@@ -149,6 +149,8 @@ var (
 	ErrNoPermission = errors.New("没有权限连接控制口")
 	// permissionHint 各平台在 init 里填:Linux / macOS 是"需要 root / sudo",Windows 是"账户没登记"。
 	permissionHint = "需要 root / sudo"
+	// errImpostor 控制口对面不是佛跳墙服务(Windows 上有人抢注了管道名,见 verifyPipeServer)。
+	errImpostor = errors.New("控制口被别的程序占着,不是佛跳墙服务;重启电脑后再试")
 )
 
 func Call(ctx context.Context, method string, params any, result any) error {
@@ -158,6 +160,9 @@ func Call(ctx context.Context, method string, params any, result any) error {
 	if err != nil {
 		if permissionDenied(err) {
 			return fmt.Errorf("%w(%s)", ErrNoPermission, permissionHint)
+		}
+		if errors.Is(err, errImpostor) {
+			return fmt.Errorf("%w(%v)", ErrNoService, err) // 对调用方仍是"服务不在":恢复网络照样走离线那条路
 		}
 		return ErrNoService
 	}

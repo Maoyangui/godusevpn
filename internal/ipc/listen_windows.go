@@ -236,7 +236,83 @@ func listen() (net.Listener, error) {
 }
 
 func dial(ctx context.Context) (net.Conn, error) {
-	return winio.DialPipeContext(ctx, PipeName)
+	c, err := winio.DialPipeContext(ctx, PipeName)
+	if err != nil {
+		return nil, err
+	}
+	if err := verifyPipeServer(c); err != nil {
+		c.Close()
+		return nil, err
+	}
+	return c, nil
+}
+
+// serviceName 与 svc.Name 一致(ipc 不引 svc 包)。
+const serviceName = "godusevpn"
+
+// verifyPipeServer 管道对面得是佛跳墙服务。服务停着或崩溃重启的空档里,同机任何账户都能抢先建一个同名管道
+// (服务随后因为名字被占监听失败);客户端不认对端的话,界面里加的订阅地址、改的设置就发给了它,它还能回假状态说
+// "已连接、禁直连已生效"。另一个登记过的控制用户也能给现有管道多开一个实例截流。
+func verifyPipeServer(c net.Conn) error {
+	f, ok := c.(interface{ Fd() uintptr })
+	if !ok {
+		return errImpostor
+	}
+	var pid uint32
+	if err := windows.GetNamedPipeServerProcessId(windows.Handle(f.Fd()), &pid); err != nil {
+		return fmt.Errorf("查控制口对端进程: %w", err)
+	}
+	if !trustedPipeServer(pid, uint32(os.Getpid()), servicePID(), privilegedProcess) {
+		return errImpostor
+	}
+	return nil
+}
+
+// trustedPipeServer 对端进程能不能信:就是本进程(测试、进程内)、是服务管理器登记的佛跳墙服务进程、
+// 或者是 LocalSystem / 提权管理员的进程(管理员终端里前台 run)。标准用户造不出后两种。
+func trustedPipeServer(pid, self, service uint32, privileged func(uint32) bool) bool {
+	return pid != 0 && (pid == self || pid == service || privileged(pid))
+}
+
+// servicePID 服务管理器里佛跳墙服务此刻的进程号;没在跑或查不到返回 0。标准用户有查询权限(见 svc 的服务 ACL)。
+func servicePID() uint32 {
+	m, err := windows.OpenSCManager(nil, nil, windows.SC_MANAGER_CONNECT)
+	if err != nil {
+		return 0
+	}
+	defer windows.CloseServiceHandle(m)
+	name, _ := windows.UTF16PtrFromString(serviceName)
+	s, err := windows.OpenService(m, name, windows.SERVICE_QUERY_STATUS)
+	if err != nil {
+		return 0
+	}
+	defer windows.CloseServiceHandle(s)
+	var st windows.SERVICE_STATUS_PROCESS
+	var need uint32
+	if err := windows.QueryServiceStatusEx(s, windows.SC_STATUS_PROCESS_INFO, (*byte)(unsafe.Pointer(&st)), uint32(unsafe.Sizeof(st)), &need); err != nil {
+		return 0
+	}
+	return st.ProcessId
+}
+
+// privilegedProcess 进程令牌是 LocalSystem 或提权的管理员。查不了令牌(标准用户看 SYSTEM 进程常常这样)就当不是 ——
+// 正经的服务进程已经由 servicePID 认出来了。
+func privilegedProcess(pid uint32) bool {
+	h, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
+	if err != nil {
+		return false
+	}
+	defer windows.CloseHandle(h)
+	var tok windows.Token
+	if err := windows.OpenProcessToken(h, windows.TOKEN_QUERY, &tok); err != nil {
+		return false
+	}
+	defer tok.Close()
+	if tok.IsElevated() {
+		return true
+	}
+	u, err := tok.GetTokenUser()
+	return err == nil && u.User.Sid.IsWellKnown(windows.WinLocalSystemSid)
 }
 
 func listenerClosed(err error) bool { return errors.Is(err, winio.ErrPipeListenerClosed) }
