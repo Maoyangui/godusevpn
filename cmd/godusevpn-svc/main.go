@@ -90,6 +90,9 @@ func main() {
 			fail(fmt.Errorf("登记控制用户失败: %w", regErr))
 		}
 		fmt.Println("已登记。名单里现在有:", strings.Join(ipc.ControllerOwnerSIDs(), ", "))
+		if err := svc.SetAccess(ipc.ControllerOwnerSIDs()); err != nil { // 新登记的账户也要能停服务(托盘「退出」)
+			fmt.Fprintln(os.Stderr, "注意:", err)
+		}
 		if !restart {
 			fmt.Println("重启服务后生效:godusevpn-svc.exe stop && godusevpn-svc.exe start")
 			return
@@ -250,6 +253,10 @@ func installService() {
 	}
 	if err := svc.Install(exe); err != nil {
 		fail(err)
+	}
+	// 能停服务的只有管理员与控制用户(升级时把老版本"所有已登录用户都能停"的权限一并收回)
+	if err := svc.SetAccess(ipc.ControllerOwnerSIDs()); err != nil {
+		fmt.Fprintln(os.Stderr, "注意:", err)
 	}
 	if err := svc.Start(); err != nil {
 		fail(fmt.Errorf("服务已注册但启动失败: %w", err))

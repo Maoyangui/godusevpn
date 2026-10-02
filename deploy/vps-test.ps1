@@ -160,6 +160,12 @@ Write-Host "== 1. 安装服务" -ForegroundColor Cyan
 & $svc install
 Check "服务运行" ((& $svc status) -eq "running") (& $svc status)
 Check "管道可达" ((& $cli version 2>&1) -match "佛跳墙") ""
+# 控制口对端核验(ipc.verifyPipeServer):认不出真服务的话,界面、命令行、恢复网络全都当成"服务未运行"
+$st0 = & $cli status 2>&1 | Out-String
+Check "命令行认得出真服务(控制口对端核验)" ($st0 -match "状态:") ($st0.Trim() -replace "`r?`n", " | ")
+# 服务权限:0.7.5 那份描述符非法,sc sdset 一直失败(错误被吞),非管理员的托盘既拉不起服务也停不了
+$sd = (& sc.exe sdshow godusevpn) -join ""
+Check "服务权限:已登录用户能启动、不能停,控制用户能停" (($sd -match '\(A;;CCLCSWRPLOCRRC;;;AU\)') -and ($sd -notmatch 'WP[A-Z]*;;;AU\)') -and ($sd -match 'CCLCSWRPWPLOCRRC;;;S-1-5-')) $sd
 # 服务里证书校验不许走 Windows 的平台校验:网络变化(TUN 起停)时它偶尔"成功但不给链",Go 顺着空指针崩在 crypt32 里
 # (刚连上就崩的元凶,golang/go#79247)。服务启动时把设置情况写进日志;这里直接看真服务进程说的,不靠重启压力碰运气。
 $tlsLine = @(Get-Content (Join-Path $script:logDir "service.log") -Encoding UTF8 -ErrorAction SilentlyContinue | Where-Object { $_ -match '证书校验:' } | Select-Object -Last 1)
