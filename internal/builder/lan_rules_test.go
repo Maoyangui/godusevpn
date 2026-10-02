@@ -34,10 +34,12 @@ func TestStrictGlobalLANOnlyForRealLAN(t *testing.T) {
 		}
 	}
 
-	// 局域网直通关着:严格全局下局域网也照样走隧道(和闸同一个开关)
+	// 局域网直通关着:严格全局下局域网也照样走隧道(和闸同一个开关)。0.7.5 在这里照样直连:真机日志里
+	// Windows「传递优化」整夜去连 10.x / 172.x / 192.168.x 的 7680(微软按出口 IP 配对,配来的是同节点其他人的内网地址),
+	// 由本服务从物理网卡发出,闸放行本服务。
 	s.LANBypass = false
 	c, _ = build(t, s)
-	for _, cn := range []conn{{dst: "192.168.1.1", port: 80}, {dst: "nas.home.example", answers: []string{"192.168.1.10"}}} {
+	for _, cn := range []conn{{dst: "192.168.1.1", port: 80}, {dst: "10.67.128.71", port: 7680}, {dst: "172.20.3.4", port: 7680}, {dst: "nas.home.example", answers: []string{"192.168.1.10"}}} {
 		if got, at := route(t, c, "Global", cn); got != "proxy" {
 			t.Errorf("局域网直通关着时 %s 应走代理,实际 %s(规则 %d)", cn.dst, got, at)
 		}
