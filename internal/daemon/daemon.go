@@ -1195,13 +1195,15 @@ func (d *Daemon) autoProbeLoop(ctx context.Context) {
 
 // nicIPv6Loop 连接期间盯着网卡:新插一张网卡、开个热点、起个虚拟机,那张新网卡上的 IPv6 没人管,
 // 公网 v6 地址就又能被程序读走了(数据包有闸挡着不会真漏流量,但"地址读不到"才是这个功能的意义)。
-// 停用那一步要起 PowerShell,挺贵;所以先用标准库枚举一遍地址,真发现漏了才去跑。
+// 停用那一步要起 PowerShell,挺贵;所以先用标准库枚举一遍地址(便宜,每 nicWatchEvery 一次),真发现漏了才去跑。
+// 以前 30 秒才看一次,新网卡拿到公网 v6 之后最多要半分钟加脚本那几秒才停掉,够程序读走了。
 func (d *Daemon) nicIPv6Loop(ctx context.Context) {
-	t := time.NewTicker(30 * time.Second)
+	t := time.NewTicker(nicWatchEvery)
 	defer t.Stop()
-	// 关不掉的情况是存在的(权限不够、或者某些虚拟网卡自己又开回来)。真碰上就别每半分钟白跑一次
-	// PowerShell 还把日志刷满:连着几轮没治好就退避,只在第一次和恢复时各说一句。
+	// 关不掉的情况是存在的(权限不够、程序够不着的拨号 / 隧道接口、或者某些虚拟网卡自己又开回来)。真碰上就别
+	// 每几秒白跑一次 PowerShell 还把日志刷满:连着几次没治好就退避,只在第一次和恢复时各说一句。
 	fails, quiet := 0, false
+	var lastTry, lastTunUp time.Time
 	for {
 		select {
 		case <-ctx.Done():
@@ -1209,7 +1211,8 @@ func (d *Daemon) nicIPv6Loop(ctx context.Context) {
 		case <-t.C:
 		}
 		// 顺带:隧道网卡的转发层放行上次没成功(网卡晚注册),这里每半分钟补一次,不用等用户动手
-		if d.tunUpPending.Load() && d.core.Running() {
+		if d.tunUpPending.Load() && d.core.Running() && time.Since(lastTunUp) >= 30*time.Second {
+			lastTunUp = time.Now()
 			d.guardTunUp()
 		}
 		if !d.nicIPv6Wanted() {
@@ -1223,8 +1226,7 @@ func (d *Daemon) nicIPv6Loop(ctx context.Context) {
 			fails, quiet = 0, false
 			continue
 		}
-		if quiet && fails%20 != 0 { // 退避后改成每 10 分钟试一次
-			fails++
+		if !nicRetryDue(quiet, lastTry, time.Now()) {
 			continue
 		}
 		if !quiet {
@@ -1236,6 +1238,7 @@ func (d *Daemon) nicIPv6Loop(ctx context.Context) {
 			d.nicMu.Unlock()
 			continue
 		}
+		lastTry = time.Now()
 		err := netmode.DisableNICIPv6(builder.TunName)
 		d.nicMu.Unlock()
 		if err != nil {
@@ -1256,6 +1259,16 @@ func (d *Daemon) nicIPv6Loop(ctx context.Context) {
 			d.logf("连着几次都没能停掉网卡的 IPv6,改成每 10 分钟再试。%s", nicLeakMessage(netmode.NICIPv6Leakers(builder.TunName)))
 		}
 	}
+}
+
+const (
+	nicWatchEvery = 5 * time.Second  // 连着的时候多久看一次网卡上有没有冒出公网 v6
+	nicQuietRetry = 10 * time.Minute // 连着几次没停掉之后,停用脚本改成这么久才再跑一次
+)
+
+// nicRetryDue 这一轮发现在漏时要不要去跑停用脚本:没退避就跑;退避了离上次跑满 nicQuietRetry 才跑。
+func nicRetryDue(quiet bool, last, now time.Time) bool {
+	return !quiet || now.Sub(last) >= nicQuietRetry
 }
 
 // currentNode 内核里 proxy 组此刻实际落在哪个节点;自动选择时是 auto 组选中的那个。
