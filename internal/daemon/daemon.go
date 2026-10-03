@@ -162,7 +162,7 @@ func NewWithOptions(o Options) (*Daemon, error) {
 	}
 	// 数据目录里有节点凭据、订阅地址、面板密码哈希,还有一层规则集会被内核当路由依据读进去,
 	// 默认从 %ProgramData% 继承来的权限是"同机任何标准用户都能读、还能往里新建文件"。每次启动都收一遍。
-	if err := paths.Harden(); err != nil {
+	if err := paths.Harden(ipc.ControllerOwnerSIDs()...); err != nil {
 		d.logf("数据目录权限没收紧(里面有节点凭据,建议用管理员身份装一次): %v", err)
 	}
 	d.coreLevel.Store(core.LevelOf(d.settings.LogLevel))
@@ -2460,16 +2460,5 @@ func (d *Daemon) registerHandlers() {
 		}
 		return logx.Tail(path, in.Lines), nil
 	})
-	h(ipc.MDiagnose, func(json.RawMessage) (any, error) {
-		_, p := d.activeProfile()
-		out := map[string]any{
-			"version": buildinfo.Version, "os": runtime.GOOS + "/" + runtime.GOARCH,
-			"state": d.stateView(), "dataDir": paths.DataDir(),
-			"serviceLog": logx.Tail(d.log.Path(), 100), "coreLog": logx.Tail(d.coreLog.Path(), 100),
-		}
-		if p != nil {
-			out["servers"] = p.Servers()
-		}
-		return out, nil
-	})
+	h(ipc.MDiagnose, func(json.RawMessage) (any, error) { return d.diagnose() })
 }

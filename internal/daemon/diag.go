@@ -4,11 +4,9 @@ import (
 	"archive/zip"
 	"encoding/json"
 	"fmt"
-	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"runtime"
 	"strings"
 	"time"
@@ -16,96 +14,8 @@ import (
 	"github.com/Maoyangui/godusevpn/internal/buildinfo"
 	"github.com/Maoyangui/godusevpn/internal/logx"
 	"github.com/Maoyangui/godusevpn/internal/paths"
+	"github.com/Maoyangui/godusevpn/internal/redact"
 )
-
-// 诊断包:日志、脱敏后的配置与设置、路由表、网卡信息。凭据类字段一律打码,订阅地址只留主机名。
-var secretKeys = map[string]bool{"password": true, "uuid": true, "privatekey": true, "psk": true, "presharedkey": true, "secret": true, "token": true, "credential": true, "credentials": true, "auth": true, "authstr": true, "authorization": true, "proxyauthorization": true, "apikey": true}
-
-func secretKey(key string) bool {
-	key = strings.NewReplacer("_", "", "-", "", ".", "").Replace(strings.ToLower(key))
-	return secretKeys[key] || strings.HasSuffix(key, "password") || strings.HasSuffix(key, "token") || strings.HasSuffix(key, "secret")
-}
-
-func redact(v any) any {
-	switch x := v.(type) {
-	case map[string]any:
-		out := make(map[string]any, len(x))
-		for k, val := range x {
-			if secretKey(k) {
-				out[k] = "***"
-			} else if strings.HasSuffix(strings.ToLower(k), "url") {
-				if s, ok := val.(string); ok {
-					out[k] = redactURL(s)
-				} else {
-					out[k] = redact(val)
-				}
-			} else {
-				out[k] = redact(val)
-			}
-		}
-		return out
-	case []any:
-		out := make([]any, len(x))
-		for i := range x {
-			out[i] = redact(x[i])
-		}
-		return out
-	case string:
-		return redactText(x)
-	default:
-		return v
-	}
-}
-
-var (
-	diagURL       = regexp.MustCompile(`[A-Za-z][A-Za-z0-9+.-]*://[^\s<>"'\x60]+`)
-	subPath       = regexp.MustCompile(`(?i)(/sub/)[^\s/?#"'<>]+`)
-	bearerToken   = regexp.MustCompile(`(?i)\bBearer[ \t]+[^\s,"'<>]+`)
-	logCredential = regexp.MustCompile(`(?i)\b((?:access[_-]?|refresh[_-]?)?token|(?:web[_-]?|obfs[_-]?|proxy[_-]?)?password|client[_-]?secret|private[_-]?key|api[_-]?key|authorization|uuid|psk)("?[ \t]*[:=][ \t]*)("[^"\r\n]*"|'[^'\r\n]*'|[^\s,;"']+)`)
-)
-
-func redactURL(raw string) string {
-	u, err := url.Parse(raw)
-	if err != nil || u.Scheme == "" || u.Host == "" {
-		if raw == "" {
-			return ""
-		}
-		return "***" // malformed or opaque subscription links must not echo credentials
-	}
-	switch strings.ToLower(u.Scheme) {
-	case "http", "https", "ws", "wss", "ftp", "socks", "socks5", "trojan", "ss", "vless", "hysteria", "hysteria2", "tuic":
-		return (&url.URL{Scheme: strings.ToLower(u.Scheme), Host: u.Host}).String()
-	default:
-		// vmess and other opaque URI schemes can encode the entire credential
-		// into what url.Parse considers a hostname.
-		return "***"
-	}
-}
-
-func redactText(s string) string {
-	// Logs may include JSON-escaped URLs. Normalization only affects the
-	// exported copy, never the underlying log or settings file.
-	s = strings.ReplaceAll(s, `\/`, `/`)
-	s = diagURL.ReplaceAllStringFunc(s, redactURL)
-	s = bearerToken.ReplaceAllString(s, "Bearer ***")
-	s = logCredential.ReplaceAllStringFunc(s, redactCredential)
-	return subPath.ReplaceAllString(s, "${1}***")
-}
-
-// redactCredential 把 key: value 里的 value 换成 ***,**引号保留**。
-// info.json / config.redacted.json 是先序列化再整段过这个正则的;m29 的写法连闭合引号一起吃掉,
-// 于是 "psk=xxx" 这种出现在节点名里的值会让整个 JSON 变成非法的,诊断包里最重要的两个文件打不开。
-func redactCredential(m string) string {
-	sub := logCredential.FindStringSubmatch(m)
-	if len(sub) < 4 {
-		return m
-	}
-	key, sep, val := sub[1], sub[2], sub[3]
-	if len(val) >= 2 && (val[0] == '"' || val[0] == '\'') && val[len(val)-1] == val[0] {
-		return key + sep + string(val[0]) + "***" + string(val[0])
-	}
-	return key + sep + "***"
-}
 
 func cmdOut(name string, args ...string) string {
 	out, err := exec.Command(name, args...).CombinedOutput()
@@ -113,6 +23,56 @@ func cmdOut(name string, args ...string) string {
 		return fmt.Sprintf("(%s %s: %v)\n%s", name, strings.Join(args, " "), err, out)
 	}
 	return string(out)
+}
+
+// 诊断:命令行 diag(MDiagnose)与界面的「导出诊断包」(MExportDiag)用同一套打码(internal/redact):
+// 凭据字段整值打码,地址只留协议与主机,订阅令牌在别处出现也盖掉;诊断包里的系统网络信息另把公网 IP、MAC、主机名打码;
+// 内核日志里的访问目标(域名、公网地址)只留顶级域 / 前缀。
+
+// diagMasker 这一次诊断输出用的打码器,带上这台设备上每条订阅地址里的令牌。
+func (d *Daemon) diagMasker() *redact.Masker {
+	var urls []string
+	for _, p := range d.getSettings().Profiles {
+		urls = append(urls, p.URL)
+	}
+	return redact.NewMasker(urls...)
+}
+
+// diagTree 先序列化成独立的 JSON 树再打码:状态里的结构体与切片可能和运行中的设置共用底层数据,
+// 就地改会把真实的订阅链接改坏(0.6.0-a2 出过:之后刷新全是 404)。
+func diagTree(m *redact.Masker, v any) (any, error) {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return nil, err
+	}
+	var detached any
+	if err := json.Unmarshal(b, &detached); err != nil {
+		return nil, err
+	}
+	return m.Tree(detached), nil
+}
+
+// diagInfo 两处共用的概况:版本、时间、状态(含设置)、当前订阅的节点地址。
+// servers 是"地址:端口",不算凭据,deploy/*-test.sh 靠它从 diag 输出里找节点。
+func (d *Daemon) diagInfo() map[string]any {
+	info := map[string]any{"version": buildinfo.Version, "os": runtime.GOOS + "/" + runtime.GOARCH, "time": time.Now().Format(time.RFC3339), "state": d.stateView()}
+	if _, p := d.activeProfile(); p != nil {
+		info["servers"] = p.Servers()
+	}
+	return info
+}
+
+// diagnose 命令行 diag 的输出(另带两份日志各最后 100 行)。
+func (d *Daemon) diagnose() (any, error) {
+	info := d.diagInfo()
+	info["dataDir"] = paths.DataDir()
+	info["serviceLog"] = logx.Tail(d.log.Path(), 100)
+	core := logx.Tail(d.coreLog.Path(), 100)
+	for i, l := range core {
+		core[i] = redact.Destinations(l) // 访问过的域名与公网地址合起来就是浏览记录
+	}
+	info["coreLog"] = core
+	return diagTree(d.diagMasker(), info)
 }
 
 // exportDiag 生成 zip,返回路径。
@@ -128,28 +88,18 @@ func (d *Daemon) exportDiag() (string, error) {
 	}
 	defer f.Close()
 	zw := zip.NewWriter(f)
+	m := d.diagMasker()
 	add := func(name, content string) {
 		w, err := zw.Create(name)
 		if err == nil {
-			_, _ = w.Write([]byte(redactText(content)))
+			_, _ = w.Write([]byte(m.Text(content)))
 		}
 	}
-	view := d.stateView()
-	info := map[string]any{"version": buildinfo.Version, "os": runtime.GOOS + "/" + runtime.GOARCH, "time": time.Now().Format(time.RFC3339), "state": view}
-	if _, p := d.activeProfile(); p != nil {
-		info["servers"] = p.Servers()
-	}
-	// Marshal into a detached JSON tree before redaction: state contains
-	// structs and slices that may share backing data with the live settings.
-	b, err := json.Marshal(info)
+	info, err := diagTree(m, d.diagInfo())
 	if err != nil {
 		return "", err
 	}
-	var detached any
-	if err := json.Unmarshal(b, &detached); err != nil {
-		return "", err
-	}
-	b, err = json.MarshalIndent(redact(detached), "", "  ")
+	b, err := json.MarshalIndent(info, "", "  ")
 	if err != nil {
 		return "", err
 	}
@@ -157,12 +107,12 @@ func (d *Daemon) exportDiag() (string, error) {
 	if raw, err := os.ReadFile(paths.Config()); err == nil {
 		var cfg any
 		if json.Unmarshal(raw, &cfg) == nil {
-			rb, _ := json.MarshalIndent(redact(cfg), "", "  ")
+			rb, _ := json.MarshalIndent(m.Tree(cfg), "", "  ")
 			add("config.redacted.json", string(rb))
 		}
 	}
 	add("service.log", strings.Join(logx.Tail(d.log.Path(), 500), "\n"))
-	add("core.log", strings.Join(logx.Tail(d.coreLog.Path(), 500), "\n"))
+	add("core.log", redact.Destinations(strings.Join(logx.Tail(d.coreLog.Path(), 500), "\n")))
 	// 崩溃记录(Windows 服务 / Linux / macOS 的 CaptureCrashes,Android 上 Go / Kotlin 侧)。.1 是启动时超过 1MB
 	// 挪走的那份 —— 轮转恰恰发生在一次崩溃把文件推过 1MB 之后,现场在那里。
 	for _, name := range []string{"crash.log", "crash.log.1"} {
@@ -170,7 +120,7 @@ func (d *Daemon) exportDiag() (string, error) {
 			add(name, s)
 		}
 	}
-	sysDiag(add)
+	sysDiag(func(name, content string) { add(name, redact.Net(content)) })
 	if err := zw.Close(); err != nil {
 		return "", err
 	}

@@ -1,8 +1,10 @@
 package daemon
 
 import (
+	"archive/zip"
 	"encoding/json"
-	"reflect"
+	"io"
+	"os"
 	"strings"
 	"time"
 
@@ -13,39 +15,105 @@ import (
 	"github.com/Maoyangui/godusevpn/internal/settings"
 )
 
-func TestRedactURLKeepsOnlyEndpoint(t *testing.T) {
-	cases := map[string]string{
-		"https://alice:pw@panel.example/sub/secret-token?access_token=x#frag": "https://panel.example",
-		"https://panel.example/path/to/sub/abc?x=y":                           "https://panel.example",
-		"vmess://eyJ2IjoiMiIsInBzcyI6InNlY3JldCJ9":                            "***",
-		"not a url /sub/secret":                                               "***",
+// diagDaemon 一个带着真实形态订阅的守护进程:m-ui 默认拿用户名当订阅路径(/sub/alice),订阅名也是它;
+// 当前订阅里有一个 socks 节点(用户名同样是 alice)。服务日志里有一行老样子的拉取失败(带完整地址)。
+func diagDaemon(t *testing.T) *Daemon {
+	t.Helper()
+	t.Setenv("GODUSEVPN_DATA", t.TempDir())
+	t.Setenv("GODUSEVPN_CONF", t.TempDir())
+	d, err := NewWithOptions(Options{NoListen: true})
+	if err != nil {
+		t.Fatal(err)
 	}
-	for in, want := range cases {
-		if got := redactURL(in); got != want {
-			t.Errorf("redactURL(%q) = %q, want %q", in, got, want)
+	t.Cleanup(func() { _ = d.Close() })
+	s := settings.Default()
+	s.Profiles = []settings.Profile{{ID: "a", Name: "alice", URL: "https://panel.example:2056/sub/alice"}}
+	s.ActiveProfile = "a"
+	s.WebPassword = "c2FsdA$0123456789abcdef"
+	if err := d.setSettings(s); err != nil {
+		t.Fatal(err)
+	}
+	d.setProfileCache("a", &profile.Profile{URL: s.Profiles[0].URL, Title: "alice", FetchedAt: time.Now().Unix(), Tags: []string{"HK"},
+		Outbounds: []json.RawMessage{json.RawMessage(`{"type":"socks","tag":"HK","server":"1.2.3.4","server_port":1080,"username":"alice","password":"S5PW"}`)}})
+	d.logf("订阅经 proxy 拉取失败: %s", `拉取订阅失败: Get "https://panel.example:2056/sub/alice?format=json": timeout`)
+	d.coreLog.Printf("INFO", "dns: lookup succeed for www.visited-site.com: 142.250.72.4")
+	return d
+}
+
+// 诊断输出里不能出现的:订阅令牌(地址里、订阅名里、节点用户名里)、节点密码、面板密码哈希、
+// 内核日志里访问过的域名与目标公网地址(合起来就是浏览记录)。
+func assertDiagClean(t *testing.T, where, s string) {
+	t.Helper()
+	for _, secret := range []string{"alice", "S5PW", "0123456789abcdef", "/sub/", "visited-site", "142.250.72.4"} {
+		if strings.Contains(s, secret) {
+			t.Errorf("%s 里还有 %q:\n%s", where, secret, s)
 		}
 	}
 }
 
-func TestRedactTextRemovesEmbeddedCredentials(t *testing.T) {
-	in := `url=https://u:p@example.test/sub/abc?q=1 Authorization: Bearer abc123 token=xyz password: "pw"`
-	got := redactText(in)
-	for _, forbidden := range []string{"abc123", "xyz", "pw", "/sub/abc", "?q=1", "u:p"} {
-		if strings.Contains(got, forbidden) {
-			t.Errorf("redacted text still contains %q: %s", forbidden, got)
+// 命令行 diag(文档说"要发给别人看就导这个,订阅地址已打码")以前原样返回状态与日志。
+// 现在和诊断包同一套打码;排障要的主机、节点地址、失败原因都还在,运行中的设置不受影响。
+func TestDiagnoseRedacts(t *testing.T) {
+	d := diagDaemon(t)
+	out, err := d.diagnose()
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := json.Marshal(out)
+	assertDiagClean(t, "diag 输出", string(b))
+	for _, keep := range []string{`panel.example:2056/***`, `"1.2.3.4:1080"`, "timeout", `"serviceLog"`, `"coreLog"`, `"webPassword":"***"`} {
+		if !strings.Contains(string(b), keep) {
+			t.Errorf("diag 输出缺了 %s:\n%s", keep, b)
 		}
 	}
-	if !strings.Contains(got, "https://example.test") || !strings.Contains(got, "Authorization: ***") {
-		t.Fatalf("endpoint or authorization marker missing: %s", got)
+	if got := d.getSettings(); got.Profiles[0].URL != "https://panel.example:2056/sub/alice" || got.WebPassword != "c2FsdA$0123456789abcdef" {
+		t.Fatalf("打码改到了运行中的设置: %+v", got.Profiles[0])
 	}
 }
 
-func TestRedactDoesNotMutateInput(t *testing.T) {
-	in := map[string]any{"nested": map[string]any{"url": "https://x.test/sub/token", "password": "pw"}, "list": []any{"Bearer abc"}}
-	original := map[string]any{"nested": map[string]any{"url": "https://x.test/sub/token", "password": "pw"}, "list": []any{"Bearer abc"}}
-	_ = redact(in)
-	if !reflect.DeepEqual(in, original) {
-		t.Fatalf("redact mutated input: %#v", in)
+// 诊断包里每个文件都过同一套打码;info.json / config.redacted.json 仍是合法 JSON。
+// 系统网络信息里本机的主机名也打了码(Windows 的 ipconfig /all 里有它)。
+func TestExportDiagRedacts(t *testing.T) {
+	d := diagDaemon(t)
+	cfg := `{"outbounds":[{"type":"socks","tag":"HK","server":"1.2.3.4","server_port":1080,"username":"alice","password":"S5PW"},
+	 {"type":"hysteria","tag":"hy1","server":"1.2.3.4","obfs":"OBFSSECRET"},{"type":"ssh","tag":"ssh","user":"root","private_key_passphrase":"PASSPHRASE1"}]}`
+	if err := os.WriteFile(paths.Config(), []byte(cfg), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	path, err := d.exportDiag()
+	if err != nil {
+		t.Fatal(err)
+	}
+	zr, err := zip.OpenReader(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer zr.Close()
+	host, _ := os.Hostname()
+	files := map[string]string{}
+	for _, f := range zr.File {
+		rc, _ := f.Open()
+		b, _ := io.ReadAll(rc)
+		rc.Close()
+		files[f.Name] = string(b)
+		assertDiagClean(t, f.Name, string(b))
+		for _, secret := range []string{"OBFSSECRET", "PASSPHRASE1", `"root"`} {
+			if strings.Contains(string(b), secret) {
+				t.Errorf("%s 里还有 %q", f.Name, secret)
+			}
+		}
+		if (f.Name == "ipconfig.txt" || f.Name == "ifconfig.txt") && len(host) >= 2 && strings.Contains(strings.ToLower(string(b)), strings.ToLower(host)) {
+			t.Errorf("%s 里还有本机主机名", f.Name)
+		}
+	}
+	for _, name := range []string{"info.json", "config.redacted.json"} {
+		var v any
+		if err := json.Unmarshal([]byte(files[name]), &v); err != nil {
+			t.Fatalf("%s 不是合法 JSON: %v", name, err)
+		}
+	}
+	if !strings.Contains(files["service.log"], "panel.example:2056/***") || !strings.Contains(files["info.json"], `"1.2.3.4:1080"`) {
+		t.Fatalf("排障要的主机 / 节点地址丢了:\n%s\n%s", files["service.log"], files["info.json"])
 	}
 }
 

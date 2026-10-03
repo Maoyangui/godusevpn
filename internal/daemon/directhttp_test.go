@@ -63,8 +63,12 @@ func TestFetchProfileWithoutCoreUsesDirectHTTP(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	_, err := d.fetchProfile(ctx, "https://sub.example.invalid/x")
-	if err == nil || !strings.Contains(err.Error(), "127.0.0.1:443/dns-query") {
+	if err == nil || !strings.Contains(err.Error(), "https://127.0.0.1:443/") {
 		t.Fatalf("内核没跑时拉订阅应当经 DoH 解析,得到 %v", err)
+	}
+	// 错误文本会进界面、服务日志与诊断:订阅地址只留协议与主机(路径就是令牌)
+	if strings.Contains(err.Error(), "sub.example.invalid/x") {
+		t.Fatalf("拉订阅失败的错误里带着订阅路径: %v", err)
 	}
 }
 
