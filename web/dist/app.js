@@ -68,17 +68,26 @@ async function refreshProfileBg(id) {
     const w = { id, resolve, reject };
     w.timer = setTimeout(() => { refreshWaits.splice(refreshWaits.indexOf(w), 1); reject(new Error(t('prof.refreshSlow'))); }, 240000);
     refreshWaits.push(w);
-    checkRefreshWaits(list);
+    checkRefreshWaits(list, true);
   });
 }
-function checkRefreshWaits(list) {
+// sure:列表是刷新开始之后才取的。状态推送可能是刷新开始前算好、晚到的,它说刷完了要再问后端一次为准
+let refreshConfirming = false;
+function checkRefreshWaits(list, sure) {
   for (const w of refreshWaits.slice()) {
     const p = (list || []).find(x => x.id === w.id);
     if (!p || p.refreshing) continue;
+    if (!sure) { confirmRefreshWaits(); return; }
     refreshWaits.splice(refreshWaits.indexOf(w), 1);
     clearTimeout(w.timer);
     if (p.error) w.reject(new Error(p.error)); else w.resolve(p);
   }
+}
+async function confirmRefreshWaits() {
+  if (refreshConfirming) return;
+  refreshConfirming = true;
+  try { checkRefreshWaits(await App().GetProfiles() || [], true); } catch (e) { /* 取不到就等下一次推送 */ }
+  refreshConfirming = false;
 }
 // ---- 应用内对话框 ----
 // 不用浏览器自带的 confirm / prompt:Windows 的 WebView2 会画成「wails.localhost 显示」的系统弹窗贴在窗口左上角,
@@ -815,7 +824,7 @@ function nodeRow(n, i, max, testing) {
       <div class="ntop"><b>${esc(cleanName(n.name))}</b>${mult ? `<em class="tag warn">${t('node.mult', { n: mult })}</em>` : ''}${n.unsupported ? `<em class="tag">${t('node.unsupported')}</em>` : ''}${n.type ? `<em class="ntype">${esc(n.type)}</em>` : ''}</div>
       <div class="bar"><i style="width:${barWidth(n.delay, max)}"></i></div>
     </div>
-    <span class="ms ${msClass(n.delay)}">${msText(n.delay, testing)}</span></div>`;
+    <span class="ms ${msClass(n.delay)}">${n.unsupported ? '' : msText(n.delay, testing)}</span></div>`;
 }
 async function drawNodes(testing) {
   let nodes = [];
@@ -866,7 +875,7 @@ function patchNodes(nodes, max, testing) {
     if (!it) return false;
     it.classList.toggle('current', !!n.current);
     const ms = it.querySelector('.ms');
-    if (ms) { ms.className = 'ms ' + msClass(n.delay); ms.innerHTML = n.name === 'auto' ? '' : msText(n.delay, testing); }
+    if (ms) { ms.className = 'ms ' + msClass(n.delay); ms.innerHTML = n.name === 'auto' || n.unsupported ? '' : msText(n.delay, testing); } // 跳过的节点不测速
     const bar = it.querySelector('.bar i');
     if (bar) bar.style.width = barWidth(n.delay, max);
     if (n.name === 'auto') {
