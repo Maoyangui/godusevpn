@@ -1442,7 +1442,7 @@ func (d *Daemon) nicIPv6Loop(ctx context.Context) {
 	// 关不掉的情况是存在的(权限不够、程序够不着的拨号 / 隧道接口、或者某些虚拟网卡自己又开回来)。真碰上就别
 	// 每几秒白跑一次 PowerShell 还把日志刷满:连着几次没治好就退避,只在第一次和恢复时各说一句。
 	fails, quiet := 0, false
-	var lastTry, lastTunUp time.Time
+	var lastTry, lastTunUp, lastProtect time.Time
 	for {
 		select {
 		case <-ctx.Done():
@@ -1455,8 +1455,10 @@ func (d *Daemon) nicIPv6Loop(ctx context.Context) {
 			d.guardTunUp()
 		}
 		// 顺带:连接时做的系统网络保护只按那一刻的状态做了一次 —— Linux 的回包规则按当时的地址(PPPoE 重拨、
-		// DHCP 换地址就对不上了),macOS 的 DNS 接管按当时的网络服务(新插的 USB 网卡、iPhone 共享没接进来)。变了就补做
-		if d.core.Running() && d.getSettings().TUN {
+		// DHCP 换地址就对不上了),macOS 的 DNS 接管按当时的网络服务(新插的 USB 网卡、iPhone 共享没接进来)。变了就补做。
+		// 半分钟看一次:这个循环现在 5 秒一轮(盯网卡 IPv6),macOS 上列网络服务要起 networksetup,不该跟着 5 秒跑
+		if d.core.Running() && d.getSettings().TUN && time.Since(lastProtect) >= 30*time.Second {
+			lastProtect = time.Now()
 			if redo, err := netmode.RefreshProtect(); redo {
 				if err != nil {
 					d.logf("本机地址 / 网络服务变了,重做系统网络保护没做完: %v", err)
