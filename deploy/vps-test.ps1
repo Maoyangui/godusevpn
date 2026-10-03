@@ -174,7 +174,8 @@ $st0 = & $cli status 2>&1 | Out-String
 Check "命令行认得出真服务(控制口对端核验)" ($st0 -match "状态:") ($st0.Trim() -replace "`r?`n", " | ")
 # 服务权限:0.7.5 那份描述符非法,sc sdset 一直失败(错误被吞),非管理员的托盘既拉不起服务也停不了
 $sd = (& sc.exe sdshow godusevpn) -join ""
-Check "服务权限:已登录用户能启动、不能停,控制用户能停" (($sd -match '\(A;;CCLCSWRPLOCRRC;;;AU\)') -and ($sd -notmatch 'WP[A-Z]*;;;AU\)') -and ($sd -match 'CCLCSWRPWPLOCRRC;;;S-1-5-')) $sd
+# 控制用户那条按 SID 写;是内置 Administrator(RID 500,CI 跑机的 runneradmin 就是)时 sdshow 显示成别名 LA
+Check "服务权限:已登录用户能启动、不能停,控制用户能停" (($sd -match '\(A;;CCLCSWRPLOCRRC;;;AU\)') -and ($sd -notmatch 'WP[A-Z]*;;;AU\)') -and ($sd -match '\(A;;CCLCSWRPWPLOCRRC;;;(S-1-5-[0-9-]+|LA)\)')) $sd
 # 服务里证书校验不许走 Windows 的平台校验:网络变化(TUN 起停)时它偶尔"成功但不给链",Go 顺着空指针崩在 crypt32 里
 # (刚连上就崩的元凶,golang/go#79247)。服务启动时把设置情况写进日志;这里直接看真服务进程说的,不靠重启压力碰运气。
 $tlsLine = @(Get-Content (Join-Path $script:logDir "service.log") -Encoding UTF8 -ErrorAction SilentlyContinue | Where-Object { $_ -match '证书校验:' } | Select-Object -Last 1)
@@ -255,6 +256,8 @@ Check "放行本服务同时比 exe 路径与进程令牌" (($null -ne $ps) -and
 $ba = Wfp-Filters "Block all outbound (IPv4)"
 $ba = @($ba | Where-Object { $_ -and ((Filter-Flags $_) -contains 'FWPM_FILTER_FLAG_PERSISTENT') })
 Check "运行期的全拦是否决(带 CLEAR_ACTION_RIGHT)" (($ba.Count -gt 0) -and -not ($ba | Where-Object { (Filter-Flags $_) -notcontains 'FWPM_FILTER_FLAG_CLEAR_ACTION_RIGHT' })) (($ba | ForEach-Object { (Filter-Flags $_) -join '+' }) -join ', ')
+# 拦 UPnP 那条的过滤器编号:下面按防火墙审计事件判 UDP 有没有被它拦(过滤器是持久的,停服务编号不变)
+$upnpIds = @((Wfp-Filters "Block UPnP / NAT-PMP outbound (IPv4)") | Where-Object { $_ } | ForEach-Object { [string]$_.filterId } | Where-Object { $_ })
 # 闸是持久的:服务停了也必须还在拦。这是 m29 绑服务名之后失效的那条性质,直接停服务实测。
 & $svc stop | Out-Null
 Start-Sleep -Seconds 3
@@ -267,22 +270,38 @@ function Tcp-Probe($port) {
   & curl.exe -s -o NUL --connect-timeout 3 -m 5 "telnet://10.255.255.1:$port" 2>$null
   return @{ rc = $LASTEXITCODE; ms = $sw.ElapsedMilliseconds }
 }
+# UDP 被闸拦下时 Send 照样返回成功(包在防火墙里丢掉,Winsock 不报错),看返回值判不了。改看防火墙审计:
+# 打开「筛选平台连接」的失败审计,发完包查 5157(WFP 阻止了连接)事件。TCP 53 那一路被拦也会记一条,当审计本身的正控制。
+$auditSub = "{0CCE9226-69AE-11D9-BED3-505054503030}" # 筛选平台连接(按 GUID,不受系统语言影响)
+& auditpol.exe /set /subcategory:"$auditSub" /failure:enable | Out-Null
+$auditFrom = (Get-Date).AddSeconds(-2)
 $p80 = Tcp-Probe 80
 $p53 = Tcp-Probe 53
 Check "服务停着时私网 80 端口照常发出(局域网放行在,对照)" ($p80.rc -eq 28) ("curl=" + $p80.rc + " " + $p80.ms + "ms")
 Check "服务停着时私网 53 端口被当场拒绝(拦 DNS 压在局域网放行上面)" (($p53.rc -ne 28) -and ($p53.rc -ne 0) -and ($p53.ms -lt 2000)) ("curl=" + $p53.rc + " " + $p53.ms + "ms")
 # UPnP 发现(SSDP 1900)与 NAT-PMP / PCP(5351)同样压在局域网放行上面:程序不能经局域网向路由器问公网 IPv4。
-# UDP 被闸拦下时 Send 当场报错;对照端口 5000 按局域网放行照常发出。对照没过就判不了,按失败报。
-function Udp-Probe($ip, $port) {
+# 对照端口 5000 按局域网放行照常发出,不该有拦截事件;5351 / 1900 要有,而且是拦 UPnP 那条过滤器拦的。
+function Udp-Send($ip, $port) {
   $u = New-Object System.Net.Sockets.UdpClient
-  try { [void]$u.Send([byte[]](0), 1, $ip, $port); return "sent" } catch { return ("error: " + $_.Exception.Message) } finally { $u.Close() }
+  try { [void]$u.Send([byte[]](0), 1, $ip, $port) } catch {} finally { $u.Close() }
 }
-$u5000 = Udp-Probe "10.255.255.1" 5000
-$u5351 = Udp-Probe "10.255.255.1" 5351
-$u1900 = Udp-Probe "239.255.255.250" 1900
-Check "服务停着时私网 UDP 5000 照常发出(局域网放行在,对照)" ($u5000 -eq "sent") $u5000
-Check "服务停着时 NAT-PMP / PCP(私网 UDP 5351)被拦" (($u5000 -eq "sent") -and ($u5351 -ne "sent")) $u5351
-Check "服务停着时 SSDP 发现(239.255.255.250:1900)被拦" (($u5000 -eq "sent") -and ($u1900 -ne "sent")) $u1900
+Udp-Send "10.255.255.1" 5000
+Udp-Send "10.255.255.1" 5351
+Udp-Send "239.255.255.250" 1900
+Start-Sleep -Seconds 2
+$wfpBlocked = @{} # "协议/目的地址/端口" → 拦它的过滤器编号
+foreach ($e in @(Get-WinEvent -FilterHashtable @{ LogName = 'Security'; Id = 5157; StartTime = $auditFrom } -ErrorAction SilentlyContinue)) {
+  $d = @{}; foreach ($n in ([xml]$e.ToXml()).Event.EventData.Data) { $d[$n.Name] = [string]$n.'#text' }
+  $wfpBlocked[$d['Protocol'] + "/" + $d['DestAddress'] + "/" + $d['DestPort']] = $d['FilterRTID']
+}
+& auditpol.exe /set /subcategory:"$auditSub" /failure:disable | Out-Null
+function Upnp-Blocked($key) { return ($wfpBlocked.ContainsKey($key) -and ($upnpIds.Count -gt 0) -and ($upnpIds -contains $wfpBlocked[$key])) }
+$auditOK = $wfpBlocked.ContainsKey("6/10.255.255.1/53")
+$auditNote = "UPnP 过滤器编号=" + ($upnpIds -join ",") + " 拦截事件=" + (($wfpBlocked.Keys | ForEach-Object { $_ + "#" + $wfpBlocked[$_] }) -join " ")
+Check "防火墙审计记下了 TCP 53 被拦(审计本身的正控制)" $auditOK $auditNote
+Check "服务停着时私网 UDP 5000 没被拦(局域网放行在,对照)" ($auditOK -and -not $wfpBlocked.ContainsKey("17/10.255.255.1/5000")) $auditNote
+Check "服务停着时 NAT-PMP / PCP(私网 UDP 5351)被拦" ($auditOK -and (Upnp-Blocked "17/10.255.255.1/5351")) $auditNote
+Check "服务停着时 SSDP 发现(239.255.255.250:1900)被拦" ($auditOK -and (Upnp-Blocked "17/239.255.255.250/1900")) $auditNote
 & $svc start | Out-Null
 $stb = Wait-Status "connected" 60
 Check "服务重启后自动恢复连接(落盘的连接意愿)" ($stb -match "状态:\s+connected") ($stb.Trim() -replace "`r?`n", " | ")
@@ -370,6 +389,9 @@ if ($LegacyBin -and -not $KeepInstalled) {
   $lcli = Join-Path $LegacyBin "godusevpn-cli.exe"
   if (-not (Test-Path $lsvc)) { Check "旧版二进制存在" $false $lsvc }
   else {
+    # 前面几段跑的是新版:它每次起内核前把模式写进 cache.db(core.PresetCache),最后一次是规则模式。旧版起内核时
+    # sing-box 先读缓存里的模式、盖过配置(审计 G038,新版修的正是这个),会一直按规则跑。删掉这份残留再装旧版
+    Remove-Item (Join-Path $env:ProgramData "godusevpn\cache.db") -ErrorAction SilentlyContinue
     & $lsvc install | Out-Null
     $lv = (& $lcli version 2>&1 | Out-String).Trim()
     Check "旧版服务装上" ((& $lsvc status) -eq "running") $lv
