@@ -165,6 +165,21 @@ func Stop() error {
 	return nil
 }
 
+// Restart 让 launchd 重启本服务,交出去就返回。调用方可能正是这个服务自己(面板里的应用内升级):
+// 先 Stop(bootout)再 Start 的话,bootout 把自己停了,Start 永远轮不到。kickstart -k 由 launchd 自己杀掉再拉起;
+// launchctl 脱离本进程跑(自成一个会话),launchd 收拾本服务的进程组时杀不到它。
+func Restart() error {
+	if err := needRoot(); err != nil {
+		return err
+	}
+	c := exec.Command("launchctl", "kickstart", "-k", "system/"+label)
+	c.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	if err := c.Start(); err != nil {
+		return err
+	}
+	return c.Process.Release()
+}
+
 func StartUser() error { return Start() }
 func StopUser() error  { return Stop() }
 

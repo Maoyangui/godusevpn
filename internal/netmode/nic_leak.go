@@ -2,6 +2,7 @@ package netmode
 
 import (
 	"net"
+	"runtime"
 	"strings"
 )
 
@@ -50,6 +51,13 @@ func nicIPv6LeakState(tunName string) (leaking, known bool) {
 	return false, known
 }
 
+// vpnTunnel macOS 上的 utunN 是 VPN 隧道(我们自己的也是):上面的 v6 是 VPN 服务商给的出口地址
+// (Cloudflare WARP 的 2606:4700:110::/48 之类),不是宽带的前缀,读走了也认不出真实网络;
+// 而停用只能按网络服务做、够不着它。把它算成"在漏",这样的 Mac 在默认设置下就永远连不上。
+func vpnTunnel(goos, name string) bool {
+	return goos == "darwin" && strings.HasPrefix(name, "utun")
+}
+
 // ifaceLeaksIPv6 单张网卡算不算"漏着 v6"。拆出来是为了能用构造的数据做单测 —— 真机上没法说造一张网卡就造一张。
 func ifaceLeaksIPv6(name string, flags net.Flags, addrs []net.Addr, tunName string) bool {
 	if flags&net.FlagUp == 0 || flags&net.FlagLoopback != 0 {
@@ -57,6 +65,9 @@ func ifaceLeaksIPv6(name string, flags net.Flags, addrs []net.Addr, tunName stri
 	}
 	if strings.EqualFold(name, tunName) {
 		return false // 隧道那张本来就要留着 v6:靠它把 v6 流量接进来再拒绝,关了反而少一层防护
+	}
+	if vpnTunnel(runtime.GOOS, name) {
+		return false
 	}
 	for _, a := range addrs {
 		ipn, ok := a.(*net.IPNet)

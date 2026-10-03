@@ -1,6 +1,7 @@
 // Package web Linux 守护进程内置的面板:把 web/dist 里的竖版页面从 HTTP 端出去,
 // 页面里的 window.go.main.App.* 由 dist/api.js 映射成 POST /api/<方法>,事件走 SSE;方法实现在 internal/uiapi。
-// 面板绑定非回环地址时要密码(设置里的 webPassword),cookie 会话;命令行走 Unix socket 不需要密码。
+// 面板一律要密码(设置里的 webPassword),cookie 会话;没设密码时除了 ping 什么都不给,本机来的也一样。
+// 命令行走 Unix socket 不需要密码(socket 只给 root / admin 组)。
 package web
 
 import (
@@ -277,20 +278,22 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) {
 		name := strings.TrimPrefix(r.URL.Path, "/api/")
-		if !s.needAuth() && !isLoopback(r) {
-			// 对外监听但还没设密码:外面的人一律挡住,本机(命令行 / 本机浏览器)照常
-			writeJSON(w, 403, map[string]any{"error": "NEED_PASSWORD"})
-			return
-		}
-		switch {
-		case name == "login" && r.Method == http.MethodPost:
-			s.handleLogin(w, r)
-			return
-		case name == "ping":
+		if name == "ping" {
 			writeJSON(w, 200, map[string]any{"result": map[string]any{"version": buildinfo.Version, "auth": s.needAuth()}})
 			return
 		}
-		if s.needAuth() && !s.authed(r) {
+		if !s.needAuth() {
+			// 没设密码就不给用,本机来的也不例外。以前回环一律放行:同一台机器上任何进程 —— 非管理员账户、
+			// 沙盒里的应用、借 DNS 重绑定打进来的网页 —— 都能撤闸、改隐私设置、换订阅、读带令牌的订阅地址,
+			// 而控制口特意只给 root / admin 组。设密码要 root(godusevpn passwd)或者已经登录的面板。
+			writeJSON(w, 403, map[string]any{"error": "NEED_PASSWORD"})
+			return
+		}
+		if name == "login" && r.Method == http.MethodPost {
+			s.handleLogin(w, r)
+			return
+		}
+		if !s.authed(r) {
 			writeJSON(w, 401, map[string]any{"error": "AUTH_REQUIRED"})
 			return
 		}
@@ -333,12 +336,6 @@ func (s *Server) Handler() http.Handler {
 		static.ServeHTTP(w, r)
 	})
 	return mux
-}
-
-// isLoopback 请求来自本机。
-func isLoopback(r *http.Request) bool {
-	ip := net.ParseIP(clientIP(r))
-	return ip != nil && ip.IsLoopback()
 }
 
 func sameOrigin(origin, host string) bool {

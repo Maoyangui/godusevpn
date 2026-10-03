@@ -35,8 +35,8 @@ func (s *Settings) validateWeb() error {
 	if port == "0" || port == "" {
 		return errors.New("面板端口无效")
 	}
-	// 非回环监听而没设密码不算设置无效(默认值就是这样,安装时才生成密码):
-	// 面板自己会拒绝非本机来的访问并提示去设密码,见 internal/web。
+	// 没设密码不算设置无效(默认值就是这样,Linux 安装时才生成密码):
+	// 面板自己会拒绝访问并提示去设密码,见 internal/web。
 	return nil
 }
 
@@ -70,10 +70,10 @@ func (s *Settings) SetWebPassword(plain string) error {
 	return nil
 }
 
-// CheckWebPassword 校验;没设密码时任何输入都通过(此时只可能监听回环)。
+// CheckWebPassword 校验;没设密码时一律不通过(面板那时不给用)。
 func (s Settings) CheckWebPassword(plain string) bool {
 	if s.WebPassword == "" {
-		return true
+		return false
 	}
 	saltHex, want, ok := strings.Cut(s.WebPassword, "$")
 	if !ok {

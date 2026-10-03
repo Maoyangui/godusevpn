@@ -26,7 +26,7 @@ real=$(resolve api.ipify.org); echo "api.ipify.org 真实 IP: $real"
 # 连上以后默认路由已经指向隧道,物理网卡要在这之前记下来;绑它发直连是全局禁直连闸的实测
 defif=$(ip route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}')
 dip=$(ip -4 addr show "$defif" 2>/dev/null | awk '/inet /{print $2; exit}' | cut -d/ -f1)
-# nft 的闸按 uid 放行 root(守护进程),所以要拿一个普通用户去试;跑机上是 uid 1000,别的机器退到 nobody
+# nft 的闸按标记放行本服务,root 只放行它回应入站连接的包;直连探测普通用户和 root 各试一次。跑机上是 uid 1001,别的机器退到 nobody
 U=$(id -un 1001 2>/dev/null || id -un 1000 2>/dev/null || true); [ "$U" = root ] && U=""; [ -z "$U" ] && id nobody >/dev/null 2>&1 && U=nobody # 跑机上 runner 是 1001
 echo "连接前默认出口网卡: ${defif:-?} ${dip:-?};直连探测用的普通用户: ${U:-无}"
 
@@ -113,6 +113,35 @@ if [ "$direct_ok" = 1 ]; then
 fi
 tc=$(curl -s -m 15 -o /dev/null -w '%{http_code}' https://1.1.1.1/cdn-cgi/trace 2>/dev/null || true)
 check "经隧道照常" "$([ "$tc" = "200" ] && echo 1 || echo 0)" "http=${tc:-000}"
+# 闸按标记放行本服务、不再整个放行 root:root 绑物理网卡的直连(NetworkManager 的联网检测就是这种)也要被拦
+check "闸按标记放行本服务" "$(echo "$rules" | grep -c 'meta mark 0x676f0000')" ""
+bare=$(echo "$rules" | grep 'skuid' | grep -v 'reply' | grep -v 'dport 67' | grep -v '168.63.129.16' | head -1)
+check "闸不再整个放行 root" "$([ -z "$bare" ] && echo 1 || echo 0)" "$bare"
+check "本机模式也有 forward 链(Docker / 虚拟机 NAT / 热点)" "$(echo "$rules" | grep -c 'hook forward')" ""
+check "拦 UPnP 发现 / NAT-PMP" "$(echo "$rules" | grep -c '1900')" ""
+if [ "$direct_ok" = 1 ]; then
+  r0=$(curl -s --interface "$dip" -m 6 -o /dev/null -w '%{http_code}' http://1.1.1.1/cdn-cgi/trace 2>/dev/null || true)
+  case "$r0" in 2*|3*) rb=0;; *) rb=1;; esac
+  check "root 绑物理网卡的直连也被拦" "$rb" "http=${r0:-000}"
+fi
+# DNS:发往 53 的包按策略路由进隧道,连着时直接问上游 DNS 照样能解析(以前局域网直通把它排在隧道外、又被闸拦下);
+# 服务停着的空档里闸把它丢掉,一条都不出物理网卡
+check "DNS 进隧道的策略路由" "$(ip rule show | grep -c 'dport 53 lookup 5053')" "$(ip rule show | grep 5053 | tr '\n' ';')"
+ns=$(awk '/^nameserver/{print $2}' /run/systemd/resolve/resolv.conf /etc/resolv.conf 2>/dev/null | grep -v '^127\.' | grep -v ':' | head -1)
+if [ -n "$ns" ] && [ -n "$U" ] && command -v dig >/dev/null 2>&1; then
+  a=$(su -s /bin/sh "$U" -c "dig +short +time=4 +tries=1 @$ns example.com A" 2>/dev/null | grep -E '^[0-9.]+$' | head -1)
+  check "连着时直接问 $ns 照样能解析(进了隧道)" "$([ -n "$a" ] && echo 1 || echo 0)" "${a:-无应答}"
+  if command -v systemctl >/dev/null 2>&1; then
+    systemctl stop godusevpn; sleep 2
+    g=$(su -s /bin/sh "$U" -c "dig +short +time=3 +tries=1 @$ns example.com A" 2>/dev/null | grep -E '^[0-9.]+$' | head -1)
+    check "服务停着的空档里 DNS 被拦" "$([ -z "$g" ] && echo 1 || echo 0)" "${g:-无应答}"
+    check "服务停着闸仍在" "$(nft list table inet godusevpn_guard 2>/dev/null | grep -c drop)" ""
+    systemctl start godusevpn
+    check "服务起来后自动重连" "$(wait_status connected 60 && echo 1 || echo 0)" "$("$BIN" status | sed -n 2p)"
+  fi
+else
+  echo "  (没有可用的上游 DNS / dig / 普通用户:跳过 DNS 进隧道与空档拦截的实测)"
+fi
 # 网卡 IPv6 备份:往里塞一张根本不存在的网卡。断开时的还原必须跳过它、把其它网卡照常还原、并把备份删干净 ——
 # m29 曾在这一步整体失败,备份永远删不掉、卸载永远跑不完。
 NICB=/var/lib/godusevpn/nic-ipv6-backup.json; nicb=0
@@ -129,6 +158,7 @@ fi
 check "切回规则模式成功" "$("$BIN" mode rule >/dev/null 2>&1 && echo 1 || echo 0)" ""
 sleep 2
 check "切回规则模式后闸表清空" "$([ -z "$(nft list table inet godusevpn_guard 2>/dev/null)" ] && echo 1 || echo 0)" "$(nft list table inet godusevpn_guard 2>/dev/null | head -3 | tr '\n' ';')"
+check "撤闸后 DNS 的策略路由也撤了" "$([ "$(ip rule show | grep -c 'lookup 5053')" = 0 ] && echo 1 || echo 0)" "$(ip rule show | grep 5053 | tr '\n' ';')"
 check "规则模式恢复连接" "$(wait_status connected 15 && echo 1 || echo 0)" ""
 
 echo "== 4. 出口"

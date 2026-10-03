@@ -56,3 +56,21 @@ func TestIfaceLeaksIPv6(t *testing.T) {
 func TestNICIPv6LeakingRunsOnThisMachine(t *testing.T) {
 	_ = NICIPv6Leaking("godusevpn")
 }
+
+// macOS 上别的 VPN 的 utun 挂着服务商给的公网 v6:那不是宽带前缀,停用也够不着它,不能因此把连接挡死。
+// 别的平台、别的网卡名照旧。
+func TestVPNTunnelNotCountedOnMac(t *testing.T) {
+	for _, c := range []struct {
+		goos, name string
+		want       bool
+	}{
+		{"darwin", "utun3", true},
+		{"darwin", "en0", false},
+		{"linux", "utun3", false},
+		{"windows", "utun0", false},
+	} {
+		if got := vpnTunnel(c.goos, c.name); got != c.want {
+			t.Fatalf("vpnTunnel(%s, %s) = %v", c.goos, c.name, got)
+		}
+	}
+}

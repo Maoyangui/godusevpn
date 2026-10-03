@@ -13,6 +13,7 @@ import (
 
 	"golang.org/x/net/dns/dnsmessage"
 
+	"github.com/Maoyangui/godusevpn/internal/netmode"
 	"github.com/Maoyangui/godusevpn/internal/settings"
 )
 
@@ -70,6 +71,7 @@ func lookupDoH(ctx context.Context, server, host string) ([]string, error) {
 	req.Header.Set("Content-Type", "application/dns-message")
 	req.Header.Set("Accept", "application/dns-message")
 	tr := &http.Transport{
+		DialContext:       (&net.Dialer{Timeout: 4 * time.Second, Control: netmode.SelfControl}).DialContext, // Linux 的闸按标记放行本服务
 		TLSClientConfig:   &tls.Config{MinVersion: tls.VersionTLS12},
 		Proxy:             nil,  // 绝不走环境变量里的代理
 		DisableKeepAlives: true, // 一问一答就完:不留一条空闲连接在隧道外挂着发 keepalive
