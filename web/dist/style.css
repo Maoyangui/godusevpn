@@ -363,6 +363,7 @@ body.tv .dialog-card { max-width: 520px; padding: 24px; } body.tv .dialog-text {
 .item .ntop b { flex: 0 1 auto; min-width: 0; }
 .ntype { font-style: normal; font-size: 10px; color: var(--muted2); text-transform: uppercase; letter-spacing: .3px; margin-left: auto; flex: none; padding-left: 6px; }
 .item.auto .name b { font-weight: 600; }
+.item.unsupported { opacity: .55; }
 
 /* ---- 节点面板顶上的地区条:只筛选,不碰后端 ---- */
 /* 自动换行,不做横向滚动:桌面端没有横向滚动条,鼠标滚轮也推不动,藏在右边的地区就点不到了 */

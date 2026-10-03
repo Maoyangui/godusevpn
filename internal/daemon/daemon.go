@@ -72,6 +72,7 @@ type Daemon struct {
 	fetchLink                  map[string]string           // 订阅 id → 拉取失败(404)时面板随响应给的「选购 / 续费」地址
 	refreshing                 map[string]*refreshCall     // 订阅 id → 正在跑的那次刷新:同一条订阅不叠第二条回退链
 	refreshQueued              map[string]bool             // 界面点的后台刷新:goroutine 还没登记进 refreshing 时也要显示"正在刷新"
+	unsupported                map[string]string           // 最近一次备配置时内核建不起来、被剔掉的节点(tag → 原因)
 	running                    *profile.Profile            // 正在跑的内核是按哪份订阅生成的;刷新后拿它和缓存比,决定动不动隧道
 	prepared                   *profile.Profile            // prepare 刚按它生成了配置、内核还没起:start 成功后转成 running
 	guardOn                    bool                        // 「全局禁直连」的闸此刻开着
@@ -674,6 +675,9 @@ func (d *Daemon) prepare(ctx context.Context) ([]byte, error) {
 	for tag, why := range skipped {
 		d.logf("节点「%s」本客户端建不起来,这次连接先跳过它: %s", tag, why)
 	}
+	d.mu.Lock()
+	d.unsupported = skipped // 节点列表里标出来:以前只写日志,选了它其实在用自动选择,界面看不出来
+	d.mu.Unlock()
 	if err != nil {
 		return nil, err
 	}
@@ -1872,6 +1876,12 @@ func (d *Daemon) stateView() ipc.StateView {
 	}
 	if want {
 		v.NICWarn = d.nicWarn
+	}
+	if len(d.unsupported) > 0 {
+		v.Unsupported = make(map[string]string, len(d.unsupported))
+		for k, why := range d.unsupported {
+			v.Unsupported[k] = why
+		}
 	}
 	d.mu.Unlock()
 	if v.Guard == "on" && v.GuardError == "" {

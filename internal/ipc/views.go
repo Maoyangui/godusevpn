@@ -66,10 +66,12 @@ type StateView struct {
 	// ProtectWarn 系统网络保护(macOS 接管 DNS、Linux 回包规则)没做完:隧道照常建立,巡检每半分钟重做
 	ProtectWarn string `json:"protectWarn,omitempty"`
 	// NICWarn 规则 / 普通全局下网卡 IPv6 没能停用:照常连着(严格全局下这种情况拒绝连接,不会走到这里)
-	NICWarn  string            `json:"nicWarn,omitempty"`
-	Profile  *ProfileView      `json:"profile,omitempty"` // 当前订阅
-	Profiles []ProfileView     `json:"profiles"`          // 全部订阅
-	Settings settings.Settings `json:"settings"`
+	NICWarn string `json:"nicWarn,omitempty"`
+	// Unsupported 订阅里本客户端的内核建不起来、这次连接跳过的节点(tag → 原因):naive、SSR 之类
+	Unsupported map[string]string `json:"unsupported,omitempty"`
+	Profile     *ProfileView      `json:"profile,omitempty"` // 当前订阅
+	Profiles    []ProfileView     `json:"profiles"`          // 全部订阅
+	Settings    settings.Settings `json:"settings"`
 	// MissingRuleSets 本地还没有、因此这一轮被摘掉的规则集标签。用到它们的规则组暂时不生效,
 	// 界面要照实说一句 —— 规则开着却不起作用,用户是看不出来的。连上之后守护进程会自动补下来。
 	MissingRuleSets []string `json:"missingRuleSets,omitempty"`

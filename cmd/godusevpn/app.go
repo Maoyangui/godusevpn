@@ -479,6 +479,8 @@ type NodeInfo struct {
 	Delay   int    `json:"delay"` // 0 = 未测;-1 = 上次失败
 	Current bool   `json:"current"`
 	AutoNow string `json:"autoNow,omitempty"` // auto 组当前落在哪个节点
+	// Unsupported 本客户端的内核建不起来、这次连接跳过了它(原因);界面标出来,点它只说原因不去选
+	Unsupported string `json:"unsupported,omitempty"`
 }
 
 // GetNodes 节点列表(带最近一次延迟);内核没跑时只给订阅里的名字。
@@ -488,7 +490,7 @@ func (a *App) GetNodes() ([]NodeInfo, error) {
 	if err != nil {
 		out := []NodeInfo{}
 		for _, n := range st.View.Nodes {
-			out = append(out, NodeInfo{Name: n, Delay: st.View.Delays[n], Current: n == st.View.Node})
+			out = append(out, NodeInfo{Name: n, Delay: st.View.Delays[n], Current: n == st.View.Node, Unsupported: st.View.Unsupported[n]})
 		}
 		return out, nil
 	}
@@ -510,6 +512,16 @@ func (a *App) GetNodes() ([]NodeInfo, error) {
 			ni.AutoNow = p.Now
 		}
 		out = append(out, ni)
+	}
+	// 被剔掉的节点不在内核的 proxy 组里:接在后面标出来,不然连着的时候它们从列表里凭空消失
+	inKernel := make(map[string]bool, len(group.All))
+	for _, name := range group.All {
+		inKernel[name] = true
+	}
+	for _, n := range st.View.Nodes {
+		if why := st.View.Unsupported[n]; why != "" && !inKernel[n] {
+			out = append(out, NodeInfo{Name: n, Unsupported: why})
+		}
 	}
 	return out, nil
 }

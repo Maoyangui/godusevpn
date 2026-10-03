@@ -73,3 +73,15 @@ func TestProtectFailureDoesNotBlockStart(t *testing.T) {
 		t.Fatal("连接时没做完的系统网络保护,巡检要重做")
 	}
 }
+
+// 每次备配置都记下内核建不起来、被剔掉的节点(连全坏、配置失败的那次也记),状态里带给界面的节点列表标出来。
+func TestUnsupportedNodesReachStateView(t *testing.T) {
+	src := readDaemonSource(t)
+	prep := funcBody(t, src, "func (d *Daemon) prepare(ctx context.Context) ([]byte, error) {")
+	before(t, prep, "d.unsupported = skipped", "if err != nil {\n\t\treturn nil, err\n\t}\n\td.noteMissingRuleSets", "剔掉的节点要在配置失败返回之前记下")
+	d := newPolicyTestDaemon(t)
+	d.unsupported = map[string]string{"老节点": "unknown outbound type: naive"}
+	if v := d.stateView(); v.Unsupported["老节点"] == "" {
+		t.Fatalf("状态里应带着被剔掉的节点: %+v", v.Unsupported)
+	}
+}

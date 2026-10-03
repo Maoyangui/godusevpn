@@ -807,10 +807,12 @@ function nodeRow(n, i, max, testing) {
       <span class="ms ${msClass(n.delay)}"></span></div>`;
   }
   const code = geoCode(n.name), mult = nodeMult(n.name);
-  return `<div class="item ${n.current ? 'current' : ''}" data-name="${esc(n.name)}" data-geo="${code}" style="animation-delay:${Math.min(i, 12) * 25}ms"><span class="check"></span>
+  // 本客户端的内核建不起来的节点(订阅里 naive、SSR 之类):照样列出来、标明,点它只说原因不去选
+  const bad = n.unsupported ? ` data-unsupported="${esc(n.unsupported)}"` : '';
+  return `<div class="item ${n.current ? 'current' : ''}${n.unsupported ? ' unsupported' : ''}" data-name="${esc(n.name)}"${bad} data-geo="${code}" style="animation-delay:${Math.min(i, 12) * 25}ms"><span class="check"></span>
     ${flagHTML(code, 'sm')}
     <div class="name">
-      <div class="ntop"><b>${esc(cleanName(n.name))}</b>${mult ? `<em class="tag warn">${t('node.mult', { n: mult })}</em>` : ''}${n.type ? `<em class="ntype">${esc(n.type)}</em>` : ''}</div>
+      <div class="ntop"><b>${esc(cleanName(n.name))}</b>${mult ? `<em class="tag warn">${t('node.mult', { n: mult })}</em>` : ''}${n.unsupported ? `<em class="tag">${t('node.unsupported')}</em>` : ''}${n.type ? `<em class="ntype">${esc(n.type)}</em>` : ''}</div>
       <div class="bar"><i style="width:${barWidth(n.delay, max)}"></i></div>
     </div>
     <span class="ms ${msClass(n.delay)}">${msText(n.delay, testing)}</span></div>`;
@@ -842,6 +844,7 @@ async function drawNodes(testing) {
     + regionChips(nodes)
     + `<div class="list">${nodes.map((n, i) => nodeRow(n, i, max, testing)).join('')}</div>`;
   $('#sheet-body').querySelectorAll('.item').forEach(it => it.addEventListener('click', async () => {
+    if (it.dataset.unsupported) { toast(t('node.unsupportedWhy', { why: it.dataset.unsupported }), 'err'); return; }
     try { await App().SelectNode(it.dataset.name); closeSheet(); } catch (e) { toast(errText(e), 'err'); }
   }));
   $('#sheet-body').querySelectorAll('.chip').forEach(c => c.addEventListener('click', () => { nodeRegion = c.dataset.geo || ''; applyNodeFilter(); }));
