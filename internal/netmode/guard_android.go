@@ -30,6 +30,7 @@ func androidVPNProtection() (AndroidVPNProtectionStatus, error) {
 // 安装，所有方法保持幂等空操作，状态只由系统 lockdown 查询决定。
 func ApplyGuard(GuardSpec) error { return nil }
 func GuardTunUp(GuardSpec) error { return nil }
+func GuardTunDown() error        { return nil }
 func ClearGuard() error          { return nil }
 
 // GuardInstallable 这个平台的闸是不是由我们自己装、并且装完能核查。

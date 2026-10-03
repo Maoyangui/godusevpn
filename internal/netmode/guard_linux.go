@@ -74,6 +74,7 @@ func ApplyGuard(spec GuardSpec) error {
 
 // GuardTunUp nft 按网卡名和地址放行,隧道起不起来无所谓。
 func GuardTunUp(GuardSpec) error { return nil }
+func GuardTunDown() error        { return nil }
 
 // ClearGuard 撤闸。表不随进程死(上次强杀留下的也要清),不存在也无妨;删了之后表还在才算失败。
 func ClearGuard() error {

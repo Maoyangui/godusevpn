@@ -366,6 +366,24 @@ func (d *Daemon) reconcileGuard() {
 	}
 }
 
+// guardTunDown 可替换:测试里不碰本机的 WFP。
+var guardTunDown = netmode.GuardTunDown
+
+// dropTunPermit 内核停了、隧道网卡随之消失:撤掉转发层按接口号装的「经隧道放行」。以前留着等下次连上才换掉,
+// 接口号会被热点的 Wi-Fi Direct 虚拟网卡、新插的 USB 网卡复用,空档期就放行了别的网卡的转发(审计 MB01)。
+// 只在闸开着时做,只删不加;撤不掉只记日志(和以前一样留着,不会更松),下次连上时 TunUp 会替换它。
+func (d *Daemon) dropTunPermit() {
+	d.mu.Lock()
+	on := d.guardOn
+	d.mu.Unlock()
+	if !on {
+		return
+	}
+	if err := guardTunDown(); err != nil {
+		d.logf("全局禁直连:隧道网卡没了,转发层的隧道放行没撤掉(下次连上时会换掉): %v", err)
+	}
+}
+
 // guardTunUp 隧道网卡起来之后再放行它(Windows 要按网卡放行;别的平台按地址,无操作)。
 func (d *Daemon) guardTunUp() {
 	d.mu.Lock()

@@ -127,7 +127,7 @@ func addPermitForward(session uintptr, baseObjects *baseObjects, weight uint8, c
 }
 
 // TunUp 隧道网卡起来了:把转发层"经隧道放行"那组按新接口号重装(先删旧的)。闸没开时什么都不做。
-// 装成持久的,和闸的其它过滤器一样跨进程、跨重启;网卡没了接口号就对不上,等于自动收回。
+// 装成持久的,和闸的其它过滤器一样跨进程;内核停下时由 TunDown 撤掉,开机后重新开闸(Enable)也会换掉它。
 func TunUp(ifIndex uint32) error {
 	mu.Lock()
 	defer mu.Unlock()
@@ -144,14 +144,48 @@ func TunUp(ifIndex uint32) error {
 		return nil // 闸没开
 	}
 	return runTransaction(s, func(s uintptr) error {
-		for i := range all {
-			if all[i].name == forwardTunPermitName {
-				if err := fwpmFilterDeleteByKey0(s, &all[i].key); err != nil && !notFound(err) {
-					return wrapErr(err)
-				}
-			}
+		if err := dropTunPermit(s, all); err != nil {
+			return err
 		}
 		curFlags = cFWPM_FILTER_FLAG_PERSISTENT
 		return permitForwardTun(s, base, 12, ifIndex)
 	})
+}
+
+// TunDown 隧道网卡没了(内核停止、崩溃后退避重试、服务停止):把"经隧道放行"那组撤掉。以前留着等下次 TunUp
+// 才替换,而 Windows 的接口号会回收复用 —— 空档期这个号被热点的 Wi-Fi Direct 虚拟网卡、新插的 USB 网卡拿去,
+// 源接口条件就放行了热点设备的全部转发、目的接口条件放行了经物理出口的转发,隧道断着热点设备照样直连出网(审计 MB01)。
+// 只删不加,只会更严;闸没开时什么都不做。
+func TunDown() error {
+	mu.Lock()
+	defer mu.Unlock()
+	s, err := openSession()
+	if err != nil {
+		return err
+	}
+	defer fwpmEngineClose0(s)
+	all, err := ourFilters(s)
+	if err != nil {
+		return err
+	}
+	have := false
+	for i := range all {
+		have = have || all[i].name == forwardTunPermitName
+	}
+	if !have {
+		return nil
+	}
+	return runTransaction(s, func(s uintptr) error { return dropTunPermit(s, all) })
+}
+
+// dropTunPermit 删掉"经隧道放行"那组(在调用方的事务里)。
+func dropTunPermit(s uintptr, all []filterInfo) error {
+	for i := range all {
+		if all[i].name == forwardTunPermitName {
+			if err := fwpmFilterDeleteByKey0(s, &all[i].key); err != nil && !notFound(err) {
+				return wrapErr(err)
+			}
+		}
+	}
+	return nil
 }

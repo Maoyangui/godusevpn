@@ -709,6 +709,7 @@ func (d *Daemon) stop() error {
 	d.running = nil
 	d.mu.Unlock()
 	err := d.core.Stop()
+	d.dropTunPermit() // 隧道网卡随内核没了
 	// 网卡 IPv6 不在这里还原:内核停了不代表用户不想连了(崩了在退避重试、切订阅重连、服务被杀、关机),
 	// 这些时候地址一冒出来就能被程序读走。只有用户真的断开 / 关掉开关 / 卸载才还原,和闸一个道理。
 	d.mu.Lock()
