@@ -100,6 +100,8 @@ type NodeInfo struct {
 	AutoNow string `json:"autoNow,omitempty"`
 	// Unsupported 本客户端的内核建不起来、这次连接跳过了它(原因);界面标出来,点它只说原因不去选
 	Unsupported string `json:"unsupported,omitempty"`
+	// Pending 订阅刷新新加进来、内核里还没有的节点:没有延迟,选它会重建配置重连用上
+	Pending bool `json:"pending,omitempty"`
 }
 
 type ConnRow struct {
@@ -554,24 +556,20 @@ func (s *Service) nodes(ctx context.Context) ([]NodeInfo, error) {
 	if !ok {
 		return nil, errors.New("内核里没有 proxy 组")
 	}
-	out := make([]NodeInfo, 0, len(group.All))
-	for _, name := range group.All {
+	names, inKernel := ipc.NodeList(st.View.Nodes, group.All)
+	out := make([]NodeInfo, 0, len(names))
+	for _, name := range names {
+		if !inKernel[name] { // 内核建不起来的标原因;其余是刷新新加进来的
+			why := st.View.Unsupported[name]
+			out = append(out, NodeInfo{Name: name, Unsupported: why, Pending: why == ""})
+			continue
+		}
 		p := proxies[name]
 		ni := NodeInfo{Name: name, Type: p.Type, Delay: p.LastDelay(), Current: name == group.Now}
 		if name == "auto" {
 			ni.AutoNow = p.Now
 		}
 		out = append(out, ni)
-	}
-	// 被剔掉的节点不在内核的 proxy 组里:接在后面标出来,不然连着的时候它们从列表里凭空消失
-	inKernel := make(map[string]bool, len(group.All))
-	for _, name := range group.All {
-		inKernel[name] = true
-	}
-	for _, n := range st.View.Nodes {
-		if why := st.View.Unsupported[n]; why != "" && !inKernel[n] {
-			out = append(out, NodeInfo{Name: n, Unsupported: why})
-		}
 	}
 	return out, nil
 }

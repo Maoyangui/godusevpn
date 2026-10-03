@@ -822,10 +822,10 @@ function nodeRow(n, i, max, testing) {
   return `<div class="item ${n.current ? 'current' : ''}${n.unsupported ? ' unsupported' : ''}" data-name="${esc(n.name)}"${bad} data-geo="${code}" style="animation-delay:${Math.min(i, 12) * 25}ms"><span class="check"></span>
     ${flagHTML(code, 'sm')}
     <div class="name">
-      <div class="ntop"><b>${esc(cleanName(n.name))}</b>${mult ? `<em class="tag warn">${t('node.mult', { n: mult })}</em>` : ''}${n.unsupported ? `<em class="tag">${t('node.unsupported')}</em>` : ''}${n.type ? `<em class="ntype">${esc(n.type)}</em>` : ''}</div>
+      <div class="ntop"><b>${esc(cleanName(n.name))}</b>${mult ? `<em class="tag warn">${t('node.mult', { n: mult })}</em>` : ''}${n.unsupported ? `<em class="tag">${t('node.unsupported')}</em>` : ''}${n.pending ? `<em class="tag">${t('node.pending')}</em>` : ''}${n.type ? `<em class="ntype">${esc(n.type)}</em>` : ''}</div>
       <div class="bar"><i style="width:${barWidth(n.delay, max)}"></i></div>
     </div>
-    <span class="ms ${msClass(n.delay)}">${n.unsupported ? '' : msText(n.delay, testing)}</span></div>`;
+    <span class="ms ${msClass(n.delay)}">${n.unsupported || n.pending ? '' : msText(n.delay, testing)}</span></div>`;
 }
 async function drawNodes(testing) {
   let nodes = [];
@@ -843,7 +843,7 @@ async function drawNodes(testing) {
   const max = Math.max(1, ...nodes.filter(n => n.delay > 0).map(n => n.delay));
   // 节点集合没变就只改数字,别整块重画:一百来个节点重画一次会先空一下,入场动画还要错峰放完,
   // 滚动位置和筛选框里的字也跟着丢 —— 测速结束那一下看着就是"闪一下白再出来"。
-  const sig = nodes.map(n => n.name).join(' ');
+  const sig = nodes.map(n => n.name + (n.pending ? '+' : '') + (n.unsupported ? '!' : '')).join(' '); // 新节点重连后用上了,标签要跟着变
   if (sig === nodeSig && patchNodes(nodes, max, testing)) return;
   nodeSig = sig;
   const st = state && state.view.state.status, online = st === 'connected' || st === 'degraded';
@@ -876,7 +876,7 @@ function patchNodes(nodes, max, testing) {
     if (!it) return false;
     it.classList.toggle('current', !!n.current);
     const ms = it.querySelector('.ms');
-    if (ms) { ms.className = 'ms ' + msClass(n.delay); ms.innerHTML = n.name === 'auto' || n.unsupported ? '' : msText(n.delay, testing); } // 跳过的节点不测速
+    if (ms) { ms.className = 'ms ' + msClass(n.delay); ms.innerHTML = n.name === 'auto' || n.unsupported || n.pending ? '' : msText(n.delay, testing); } // 跳过的、还没进内核的节点不测速
     const bar = it.querySelector('.bar i');
     if (bar) bar.style.width = barWidth(n.delay, max);
     if (n.name === 'auto') {
