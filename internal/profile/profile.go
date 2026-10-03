@@ -61,8 +61,9 @@ func Parse(body []byte, hdr http.Header) (*Profile, error) {
 	}
 	for _, raw := range doc.Outbounds {
 		var meta struct {
-			Type string `json:"type"`
-			Tag  string `json:"tag"`
+			Type     string          `json:"type"`
+			Tag      string          `json:"tag"`
+			Resolver json.RawMessage `json:"domain_resolver"`
 		}
 		if json.Unmarshal(raw, &meta) != nil || meta.Type == "" || nonNodeTypes[meta.Type] {
 			continue
@@ -76,12 +77,15 @@ func Parse(body []byte, hdr http.Header) (*Profile, error) {
 			tag = fmt.Sprintf("%s %d", base, i)
 		}
 		used[tag] = true
-		if tag != meta.Tag { // 改过名字要写回出站
+		// 改过名字要写回出站。domain_resolver 一并去掉:第三方订阅常让它指向订阅自己的 DNS 服务器,
+		// 而订阅的 DNS 段客户端整个不要,留着这个节点就建不起来;去掉后节点域名由客户端自己的解析处理
+		if tag != meta.Tag || len(meta.Resolver) > 0 {
 			var m map[string]any
 			if json.Unmarshal(raw, &m) != nil {
 				continue
 			}
 			m["tag"] = tag
+			delete(m, "domain_resolver")
 			raw, _ = json.Marshal(m)
 		}
 		p.Outbounds = append(p.Outbounds, raw)
