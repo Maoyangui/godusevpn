@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"errors"
 	"os"
 	"strings"
 	"testing"
@@ -71,8 +72,8 @@ func TestNICIPv6FollowsWantedNotCoreRunning(t *testing.T) {
 	if contains(fn, "core.Running") {
 		t.Fatal("nicIPv6Wanted 里不该看内核在不在跑:它必须和闸一样只看用户的连接意愿")
 	}
-	if !contains(fn, "machine.Wanted") {
-		t.Fatal("nicIPv6Wanted 必须看 machine.Wanted():这才是和闸一致的那个判断")
+	if !contains(fn, "wantConnected()") || !contains(funcBody(t, src, "func (d *Daemon) wantConnected() bool {"), "machine.Wanted") {
+		t.Fatal("nicIPv6Wanted 必须看用户的连接意愿(wantConnected → machine.Wanted()):这才是和闸一致的那个判断")
 	}
 	stop := funcBody(t, src, "func (d *Daemon) stop() error {")
 	if contains(stop, "RestoreNICIPv6") {
@@ -110,3 +111,42 @@ func funcBody(t *testing.T, src, sig string) string {
 }
 
 func contains(s, sub string) bool { return strings.Contains(s, sub) }
+
+// 连接状态读不出来时网卡 IPv6 的去留:意愿未知不放宽,只有"设置不要求严格全局、闸也确实不在"才还原。
+func TestKeepNICWhenIntentUnknown(t *testing.T) {
+	queryErr := errors.New("BFE 暂时不可用")
+	for _, c := range []struct {
+		name   string
+		strict bool
+		n      int
+		err    error
+		keep   bool
+	}{
+		{"严格全局 + 关 IPv6,闸不在(Linux / macOS 重启后必然如此)", true, 0, nil, true},
+		{"严格全局,闸还在", true, 5, nil, true},
+		{"非严格,闸还在(Windows 上说明上次连着)", false, 5, nil, true},
+		{"非严格,闸状态查不到:未知,不当成不在", false, 0, queryErr, true},
+		{"非严格,确认闸不在:按文档还原", false, 0, nil, false},
+	} {
+		if got := keepNICWhenIntentUnknown(c.strict, c.n, c.err); got != c.keep {
+			t.Fatalf("%s:得 %v,应 %v", c.name, got, c.keep)
+		}
+	}
+	if !contains(funcBody(t, readDaemonSource(t), "func (d *Daemon) reconcileNICIPv6() {"), "keepNICWhenIntentUnknown(") {
+		t.Fatal("reconcileNICIPv6 在连接状态不可读时要按 keepNICWhenIntentUnknown 判断")
+	}
+}
+
+// 巡检在锁外判完"该关",拿到锁时用户可能刚断开、断开那边刚还原完:必须在锁里复查,否则又把 IPv6 关回去、
+// 还记成"我们关着",之后没人再还原。(真停用网卡不能在本机跑,钉源码结构。)
+func TestNICLoopRechecksUnderLock(t *testing.T) {
+	loop := funcBody(t, readDaemonSource(t), "func (d *Daemon) nicIPv6Loop(ctx context.Context) {")
+	lock := strings.Index(loop, "d.nicMu.Lock()")
+	dis := strings.Index(loop, "netmode.DisableNICIPv6(")
+	if lock < 0 || dis < lock || !strings.Contains(loop[lock:dis], "!d.nicIPv6Wanted()") || !strings.Contains(loop[lock:dis], "shuttingDown") {
+		t.Fatal("nicIPv6Loop 拿到 nicMu 之后、停用之前要复查 nicIPv6Wanted() 与 shuttingDown")
+	}
+	if unlock := strings.Index(loop[dis:], "d.nicMu.Unlock()"); unlock < 0 || strings.Index(loop[dis:], "d.nicOff.Store(") > unlock {
+		t.Fatal("nicOff 的写入要留在锁里,免得盖掉 syncNICIPv6 刚写的")
+	}
+}

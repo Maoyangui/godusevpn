@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -78,6 +79,17 @@ func ModeName(mode string) string {
 	}
 }
 
+// DefaultSelected proxy 组这一轮该落在哪个节点:设置里选的在订阅里就是它,否则自动选择。
+func DefaultSelected(tags []string, selected string) string {
+	if selected != "" && slices.Contains(tags, selected) {
+		return selected
+	}
+	return "auto"
+}
+
+// CachePath 内核缓存文件(选中节点、模式、fake-ip)的位置。
+func CachePath(dataDir string) string { return filepath.Join(dataDir, "cache.db") }
+
 // SettingMode 反向:内核模式名 → 设置值。
 func SettingMode(clash string) string {
 	switch strings.ToLower(clash) {
@@ -132,12 +144,7 @@ func buildConfig(in Input, rep *Report) ([]byte, error) {
 		return nil, err
 	}
 	tags := in.Profile.Tags
-	selected := "auto"
-	for _, t := range tags {
-		if t == s.Selected {
-			selected = t
-		}
-	}
+	selected := DefaultSelected(tags, s.Selected)
 
 	// ---- 出站 ----
 	outbounds := []any{
@@ -420,7 +427,7 @@ func buildConfig(in Input, rep *Report) ([]byte, error) {
 			// 端口被别的程序占着的问题由守护进程在 prepare 里解决(换一个空闲端口,见 daemon.pickClashPort),
 			// 而不是不监听。
 			"clash_api", obj("external_controller", "127.0.0.1:"+itoa(clashPort(in)), "secret", in.ClashSecret, "default_mode", ModeName(s.Mode)),
-			"cache_file", obj("enabled", true, "path", filepath.Join(in.DataDir, "cache.db"), "store_fakeip", true),
+			"cache_file", obj("enabled", true, "path", CachePath(in.DataDir), "store_fakeip", true),
 		),
 	)
 	return json.MarshalIndent(cfg, "", "  ")

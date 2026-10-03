@@ -14,11 +14,13 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/sagernet/sing/common/logger"
 	M "github.com/sagernet/sing/common/metadata"
 
 	sb "github.com/sagernet/sing-box"
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/common/urltest"
+	"github.com/sagernet/sing-box/experimental/cachefile"
 	"github.com/sagernet/sing-box/include"
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/option"
@@ -293,6 +295,30 @@ func (c *Core) SetMode(mode string) error {
 	return fmt.Errorf("内核不认识模式 %q(可选: %s)", mode, strings.Join(cs.ModeList(), " / "))
 }
 
+// PresetCache 内核启动前,把缓存文件里记着的模式和 group 组选中项改成这一轮配置要的。
+//
+// sing-box 启动时 Clash 服务先读缓存里的模式、选择组先读缓存里的选中项,读到就盖过配置里的
+// default_mode / default。缓存里的值来自老版本切模式、连着时手动选过的节点、临时换线借过的节点 ——
+// 不先改掉,配置写得再对,内核也按上一次记下的跑:用户在未连接时选了「自动」,连上还是旧节点;
+// 严格全局下内核若按缓存里的 Rule / Direct 跑,流量就经 direct 出站从本服务出去,而闸放行本服务。
+// 必须在 Start 之前改:Start 返回时 TUN 已经在收流量了。用的是 sing-box 自己的缓存实现,格式跟着它走。
+func PresetCache(path, mode, group, selected string) error {
+	cf := cachefile.New(context.Background(), logger.NOP(), option.CacheFileOptions{Enabled: true, Path: path})
+	if err := cf.Start(adapter.StartStateInitialize); err != nil {
+		return err
+	}
+	defer cf.Close()
+	if cf.LoadMode() != mode {
+		if err := cf.StoreMode(mode); err != nil {
+			return err
+		}
+	}
+	if cf.LoadSelected(group) != selected {
+		return cf.StoreSelected(group, selected)
+	}
+	return nil
+}
+
 type selector interface {
 	SelectOutbound(tag string) bool
 }
@@ -336,6 +362,8 @@ func (c *Core) Select(group, tag string) error {
 
 // HTTPClient 经某个出站(节点、选择组或 direct)发 HTTP 请求的客户端。
 // direct 出站绑定物理网卡,所以即使 TUN 在跑,经它的请求也不会绕回内核。
+// 不留空闲连接:调用方都是用一次就丢(拉订阅、查出口、补规则集),连接池没人复用;
+// 留着的话 direct 那一跳的连接会在隧道外挂着发 keepalive,超出"只许刷新订阅这一条请求"的例外。
 func (c *Core) HTTPClient(tag string, timeout time.Duration) (*http.Client, error) {
 	box, _, ok := c.snapshot()
 	if !ok {
@@ -351,6 +379,7 @@ func (c *Core) HTTPClient(tag string, timeout time.Duration) (*http.Client, erro
 		},
 		TLSHandshakeTimeout: 10 * time.Second,
 		ForceAttemptHTTP2:   true,
+		DisableKeepAlives:   true,
 	}
 	return &http.Client{Transport: tr, Timeout: timeout}, nil
 }

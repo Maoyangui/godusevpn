@@ -155,7 +155,7 @@ func (d *Daemon) needRebuildFor(tag string) bool {
 // 内核停了、崩了、在重启,只要这三条还成立,闸就该在。Android 的 VPN 接口按它决定要不要留着。
 func (d *Daemon) GuardWanted() bool {
 	s := d.getSettings()
-	return s.NoDirect && s.Mode == settings.ModeGlobal && d.machine.Wanted()
+	return s.NoDirect && s.Mode == settings.ModeGlobal && d.wantConnected()
 }
 
 func (d *Daemon) guardSpec() netmode.GuardSpec {
@@ -174,9 +174,10 @@ func (d *Daemon) syncGuard() {
 	if d.shuttingDown.Load() {
 		return // 服务正在停止:闸不动(见 Run 的 ctx.Done)。下次启动由 reconcileGuard 按落盘意愿对账
 	}
-	if !d.settingsTrusted() {
-		// 设置读不出来时手上是默认值(模式=规则),据此判出来的"不该有闸"是猜的,不是用户的意思。
+	if !d.settingsTrusted() && d.wantConnected() {
+		// 设置读不出来时手上是默认值(模式=规则),想连着时据此判出来的"不该有闸"是猜的,不是用户的意思。
 		// 保持现状:该有的闸留着,不该有的也不去装。用户保存一次设置就恢复正常。
+		// 用户明确断开(不想连)时该不该有闸和设置无关,照常撤 —— 不然断开也撤不掉,只剩「恢复网络」。
 		return
 	}
 	d.guardMu.Lock()
@@ -243,11 +244,11 @@ func (d *Daemon) syncGuard() {
 	}
 }
 
-// guardArmed 闸此刻开着(按守护进程自己的记录)。
+// guardArmed 闸此刻开着(按守护进程自己的记录),或者正在装(见 cancelDirect):直连动作一律按开着处理。
 func (d *Daemon) guardArmed() bool {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	return d.guardOn
+	return d.guardOn || d.guardArming
 }
 
 // guardRedoReason 闸已经开着时,要不要重装、为什么。返回空串 = 不用动。
@@ -277,11 +278,13 @@ func (d *Daemon) appliedGuardSpec() netmode.GuardSpec {
 	return d.guardApplied
 }
 
-// applyGuard 装闸并把结果记进状态与日志;持久闸或开机闸任一失败都保持未就绪，
-// 由 prepare/start 的隐私前置检查拒绝启动数据面。
+// applyGuard 装闸并把结果记进状态与日志;失败时如实记着(界面标「禁直连未生效」),
+// 隧道照常起(见 guardReady),health 每轮原地重试。
 func (d *Daemon) applyGuard(okMsg string) {
-	// 装闸之前先把只在闸没开时才做的直连动作取消掉:闸放行本服务,装好以后它们再发出的都是隧道外的包
+	// 装闸之前先把只在闸没开时才做的直连动作取消掉:闸放行本服务,装好以后它们再发出的都是隧道外的包。
+	// 从这一刻起到装完,新来的直连动作也按"闸开着"拒掉(guardArming),不然装闸那几百毫秒里开始的照样出去。
 	d.cancelDirect()
+	defer d.endArming()
 	spec := d.guardSpec()
 	d.mu.Lock()
 	previousOn, previousSpec := d.guardOn, d.guardApplied
@@ -293,7 +296,7 @@ func (d *Daemon) applyGuard(okMsg string) {
 		d.guardApplied = previousSpec
 		d.mu.Unlock()
 		d.setGuard(previousOn, err.Error())
-		d.logf("全局禁直连:开闸失败,拒绝启动数据面: %v", err)
+		d.logf("全局禁直连:开闸失败(隧道照常建立,稍后重试): %v", err)
 		return
 	}
 	d.mu.Lock()
@@ -354,8 +357,11 @@ func (d *Daemon) reconcileGuard() {
 		if err := netmode.ClearGuard(); err != nil {
 			d.setGuard(true, "撤闸失败: "+err.Error())
 			d.logf("全局禁直连:上次残留的闸清不掉,直连仍被拦: %v", err)
-		} else if w := netmode.GuardWarning(); w != "" {
-			d.logf("全局禁直连:%s", w)
+		} else {
+			d.setGuard(false, "") // Run 开头按实物记成了开着
+			if w := netmode.GuardWarning(); w != "" {
+				d.logf("全局禁直连:%s", w)
+			}
 		}
 		return
 	}

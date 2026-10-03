@@ -162,9 +162,12 @@ func (d *Daemon) holdDirect(cancel context.CancelFunc) (release func()) {
 	}
 }
 
-// cancelDirect 取消所有登记着的直连动作(装闸之前调)。
+// cancelDirect 装闸之前调:记下"正在装闸"(guardArmed 从此为真),并取消所有登记着的直连动作。
+// 两件事在同一次加锁里做:快照之前登记的都被取消;之后登记的在判闸时一定看得到 arming,于是被拒。
+// 装完(不管成没成)由 endArming 收回。
 func (d *Daemon) cancelDirect() {
 	d.mu.Lock()
+	d.guardArming = true
 	held := make([]context.CancelFunc, 0, len(d.directHeld))
 	for _, c := range d.directHeld {
 		held = append(held, c)
@@ -173,4 +176,11 @@ func (d *Daemon) cancelDirect() {
 	for _, c := range held {
 		c()
 	}
+}
+
+// endArming 装闸结束:此后按 guardOn 判闸(装成了 applyGuard 已经把它置真,装失败则按原状)。
+func (d *Daemon) endArming() {
+	d.mu.Lock()
+	d.guardArming = false
+	d.mu.Unlock()
 }

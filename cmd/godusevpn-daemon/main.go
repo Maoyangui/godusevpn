@@ -220,7 +220,11 @@ func setPassword(pw string) error {
 	if err := paths.Ensure(); err != nil {
 		return err
 	}
-	s, _ = settings.Load(paths.Settings())
+	s, err := settings.Load(paths.Settings())
+	if err != nil {
+		// 读不出来时拿到的是默认值,存回去等于把订阅、规则全抹掉
+		return fmt.Errorf("设置文件读不出来,没有改密码(改了会把整份设置覆盖成默认值): %w", err)
+	}
 	if err := s.SetWebPassword(pw); err != nil {
 		return err
 	}

@@ -46,3 +46,33 @@ func TestPrivacyRelaxes(t *testing.T) {
 		})
 	}
 }
+
+// 运行中切模式:只有跨过严格全局边界(禁直连 + 全局)才整份重建;没跨过的新旧配置只差 default_mode,就地切。
+// 隐私相关的其余开关一律整份重建,一项都不能省。
+func TestNeedsPrivacyRebuild(t *testing.T) {
+	mode := func(noDirect bool, m string) settings.Settings {
+		s := settings.Default()
+		s.NoDirect, s.Mode = noDirect, m
+		return s
+	}
+	g, r, d := settings.ModeGlobal, settings.ModeRule, settings.ModeDirect
+	for _, c := range []struct {
+		name       string
+		prev, next settings.Settings
+		want       bool
+	}{
+		{"禁直连开:规则 → 全局(进严格全局)", mode(true, r), mode(true, g), true},
+		{"禁直连开:全局 → 直连(出严格全局)", mode(true, g), mode(true, d), true},
+		{"禁直连开:规则 ↔ 直连", mode(true, r), mode(true, d), false},
+		{"禁直连关:规则 → 全局", mode(false, r), mode(false, g), false},
+		{"禁直连关:全局 → 直连", mode(false, g), mode(false, d), false},
+		{"规则模式下开关禁直连", mode(false, r), mode(true, r), true},
+		{"打开 IPv6", mode(false, r), func() settings.Settings { s := mode(false, r); s.IPv6 = true; return s }(), true},
+		{"关掉连接时停用网卡 IPv6", mode(false, r), func() settings.Settings { s := mode(false, r); s.DisableNICIPv6 = false; return s }(), true},
+		{"关掉 TUN", mode(false, r), func() settings.Settings { s := mode(false, r); s.TUN = false; return s }(), true},
+	} {
+		if got := needsPrivacyRebuild(c.prev, c.next); got != c.want {
+			t.Fatalf("%s:needsPrivacyRebuild = %v,想要 %v", c.name, got, c.want)
+		}
+	}
+}
