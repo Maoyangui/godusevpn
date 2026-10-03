@@ -76,11 +76,12 @@ let refreshConfirming = false;
 function checkRefreshWaits(list, sure) {
   for (const w of refreshWaits.slice()) {
     const p = (list || []).find(x => x.id === w.id);
-    if (!p || p.refreshing) continue;
+    if (p && p.refreshing) continue;
     if (!sure) { confirmRefreshWaits(); return; }
     refreshWaits.splice(refreshWaits.indexOf(w), 1);
     clearTimeout(w.timer);
-    if (p.error) w.reject(new Error(p.error)); else w.resolve(p);
+    if (!p) w.reject(new Error(t('prof.gone'))); // 刷新期间这条订阅被删了
+    else if (p.error) w.reject(new Error(p.error)); else w.resolve(p);
   }
 }
 async function confirmRefreshWaits() {
