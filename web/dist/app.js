@@ -5,6 +5,15 @@ const esc = s => String(s === null || s === undefined ? '' : s).replace(/[&<>"']
 let state = null;          // 最新 UIState
 let view = null;           // 当前页面名:onboard / home / settings / profiles / conns / logs / about
 let pageTimer = null;      // 页面自己的定时刷新
+// 页面定时刷新:上一轮还没回来就跳过这一轮,服务慢 / 安卓桥忙时同样的请求不会一轮轮叠起来
+function oneAtATime(fn) {
+  let busy = false;
+  return async () => {
+    if (busy) return;
+    busy = true;
+    try { await fn(); } finally { busy = false; }
+  };
+}
 let lastPing = 0;          // 手动测速刚测出来的延迟;服务每次推状态时会用它自己那份覆盖
 let tweens = {};           // 数字过渡
 
@@ -1211,7 +1220,7 @@ async function renderDevices(el) {
   };
   const load = async () => { try { draw(await App().GetDevices() || []); } catch (e) { const b = $('#dev-list'); if (b) b.innerHTML = `<div class="empty">${esc(errText(e))}</div>`; } };
   load();
-  pageTimer = setInterval(load, 10000);
+  pageTimer = setInterval(oneAtATime(load), 10000);
 }
 
 // ---- 连接 ----
@@ -1326,7 +1335,7 @@ function renderConns(el) {
     }
   };
   load();
-  pageTimer = setInterval(load, 2000);
+  pageTimer = setInterval(oneAtATime(load), 2000);
 }
 
 // ---- 日志 ----
@@ -1413,7 +1422,7 @@ function renderLogs(el) {
   });
   $('#diag').addEventListener('click', exportDiag);
   load();
-  pageTimer = setInterval(load, 3000);
+  pageTimer = setInterval(oneAtATime(load), 3000);
 }
 function segInit(seg, onPick) {
   const pill = seg.querySelector('.pill');

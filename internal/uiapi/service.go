@@ -19,6 +19,7 @@ import (
 	"github.com/Maoyangui/godusevpn/internal/buildinfo"
 	"github.com/Maoyangui/godusevpn/internal/clash"
 	"github.com/Maoyangui/godusevpn/internal/ipc"
+	"github.com/Maoyangui/godusevpn/internal/paths"
 	"github.com/Maoyangui/godusevpn/internal/settings"
 	"github.com/Maoyangui/godusevpn/internal/svc"
 	"github.com/Maoyangui/godusevpn/internal/update"
@@ -262,6 +263,7 @@ func (s *Service) clashClient() (*clash.Client, error) {
 func (s *Service) State() State {
 	var view ipc.StateView
 	err := s.dispatch(ipc.MGetState, nil, &view)
+	view.Settings.WebPassword = "" // 和 GetSettings 一样不把面板密码哈希给页面:状态每 1.5 秒推一次,局域网明文访问时一路都带着它
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	st := State{Service: err == nil, SvcState: "running", View: view, Up: s.up, Down: s.down, TotalUp: s.totUp, TotalDown: s.totDown, Lang: s.prefs.Lang, Theme: s.prefs.Theme,
@@ -655,6 +657,11 @@ func (s *Service) checkUpdate(manual bool) (*update.Release, error) {
 	return rel, nil
 }
 
+// updateDir 安装包下载到数据目录里(只有守护进程自己能进)。Linux / macOS 上守护进程以 root 跑、装完以 root 运行新程序:
+// 以前下到 /tmp/godusevpn-update,本机普通用户能在 RemoveAll 之后抢先建好这个目录(归他所有),下载期间把安装包
+// 换成自己的 —— 校验算的是下载流,installUpdate 从磁盘重新打开解压,root 装上的就是他的程序。Android 上数据目录同样私有。
+func updateDir() string { return filepath.Join(paths.DataDir(), "update") }
+
 // applyUpdate 下载安装包(进度经 update-progress 事件推给页面),然后交给平台安装。
 func (s *Service) applyUpdate(ctx context.Context) error {
 	s.mu.Lock()
@@ -666,7 +673,7 @@ func (s *Service) applyUpdate(ctx context.Context) error {
 	s.updating = true
 	s.mu.Unlock()
 	defer func() { s.mu.Lock(); s.updating = false; s.mu.Unlock() }()
-	dir := filepath.Join(os.TempDir(), "godusevpn-update")
+	dir := updateDir()
 	_ = os.RemoveAll(dir)
 	client, err := s.httpClient(30 * time.Minute)
 	if err != nil {

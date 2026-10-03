@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">佛跳墙</string>
+    <string name="channel_vpn">连接状态</string>
+    <string name="act_disconnect">断开</string>
+    <string name="st_connected">已连接</string>
+    <string name="st_degraded">已连接 · 节点不稳</string>
+    <string name="st_connecting">连接中…</string>
+    <string name="st_error">出错,自动重试中</string>
+    <string name="st_disconnected">未连接</string>
+    <string name="share_diag">发送诊断包</string>
+    <string name="no_browser">没有找到浏览器,请手动打开:%1$s</string>
+    <string name="webview_gone">界面反复崩溃,已关闭。连接不受影响,重新打开应用即可。</string>
+    <string name="no_vpn_dialog">这台设备的系统里没有 VPN 授权界面,无法连接。可到「设置 → 网络 → VPN」里手动允许本应用。</string>
+    <string name="vpn_denied">没有允许 VPN 请求,无法连接。再点一次连接会重新询问。</string>
+    <string name="vpn_settings_failed">打不开系统 VPN 设置</string>
+    <string name="install_need_permission">需要先允许本应用安装未知应用。系统授权页可能已弹出;没有的话到「系统设置 → 应用 → 特殊权限 → 安装未知应用」里允许本应用,然后再点一次更新</string>
+    <string name="install_blocked">这台设备不让应用自行安装更新,请到官网手动下载安装包</string>
+    <string name="install_no_installer">拉不起系统安装器。请打开应用后再点一次更新,或到官网手动下载安装包</string>
+    <string name="lockdown_no_service">VPN 服务尚未运行,无法读取系统「始终开启 / 屏蔽未使用 VPN 的连接」状态</string>
+    <string name="lockdown_old_api">Android 版本低于 10,没有可读取「始终开启 / 屏蔽未使用 VPN 的连接」的系统接口</string>
+    <string name="lockdown_read_failed">读取系统「始终开启 / 屏蔽未使用 VPN 的连接」状态失败:%1$s</string>
+</resources>

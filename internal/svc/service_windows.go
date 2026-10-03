@@ -91,7 +91,7 @@ func Install(exe string) error {
 		if err := s.UpdateConfig(cfg); err != nil {
 			return fmt.Errorf("更新已有服务配置: %w", err)
 		}
-		_ = exec.Command("sc.exe", "sdset", Name, userStartStopSDDL).Run()
+		_ = SetAccess(nil) // 基础权限;能停服务的控制用户由调用方随后按名单补上
 		_ = s.SetRecoveryActions(recoveryActions, 86400)
 		return nil
 	}
@@ -103,8 +103,8 @@ func Install(exe string) error {
 		return fmt.Errorf("创建服务: %w", err)
 	}
 	defer s.Close()
-	// 让本机已登录用户能启停服务(托盘"退出"要把服务一起停掉,登录时再拉起,都不弹 UAC)
-	_ = exec.Command("sc.exe", "sdset", Name, userStartStopSDDL).Run()
+	// 已登录用户能启动(托盘登录时拉起,不弹 UAC)
+	_ = SetAccess(nil) // 基础权限;能停服务的控制用户由调用方随后按名单补上
 	_ = s.SetRecoveryActions(recoveryActions, 86400)
 	return nil
 }
@@ -248,8 +248,27 @@ func Stop() error {
 	return stopHard(s, 20*time.Second)
 }
 
-// userStartStopSDDL 默认服务 ACL 基础上给 Authenticated Users 加 RP(启动)与 WP(停止)。
-const userStartStopSDDL = "D:(A;;CCLCSWRPWPDTLOCRRC;;;SY)(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;BA)(A;;CCLCSWRPWPLOCRRC;;;AU)(A;;CCLCSWLOCRRC;;;IU)(A;;CCLCSWLOCRRC;;;SU)S:(AU;FA;CCDCLCSWRPWPDTLOCRSDRCWDWO;;WD)"
+// serviceSDDL 服务的权限:SYSTEM、管理员全权;已认证用户能查询、能启动(服务本来就该跑着,托盘登录时拉起它);
+// 停止(WP)只给登记过的控制用户(托盘「退出」要停服务)。以前停止也放给了所有已认证用户:同机另一个标准账户
+// 随时能 sc stop,主用户断网(闸持久,不漏),停下来的空档还正好能抢注控制管道(见 ipc.verifyPipeServer)。
+// 格式不对的 SID 跳过:拼进去会让整份描述符设不上。
+func serviceSDDL(controllers []string) string {
+	s := "D:(A;;CCLCSWRPWPDTLOCRRC;;;SY)(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;BA)(A;;CCLCSWRPLOCRRC;;;AU)(A;;CCLCSWLOCRRC;;;IU)(A;;CCLCSWLOCRRC;;;SU)"
+	for _, sid := range controllers {
+		if _, err := windows.StringToSid(sid); err == nil {
+			s += "(A;;CCLCSWRPWPLOCRRC;;;" + sid + ")"
+		}
+	}
+	return s + "S:(AU;FA;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;WD)" // ACE 是 6 段:类型;标志;权限;对象;继承对象;SID
+}
+
+// SetAccess 按控制用户名单下发服务权限(安装、升级、修复、登记新控制用户时调用;需要管理员)。
+func SetAccess(controllers []string) error {
+	if out, err := exec.Command("sc.exe", "sdset", Name, serviceSDDL(controllers)).CombinedOutput(); err != nil {
+		return fmt.Errorf("设置服务权限: %v: %s", err, out)
+	}
+	return nil
+}
 
 // openUser 以普通用户能拿到的权限打开服务。
 func openUser(access uint32) (windows.Handle, windows.Handle, error) {

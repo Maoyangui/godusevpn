@@ -1,16 +1,24 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!-- 默认(非中文系统)用英文,中文在 values-zh;两份键要一一对应 -->
 <resources>
-    <string name="app_name">佛跳墙</string>
-    <string name="channel_vpn">连接状态</string>
-    <string name="act_disconnect">断开</string>
-    <string name="st_connected">已连接</string>
-    <string name="st_degraded">已连接 · 节点不稳</string>
-    <string name="st_connecting">连接中…</string>
-    <string name="st_error">出错,自动重试中</string>
-    <string name="st_disconnected">未连接</string>
-    <string name="share_diag">发送诊断包</string>
-    <string name="no_browser">没有找到浏览器,请手动打开:%1$s</string>
-    <string name="webview_gone">界面反复崩溃,已关闭。连接不受影响,重新打开应用即可。</string>
-    <string name="no_vpn_dialog">这台设备的系统里没有 VPN 授权界面,无法连接。可到「设置 → 网络 → VPN」里手动允许本应用。</string>
-    <string name="vpn_denied">没有允许 VPN 请求,无法连接。再点一次连接会重新询问。</string>
+    <string name="app_name">Fotiaoqiang</string>
+    <string name="channel_vpn">Connection status</string>
+    <string name="act_disconnect">Disconnect</string>
+    <string name="st_connected">Connected</string>
+    <string name="st_degraded">Connected · node unstable</string>
+    <string name="st_connecting">Connecting…</string>
+    <string name="st_error">Error, retrying automatically</string>
+    <string name="st_disconnected">Disconnected</string>
+    <string name="share_diag">Send diagnostics</string>
+    <string name="no_browser">No browser found. Open this manually: %1$s</string>
+    <string name="webview_gone">The interface kept crashing and was closed. The connection is not affected; just reopen the app.</string>
+    <string name="no_vpn_dialog">This device has no VPN permission screen, so it cannot connect. Allow this app manually under Settings → Network → VPN.</string>
+    <string name="vpn_denied">The VPN request was not allowed, so it cannot connect. Tap connect again to be asked again.</string>
+    <string name="vpn_settings_failed">Cannot open the system VPN settings</string>
+    <string name="install_need_permission">Allow this app to install unknown apps first. The system permission page may have opened; if not, allow it under Settings → Apps → Special access → Install unknown apps, then tap update again</string>
+    <string name="install_blocked">This device does not let apps install their own updates. Download the installer from the website instead</string>
+    <string name="install_no_installer">Could not open the system installer. Open the app and tap update again, or download the installer from the website</string>
+    <string name="lockdown_no_service">The VPN service is not running yet, so the system \"Always-on VPN / Block connections without VPN\" state cannot be read</string>
+    <string name="lockdown_old_api">Android is older than 10 and has no API to read \"Always-on VPN / Block connections without VPN\"</string>
+    <string name="lockdown_read_failed">Reading the system \"Always-on VPN / Block connections without VPN\" state failed: %1$s</string>
 </resources>
