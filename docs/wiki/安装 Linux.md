@@ -31,6 +31,8 @@ curl -fsSL https://raw.githubusercontent.com/Maoyangui/godusevpn/master/deploy/i
 | Entware(梅林等) | 对应 `/opt/etc/` 与 `/opt/var/lib/` |
 
 自启按初始化系统落地:systemd 单元、OpenWrt 的 procd 脚本、Entware 的 init.d 脚本。
+服务崩了 systemd / procd 会自己拉起;梅林没有这种机制,启动时挂一条每分钟的定时任务(`cru`)代替 ——
+`godusevpn stop` 主动停掉的不拉,再 `start` 或重启路由器后恢复。
 
 ## 本机模式(默认)
 

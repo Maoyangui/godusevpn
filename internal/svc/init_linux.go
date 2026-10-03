@@ -128,8 +128,30 @@ PREARGS=""
 DESC=$PROCS
 PATH=/opt/bin:/opt/sbin:/sbin:/bin:/usr/sbin:/usr/bin
 
+# 梅林没有 systemd / procd 那样的崩溃重拉:start 时挂一条每分钟的 cru 定时,服务没在跑就拉起来。
+# 用户主动 stop 留个标记,定时看到它就不拉;再 start(开机也是 start)时去掉。
+STOPPED=/opt/var/lib/godusevpn/stopped
+case "$1" in
+watchdog)
+	[ "$ENABLED" = yes ] || exit 0
+	[ -f "$STOPPED" ] && exit 0
+	pidof $PROCS >/dev/null && exit 0
+	set -- start
+	;;
+start | restart)
+	rm -f "$STOPPED"
+	command -v cru >/dev/null 2>&1 && cru a $PROCS "* * * * * /opt/etc/init.d/S99godusevpn watchdog"
+	;;
+stop | kill)
+	mkdir -p "${STOPPED%/*}" && touch "$STOPPED"
+	;;
+esac
+
 . /opt/etc/init.d/rc.func
 `
+
+// entwareWatchdog 看门狗定时的 cru 编号与命令(和脚本里那行一致)。
+var entwareWatchdog = []string{"a", name, "* * * * * /opt/etc/init.d/S99" + name + " watchdog"}
 
 func unitPath() string {
 	switch detect() {
@@ -195,10 +217,51 @@ func Uninstall() error {
 		}
 		_ = os.Remove(unitPath())
 	case initEntware:
+		if _, err := exec.LookPath("cru"); err == nil {
+			_, _ = sh("cru", "d", name) // 看门狗定时
+		}
 		_ = os.Remove(unitPath())
 		_ = os.Remove("/opt/bin/" + name)
 	}
 	return nil
+}
+
+// Refresh 守护进程每次启动时调:面板自更新只换程序文件、不重跑 install,旧版装下的启动脚本会一直留着。
+// 只动已经装好的(手动 `godusevpn run`、没装服务的不碰)。目前要跟上的只有 Entware 的脚本(看门狗):
+// 它不带程序路径,和当前模板不同就按原来的开关状态重写(先写临时文件再改名:脚本可能正被 sh 读着),
+// 再补上看门狗定时 —— 服务正在起,说明用户没停它。
+func Refresh() error {
+	if detect() != initEntware || !exists(unitPath()) {
+		return nil
+	}
+	b, err := os.ReadFile(unitPath())
+	if err != nil {
+		return err
+	}
+	want, enabled := entwareScriptLike(string(b))
+	if string(b) != want {
+		tmp := unitPath() + ".tmp"
+		if err := os.WriteFile(tmp, []byte(want), 0o755); err != nil {
+			return err
+		}
+		if err := os.Rename(tmp, unitPath()); err != nil {
+			_ = os.Remove(tmp)
+			return err
+		}
+	}
+	if _, err := exec.LookPath("cru"); err != nil || !enabled {
+		return nil // 不是梅林(没有 cru),或者自启关着
+	}
+	_, err = sh("cru", entwareWatchdog...)
+	return err
+}
+
+// entwareScriptLike 当前模板,开机自启的开关照抄已装的那份。
+func entwareScriptLike(cur string) (script string, enabled bool) {
+	if strings.Contains(cur, "ENABLED=yes") {
+		return entwareScript, true
+	}
+	return strings.Replace(entwareScript, "ENABLED=yes", "ENABLED=no", 1), false
 }
 
 func ctl(action string) error {

@@ -28,6 +28,9 @@ func plistPath() string { return "/Library/LaunchDaemons/" + label + ".plist" }
 // Kind 面板"服务状态"里显示的初始化系统。
 func Kind() string { return "launchd" }
 
+// Refresh 守护进程启动时让旧版装下的服务文件跟上当前版本(见 Linux 版)。macOS 目前没有要跟上的。
+func Refresh() error { return nil }
+
 // IsService 是不是被 launchd 拉起来的(launchd 会给子进程这个环境变量)。
 func IsService() bool {
 	return os.Getenv("XPC_SERVICE_NAME") != "" && os.Getenv("XPC_SERVICE_NAME") != "0"

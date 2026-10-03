@@ -183,6 +183,9 @@ func runDaemon(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	if err := svc.Refresh(); err != nil { // 面板自更新只换程序文件:旧版装下的启动脚本在这里跟上
+		d.Logf("更新服务启动脚本失败: %v", err)
+	}
 	ui := uiapi.New(d, uiapi.Options{Platform: runtime.GOOS, PrefsPath: paths.UIPrefs(), Autostart: autostart.Enabled, SetAutostart: autostart.Set})
 	ws := web.New(ui, d.Logf)
 	go func() {
