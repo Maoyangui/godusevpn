@@ -28,8 +28,58 @@ func plistPath() string { return "/Library/LaunchDaemons/" + label + ".plist" }
 // Kind 面板"服务状态"里显示的初始化系统。
 func Kind() string { return "launchd" }
 
-// Refresh 守护进程启动时让旧版装下的服务文件跟上当前版本(见 Linux 版)。macOS 目前没有要跟上的。
-func Refresh() error { return nil }
+// Refresh 守护进程启动时让旧版装下的服务文件跟上当前版本(见 Linux 版):补上开机闸的 LaunchDaemon。
+// 只动已经装好的(没装服务、手动跑的不碰)。
+func Refresh() error {
+	if _, err := os.Stat(plistPath()); err != nil {
+		return nil
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	if p, err := filepath.EvalSymlinks(exe); err == nil {
+		exe = p
+	}
+	return writeGuardPlist(exe)
+}
+
+// 开机闸:pf 的锚点规则不过重启。开机时 launchd 拉一次 `godusevpn boot-guard`,有落盘的闸就先装上、打开 pf
+// (见 netmode.ApplyBootGuard);没有就什么都不做。launchd 开机时自己扫 /Library/LaunchDaemons,不用 bootstrap;
+// 它不保证早于联网,只能把开机到服务起来之间的空档缩到最短。
+const guardLabel = label + ".guard"
+
+func guardPlistPath() string { return "/Library/LaunchDaemons/" + guardLabel + ".plist" }
+
+const guardPlistTmpl = `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key><string>%s</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>%s</string>
+		<string>boot-guard</string>
+	</array>
+	<key>RunAtLoad</key><true/>
+	<key>LaunchOnlyOnce</key><true/>
+	<key>StandardErrorPath</key><string>%s</string>
+</dict>
+</plist>
+`
+
+func guardPlistText(exe string) string {
+	return fmt.Sprintf(guardPlistTmpl, guardLabel, exe, filepath.Join("/Library/Logs", name+".guard.log"))
+}
+
+// writeGuardPlist 内容不同才写。
+func writeGuardPlist(exe string) error {
+	text := guardPlistText(exe)
+	if b, err := os.ReadFile(guardPlistPath()); err == nil && string(b) == text {
+		return nil
+	}
+	return os.WriteFile(guardPlistPath(), []byte(text), 0o644)
+}
 
 // IsService 是不是被 launchd 拉起来的(launchd 会给子进程这个环境变量)。
 func IsService() bool {
@@ -108,6 +158,9 @@ func Install(exe string) error {
 	if err := writePlist(abs, true); err != nil {
 		return err
 	}
+	if err := writeGuardPlist(abs); err != nil {
+		return err
+	}
 	return bootstrap()
 }
 
@@ -129,6 +182,10 @@ func Uninstall() error {
 	}
 	_ = bootout()
 	if err := os.Remove(plistPath()); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	_, _ = sh("launchctl", "bootout", "system/"+guardLabel) // 开机时载入过的,先踢出去
+	if err := os.Remove(guardPlistPath()); err != nil && !os.IsNotExist(err) {
 		return err
 	}
 	return nil

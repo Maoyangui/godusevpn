@@ -46,6 +46,16 @@ func NICWarning() string {
 	return nicWarn
 }
 
+// addNICWarning 在现有的网卡警告后面再挂一条(不盖掉前面的)。
+func addNICWarning(s string) {
+	nicWarnMu.Lock()
+	if nicWarn != "" {
+		nicWarn += ";"
+	}
+	nicWarn += s
+	nicWarnMu.Unlock()
+}
+
 // setRouteWarning / RouteWarning 是另一个槽:Linux 的"回包走主表"策略路由和网卡 IPv6 是两件事,
 // 共用一个格子的话后写的会把先写的盖掉,用户只看得见其中一条。
 func setRouteWarning(s string) {

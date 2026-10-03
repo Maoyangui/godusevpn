@@ -14,6 +14,8 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+
+	"github.com/Maoyangui/godusevpn/internal/paths"
 )
 
 const DisplayName = "佛跳墙"
@@ -103,6 +105,107 @@ TimeoutStopSec=15
 WantedBy=multi-user.target
 `
 
+// 开机闸:nft 的表、sysctl 改的网卡 IPv6 都不过重启,开机到服务起来之间要靠它 —— 早于联网把落盘的闸装上、
+// 按备份先停网卡 IPv6(见 netmode.ApplyBootGuard)。两个文件都不在(没在严格全局、没停过网卡 IPv6)就整个跳过:
+// ConditionPathExists 前面的 | 是"任一满足"。
+const guardName = name + "-guard"
+
+const systemdGuardUnit = `[Unit]
+Description=佛跳墙开机闸 (godusevpn)
+DefaultDependencies=no
+After=local-fs.target
+Before=network-pre.target shutdown.target
+Wants=network-pre.target
+Conflicts=shutdown.target
+RequiresMountsFor=%[2]s %[3]s
+ConditionPathExists=|%[2]s/guard-boot.nft
+ConditionPathExists=|%[2]s/nic-ipv6-backup.json
+
+[Service]
+Type=oneshot
+ExecStart=%[1]s boot-guard
+RemainAfterExit=yes
+
+[Install]
+WantedBy=sysinit.target
+`
+
+// procdGuardScript OpenWrt:network 是 START=20,同为 19 的 firewall(fw4 只重建自己那张表)按名字排在前面。只在开机时做。
+const procdGuardScript = `#!/bin/sh /etc/rc.common
+# 佛跳墙开机闸 (godusevpn)
+START=19
+
+boot() {
+	%s boot-guard
+}
+
+start() {
+	return 0
+}
+`
+
+func guardUnitPath(k initKind) string {
+	switch k {
+	case initSystemd:
+		return "/etc/systemd/system/" + guardName + ".service"
+	case initProcd:
+		return "/etc/init.d/" + guardName
+	}
+	return ""
+}
+
+// guardUnitText 当前版本的开机闸单元;Entware 做不到开机闸(/opt 挂得比联网晚),给空。
+func guardUnitText(k initKind, exe string) string {
+	switch k {
+	case initSystemd:
+		return fmt.Sprintf(systemdGuardUnit, exe, paths.DataDir(), filepath.Dir(exe))
+	case initProcd:
+		return fmt.Sprintf(procdGuardScript, exe)
+	}
+	return ""
+}
+
+// ensureGuardUnit 开机闸单元在且是当前内容、启用着;内容不同才写。
+func ensureGuardUnit(k initKind, exe string) error {
+	text, p := guardUnitText(k, exe), guardUnitPath(k)
+	if text == "" {
+		return nil
+	}
+	if b, err := os.ReadFile(p); err != nil || string(b) != text {
+		mode := os.FileMode(0o644)
+		if k == initProcd {
+			mode = 0o755
+		}
+		if err := os.WriteFile(p, []byte(text), mode); err != nil {
+			return err
+		}
+		if k == initSystemd {
+			if _, err := sh("systemctl", "daemon-reload"); err != nil {
+				return err
+			}
+		}
+	}
+	if k == initSystemd {
+		_, err := sh("systemctl", "enable", guardName)
+		return err
+	}
+	_, err := sh(p, "enable")
+	return err
+}
+
+func removeGuardUnit(k initKind) {
+	p := guardUnitPath(k)
+	if p == "" || !exists(p) {
+		return
+	}
+	if k == initSystemd {
+		_, _ = sh("systemctl", "disable", guardName)
+	} else {
+		_, _ = sh(p, "disable")
+	}
+	_ = os.Remove(p)
+}
+
 const procdScript = `#!/bin/sh /etc/rc.common
 # 佛跳墙 (godusevpn)
 START=99
@@ -170,7 +273,7 @@ func Install(exe string) error {
 	if err := needRoot(); err != nil {
 		return err
 	}
-	switch detect() {
+	switch k := detect(); k {
 	case initSystemd:
 		if err := os.WriteFile(unitPath(), []byte(fmt.Sprintf(systemdUnit, exe)), 0o644); err != nil {
 			return err
@@ -178,14 +281,18 @@ func Install(exe string) error {
 		if _, err := sh("systemctl", "daemon-reload"); err != nil {
 			return err
 		}
-		_, err := sh("systemctl", "enable", name)
-		return err
+		if _, err := sh("systemctl", "enable", name); err != nil {
+			return err
+		}
+		return ensureGuardUnit(k, exe)
 	case initProcd:
 		if err := os.WriteFile(unitPath(), []byte(fmt.Sprintf(procdScript, exe)), 0o755); err != nil {
 			return err
 		}
-		_, err := sh(unitPath(), "enable")
-		return err
+		if _, err := sh(unitPath(), "enable"); err != nil {
+			return err
+		}
+		return ensureGuardUnit(k, exe)
 	case initEntware:
 		// rc.func 按名字找进程,程序必须叫 godusevpn 且在 /opt/bin 里
 		target := "/opt/bin/" + name
@@ -206,16 +313,18 @@ func Uninstall() error {
 		return err
 	}
 	_ = Stop()
-	switch detect() {
+	switch k := detect(); k {
 	case initSystemd:
 		_, _ = sh("systemctl", "disable", name)
 		_ = os.Remove(unitPath())
+		removeGuardUnit(k)
 		_, _ = sh("systemctl", "daemon-reload")
 	case initProcd:
 		if exists(unitPath()) {
 			_, _ = sh(unitPath(), "disable")
 		}
 		_ = os.Remove(unitPath())
+		removeGuardUnit(k)
 	case initEntware:
 		if _, err := exec.LookPath("cru"); err == nil {
 			_, _ = sh("cru", "d", name) // 看门狗定时
@@ -227,11 +336,25 @@ func Uninstall() error {
 }
 
 // Refresh 守护进程每次启动时调:面板自更新只换程序文件、不重跑 install,旧版装下的启动脚本会一直留着。
-// 只动已经装好的(手动 `godusevpn run`、没装服务的不碰)。目前要跟上的只有 Entware 的脚本(看门狗):
-// 它不带程序路径,和当前模板不同就按原来的开关状态重写(先写临时文件再改名:脚本可能正被 sh 读着),
+// 只动已经装好的(手动 `godusevpn run`、没装服务的不碰)。systemd / procd 补上开机闸单元;
+// Entware 的脚本(看门狗)不带程序路径,和当前模板不同就按原来的开关状态重写(先写临时文件再改名:脚本可能正被 sh 读着),
 // 再补上看门狗定时 —— 服务正在起,说明用户没停它。
 func Refresh() error {
-	if detect() != initEntware || !exists(unitPath()) {
+	k := detect()
+	if !exists(unitPath()) {
+		return nil
+	}
+	if k == initSystemd || k == initProcd {
+		exe, err := os.Executable()
+		if err != nil {
+			return err
+		}
+		if p, err := filepath.EvalSymlinks(exe); err == nil {
+			exe = p
+		}
+		return ensureGuardUnit(k, exe)
+	}
+	if k != initEntware {
 		return nil
 	}
 	b, err := os.ReadFile(unitPath())

@@ -129,3 +129,19 @@ func TestDNSPortOnly(t *testing.T) {
 		t.Fatal("端口范围不对也要认出来")
 	}
 }
+
+// 开机挡路由器通告:只挡进来的通告(别的 ICMPv6、邻居发现照常),单独一张表,守护进程对完账整张删掉。
+func TestBootRARuleset(t *testing.T) {
+	for _, want := range []string{
+		"table inet godusevpn_boot_ra {}\ndelete table inet godusevpn_boot_ra\ntable inet godusevpn_boot_ra {",
+		"type filter hook input priority filter; policy accept;",
+		"icmpv6 type nd-router-advert drop",
+	} {
+		if !strings.Contains(bootRARuleset, want) {
+			t.Fatalf("少了 %q:\n%s", want, bootRARuleset)
+		}
+	}
+	if strings.Count(bootRARuleset, "drop") != 1 || strings.Contains(bootRARuleset, "hook output") {
+		t.Fatalf("只挡进来的路由器通告:\n%s", bootRARuleset)
+	}
+}

@@ -6,7 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 
@@ -15,6 +17,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/Maoyangui/godusevpn/internal/builder"
+	"github.com/Maoyangui/godusevpn/internal/paths"
 )
 
 // Linux 用 nftables:一张 inet 表,output 链管本机发出的包,forward 链管经本机转发的包(网关模式的局域网设备,
@@ -127,8 +130,57 @@ func ApplyGuard(spec GuardSpec) error {
 	}
 	dnsSealed = dns
 	guardWarn = why
+	// 开机版落盘:nft 的表不过重启,开机到服务起来之间由开机单元先装上它(见 BootGuardFile)。
+	// 拦 DNS 那几条总是带上:开机时没有隧道,DNS 本来就不该出去
+	if err := writeAtomic(BootGuardFile(), []byte(guardRuleset(spec, true)), 0o600); err != nil {
+		if guardWarn != "" {
+			guardWarn += ";"
+		}
+		guardWarn += "开机闸没落盘(" + err.Error() + "):重启后到服务起来之前没有闸"
+	}
 	return nil
 }
+
+// BootGuardFile 开机版的闸。闸装上时写、撤闸时删(手动断开、换模式、改设置、卸载才撤闸;崩溃、断电不会),
+// 开机时早于联网的单元(godusevpn-guard,见 svc)看到它就先装上;服务起来后自己的 ApplyGuard 用同名表
+// 整表替换(nft 事务),中间没有空档。
+func BootGuardFile() string { return filepath.Join(paths.DataDir(), "guard-boot.nft") }
+
+// ApplyBootGuard 开机单元调:有开机版的闸就装上;网卡 IPv6 该关着(有备份)就把此刻已经在的网卡先停掉 v6,
+// 并挡住路由器通告(见 bootRARuleset)。
+func ApplyBootGuard() error {
+	nftMu.Lock()
+	defer nftMu.Unlock()
+	var errs []string
+	if NICIPv6Off() {
+		BootNICIPv6()
+		cmd := exec.Command("nft", "-f", "-")
+		cmd.Stdin = strings.NewReader(bootRARuleset)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			errs = append(errs, nftError("nft 挡路由器通告", err, out).Error())
+		}
+	}
+	if _, err := os.Stat(BootGuardFile()); err == nil {
+		if out, err := exec.Command("nft", "-f", BootGuardFile()).CombinedOutput(); err != nil {
+			errs = append(errs, nftError("nft 装开机闸", err, out).Error())
+		}
+	}
+	if len(errs) > 0 {
+		return errors.New(strings.Join(errs, "; "))
+	}
+	return nil
+}
+
+// bootRATable 开机时网卡 IPv6 该关着,却会被 systemd-networkd / NetworkManager 配置网卡时改回开(disable_ipv6=0);
+// 到守护进程起来重新停用之前这几秒,路由器通告一到,网卡就拿到公网 v6 地址。开机单元先把通告挡在门外,
+// 守护进程把网卡重新停用之后撤掉(DropBootRA);停用没做成就一直挡着。
+const bootRATable = "godusevpn_boot_ra"
+
+var bootRARuleset = "table inet " + bootRATable + " {}\ndelete table inet " + bootRATable + "\ntable inet " + bootRATable + " {\n" +
+	"\tchain input {\n\t\ttype filter hook input priority filter; policy accept;\n\t\ticmpv6 type nd-router-advert drop\n\t}\n}\n"
+
+// DropBootRA 撤掉开机时挡路由器通告的表(没有也无妨)。
+func DropBootRA() { _ = exec.Command("nft", "delete", "table", "inet", bootRATable).Run() }
 
 // GuardTunUp 隧道网卡起来之后,给 DNS 的那张表补上"默认走隧道网卡"。放行本身按网卡名,不用等网卡。
 func GuardTunUp(spec GuardSpec) error {
@@ -158,7 +210,12 @@ func ClearGuard() error {
 	if !nftMissing(out, err) {
 		return nftError("nft 确认闸状态失败", err, out)
 	}
-	unsealDNS() // 闸没了,DNS 的策略路由也撤:留着也不漏(隧道不在时落回主表),只是没用了
+	// 开机版也删:不然下次开机闸又回来了(那时服务对账会再撤,但开机到服务起来之间白断一阵网)
+	if err := os.Remove(BootGuardFile()); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("删除开机闸 %s: %w", BootGuardFile(), err)
+	}
+	DropBootRA() // 守护进程没起来过就卸载 / 恢复网络时,开机挡路由器通告的表也一起撤
+	unsealDNS()  // 闸没了,DNS 的策略路由也撤:留着也不漏(隧道不在时落回主表),只是没用了
 	dnsSealed, guardWarn = false, ""
 	return nil
 }
@@ -281,9 +338,8 @@ func GuardWarning() string {
 	return guardWarn
 }
 
-// Linux nftables rules are runtime state.  They are not restored before the
-// network stack can emit traffic after a reboot, so strict global mode must
-// refuse to start until a boot-time firewall integration is installed.
+// BootGuardReady 只有 Windows 拿它核查开机那组过滤器。Linux 的 nft 表不过重启,开机到服务起来之间由
+// godusevpn-guard 单元按 BootGuardFile 先装上(OpenWrt 是同名的 init 脚本);Entware(梅林)的 /opt 挂得比联网晚,做不到。
 func BootGuardReady() (bool, error) { return false, nil }
 
 // GuardInstallable 这个平台的闸是不是由我们自己装、并且装完能核查。
@@ -292,7 +348,7 @@ func BootGuardReady() (bool, error) { return false, nil }
 // 硬核查只会把连接整个挡死,而用户挡不住就会去把「全局禁直连」关掉,反倒更不私密。
 func GuardInstallable() bool { return true }
 
-// Linux currently has no daemon-independent boot-time guard.
+// GuardPersistentSupported Linux 没有 Windows 那种由系统保管、能核查装没装全的持久组(开机那段见 BootGuardFile)。
 func GuardPersistentSupported() bool      { return false }
 func GuardPersistentReady() (bool, error) { return false, nil }
 

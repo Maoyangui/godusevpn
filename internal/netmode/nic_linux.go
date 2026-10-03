@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/Maoyangui/godusevpn/internal/paths"
@@ -115,6 +116,7 @@ func DisableNICIPv6(tunName string) error {
 	if err := writeNICBackup(record); err != nil {
 		return fmt.Errorf("保存 IPv6 备份: %w", err)
 	}
+	confErr := writeNICSysctl(record) // 重启后也保持停用
 	done := map[string]bool{}
 	for n := range saved {
 		if err := os.WriteFile(filepath.Join(v6ConfDir, n, "disable_ipv6"), []byte("1\n"), 0o644); err != nil {
@@ -139,7 +141,11 @@ func DisableNICIPv6(tunName string) error {
 			errs = append(errs, n+": 校验失败: "+err.Error())
 		}
 	}
-	return nicResult(tunName, errs)
+	err = nicResult(tunName, errs)
+	if err == nil && confErr != nil {
+		addNICWarning("重启后保持停用的配置没写进去(" + confErr.Error() + "):重启后到服务起来之前,网卡 IPv6 会先开着")
+	}
+	return err
 }
 
 func RestoreNICIPv6() error {
@@ -156,6 +162,7 @@ func RestoreNICIPv6() error {
 		if err != nil {
 			why = err.Error()
 		}
+		_ = writeNICSysctl(nil) // 原值没了,别让它每次开机都把网卡 IPv6 关掉
 		return nicRestoreCorrupt(nicBackup(), why)
 	}
 	// 备份里的网卡可能已经不在了(拔掉 USB 网卡、关掉虚拟机让 tap/veth 消失、ppp 断开)。
@@ -193,7 +200,12 @@ func RestoreNICIPv6() error {
 		// 还原不了的留在备份里下次接着试;已经还原好的和已经消失的剔出去,免得同一张网卡
 		// 把后面的永远挡住。写不回去也只是下次多试一遍,不改变"还没还原干净"这个结论。
 		_ = writeNICBackup(left)
+		_ = writeNICSysctl(left)
 		return fmt.Errorf("还原网卡 IPv6: %s", strings.Join(errs, "; "))
+	}
+	// 先删重启后保持停用的配置、再删备份:配置删不掉时留着备份,下次还原接着删
+	if err := writeNICSysctl(nil); err != nil {
+		return fmt.Errorf("删除重启后保持停用的配置: %w", err)
 	}
 	if err := os.Remove(nicBackup()); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("删除 IPv6 备份: %w", err)
@@ -214,3 +226,77 @@ func NICIPv6Off() bool {
 
 // NICIPv6Manageable 这台机器能不能动物理网卡的 IPv6。
 func NICIPv6Manageable() bool { return true }
+
+// NICIPv6Drifted 备份里记着的网卡,有没有 IPv6 又被打开的。sysctl 改的值不过重启;systemd-networkd、NetworkManager
+// 配置网卡时也会按自己的配置把 disable_ipv6 改回 0(真机重启实测:开机闸关上,networkd 起来又打开)。
+// 只认读得到、值是 0 的;网卡不在了不算。
+func NICIPv6Drifted() bool {
+	b, err := os.ReadFile(nicBackup())
+	if err != nil {
+		return false
+	}
+	var saved map[string]string
+	if json.Unmarshal(b, &saved) != nil {
+		return false
+	}
+	for n := range saved {
+		cur, err := os.ReadFile(filepath.Join(v6ConfDir, n, "disable_ipv6"))
+		if err == nil && strings.TrimSpace(string(cur)) == "0" {
+			return true
+		}
+	}
+	return false
+}
+
+// nicSysctlConf 停用期间让这些网卡重启后也保持停用。sysctl 改的值不过重启:不写这份配置的话,重启后到服务起来之前
+// 网卡会先拿到公网 v6 地址。systemd 在开机时、以及每张网卡出现时(开机晚出现的、被改名的也算)都按 sysctl.d 设一遍,
+// 比守护进程起来再关早得多。只在 systemd 的系统上写;OpenWrt 由开机闸的脚本按备份先关一遍(BootNICIPv6)。
+const nicSysctlConf = "/etc/sysctl.d/90-godusevpn-ipv6.conf"
+
+// writeNICSysctl 按备份里的网卡重写那份配置;record 为空就删掉。
+func writeNICSysctl(record map[string]string) error {
+	if len(record) == 0 {
+		if err := os.Remove(nicSysctlConf); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+		return nil
+	}
+	if _, err := os.Stat("/run/systemd/system"); err != nil {
+		return nil
+	}
+	return writeAtomic(nicSysctlConf, []byte(nicSysctlText(record)), 0o644)
+}
+
+func nicSysctlText(record map[string]string) string {
+	names := make([]string, 0, len(record))
+	for n := range record {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	var b strings.Builder
+	b.WriteString("# 佛跳墙连着时停用了这些网卡的 IPv6,重启后也保持停用;断开、卸载时佛跳墙会删掉本文件。\n")
+	for _, n := range names {
+		// 用斜杠写法:网卡名里的点(eth0.100 这类 VLAN)按原样,不会被当成分隔符
+		fmt.Fprintf(&b, "net/ipv6/conf/%s/disable_ipv6 = 1\n", n)
+	}
+	return b.String()
+}
+
+// DropNICReboot 卸载时调:还原没做成的网卡也不再在开机时被关掉。
+func DropNICReboot() { _ = writeNICSysctl(nil) }
+
+// BootNICIPv6 开机闸的脚本调:按备份把此刻已经在的网卡先停掉 v6,备份不动(守护进程起来后照常对账)。
+// systemd 上 sysctl.d 已经做过,这里再做一遍无妨。
+func BootNICIPv6() {
+	b, err := os.ReadFile(nicBackup())
+	if err != nil {
+		return
+	}
+	var saved map[string]string
+	if json.Unmarshal(b, &saved) != nil {
+		return
+	}
+	for n := range saved {
+		_ = os.WriteFile(filepath.Join(v6ConfDir, n, "disable_ipv6"), []byte("1\n"), 0o644)
+	}
+}

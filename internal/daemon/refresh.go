@@ -308,9 +308,6 @@ func (d *Daemon) applyGuard(okMsg string) {
 	if w := netmode.GuardWarning(); w != "" {
 		d.logf("全局禁直连:%s", w)
 	}
-	if w := netmode.NICWarning(); w != "" {
-		d.logf("网卡 IPv6:%s", w)
-	}
 	if w := netmode.RouteWarning(); w != "" {
 		d.logf("回包路由:%s", w)
 	}

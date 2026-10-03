@@ -11,8 +11,9 @@ BIN="${2:-/usr/local/bin/godusevpn}"
 fail=0
 # check 名字 计数/布尔 说明:第二个参数大于 0 算通过
 check() { if [ "${2:-0}" -gt 0 ] 2>/dev/null; then printf '[PASS] %s  %s\n' "$1" "$3"; else printf '[FAIL] %s  %s\n' "$1" "$3"; fail=$((fail+1)); fi; }
-# 上次可能还连着(开机自动重连),先停干净再量"连接前"的基线
-"$BIN" uninstall >/dev/null 2>&1; rm -f /var/lib/godusevpn/state.json; sleep 2
+# 上次可能还连着(开机自动重连),先停干净再量"连接前"的基线。上次的内核日志也删:"绕圈"检查读日志末尾,
+# 会读到上次切到全局模式时(本该走代理)的连接
+"$BIN" uninstall >/dev/null 2>&1; rm -f /var/lib/godusevpn/state.json /var/lib/godusevpn/logs/core.log*; sleep 2
 pub4() { curl -s -4 --max-time 15 https://api.ipify.org; }
 pub6() { curl -s -6 --max-time 8 https://api6.ipify.org; }
 resolve() { getent hosts "$1" | awk '{print $1; exit}'; }
@@ -37,6 +38,7 @@ i=0; while [ $i -lt 10 ] && ! curl -s --max-time 2 http://127.0.0.1:9800/api/pin
 check "面板可达" "$(curl -s --max-time 5 http://127.0.0.1:9800/api/ping | grep -c version)" "$(curl -s --max-time 5 http://127.0.0.1:9800/api/ping)"
 
 echo "== 2. 订阅与连接"
+"$BIN" mode rule >/dev/null 2>&1 # 设置跨卸载留着:上次停在全局 / 直连模式的话,下面按规则模式的检查全红
 p=$("$BIN" profile "$SUB" 2>&1); check "订阅拉取" "$(echo "$p" | grep -c '个节点')" "$(echo "$p" | head -1)"
 ( sleep 420; "$BIN" disconnect >/dev/null 2>&1; systemctl stop godusevpn 2>/dev/null; "$BIN" guard clear >/dev/null 2>&1 || nft delete table inet godusevpn_guard 2>/dev/null; rm -f /var/lib/godusevpn/state.json ) >/dev/null 2>&1 &
 deadman=$!
@@ -149,6 +151,41 @@ if [ -n "$ns" ] && [ -n "$U" ] && command -v dig >/dev/null 2>&1; then
 else
   echo "  (没有可用的上游 DNS / dig / 普通用户:跳过 DNS 进隧道与空档拦截的实测)"
 fi
+# 开机闸:nft 的表不过重启。模拟开机 —— 服务停掉、表删掉,再跑一次开机闸单元:表要回来(带拦 DNS),
+# 普通用户按网卡绑物理网卡照样出不去;之后服务起来接着连。单元语法用 systemd-analyze 核
+if command -v systemctl >/dev/null 2>&1; then
+  check "开机闸单元装好并启用" "$(systemctl is-enabled godusevpn-guard 2>/dev/null | grep -c '^enabled')" "$(systemctl is-enabled godusevpn-guard 2>&1)"
+  va=$(systemd-analyze verify /etc/systemd/system/godusevpn-guard.service 2>&1 | grep 'godusevpn-guard')
+  check "开机闸单元语法" "$([ -z "$va" ] && echo 1 || echo 0)" "$va"
+  check "严格全局下开机版的闸已落盘" "$([ -f /var/lib/godusevpn/guard-boot.nft ] && echo 1 || echo 0)" ""
+  systemctl stop godusevpn; sleep 2; nft delete table inet godusevpn_guard 2>/dev/null
+  check "模拟开机:闸表没了" "$([ -z "$(nft list table inet godusevpn_guard 2>/dev/null)" ] && echo 1 || echo 0)" ""
+  systemctl restart godusevpn-guard
+  br=$(nft list table inet godusevpn_guard 2>/dev/null)
+  check "开机闸单元把闸装回来(带拦 DNS)" "$(echo "$br" | grep -c 'dport { 53, 853 } drop')" "$(systemctl status godusevpn-guard --no-pager 2>&1 | tail -3 | tr '\n' ';')"
+  if [ "$direct_ok" = 1 ]; then
+    d=$(su -s /bin/sh "$U" -c "curl -s --interface $defif -m 6 -o /dev/null -w '%{http_code}' http://1.1.1.1/cdn-cgi/trace" 2>/dev/null || true)
+    case "$d" in 2*|3*) bb=0;; *) bb=1;; esac
+    check "开机闸在、服务没起时普通用户绑物理网卡出不去" "$bb" "http=${d:-000}"
+  fi
+  # 网卡 IPv6 该关着时,开机单元还会挡住路由器通告(networkd / NetworkManager 起来会把网卡 IPv6 改回开)
+  if [ -f /var/lib/godusevpn/nic-ipv6-backup.json ]; then
+    check "开机时挡住路由器通告" "$(nft list table inet godusevpn_boot_ra 2>/dev/null | grep -c 'nd-router-advert drop')" ""
+  fi
+  systemctl start godusevpn
+  check "服务起来后接着连上" "$(wait_status connected 60 && echo 1 || echo 0)" "$("$BIN" status | sed -n 2p)"
+  check "服务对完账撤掉了挡路由器通告的表" "$([ -z "$(nft list table inet godusevpn_boot_ra 2>/dev/null)" ] && echo 1 || echo 0)" ""
+fi
+# 网卡 IPv6 被系统网络配置改回开(重启、networkd 重新配置网卡时会这样):巡检几秒内重新停用
+if [ -f /var/lib/godusevpn/nic-ipv6-backup.json ] && [ -n "$defif" ] && [ -f "/proc/sys/net/ipv6/conf/$defif/disable_ipv6" ]; then
+  echo 0 > "/proc/sys/net/ipv6/conf/$defif/disable_ipv6"
+  i=0; while [ $i -lt 15 ] && [ "$(cat /proc/sys/net/ipv6/conf/$defif/disable_ipv6)" = 0 ]; do sleep 1; i=$((i+1)); done
+  check "网卡 IPv6 被改回开后几秒内重新停用" "$([ "$(cat /proc/sys/net/ipv6/conf/$defif/disable_ipv6)" = 1 ] && echo 1 || echo 0)" "${i} 秒"
+fi
+# 网卡 IPv6 关着时,重启后也要保持关着:systemd 开机和每张网卡出现时都按 sysctl.d 设一遍
+if [ -f /var/lib/godusevpn/nic-ipv6-backup.json ] && [ -d /run/systemd/system ]; then
+  check "重启后保持停用的网卡 IPv6 配置已写" "$(grep -c 'disable_ipv6 = 1' /etc/sysctl.d/90-godusevpn-ipv6.conf 2>/dev/null)" "$(tr '\n' ';' < /etc/sysctl.d/90-godusevpn-ipv6.conf 2>/dev/null)"
+fi
 # 网卡 IPv6 备份:往里塞一张根本不存在的网卡。断开时的还原必须跳过它、把其它网卡照常还原、并把备份删干净 ——
 # m29 曾在这一步整体失败,备份永远删不掉、卸载永远跑不完。
 NICB=/var/lib/godusevpn/nic-ipv6-backup.json; nicb=0
@@ -166,6 +203,7 @@ check "切回规则模式成功" "$("$BIN" mode rule >/dev/null 2>&1 && echo 1 |
 sleep 2
 check "切回规则模式后闸表清空" "$([ -z "$(nft list table inet godusevpn_guard 2>/dev/null)" ] && echo 1 || echo 0)" "$(nft list table inet godusevpn_guard 2>/dev/null | head -3 | tr '\n' ';')"
 check "撤闸后 DNS 的策略路由也撤了" "$([ "$(ip rule show | grep -c 'lookup 5053')" = 0 ] && echo 1 || echo 0)" "$(ip rule show | grep 5053 | tr '\n' ';')"
+check "撤闸后开机版的闸也删了" "$([ ! -f /var/lib/godusevpn/guard-boot.nft ] && echo 1 || echo 0)" ""
 check "规则模式恢复连接" "$(wait_status connected 15 && echo 1 || echo 0)" ""
 
 echo "== 4. 出口"
@@ -194,6 +232,7 @@ check "断开后回包标记的 nft 表撤掉" "$([ -z "$(nft list table ip godu
 after=$(pub4); check "断开后出口恢复" "$([ "$after" = "$before" ] && echo 1 || echo 0)" "after=$after"
 if [ "$nicb" = 1 ]; then
   check "断开后网卡 IPv6 备份已清理(含那张不存在的网卡)" "$([ ! -f "$NICB" ] && echo 1 || echo 0)" "$(cat "$NICB" 2>/dev/null)"
+  check "断开后重启保持停用的配置也删了" "$([ ! -f /etc/sysctl.d/90-godusevpn-ipv6.conf ] && echo 1 || echo 0)" ""
   check "服务日志记下了已消失的网卡" "$("$BIN" logs 80 2>/dev/null | grep -c '已经不在了')" ""
 fi
 echo

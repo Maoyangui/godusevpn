@@ -196,3 +196,6 @@ func NICIPv6Off() bool {
 
 // NICIPv6Manageable 这台机器能不能动物理网卡的 IPv6。
 func NICIPv6Manageable() bool { return true }
+
+// DropNICReboot 卸载时调。macOS 用 networksetup 关的 IPv6 存在系统网络设置里,没有另外的开机配置要删。
+func DropNICReboot() {}

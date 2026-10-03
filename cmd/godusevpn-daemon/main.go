@@ -118,6 +118,8 @@ func main() {
 				fmt.Println("卸载继续。要手动开回去:sysctl -w net.ipv6.conf.<网卡>.disable_ipv6=0")
 			}
 		}
+		// 没还原成的网卡也不再在开机时被关掉:卸载就是回到没装过的样子
+		netmode.DropNICReboot()
 		// 记录不在这里删(见 godusevpn-svc 的同一段):界面「修复」跑卸载时用户看不到输出;重装后首页照样提示
 		lost := netmode.NICLossNote()
 		if lost == "" && inc != nil {
@@ -136,6 +138,11 @@ func main() {
 			fail(err)
 		}
 		fmt.Println("已停止并删除自启;设置与数据保留在", paths.ConfDir(), "与", paths.DataDir())
+	case "boot-guard":
+		// 开机闸单元调:早于联网把落盘的闸装上、按备份先停网卡 IPv6;没有落盘的就什么都不做
+		if err := netmode.ApplyBootGuard(); err != nil {
+			fail(err)
+		}
 	case "start":
 		if err := svc.Start(); err != nil {
 			fail(err)

@@ -67,13 +67,55 @@ var pfTokenRe = regexp.MustCompile(`Token\s*:\s*(\d+)`)
 // pfTokens pfctl -E 拿到的引用记号,落盘:服务重启、或者由命令行撤闸时,都要拿得到上一个进程的记号才还得回去。
 func pfTokens() string { return filepath.Join(paths.DataDir(), "pf-tokens") }
 
+// bootWarn 开机版的闸没落盘的原因(pfMu 管着)。
+var bootWarn string
+
 func ApplyGuard(spec GuardSpec) error {
 	pfMu.Lock()
 	defer pfMu.Unlock()
+	rules := guardRules(spec)
 	cmd := exec.Command("pfctl", "-a", pfAnchor, "-f", "-")
-	cmd.Stdin = strings.NewReader(guardRules(spec))
+	cmd.Stdin = strings.NewReader(rules)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("pfctl 加载规则: %v: %s", err, strings.TrimSpace(string(out)))
+	}
+	if err := enablePF(); err != nil {
+		return err
+	}
+	// 开机版落盘:pf 的锚点规则不过重启,开机时由 LaunchDaemon 先装上(见 BootGuardFile)
+	bootWarn = ""
+	if err := writeAtomic(BootGuardFile(), []byte(rules), 0o600); err != nil {
+		bootWarn = "开机闸没落盘(" + err.Error() + "):重启后到服务起来之前没有闸"
+	}
+	return nil
+}
+
+// BootGuardFile 开机版的闸(锚点规则)。闸装上时写、撤闸时删(手动断开、换模式、改设置、卸载才撤闸;崩溃、断电不会),
+// 开机时 LaunchDaemon(com.maoyangui.godusevpn.guard,见 svc)看到它就先装上、打开 pf。
+// launchd 不保证它早于联网,只能把开机到服务起来之间的空档缩到最短。
+func BootGuardFile() string { return filepath.Join(paths.DataDir(), "guard-boot.pf") }
+
+// ApplyBootGuard 开机 LaunchDaemon 调:有开机版的闸就装上。开机时主规则集可能还没载入 —— 没有挂 com.apple/* 锚点的那行,
+// 我们的规则就不会被评估 —— 那就先按系统自己的 /etc/pf.conf 载入。网卡 IPv6 在 macOS 上用 networksetup 关,本来就过重启。
+func ApplyBootGuard() error {
+	rules, err := os.ReadFile(BootGuardFile())
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	pfMu.Lock()
+	defer pfMu.Unlock()
+	if main, err := exec.Command("pfctl", "-sr").Output(); err != nil || !mainRulesHookAnchor(string(main)) {
+		if out, err := exec.Command("pfctl", "-f", "/etc/pf.conf").CombinedOutput(); err != nil {
+			return fmt.Errorf("pfctl 载入 /etc/pf.conf: %v: %s", err, strings.TrimSpace(string(out)))
+		}
+	}
+	cmd := exec.Command("pfctl", "-a", pfAnchor, "-f", "-")
+	cmd.Stdin = strings.NewReader(string(rules))
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("pfctl 装开机闸: %v: %s", err, strings.TrimSpace(string(out)))
 	}
 	return enablePF()
 }
@@ -113,6 +155,11 @@ func ClearGuard() error {
 	if out, err := exec.Command("pfctl", "-a", pfAnchor, "-F", "all").CombinedOutput(); err != nil {
 		return fmt.Errorf("pfctl 清锚点: %v: %s", err, strings.TrimSpace(string(out)))
 	}
+	// 开机版也删:不然下次开机闸又回来了
+	if err := os.Remove(BootGuardFile()); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("删除开机闸 %s: %w", BootGuardFile(), err)
+	}
+	bootWarn = ""
 	// 把我们拿过的 pf 引用一份份还回去(别的程序拿的不动;还不掉的多半是 pf 已被 -d 过,记号早作废了)
 	if b, err := os.ReadFile(pfTokens()); err == nil {
 		for _, tok := range strings.Fields(string(b)) {
@@ -178,12 +225,15 @@ func mainRulesHookAnchor(rules string) bool {
 	return false
 }
 
-// GuardWarning macOS 一步装完,没有"装了一半"的情况。
-func GuardWarning() string { return "" }
+// GuardWarning 闸本身一步装完,没有"装了一半";只有开机版没落盘这一种保留。
+func GuardWarning() string {
+	pfMu.Lock()
+	defer pfMu.Unlock()
+	return bootWarn
+}
 
-// pf anchor rules are runtime state and this application does not own a
-// pre-network launchd hook.  Treat boot protection as unavailable rather than
-// claiming that a normal runtime anchor covers the reboot window.
+// BootGuardReady 只有 Windows 拿它核查开机那组过滤器。macOS 开机那段由 LaunchDaemon 按 BootGuardFile 装,
+// launchd 不保证早于联网,不当成"开机全程有闸"来报。
 func BootGuardReady() (bool, error) { return false, nil }
 
 // GuardInstallable 这个平台的闸是不是由我们自己装、并且装完能核查。
@@ -192,7 +242,7 @@ func BootGuardReady() (bool, error) { return false, nil }
 // 硬核查只会把连接整个挡死,而用户挡不住就会去把「全局禁直连」关掉,反倒更不私密。
 func GuardInstallable() bool { return true }
 
-// pf is installed by the running daemon and has no boot-time anchor guarantee.
+// GuardPersistentSupported macOS 没有 Windows 那种由系统保管、能核查装没装全的持久组(开机那段见 BootGuardFile)。
 func GuardPersistentSupported() bool      { return false }
 func GuardPersistentReady() (bool, error) { return false, nil }
 

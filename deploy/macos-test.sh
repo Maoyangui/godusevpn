@@ -173,9 +173,30 @@ gs=$("$BIN" guard status 2>&1)
 check "pf 被关掉后闸如实报没开" "$(echo "$gs" | grep -c '没开')" "$gs"
 "$BIN" mode rule >/dev/null 2>&1; "$BIN" mode global >/dev/null 2>&1; sleep 2
 check "重装闸时重新打开了 pf" "$(pfctl -s info 2>/dev/null | grep -c 'Status: Enabled')" "$("$BIN" guard status 2>&1)"
+# 开机闸:pf 的锚点规则不过重启。模拟开机 —— 服务停掉、锚点清空、pf 关掉(开机时就是这样),
+# 再让 launchd 跑一次开机闸的 LaunchDaemon:锚点和 pf 都要回来,普通用户绑物理网卡照样出不去;之后服务起来接着连
+BOOTPF="/Library/Application Support/godusevpn/data/guard-boot.pf"
+GPLIST=/Library/LaunchDaemons/com.maoyangui.godusevpn.guard.plist
+check "严格全局下开机版的闸已落盘" "$([ -f "$BOOTPF" ] && echo 1 || echo 0)" ""
+check "开机闸的 LaunchDaemon 装好了" "$(grep -c 'boot-guard' "$GPLIST" 2>/dev/null)" ""
+launchctl bootout system/com.maoyangui.godusevpn >/dev/null 2>&1; sleep 2
+pfctl -a com.apple/godusevpn -F all >/dev/null 2>&1; pfctl -d >/dev/null 2>&1
+check "模拟开机:锚点空、pf 关着" "$([ -z "$(pfctl -a com.apple/godusevpn -sr 2>/dev/null)" ] && ! pfctl -s info 2>/dev/null | grep -q 'Status: Enabled' && echo 1 || echo 0)" ""
+launchctl bootstrap system "$GPLIST" >/dev/null 2>&1; sleep 3
+check "开机闸把锚点装回来" "$(pfctl -a com.apple/godusevpn -sr 2>/dev/null | grep -c 'block drop out quick all')" "$(tail -3 /Library/Logs/godusevpn.guard.log 2>/dev/null | tr '\n' ';')"
+check "开机闸打开了 pf" "$(pfctl -s info 2>/dev/null | grep -c 'Status: Enabled')" ""
+if [ "$direct_ok" = 1 ]; then
+  db=$(sudo -u "$U" curl -s --interface "$dip" -m 6 -o /dev/null -w '%{http_code}' http://1.1.1.1/cdn-cgi/trace 2>/dev/null || true)
+  case "$db" in 2*|3*) bb=0;; *) bb=1;; esac
+  check "开机闸在、服务没起时普通用户绑物理网卡出不去" "$bb" "http=${db:-000}"
+fi
+launchctl bootout system/com.maoyangui.godusevpn.guard >/dev/null 2>&1
+launchctl bootstrap system /Library/LaunchDaemons/com.maoyangui.godusevpn.plist >/dev/null 2>&1
+check "服务起来后接着连上" "$(wait_status connected 60 && echo 1 || echo 0)" "$("$BIN" status | sed -n 2p)"
 check "切回规则模式成功" "$("$BIN" mode rule >/dev/null 2>&1 && echo 1 || echo 0)" ""
 sleep 2
 check "切回规则模式后锚点清空" "$([ -z "$(pfctl -a com.apple/godusevpn -sr 2>/dev/null)" ] && echo 1 || echo 0)" "$(pfctl -a com.apple/godusevpn -sr 2>/dev/null | tr '\n' ';')"
+check "撤闸后开机版的闸也删了" "$([ ! -f "$BOOTPF" ] && echo 1 || echo 0)" ""
 check "规则模式恢复连接" "$(wait_status connected 15 && echo 1 || echo 0)" ""
 
 echo "== 4. IPv6:关闭时必须是真拒绝,且不能绕过隧道出去"
@@ -240,7 +261,7 @@ check "断开后默认路由回到物理网卡" "$([ "$(ifaceFor 1.1.1.1)" = "$d
 after=$(pub4); check "断开后出口不再是节点" "$([ -n "$after" ] && [ "$after" != "$now" ] && echo 1 || echo 0)" "after=$after 节点出口=$now 连接前=$before"
 "$BIN" uninstall >/dev/null 2>&1
 check "卸载后 launchd 里没有了" "$(launchctl print system/com.maoyangui.godusevpn >/dev/null 2>&1 && echo 0 || echo 1)" ""
-check "卸载后 plist 删掉了" "$([ ! -f /Library/LaunchDaemons/com.maoyangui.godusevpn.plist ] && echo 1 || echo 0)" ""
+check "卸载后 plist 删掉了" "$([ ! -f /Library/LaunchDaemons/com.maoyangui.godusevpn.plist ] && [ ! -f /Library/LaunchDaemons/com.maoyangui.godusevpn.guard.plist ] && echo 1 || echo 0)" ""
 
 echo
 if [ $fail = 0 ]; then echo "全部通过"; else echo "$fail 项失败"; echo "== 断开前留的日志"; echo "$logs_tail"; fi

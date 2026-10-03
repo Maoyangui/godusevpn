@@ -113,6 +113,29 @@ func TestEntwareScriptRefreshKeepsEnabled(t *testing.T) {
 	}
 }
 
+// 开机闸单元:早于联网、不带默认依赖(否则会被排到联网之后),两个落盘文件任一在才跑,跑本程序的 boot-guard;
+// OpenWrt 的脚本排在 network(20)之前、只在开机时做。Entware 做不到,不给。
+func TestGuardUnitText(t *testing.T) {
+	u := guardUnitText(initSystemd, "/usr/local/bin/godusevpn")
+	for _, want := range []string{
+		"DefaultDependencies=no", "Before=network-pre.target", "Wants=network-pre.target",
+		"RequiresMountsFor=/var/lib/godusevpn /usr/local/bin",
+		"ConditionPathExists=|/var/lib/godusevpn/guard-boot.nft", "ConditionPathExists=|/var/lib/godusevpn/nic-ipv6-backup.json",
+		"Type=oneshot", "ExecStart=/usr/local/bin/godusevpn boot-guard", "WantedBy=sysinit.target",
+	} {
+		if !strings.Contains(u, want) {
+			t.Fatalf("systemd 开机闸单元少了 %q:\n%s", want, u)
+		}
+	}
+	p := guardUnitText(initProcd, "/usr/bin/godusevpn")
+	if !strings.Contains(p, "START=19") || !strings.Contains(p, "boot() {\n\t/usr/bin/godusevpn boot-guard\n}") || !strings.Contains(p, "start() {\n\treturn 0\n}") {
+		t.Fatalf("OpenWrt 开机闸脚本:要排在 network 之前、只在开机时做:\n%s", p)
+	}
+	if guardUnitText(initEntware, "/opt/bin/godusevpn") != "" {
+		t.Fatal("Entware 做不到开机闸")
+	}
+}
+
 // procd 的重试次数写 0 才是无限重拉:写 5 的话一小时内崩 5 次就永久停着,严格全局下闸还在、整个局域网断网。
 func TestProcdRespawnForever(t *testing.T) {
 	if !strings.Contains(procdScript, "procd_set_param respawn 3600 5 0") {

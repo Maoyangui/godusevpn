@@ -128,6 +128,15 @@ func TestInboundSessions(t *testing.T) {
 	}
 }
 
+// 重启后保持停用的 sysctl 配置:按名字排好、用斜杠写法(VLAN 网卡名里的点按原样)。
+func TestNICSysctlText(t *testing.T) {
+	s := nicSysctlText(map[string]string{"eth0.100": "0", "ens3": "0"})
+	want := "net/ipv6/conf/ens3/disable_ipv6 = 1\nnet/ipv6/conf/eth0.100/disable_ipv6 = 1\n"
+	if !strings.HasSuffix(s, want) || !strings.HasPrefix(s, "#") {
+		t.Fatalf("配置内容不对:\n%s", s)
+	}
+}
+
 // 地址集合按内容比,不看顺序:PPPoE 重拨、DHCP 换地址时才重做。
 func TestAddrKey(t *testing.T) {
 	if addrKey([]string{"b", "a"}) != addrKey([]string{"a", "b"}) || addrKey([]string{"a"}) == addrKey([]string{"a", "c"}) {

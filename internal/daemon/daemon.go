@@ -1150,6 +1150,12 @@ func (d *Daemon) syncNICIPv6() error {
 	d.nicMu.Lock()
 	defer d.nicMu.Unlock()
 	defer d.logNICWarning()
+	// 开机时停用没做成、挡着路由器通告的那张表(见 reconcileNICIPv6):这里停成了或还原了就撤,不然还原后网卡拿不到 v6 地址
+	defer func() {
+		if !d.nicDisablePending.Load() {
+			netmode.DropBootRA()
+		}
+	}()
 	d.mu.Lock()
 	hold := d.nicHold
 	d.mu.Unlock()
@@ -1168,7 +1174,7 @@ func (d *Daemon) syncNICIPv6() error {
 	// Keep its IPv6 protection until the replacement starts successfully; the
 	// final sync after RestartChecked then performs the requested restore.
 	if hold && on {
-		if want && (d.nicDisablePending.Load() || netmode.NICIPv6Leaking(builder.TunName)) {
+		if want && (d.nicDisablePending.Load() || netmode.NICIPv6Leaking(builder.TunName) || netmode.NICIPv6Drifted()) {
 			if err := netmode.DisableNICIPv6(builder.TunName); err != nil {
 				d.nicDisablePending.Store(true)
 				d.nicOff.Store(netmode.NICIPv6Off())
@@ -1182,8 +1188,9 @@ func (d *Daemon) syncNICIPv6() error {
 	if want && on {
 		// Partial adapter failure leaves a backup and may leave a public address.
 		// Retry the disable operation while connecting instead of treating the
-		// backup as proof that every adapter is protected.
-		if d.nicDisablePending.Load() || netmode.NICIPv6Leaking(builder.TunName) {
+		// backup as proof that every adapter is protected. Linux 上备份在也不等于还关着:
+		// 停用不过重启,networkd / NetworkManager 配置网卡时还会改回去(NICIPv6Drifted)。
+		if d.nicDisablePending.Load() || netmode.NICIPv6Leaking(builder.TunName) || netmode.NICIPv6Drifted() {
 			if err := netmode.DisableNICIPv6(builder.TunName); err != nil {
 				d.nicDisablePending.Store(true)
 				d.nicOff.Store(netmode.NICIPv6Off())
@@ -1240,6 +1247,13 @@ func (d *Daemon) logNICWarning() {
 func (d *Daemon) reconcileNICIPv6() {
 	d.nicMu.Lock()
 	defer d.nicMu.Unlock()
+	defer d.logNICWarning() // 网卡告警只经 logNICWarning 打(去重);开闸那条不再顺带打,免得把上回还原的旧话再说一遍
+	// 对完账撤掉开机单元挡路由器通告的表(Linux,见 netmode.DropBootRA);停用没做成就接着挡
+	defer func() {
+		if !d.nicDisablePending.Load() {
+			netmode.DropBootRA()
+		}
+	}()
 	d.nicOff.Store(netmode.NICIPv6Off()) // 有备份就说明上次关过还没还原
 	on := d.nicOff.Load()
 	// 机器刚启动时状态机还没 Connect,所以这里用落盘的连接意愿代替 machine.Wanted()
@@ -1285,8 +1299,9 @@ func (d *Daemon) reconcileNICIPv6() {
 		if !want {
 			return // 本来就不该关,也没关着
 		}
-		// 该关、也记着关过了:再看一眼真没漏(比如关机期间插了张新网卡),没漏就不必再跑一遍那段慢脚本
-		if !netmode.NICIPv6Leaking(builder.TunName) {
+		// 该关、也记着关过了:再看一眼真没漏(比如关机期间插了张新网卡)、也没被改回去(Linux 的停用不过重启,
+		// networkd / NetworkManager 配置网卡时还会打开 —— 真机重启实测),都没有就不必再跑一遍那段慢脚本
+		if !netmode.NICIPv6Leaking(builder.TunName) && !netmode.NICIPv6Drifted() {
 			d.logf("网卡 IPv6:上次连着关的机,一直关着")
 			return
 		}
@@ -1535,7 +1550,9 @@ func (d *Daemon) nicIPv6Loop(ctx context.Context) {
 			fails, quiet = 0, false
 			continue
 		}
-		if !netmode.NICIPv6Leaking(builder.TunName) {
+		leaking := netmode.NICIPv6Leaking(builder.TunName)
+		drifted := !leaking && netmode.NICIPv6Drifted()
+		if !leaking && !drifted {
 			if quiet {
 				d.logf("网卡的 IPv6 地址没有了,恢复正常盯着")
 			}
@@ -1546,7 +1563,11 @@ func (d *Daemon) nicIPv6Loop(ctx context.Context) {
 			continue
 		}
 		if !quiet {
-			d.logf("发现网卡上又有公网 IPv6 地址(多半是新接了一张网卡),重新停用")
+			if drifted {
+				d.logf("网卡的 IPv6 被系统网络配置重新打开了(networkd / NetworkManager 重新配置网卡时会这样),重新停用")
+			} else {
+				d.logf("发现网卡上又有公网 IPv6 地址(多半是新接了一张网卡),重新停用")
+			}
 		}
 		d.nicMu.Lock()
 		// 拿到锁再判一次:上面判完到这里,用户可能已经点了断开、断开那边刚还原完 —— 不复查就又关回去,
@@ -1564,8 +1585,10 @@ func (d *Daemon) nicIPv6Loop(ctx context.Context) {
 		} else {
 			d.nicOff.Store(true)
 			d.nicDisablePending.Store(false)
+			netmode.DropBootRA() // 开机时停用没做成、一直挡着的路由器通告,这会儿可以放了
 		}
 		d.nicMu.Unlock()
+		d.logNICWarning()
 		if err != nil {
 			d.logf("停用新网卡的 IPv6 失败: %v", err)
 		}
