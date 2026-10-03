@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- 默认(非中文系统)用英文,中文在 values-zh;两份键要一一对应 -->
+<!-- 默认(非中文系统)用英文,中文在 values-zh;两份键要一一对应。应用名是品牌,各语言都叫「佛跳墙」 -->
 <resources>
-    <string name="app_name">Fotiaoqiang</string>
+    <string name="app_name">佛跳墙</string>
     <string name="channel_vpn">Connection status</string>
     <string name="act_disconnect">Disconnect</string>
     <string name="st_connected">Connected</string>
