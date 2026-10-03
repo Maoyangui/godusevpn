@@ -80,6 +80,8 @@ type Daemon struct {
 	guardErr     string     // 闸该开却没开成的原因
 	guardNote    string     // 闸开着时平台这一层保护的保留(见 guardNoteNow)
 	guardNoteAt  time.Time  // 上次问 GuardWarning 的时间
+	protectWarn  string     // 系统网络保护(macOS 接管 DNS、Linux 回包规则)没做完的原因:隧道照常建立,巡检每半分钟重做
+	nicWarn      string     // 非严格模式下网卡 IPv6 没能停用:照常连,首页标出来(严格全局仍拒绝连接,见 nicReady)
 	persistedOK  bool       // persisted 状态文件可被可靠读取;未知时不撤保护、不自动连接
 	connOpMu     sync.Mutex // MConnect / MDisconnect 串行:两者交错会让落盘意愿与状态机相反
 	// settingsOK 设置文件读出来了。读不出来时用的是默认值,而默认值(模式=规则)会让
@@ -761,12 +763,15 @@ func (d *Daemon) start(cfg []byte) error {
 		return err
 	}
 	s := d.getSettings()
-	// 系统 DNS / 本机回包路由必须在数据面启动前完成。尤其是 macOS
-	// 的全局模式，接管失败时继续启动会让系统解析绕过隧道；备份和
-	// 接管失败都按隐私前置条件失败处理，状态机只会退避重试。
+	// 系统 DNS(macOS)/ 本机回包路由(Linux)在数据面启动前做。做不成也照常起:不起隧道时流量全部直连,
+	// 起着只会更少 —— 严格全局下闸照样拦着发往局域网的 DNS;规则 / 普通全局下系统解析可能直接问路由器,
+	// Linux 上经物理网卡连进来的远程登录可能回不去。所以如实标在首页,nicIPv6Loop 每半分钟重做一次。
 	if s.TUN {
 		if err := netmode.Protect(builder.TunName, s.IPv6); err != nil {
-			return state.Errf(state.CodePrivacyGuard, "建立系统网络保护失败,拒绝启动数据面: %v", err)
+			d.setProtectWarn(err.Error())
+			d.logf("系统网络保护没做完(隧道照常建立,半分钟后重做): %v", err)
+		} else {
+			d.setProtectWarn("")
 		}
 	}
 	// 内核启动时先读缓存里记着的模式与选中节点、盖过配置(见 core.PresetCache),起之前按这份配置对齐
@@ -1355,21 +1360,48 @@ func (d *Daemon) guardReady() error {
 
 // nicReady 网卡 IPv6 类核查。启动前没过就拒绝起数据面(只认"确证在漏"及停用没做成,见下)。
 func (d *Daemon) nicReady() error {
+	problem := ""
 	if d.nicIPv6Wanted() {
-		if d.nicDisablePending.Load() {
-			return state.Errf(state.CodePrivacyNIC, "网卡 IPv6 停用操作尚未完整成功")
-		}
-		if !d.nicOff.Load() {
-			return state.Errf(state.CodePrivacyNIC, "网卡 IPv6 未成功停用")
-		}
-		// 这里是**拒绝连接**的门,必须用确证谓词:NICIPv6Leaking 把"枚举失败 / 某张网卡读不到地址"
-		// 也算成在漏,一次瞬时的系统调用失败就能让人连不上,而且没有自愈路径。
-		// 别处那几个 NICIPv6Leaking 是"要不要再跑一遍昂贵的停用脚本",宁可多跑,保持不变。
-		if l := netmode.NICIPv6Leakers(builder.TunName); len(l) > 0 {
-			return state.Errf(state.CodePrivacyNIC, "%s", nicLeakMessage(l))
+		switch {
+		case d.nicDisablePending.Load():
+			problem = "网卡 IPv6 停用操作尚未完整成功"
+		case !d.nicOff.Load():
+			problem = "网卡 IPv6 未成功停用"
+		default:
+			// 这里是**拒绝连接**的门,必须用确证谓词:NICIPv6Leaking 把"枚举失败 / 某张网卡读不到地址"
+			// 也算成在漏,一次瞬时的系统调用失败就能让人连不上,而且没有自愈路径。
+			// 别处那几个 NICIPv6Leaking 是"要不要再跑一遍昂贵的停用脚本",宁可多跑,保持不变。
+			if l := netmode.NICIPv6Leakers(builder.TunName); len(l) > 0 {
+				problem = nicLeakMessage(l)
+			}
 		}
 	}
+	// 只有严格全局拒绝连接。规则 / 普通全局下拒绝等于连 IPv4 也全部直连,比连上、只露个 v6 地址更糟
+	// (v6 流量照样被隧道接住再拒绝):照常连,首页标出来,停用照旧在 nicIPv6Loop 里重试
+	s := d.getSettings()
+	strict := s.NoDirect && s.Mode == settings.ModeGlobal
+	d.mu.Lock()
+	d.nicWarn = ""
+	if problem != "" && !strict {
+		d.nicWarn = problem
+	}
+	d.mu.Unlock()
+	if problem != "" && strict {
+		return state.Errf(state.CodePrivacyNIC, "%s", problem)
+	}
 	return nil
+}
+
+func (d *Daemon) setProtectWarn(w string) {
+	d.mu.Lock()
+	d.protectWarn = w
+	d.mu.Unlock()
+}
+
+func (d *Daemon) protectWarnText() string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.protectWarn
 }
 
 // groupTest 让 auto 组测一轮全部节点并换到最快的,记下时间。sing-box 自己的定时测速在配置里关掉了
@@ -1457,10 +1489,18 @@ func (d *Daemon) nicIPv6Loop(ctx context.Context) {
 		// 顺带:连接时做的系统网络保护只按那一刻的状态做了一次 —— Linux 的回包规则按当时的地址(PPPoE 重拨、
 		// DHCP 换地址就对不上了),macOS 的 DNS 接管按当时的网络服务(新插的 USB 网卡、iPhone 共享没接进来)。变了就补做。
 		// 半分钟看一次:这个循环现在 5 秒一轮(盯网卡 IPv6),macOS 上列网络服务要起 networksetup,不该跟着 5 秒跑
-		if d.core.Running() && d.getSettings().TUN && time.Since(lastProtect) >= 30*time.Second {
+		if s := d.getSettings(); d.core.Running() && s.TUN && time.Since(lastProtect) >= 30*time.Second {
 			lastProtect = time.Now()
-			if redo, err := netmode.RefreshProtect(); redo {
+			if d.protectWarnText() != "" { // 连接时没做完(见 start):整套重做
+				if err := netmode.Protect(builder.TunName, s.IPv6); err != nil {
+					d.setProtectWarn(err.Error())
+				} else {
+					d.setProtectWarn("")
+					d.logf("系统网络保护已重做完成")
+				}
+			} else if redo, err := netmode.RefreshProtect(); redo {
 				if err != nil {
+					d.setProtectWarn(err.Error())
 					d.logf("本机地址 / 网络服务变了,重做系统网络保护没做完: %v", err)
 				} else {
 					d.logf("本机地址 / 网络服务变了,系统网络保护已按新的重做")
@@ -1811,6 +1851,7 @@ func (d *Daemon) stateView() ipc.StateView {
 	if v.Nodes == nil {
 		v.Nodes = []string{}
 	}
+	running, want := d.core.Running(), d.wantConnected() // 别在 d.mu 里问内核 / 状态机(各有各的锁)
 	d.mu.Lock()
 	if len(d.delays) > 0 {
 		v.Delays = make(map[string]int, len(d.delays))
@@ -1824,6 +1865,12 @@ func (d *Daemon) stateView() ipc.StateView {
 		v.Guard = "on"
 	}
 	v.GuardError = d.guardErr
+	if running { // 两条都是"连着时"的状况:断开后不再挂着
+		v.ProtectWarn = d.protectWarn
+	}
+	if want {
+		v.NICWarn = d.nicWarn
+	}
 	d.mu.Unlock()
 	if v.Guard == "on" && v.GuardError == "" {
 		v.GuardNote = d.guardNoteNow()

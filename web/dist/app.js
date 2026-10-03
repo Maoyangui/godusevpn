@@ -538,6 +538,7 @@ function renderHome(el) {
       <div class="status-sub" id="status-sub"></div>
       <div class="guard-pill" id="guard-pill" hidden></div>
       <div class="guard-pill warn" id="nic-pill" hidden></div>
+      <div class="guard-pill warn" id="privacy-pill" hidden></div>
     </div>
     <button class="idcard" id="id-card">
       <span class="flag none" id="id-flag">${ICON_GLOBE}</span>
@@ -615,6 +616,17 @@ function updateHome() {
     np.title = lost; // 胶囊里放不下全文时,悬停可以看全
     const ok = np.querySelector('#nic-ok');
     if (ok) ok.addEventListener('click', async () => { try { await App().DismissNICLost(); } catch (e) { toast(errText(e), 'err'); } });
+  }
+
+  // 隧道照常连着,但有一层保护没做成:系统网络保护(macOS 接管 DNS、Linux 回包规则),或规则 / 普通全局下网卡 IPv6 没停掉
+  const pp = $('#privacy-pill');
+  const warns = [];
+  if (v.protectWarn) warns.push(t('home.protectWarn') + ' · ' + v.protectWarn);
+  if (v.nicWarn) warns.push(t('home.nicWarn') + ' · ' + v.nicWarn);
+  if (pp) {
+    pp.hidden = !warns.length;
+    pp.innerHTML = warns.length ? ICON_WARN + `<span>${esc(warns.join('; '))}</span>` : '';
+    pp.title = warns.join('\n'); // 胶囊里放不下全文时,悬停可以看全
   }
 
   // 出口卡片:自动选择时显示实际落到的那个节点,底下是这条线路真正的出口地址

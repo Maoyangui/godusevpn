@@ -42,28 +42,32 @@ type ClashInfo struct {
 }
 
 type StateView struct {
-	Version    string            `json:"version"`
-	Protocol   int               `json:"protocol"`
-	State      state.Snapshot    `json:"state"`
-	Mode       string            `json:"mode"`              // rule / global / direct
-	Node       string            `json:"node"`              // proxy 组当前项
-	AutoNow    string            `json:"autoNow,omitempty"` // 自动选择组当前落在哪个节点(内核在跑时才有)
-	Nodes      []string          `json:"nodes"`
-	Delays     map[string]int    `json:"delays,omitempty"`     // 最近一次全节点测速(节点 → 毫秒,-1 不通);内核没跑时界面靠它显示
-	Ping       int               `json:"ping,omitempty"`       // 当前节点最近一次测得的延迟(毫秒):连上后立刻测一次,之后每次健康检查顺带更新
-	ExitIP     string            `json:"exitIp,omitempty"`     // 经当前节点出去时对外露出的地址;查不到就空着
-	ExitLoc    string            `json:"exitLoc,omitempty"`    // 出口所在国家的两位代码(US / ES …)
-	ExitCity   string            `json:"exitCity,omitempty"`   // 出口所在城市(英文,接口给什么就是什么)
-	ExitRegion string            `json:"exitRegion,omitempty"` // 出口所在一级行政区
-	ExitISP    string            `json:"exitIsp,omitempty"`    // 出口那条线路的运营商 / 机房
-	Uptime     int64             `json:"uptime"`
-	Guard      string            `json:"guard,omitempty"`      // 全局禁直连的闸:on = 开着;空 = 没开(开关关了、不是全局模式、或没在连)
-	GuardError string            `json:"guardError,omitempty"` // 闸该开却没开成(或隧道网卡放行失败)的原因
-	GuardNote  string            `json:"guardNote,omitempty"`  // 闸开着,但平台这一层保护不完整(Android 没开 lockdown、Windows 开机那组没装全)
-	NICLost    string            `json:"nicLost,omitempty"`    // 有几张网卡动手前的 IPv6 状态丢了、可能还关着;用户点"知道了"之前一直带着
-	Profile    *ProfileView      `json:"profile,omitempty"`    // 当前订阅
-	Profiles   []ProfileView     `json:"profiles"`             // 全部订阅
-	Settings   settings.Settings `json:"settings"`
+	Version    string         `json:"version"`
+	Protocol   int            `json:"protocol"`
+	State      state.Snapshot `json:"state"`
+	Mode       string         `json:"mode"`              // rule / global / direct
+	Node       string         `json:"node"`              // proxy 组当前项
+	AutoNow    string         `json:"autoNow,omitempty"` // 自动选择组当前落在哪个节点(内核在跑时才有)
+	Nodes      []string       `json:"nodes"`
+	Delays     map[string]int `json:"delays,omitempty"`     // 最近一次全节点测速(节点 → 毫秒,-1 不通);内核没跑时界面靠它显示
+	Ping       int            `json:"ping,omitempty"`       // 当前节点最近一次测得的延迟(毫秒):连上后立刻测一次,之后每次健康检查顺带更新
+	ExitIP     string         `json:"exitIp,omitempty"`     // 经当前节点出去时对外露出的地址;查不到就空着
+	ExitLoc    string         `json:"exitLoc,omitempty"`    // 出口所在国家的两位代码(US / ES …)
+	ExitCity   string         `json:"exitCity,omitempty"`   // 出口所在城市(英文,接口给什么就是什么)
+	ExitRegion string         `json:"exitRegion,omitempty"` // 出口所在一级行政区
+	ExitISP    string         `json:"exitIsp,omitempty"`    // 出口那条线路的运营商 / 机房
+	Uptime     int64          `json:"uptime"`
+	Guard      string         `json:"guard,omitempty"`      // 全局禁直连的闸:on = 开着;空 = 没开(开关关了、不是全局模式、或没在连)
+	GuardError string         `json:"guardError,omitempty"` // 闸该开却没开成(或隧道网卡放行失败)的原因
+	GuardNote  string         `json:"guardNote,omitempty"`  // 闸开着,但平台这一层保护不完整(Android 没开 lockdown、Windows 开机那组没装全)
+	NICLost    string         `json:"nicLost,omitempty"`    // 有几张网卡动手前的 IPv6 状态丢了、可能还关着;用户点"知道了"之前一直带着
+	// ProtectWarn 系统网络保护(macOS 接管 DNS、Linux 回包规则)没做完:隧道照常建立,巡检每半分钟重做
+	ProtectWarn string `json:"protectWarn,omitempty"`
+	// NICWarn 规则 / 普通全局下网卡 IPv6 没能停用:照常连着(严格全局下这种情况拒绝连接,不会走到这里)
+	NICWarn  string            `json:"nicWarn,omitempty"`
+	Profile  *ProfileView      `json:"profile,omitempty"` // 当前订阅
+	Profiles []ProfileView     `json:"profiles"`          // 全部订阅
+	Settings settings.Settings `json:"settings"`
 	// MissingRuleSets 本地还没有、因此这一轮被摘掉的规则集标签。用到它们的规则组暂时不生效,
 	// 界面要照实说一句 —— 规则开着却不起作用,用户是看不出来的。连上之后守护进程会自动补下来。
 	MissingRuleSets []string `json:"missingRuleSets,omitempty"`
