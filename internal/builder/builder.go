@@ -134,9 +134,11 @@ func BuildEx(in Input) ([]byte, Report, error) {
 }
 
 func buildConfig(in Input, rep *Report) ([]byte, error) {
-	android := in.Android || runtime.GOOS == "android"
-	darwin := in.Darwin || runtime.GOOS == "darwin"
-	linux := !android && !darwin && (in.Linux || runtime.GOOS == "linux")
+	// 指定了目标平台就按指定的生成,运行平台只在一个都没指定时兜底:不然在 Mac 上按 Linux 生成,运行平台的 darwin 会把它盖掉
+	explicit := in.Android || in.Darwin || in.Linux
+	android := in.Android || (!explicit && runtime.GOOS == "android")
+	darwin := in.Darwin || (!explicit && runtime.GOOS == "darwin")
+	linux := !android && !darwin && (in.Linux || (!explicit && runtime.GOOS == "linux"))
 	procKey := "process_name" // 桌面按进程名分流;Android 没有进程名,按应用包名
 	if android {
 		procKey = "package_name"
