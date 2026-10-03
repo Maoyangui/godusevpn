@@ -1,9 +1,11 @@
 package daemon
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
+	"github.com/Maoyangui/godusevpn/internal/profile"
 	"github.com/Maoyangui/godusevpn/internal/settings"
 	"github.com/Maoyangui/godusevpn/internal/state"
 )
@@ -75,13 +77,35 @@ func TestProtectFailureDoesNotBlockStart(t *testing.T) {
 }
 
 // 每次备配置都记下内核建不起来、被剔掉的节点(连全坏、配置失败的那次也记),状态里带给界面的节点列表标出来。
+// 只标当前订阅里名字和内容都没变的:换了订阅、或机场把节点改成能用的,不沿用上次连接时的判断。
 func TestUnsupportedNodesReachStateView(t *testing.T) {
 	src := readDaemonSource(t)
 	prep := funcBody(t, src, "func (d *Daemon) prepare(ctx context.Context) ([]byte, error) {")
-	before(t, prep, "d.unsupported = skipped", "if err != nil {\n\t\treturn nil, err\n\t}\n\td.noteMissingRuleSets", "剔掉的节点要在配置失败返回之前记下")
+	before(t, prep, "d.unsupported = bad", "if err != nil {\n\t\treturn nil, err\n\t}\n\td.noteMissingRuleSets", "剔掉的节点要在配置失败返回之前记下")
 	d := newPolicyTestDaemon(t)
-	d.unsupported = map[string]string{"老节点": "unknown outbound type: naive"}
-	if v := d.stateView(); v.Unsupported["老节点"] == "" {
+	naive := `{"type":"naive","tag":"老节点","server":"a.example","server_port":443}`
+	d.settings.Profiles = []settings.Profile{{ID: "a", Name: "甲", URL: "https://a.example/sub"}, {ID: "b", Name: "乙", URL: "https://b.example/sub"}}
+	d.settings.ActiveProfile = "a"
+	d.profiles["a"] = &profile.Profile{Tags: []string{"好节点", "老节点"}, Outbounds: []json.RawMessage{json.RawMessage(`{"type":"anytls","tag":"好节点"}`), json.RawMessage(naive)}}
+	d.unsupported = map[string]skippedNode{"老节点": {why: "unknown outbound type: naive", raw: naive}}
+	if v := d.stateView(); v.Unsupported["老节点"] == "" || len(v.Unsupported) != 1 {
 		t.Fatalf("状态里应带着被剔掉的节点: %+v", v.Unsupported)
+	}
+	// 刷新后内容没变(缓存换了一份新的):照样标着
+	d.profiles["a"] = &profile.Profile{Tags: []string{"老节点"}, Outbounds: []json.RawMessage{json.RawMessage(naive)}}
+	if v := d.stateView(); v.Unsupported["老节点"] == "" {
+		t.Fatal("内容没变的节点刷新后照样标着")
+	}
+	// 机场把它改成能用的类型:不再标
+	d.profiles["a"] = &profile.Profile{Tags: []string{"老节点"}, Outbounds: []json.RawMessage{json.RawMessage(`{"type":"hysteria2","tag":"老节点"}`)}}
+	if v := d.stateView(); len(v.Unsupported) != 0 {
+		t.Fatalf("内容变了不该沿用上次的判断: %+v", v.Unsupported)
+	}
+	// 换到另一条订阅,里面恰好有同名节点:不标
+	d.profiles["a"] = &profile.Profile{Tags: []string{"老节点"}, Outbounds: []json.RawMessage{json.RawMessage(naive)}}
+	d.profiles["b"] = &profile.Profile{Tags: []string{"老节点"}, Outbounds: []json.RawMessage{json.RawMessage(`{"type":"vless","tag":"老节点"}`)}}
+	d.settings.ActiveProfile = "b"
+	if v := d.stateView(); len(v.Unsupported) != 0 {
+		t.Fatalf("换了订阅不该沿用上一条订阅的判断: %+v", v.Unsupported)
 	}
 }

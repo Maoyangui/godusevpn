@@ -72,7 +72,7 @@ type Daemon struct {
 	fetchLink                  map[string]string           // 订阅 id → 拉取失败(404)时面板随响应给的「选购 / 续费」地址
 	refreshing                 map[string]*refreshCall     // 订阅 id → 正在跑的那次刷新:同一条订阅不叠第二条回退链
 	refreshQueued              map[string]bool             // 界面点的后台刷新:goroutine 还没登记进 refreshing 时也要显示"正在刷新"
-	unsupported                map[string]string           // 最近一次备配置时内核建不起来、被剔掉的节点(tag → 原因)
+	unsupported                map[string]skippedNode      // 最近一次备配置时内核建不起来、被剔掉的节点(tag → 原因与当时的出站)
 	running                    *profile.Profile            // 正在跑的内核是按哪份订阅生成的;刷新后拿它和缓存比,决定动不动隧道
 	prepared                   *profile.Profile            // prepare 刚按它生成了配置、内核还没起:start 成功后转成 running
 	guardOn                    bool                        // 「全局禁直连」的闸此刻开着
@@ -675,8 +675,18 @@ func (d *Daemon) prepare(ctx context.Context) ([]byte, error) {
 	for tag, why := range skipped {
 		d.logf("节点「%s」本客户端建不起来,这次连接先跳过它: %s", tag, why)
 	}
+	// 节点列表里标出来:以前只写日志,选了它其实在用自动选择,界面看不出来
+	var bad map[string]skippedNode
+	for i, tag := range p.Tags {
+		if why, ok := skipped[tag]; ok && i < len(p.Outbounds) {
+			if bad == nil {
+				bad = map[string]skippedNode{}
+			}
+			bad[tag] = skippedNode{why: why, raw: string(p.Outbounds[i])}
+		}
+	}
 	d.mu.Lock()
-	d.unsupported = skipped // 节点列表里标出来:以前只写日志,选了它其实在用自动选择,界面看不出来
+	d.unsupported = bad
 	d.mu.Unlock()
 	if err != nil {
 		return nil, err
@@ -705,6 +715,12 @@ func (d *Daemon) prepare(ctx context.Context) ([]byte, error) {
 	d.preparedConfigHash = sha256.Sum256(cfg)
 	d.mu.Unlock()
 	return cfg, nil
+}
+
+// skippedNode 一个被剔掉的节点:原因,和判它时的出站内容(内容变了就不再沿用这个判断)。
+type skippedNode struct {
+	why string
+	raw string
 }
 
 // buildValid 生成配置并干跑。整份校验不过时,逐个节点单独构造,把内核建不起来的剔掉(skipped:tag → 原因)
@@ -1877,10 +1893,17 @@ func (d *Daemon) stateView() ipc.StateView {
 	if want {
 		v.NICWarn = d.nicWarn
 	}
-	if len(d.unsupported) > 0 {
-		v.Unsupported = make(map[string]string, len(d.unsupported))
-		for k, why := range d.unsupported {
-			v.Unsupported[k] = why
+	// 只标当前订阅里名字和内容都没变的:换了订阅、或刷新后机场把节点改成能用的,不再沿用上次连接时的判断
+	if a := d.settings.Active(); a != nil && len(d.unsupported) > 0 {
+		if p := d.profiles[a.ID]; p != nil {
+			for i, tag := range p.Tags {
+				if u, ok := d.unsupported[tag]; ok && i < len(p.Outbounds) && u.raw == string(p.Outbounds[i]) {
+					if v.Unsupported == nil {
+						v.Unsupported = map[string]string{}
+					}
+					v.Unsupported[tag] = u.why
+				}
+			}
 		}
 	}
 	d.mu.Unlock()
