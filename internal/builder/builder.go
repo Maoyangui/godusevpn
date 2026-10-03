@@ -207,8 +207,9 @@ func buildConfig(in Input, rep *Report) ([]byte, error) {
 		}
 		servers = append(servers, fake)
 	}
+	// 节点自己的域名由 route.default_domain_resolver(local)解析,不再用 DNS 规则里的 outbound 项:
+	// sing-box 把它排在 1.14.0 移除,换到真正删掉它的内核版本时整份配置会解析失败、所有人都连不上
 	dnsRules := []any{
-		obj("outbound", "any", "server", "local"), // 节点自己的域名:直连解析,不能绕圈
 		obj("clash_mode", "Direct", "server", "local"),
 	}
 	if rs.has("geosite-cn") && s.DefaultRules.CN == settings.OutDirect {
