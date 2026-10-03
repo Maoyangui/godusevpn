@@ -228,8 +228,12 @@ func buildConfig(in Input, rep *Report) ([]byte, error) {
 	dnsRules := []any{
 		obj("clash_mode", "Direct", "server", "local"),
 	}
+	var directConds []any // 排在前面、走直连的组的域名条件:路由是排前面的组先赢,后面的组在 DNS 里也要让开
 	for _, g := range s.RuleGroups {
-		dnsRules = append(dnsRules, groupDNSRules(g, rs, s.FakeIP, s.IPv6)...)
+		dnsRules = append(dnsRules, groupDNSRules(g, rs, s.FakeIP, s.IPv6, directConds)...)
+		if g.Enabled && g.Outbound == settings.OutDirect {
+			directConds = append(directConds, groupDomainConds(g, rs)...)
+		}
 	}
 	if rs.has("geosite-cn") && s.DefaultRules.CN == settings.OutDirect {
 		// 国内域名交给直连的本地 DNS,只在默认规则「国内」是直连时:改成代理 / 拒绝后,它们的解析也不该从本机直连出去
@@ -524,11 +528,49 @@ func groupRule(g settings.RuleGroup, tags []string, rs *ruleSetPicker, procKey s
 // groupDNSRules 规则组里走代理 / 拒绝的那些在 DNS 里的规则,排在"国内域名交给本地 DNS"之前:不然国内名单里的
 // 域名(比如想从海外出口看的国内站)照样先在国内直连解析、拿到国内地址,查询也留在国内。走代理的和其余域名一样处理
 // (A / AAAA 给 fake-ip,别的查询类型交给远程 DNS);拒绝的连查询一起拒掉;直连的不管。
-// 只取域名类条件和 geosite,不看 IP / 进程 / 端口:规则组是"任一条件命中",域名命中就一定归这个组。只在规则模式生效。
-func groupDNSRules(g settings.RuleGroup, rs *ruleSetPicker, fakeIP, ipv6 bool) []any {
+// 只取域名类条件和 geosite,不看 IP / 进程 / 端口:规则组是"任一条件命中",域名命中就归这个组 —— 除非排在前面的
+// 直连组也写了它(skip:路由归那个组),那就让开、照常按国内 / 通用规则解析。只在规则模式生效。
+func groupDNSRules(g settings.RuleGroup, rs *ruleSetPicker, fakeIP, ipv6 bool, skip []any) []any {
 	if !g.Enabled || g.Outbound == settings.OutDirect {
 		return nil
 	}
+	conds := groupDomainConds(g, rs)
+	if len(conds) == 0 {
+		return nil
+	}
+	match := conds[0]
+	if len(conds) > 1 {
+		match = obj("type", "logical", "mode", "or", "rules", conds)
+	}
+	inRuleMode := func(extra ...any) map[string]any {
+		rules := append(append([]any{obj("clash_mode", "Rule")}, extra...), match)
+		if len(skip) > 0 {
+			rules = append(rules, obj("type", "logical", "mode", "or", "rules", skip, "invert", true))
+		}
+		return obj("type", "logical", "mode", "and", "rules", rules)
+	}
+	if g.Outbound == settings.OutReject {
+		r := inRuleMode()
+		r["action"] = "reject"
+		return []any{r}
+	}
+	var out []any
+	if fakeIP {
+		qt := []string{"A"}
+		if ipv6 {
+			qt = append(qt, "AAAA")
+		}
+		r := inRuleMode(obj("query_type", qt))
+		r["server"] = "fakeip"
+		out = append(out, r)
+	}
+	r := inRuleMode()
+	r["server"] = "remote"
+	return append(out, r)
+}
+
+// groupDomainConds 规则组里解析时就能判断的条件:四类域名与 geosite(IP / 进程 / 端口这时看不到)。
+func groupDomainConds(g settings.RuleGroup, rs *ruleSetPicker) []any {
 	var conds []any
 	for _, typ := range []string{settings.RuleDomain, settings.RuleDomainSuffix, settings.RuleDomainKeyword, settings.RuleDomainRegex} {
 		var v []string
@@ -550,35 +592,7 @@ func groupDNSRules(g settings.RuleGroup, rs *ruleSetPicker, fakeIP, ipv6 bool) [
 	if len(sets) > 0 {
 		conds = append(conds, obj("rule_set", sets))
 	}
-	if len(conds) == 0 {
-		return nil
-	}
-	match := conds[0]
-	if len(conds) > 1 {
-		match = obj("type", "logical", "mode", "or", "rules", conds)
-	}
-	inRuleMode := func(extra ...any) map[string]any {
-		rules := append(append([]any{obj("clash_mode", "Rule")}, extra...), match)
-		return obj("type", "logical", "mode", "and", "rules", rules)
-	}
-	if g.Outbound == settings.OutReject {
-		r := inRuleMode()
-		r["action"] = "reject"
-		return []any{r}
-	}
-	var out []any
-	if fakeIP {
-		qt := []string{"A"}
-		if ipv6 {
-			qt = append(qt, "AAAA")
-		}
-		r := inRuleMode(obj("query_type", qt))
-		r["server"] = "fakeip"
-		out = append(out, r)
-	}
-	r := inRuleMode()
-	r["server"] = "remote"
-	return append(out, r)
+	return conds
 }
 
 // clashPort 这一轮 Clash API 实际监听的端口:守护进程挑过的优先(设置里那个被占着时它会换一个),

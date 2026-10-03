@@ -65,14 +65,15 @@ func dnsRoute(t *testing.T, c cfg, mode, domain string, qtype uint16) (string, i
 
 // 规则组里走代理 / 拒绝的域名不能先命中"国内域名交给本地 DNS":想从海外出口看的国内站,以前照样先在国内直连解析、
 // 拿到国内地址。现在走代理的按其余域名处理(A 给 fake-ip、别的查询交给远程 DNS),拒绝的连查询一起拒掉,
-// 直连的不生成;只在规则模式生效。
+// 直连的不生成;只在规则模式生效。路由是排前面的组先赢:前面的直连组写过的域名,后面的组在 DNS 里也让开。
 func TestRuleGroupDomainsSkipLocalDNS(t *testing.T) {
 	s := settings.Default()
 	s.RuleGroups = []settings.RuleGroup{
+		{Name: "先直连", Enabled: true, Outbound: settings.OutDirect, Rules: []settings.Rule{{Type: settings.RuleDomainSuffix, Value: "live.bilibili.com"}}},
 		{Name: "海外看国内站", Enabled: true, Outbound: settings.OutProxy, Rules: []settings.Rule{{Type: settings.RuleDomainSuffix, Value: "bilibili.com"}, {Type: settings.RuleProcess, Value: "x.exe"}}},
 		{Name: "拦截", Enabled: true, Outbound: settings.OutReject, Rules: []settings.Rule{{Type: settings.RuleDomainKeyword, Value: "tracker"}}},
-		{Name: "直连", Enabled: true, Outbound: settings.OutDirect, Rules: []settings.Rule{{Type: settings.RuleDomainSuffix, Value: "direct.example"}}},
-		{Name: "指定节点", Enabled: true, Outbound: "台湾2", Rules: []settings.Rule{{Type: settings.RuleDomain, Value: "abc.example"}}},
+		{Name: "直连", Enabled: true, Outbound: settings.OutDirect, Rules: []settings.Rule{{Type: settings.RuleDomainSuffix, Value: "direct.example"}, {Type: settings.RuleDomain, Value: "x.tracker.net"}, {Type: settings.RuleDomain, Value: "both.example"}}},
+		{Name: "指定节点", Enabled: true, Outbound: "台湾2", Rules: []settings.Rule{{Type: settings.RuleDomain, Value: "abc.example"}, {Type: settings.RuleDomain, Value: "both.example"}}},
 		{Name: "停用的", Enabled: false, Outbound: settings.OutProxy, Rules: []settings.Rule{{Type: settings.RuleDomain, Value: "off.example"}}},
 	}
 	c, raw := build(t, s)
@@ -97,7 +98,10 @@ func TestRuleGroupDomainsSkipLocalDNS(t *testing.T) {
 	}{
 		{"Rule", "www.bilibili.com", qtA, "fakeip", true},
 		{"Rule", "www.bilibili.com", qtHTTPS, "remote", true},
-		{"Rule", "x.tracker.net", qtA, "reject", true},
+		{"Rule", "x.tracker.net", qtA, "reject", true},        // 后面的直连组也写了它:排前面的拒绝组照样先赢
+		{"Rule", "x.live.bilibili.com", qtA, "fakeip", false}, // 排在前面的直连组写了它:路由归直连,DNS 让开按通用规则走
+		{"Rule", "x.live.bilibili.com", qtHTTPS, "remote", false},
+		{"Rule", "both.example", qtA, "fakeip", false},
 		{"Rule", "abc.example", qtA, "fakeip", true},
 		{"Rule", "a.direct.example", qtA, "fakeip", false}, // 直连的组不生成 DNS 规则,按通用规则走
 		{"Rule", "off.example", qtA, "fakeip", false},
