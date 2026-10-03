@@ -77,6 +77,14 @@ $traffic = Start-Job -ScriptBlock {
     Start-Sleep -Milliseconds 200
   }
 }
+# 死人开关:严格全局下跑机自己的网络也只能走隧道。哪一轮服务没能连回来、闸又在,跑机就和 GitHub 失联 ——
+# 作业挂到总时限、日志一行都拿不回来。20 分钟还没跑完就撤闸、卸服务,让这一步按超时结束并带回日志。
+$deadman = Start-Job -ArgumentList $svc -ScriptBlock {
+  param($svc)
+  Start-Sleep -Seconds 1200
+  & $svc guard clear | Out-Null
+  & $svc uninstall | Out-Null
+}
 $t0 = Get-Date
 $seen = 0
 $notConnected = 0
@@ -100,8 +108,8 @@ for ($i = 1; $i -le $Rounds; $i++) {
 }
 
 Write-Host "== 收尾" -ForegroundColor Cyan
-Stop-Job $traffic -ErrorAction SilentlyContinue
-Remove-Job $traffic -Force -ErrorAction SilentlyContinue
+Stop-Job $traffic, $deadman -ErrorAction SilentlyContinue
+Remove-Job $traffic, $deadman -Force -ErrorAction SilentlyContinue
 $ev = Svc-Crashes $t0
 & $cli disconnect | Out-Null
 Start-Sleep -Seconds 3
