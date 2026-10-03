@@ -190,7 +190,7 @@ func ensureBase(session uintptr) error {
 // 权重(同一子层里大的先判,先命中的说了算):
 //
 //	15 放行本服务      14 放行回环、隧道地址      13 拦 DNS(53 / 853)、UPnP / NAT-PMP(1900 / 5351 / 5350)、v6 假地址段
-//	12 局域网、DHCP、邻居发现      0 其余全拦
+//	12 局域网、DHCP、邻居发现、热点(本机当 DHCP 服务端 / DNS 代理)      0 其余全拦
 //
 // 拦 DNS 必须压在局域网放行上面(见 blockDNS),又必须在隧道地址、回环、本服务下面 —— 所以隧道地址和回环
 // 从 12 / 13 提到了 14。只影响 DNS 的先后,别的流量这几条规则的结果不变。拦 UPnP / NAT-PMP 同理(见 blockUPnP)。
@@ -227,6 +227,9 @@ func installSet(session uintptr, spec Spec, withSelf, withForward bool) error {
 		return err
 	}
 	if err := permitNdp(session, base, 12); err != nil {
+		return err
+	}
+	if err := permitHotspot(session, base, 12); err != nil {
 		return err
 	}
 	if withForward {

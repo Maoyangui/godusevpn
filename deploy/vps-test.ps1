@@ -305,6 +305,40 @@ Check "服务停着时 SSDP 发现(239.255.255.250:1900)被拦" ($auditOK -and (
 & $svc start | Out-Null
 $stb = Wait-Status "connected" 60
 Check "服务重启后自动恢复连接(落盘的连接意愿)" ($stb -match "状态:\s+connected") ($stb.Trim() -replace "`r?`n", " | ")
+# 热点 / 网络共享:「局域网直通」关着时,本机当 DHCP 服务端的回包(67→68,发往私网 / 广播)也要放行,不然热点开着
+# 手机拿不到地址;同一私网地址换个源端口照样被拦(局域网放行这时不在)—— 两个一比,放行的正是 DHCP 服务端那一种。
+& $cli settings lanBypass=false 2>&1 | Out-Null
+Start-Sleep -Seconds 3
+$null = Get-WfpProviders
+$hotNames = @("Permit hotspot DHCP request (IPv4)", "Permit hotspot DHCP reply (IPv4)", "Permit hotspot DNS query (IPv4)")
+$hotMissing = @($hotNames | Where-Object { @(Wfp-Filters $_ | Where-Object { $_ }).Count -eq 0 })
+Check "闸里有热点那三条放行(DHCP 收 / 回、DNS 代理)" ($hotMissing.Count -eq 0) ($hotMissing -join ", ")
+& $svc stop | Out-Null
+Start-Sleep -Seconds 3
+& auditpol.exe /set /subcategory:"$auditSub" /failure:enable | Out-Null
+$auditFrom2 = (Get-Date).AddSeconds(-2)
+function Udp-SendFrom($lport, $ip, $port) {
+  $u = New-Object System.Net.Sockets.UdpClient($lport)
+  try { [void]$u.Send([byte[]](0), 1, $ip, $port) } catch {} finally { $u.Close() }
+}
+Udp-SendFrom 67 "10.255.255.1" 68
+Udp-SendFrom 50667 "10.255.255.1" 68
+Start-Sleep -Seconds 2
+$hotBlocked = @{} # "源端口/目的地址/目的端口" → 拦它的过滤器编号
+foreach ($e in @(Get-WinEvent -FilterHashtable @{ LogName = 'Security'; Id = 5157; StartTime = $auditFrom2 } -ErrorAction SilentlyContinue)) {
+  $d = @{}; foreach ($n in ([xml]$e.ToXml()).Event.EventData.Data) { $d[$n.Name] = [string]$n.'#text' }
+  if ($d['Protocol'] -eq '17') { $hotBlocked[$d['SourcePort'] + "/" + $d['DestAddress'] + "/" + $d['DestPort']] = $d['FilterRTID'] }
+}
+& auditpol.exe /set /subcategory:"$auditSub" /failure:disable | Out-Null
+$hotNote = "拦截事件=" + (($hotBlocked.Keys | ForEach-Object { $_ + "#" + $hotBlocked[$_] }) -join " ")
+Check "局域网直通关着时别的源端口发往私网 68 被拦(对照)" $hotBlocked.ContainsKey("50667/10.255.255.1/68") $hotNote
+Check "局域网直通关着时 DHCP 服务端回包(67→私网 68)放行" ($hotBlocked.ContainsKey("50667/10.255.255.1/68") -and -not $hotBlocked.ContainsKey("67/10.255.255.1/68")) $hotNote
+& $svc start | Out-Null
+$null = Wait-Status "connected" 60
+& $cli settings lanBypass=true 2>&1 | Out-Null
+Start-Sleep -Seconds 3
+$stb = Wait-Status "connected" 60
+Check "热点检查后恢复连接、局域网直通开回" (($stb -match "状态:\s+connected") -and ((& $cli settings 2>&1 | Out-String) -match '"lanBypass":\s*true')) ($stb.Trim() -replace "`r?`n", " | ")
 # 网卡 IPv6 备份:塞一张不存在的网卡进去。断开时的还原脚本必须跳过它、把其它网卡照常还原、并把备份删干净 ——
 # m29 的脚本在 $ErrorActionPreference='Stop' 下会在这一行中断,排在后面的网卡一张都不还原,备份永远删不掉。
 $nicb = Join-Path $env:ProgramData "godusevpn\nic-ipv6-backup.txt"
