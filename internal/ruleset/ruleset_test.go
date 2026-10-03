@@ -232,4 +232,19 @@ func TestTagCannotEscapeTheDirectory(t *testing.T) {
 	if _, ok := Find(root, "geosite-category-ads-all"); !ok {
 		t.Fatal("正常标签被误伤了")
 	}
+	// 官方规则集里带 ! 与 @ 的类别名:下得下来、放进去找得到
+	for _, tag := range []string{"geosite-geolocation-!cn", "geosite-google@cn"} {
+		if err := Save(root, tag, Bytes("geosite-cn")); err != nil {
+			t.Errorf("标签 %q 应能保存: %v", tag, err)
+		}
+		if p, ok := Find(root, tag); !ok || !strings.Contains(filepath.ToSlash(p), "/"+subDownloaded+"/") {
+			t.Errorf("标签 %q 应能找到下载的那份,实际 %q", tag, p)
+		}
+		if err := os.WriteFile(filepath.Join(root, tag+".srs"), Bytes("geoip-cn"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if p, ok := Find(root, tag); !ok || filepath.Dir(p) != root {
+			t.Errorf("标签 %q 应能找到用户自己放的那份,实际 %q", tag, p)
+		}
+	}
 }

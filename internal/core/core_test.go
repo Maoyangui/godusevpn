@@ -2,6 +2,7 @@ package core
 
 import (
 	"encoding/json"
+	"runtime"
 	"testing"
 
 	"github.com/Maoyangui/godusevpn/internal/builder"
@@ -43,6 +44,15 @@ func TestBuiltConfigPassesDryRun(t *testing.T) {
 		}
 		return s
 	}(), func() settings.Settings {
+		// 局域网直通关着 + 网关设备:强制代理的设备带指定服务器的 resolve,内核要认(auto_redirect 只有 Linux 建得起来)
+		s := settings.Default()
+		s.LANBypass = false
+		if runtime.GOOS == "linux" {
+			s.NetMode = settings.NetGateway
+			s.Devices = []settings.Device{{ID: "a", IP: "10.99.0.21", Mode: "proxy"}, {ID: "b", IP: "10.99.0.22", Mode: "reject"}}
+		}
+		return s
+	}(), func() settings.Settings {
 		// 手动指定节点时自动选择组换成很长的测速间隔:间隔与 idle_timeout 的关系写错,内核会直接拒绝启动
 		s := settings.Default()
 		s.Selected = "hk"
@@ -58,5 +68,31 @@ func TestBuiltConfigPassesDryRun(t *testing.T) {
 	}
 	if err := c.Validate([]byte(`{"inbounds":[{"type":"nope"}]}`)); err == nil {
 		t.Fatal("坏配置应被拒绝")
+	}
+}
+
+// 订阅里混着本构建建不起来的节点:整份配置校验不过,Unbuildable 要把坏的那几个点出来,好的一个不误伤。
+func TestUnbuildableFindsBadNodes(t *testing.T) {
+	good := []json.RawMessage{
+		json.RawMessage(`{"type":"hysteria2","tag":"hk","server":"1.2.3.4","server_port":443,"password":"p","tls":{"enabled":true,"server_name":"a.example"}}`),
+		json.RawMessage(`{"type":"anytls","tag":"tw","server":"1.2.3.5","server_port":8443,"password":"p","tls":{"enabled":true,"server_name":"b.example"}}`),
+		json.RawMessage(`{"type":"shadowsocks","tag":"ss","server":"1.2.3.6","server_port":8388,"method":"aes-128-gcm","password":"p"}`),
+	}
+	bad := []json.RawMessage{
+		json.RawMessage(`{"type":"naive","tag":"nv","server":"1.2.3.7","server_port":443,"username":"u","password":"p","tls":{"enabled":true,"server_name":"n.example"}}`),
+		json.RawMessage(`{"type":"shadowsocksr","tag":"ssr","server":"1.2.3.8","server_port":443,"method":"aes-128-cfb","password":"p","obfs":"plain","protocol":"origin"}`),
+		json.RawMessage(`{"type":"wireguard","tag":"wg","server":"1.2.3.9","server_port":51820,"private_key":"x","peer_public_key":"y"}`),
+		json.RawMessage(`{"type":"shadowsocks","tag":"rc4","server":"1.2.3.10","server_port":8388,"method":"rc4","password":"p"}`),
+	}
+	got := New(nil).Unbuildable(append(append([]json.RawMessage{}, good...), bad...))
+	for _, tag := range []string{"nv", "ssr", "wg", "rc4"} {
+		if got[tag] == "" {
+			t.Errorf("节点 %s 内核建不起来,应被点出来: %v", tag, got)
+		}
+	}
+	for _, tag := range []string{"hk", "tw", "ss"} {
+		if why, ok := got[tag]; ok {
+			t.Errorf("好节点 %s 被误判: %s", tag, why)
+		}
 	}
 }

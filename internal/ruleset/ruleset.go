@@ -85,6 +85,9 @@ func Dirs(root string) []string {
 // 哪天有人从别的地方喂进来一个没规范化过的值,`filepath.Join(dir, "geosite-../../../x.srs")`
 // 会规规矩矩地把路径清成目录外面去。Windows 上服务以 SYSTEM 跑,那就不只是掉几个文件的事。
 // 门放在最贴近危险动作的地方,不指望上游永远记得校验。
+//
+// ! 和 @ 要放行:官方规则集里就有 geosite-geolocation-!cn、geosite-google@cn 这类名字(settings 的 geoName 也收),
+// 它们穿不出目录。挡掉的话设置能存、规则集却永远找不到也下不下来,那条规则一直不生效。
 func validTag(tag string) bool {
 	if tag == "" || len(tag) > 96 || strings.Contains(tag, "..") {
 		return false
@@ -92,7 +95,7 @@ func validTag(tag string) bool {
 	for _, r := range tag {
 		switch {
 		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
-		case r == '-', r == '_', r == '.':
+		case r == '-', r == '_', r == '.', r == '!', r == '@':
 		default:
 			return false
 		}

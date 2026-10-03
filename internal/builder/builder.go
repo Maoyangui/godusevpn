@@ -9,6 +9,7 @@ import (
 	"errors"
 	"net/netip"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
@@ -16,10 +17,12 @@ import (
 	"github.com/Maoyangui/godusevpn/internal/profile"
 	"github.com/Maoyangui/godusevpn/internal/ruleset"
 	"github.com/Maoyangui/godusevpn/internal/settings"
+
+	"go4.org/netipx"
 )
 
 type Input struct {
-	// SelfProcess 运行内核的那个进程的名字(桌面:godusevpn-svc.exe / godusevpn)。全局禁直连下"节点服务器直连"
+	// SelfProcess 运行内核的那个进程的名字(桌面:godusevpn-svc.exe / godusevpn)。全局模式下"节点服务器直连"
 	// 那几条规则只放它自己(见下面节点规则的注释);空 = 不知道,按老样子不限定进程。Android 用的是本应用的包名。
 	SelfProcess string
 	Profile     *profile.Profile
@@ -204,11 +207,13 @@ func buildConfig(in Input, rep *Report) ([]byte, error) {
 		}
 		servers = append(servers, fake)
 	}
+	// 节点自己的域名由 route.default_domain_resolver(local)解析,不再用 DNS 规则里的 outbound 项:
+	// sing-box 把它排在 1.14.0 移除,换到真正删掉它的内核版本时整份配置会解析失败、所有人都连不上
 	dnsRules := []any{
-		obj("outbound", "any", "server", "local"), // 节点自己的域名:直连解析,不能绕圈
 		obj("clash_mode", "Direct", "server", "local"),
 	}
-	if rs.has("geosite-cn") {
+	if rs.has("geosite-cn") && s.DefaultRules.CN == settings.OutDirect {
+		// 国内域名交给直连的本地 DNS,只在默认规则「国内」是直连时:改成代理 / 拒绝后,它们的解析也不该从本机直连出去
 		dnsRules = append(dnsRules, obj("clash_mode", "Rule", "rule_set", []string{"geosite-cn"}, "server", "local"))
 	}
 	if s.FakeIP {
@@ -242,7 +247,12 @@ func buildConfig(in Input, rep *Report) ([]byte, error) {
 		if s.LANBypass {
 			// 私网段与链路本地之外,168.63.129.16 是 Azure 平台地址(来宾代理、DNS、健康探测),进了隧道整台云主机就失联,一并排除
 			ex := []string{"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "169.254.0.0/16", "168.63.129.16/32", "224.0.0.0/4"}
-			ex = append(ex, "fc00::/7", "fe80::/10", "ff00::/8") // v6 的私网 / 链路本地 / 组播,同样留给局域网
+			ula := []string{"fc00::/7"} // v6 的私网 / 链路本地 / 组播,同样留给局域网
+			if s.FakeIP && s.IPv6 {
+				// v6 的 fake-ip 段在 fc00::/7 里:整段排除的话,发往 v6 假地址的连接进不了 TUN,从物理网卡发出去就没了
+				ula = excludeHole(ula[0], fakeIP6)
+			}
+			ex = append(append(ex, ula...), "fe80::/10", "ff00::/8")
 			tun["route_exclude_address"] = ex
 		}
 		if s.NetMode == settings.NetGateway {
@@ -272,12 +282,19 @@ func buildConfig(in Input, rep *Report) ([]byte, error) {
 		obj("protocol", "dns", "action", "hijack-dns"),
 		obj("port", 53, "action", "hijack-dns"), // 不走系统解析、自己发 53 的程序也收进来,不泄漏
 	}
+	if !s.IPv6 {
+		// 直接写 IPv6 字面量的连接也堵住。排在按进程直连、设备策略这些直连规则前面:否则被直连的进程 / 设备
+		// 照样能用 IPv6 从物理网卡出去。要在 DNS 劫持之后,发往 v6 地址 53 端口的查询仍得收进内核。
+		rules = append(rules, obj("ip_version", 6, "action", "reject"))
+	}
 	// 全局禁直连:隧道以外只剩节点连接本身、回环、(局域网直通开着时的)局域网 —— 按进程 / 按应用直连、网关模式
 	// 里设成"直连"的设备,这时都不生效(照样走隧道)。它们是给规则模式配的;在严格全局下直连出去,闸又放行本服务,
 	// 就是隧道外的流量。
 	sealed := s.NoDirect && s.Mode == settings.ModeGlobal
 	if len(s.BypassApps) > 0 && !sealed {
-		rules = append(rules, obj(procKey, s.BypassApps, "outbound", "direct")) // 指定进程 / 应用直连,放在最前
+		r := procCond(procKey, s.BypassApps)
+		r["outbound"] = "direct"
+		rules = append(rules, r) // 指定进程 / 应用直连,放在最前
 	}
 	// 局域网设备策略(网关模式):按来源 IP 强制直连 / 拒绝 / 代理,放在模式分支之前,任何模式下都成立
 	if s.NetMode == settings.NetGateway {
@@ -292,12 +309,19 @@ func buildConfig(in Input, rep *Report) ([]byte, error) {
 			if mode == "direct" && sealed {
 				continue // 严格全局下设备的"直连"不生效(见上)
 			}
-			if ips := byMode[mode]; len(ips) > 0 {
-				if mode == "reject" {
-					rules = append(rules, obj("source_ip_cidr", ips, "action", "reject"))
-				} else {
-					rules = append(rules, obj("source_ip_cidr", ips, "outbound", mode))
-				}
+			ips := byMode[mode]
+			switch {
+			case len(ips) == 0:
+			case mode == "reject":
+				rules = append(rules, obj("source_ip_cidr", ips, "action", "reject"))
+			case mode == "proxy" && !s.IPv6:
+				// 强制代理的设备不走下面那条通用的 resolve(那条要按 DNS 规则走,规则模式下国内域名会交给直连的本地 DNS):
+				// 这里先经远程 DNS(经代理)按 ipv4_only 解析,再交给代理 —— 否则节点拿到域名自己解析,解析出 AAAA 就走 IPv6 出去
+				rules = append(rules,
+					obj("source_ip_cidr", ips, "action", "resolve", "server", "remote", "strategy", "ipv4_only"),
+					obj("source_ip_cidr", ips, "outbound", mode))
+			default:
+				rules = append(rules, obj("source_ip_cidr", ips, "outbound", mode))
 			}
 		}
 	}
@@ -305,9 +329,7 @@ func buildConfig(in Input, rep *Report) ([]byte, error) {
 		// 先按 ipv4_only 把目标域名解析成 IPv4(fake-ip 只是给客户端的占位,这里查的是真实地址),
 		// 之后不管直连还是经代理,拿到的都是 IPv4;否则代理服务器会自己解析出 AAAA 走 IPv6 出去。
 		// 解析走 DNS 规则:国内域名本地 DoH、其余远程 DoH(经代理),路由器查询不会返回 fake-ip。
-		rules = append(rules,
-			obj("action", "resolve", "strategy", "ipv4_only"),
-			obj("ip_version", 6, "action", "reject")) // 直接写 IPv6 字面量的连接也堵住
+		rules = append(rules, obj("action", "resolve", "strategy", "ipv4_only"))
 	} else {
 		rules = append(rules, obj("action", "resolve")) // 开 IPv6 也要先解析,否则 IP 类规则(geoip、IP 段)对域名连接不生效
 	}
@@ -319,13 +341,13 @@ func buildConfig(in Input, rep *Report) ([]byte, error) {
 	// 只放行"这台服务器上的这些端口",不是整台服务器:面板、订阅地址、落地页常和节点同一个 IP,
 	// 按整个 IP 放行会把它们也变成直连,用户在全局模式下会莫名其妙地把面板暴露给本地网络。
 	//
-	// 全局禁直连下这几条只放内核自己(SelfProcess):规则本身只看目的地址和端口,不限定是谁发的 —— 用户去往和节点
+	// 全局模式下这几条只放内核自己(SelfProcess):规则本身只看目的地址和端口,不限定是谁发的 —— 用户去往和节点
 	// 同域名 / 同地址、同端口的连接也会命中。CDN 节点很常见(server 写优选域名 www.visa.com、或 Cloudflare 的共享
-	// 地址,端口 443),浏览器一打开同一个站点、或恰好解析到同一地址的别的站点,就从本服务直连出去了,闸放行本服务。
-	// 限定成内核自己的进程,绕圈照样避开,用户的连接照常走隧道。只在严格全局下这么做:别的模式本来就有直连,
-	// 按进程查找对每条连接都有开销(路由器上尤其)。
+	// 地址,端口 443),浏览器一打开同一个站点、或恰好解析到同一地址的别的站点,就从本服务直连出去了(禁直连开着时闸还放行本服务)。
+	// 限定成内核自己的进程,绕圈照样避开,用户的连接照常走隧道;网关模式下局域网设备去节点地址的连接没有本机进程,也走隧道。
+	// 规则 / 直连模式不加:那本来就有直连,按进程查找对每条连接都有开销(路由器上尤其)。
 	var self map[string]any
-	if sealed && in.SelfProcess != "" {
+	if s.Mode == settings.ModeGlobal && in.SelfProcess != "" {
 		self = map[string]any{procKey: []string{in.SelfProcess}}
 	}
 	withSelf := func(r map[string]any) map[string]any {
@@ -348,8 +370,12 @@ func buildConfig(in Input, rep *Report) ([]byte, error) {
 			rules = append(rules, withSelf(obj("ip_cidr", cidrs, "port", n.Ports, "outbound", "direct")))
 		}
 	}
-	dr := s.DefaultRules
-	rules = append(rules, withOutbound(obj("ip_is_private", true), dr.Private))
+	if s.LANBypass {
+		// 全局模式里去局域网的连接只在「局域网直通」开着时直连 —— 和闸的局域网放行跟同一个开关;关着就照样走隧道。
+		// 私网段的 IP 字面量这时本来就不进 TUN,走到这里的是经混合端口来的、和域名解析出来全是局域网地址的(NAS 的域名)。
+		// 它不是默认规则「私网」(那条只在规则模式生效,在下面)。
+		rules = append(rules, withOutbound(lanDest(obj("clash_mode", "Global")), settings.OutDirect))
+	}
 	rules = append(rules,
 		obj("clash_mode", "Direct", "outbound", "direct"),
 		obj("clash_mode", "Global", "outbound", "proxy"),
@@ -367,6 +393,9 @@ func buildConfig(in Input, rep *Report) ([]byte, error) {
 		}
 		rules = append(rules, r)
 	}
+	// 默认规则(私网 → 国内 → 其余):排在用户规则组之后,同样只在规则模式下走到
+	dr := s.DefaultRules
+	rules = append(rules, withOutbound(lanDest(), dr.Private))
 	if len(adSets) > 0 {
 		rules = append(rules, obj("rule_set", adSets, "action", "reject"))
 	}
@@ -425,11 +454,11 @@ func groupRule(g settings.RuleGroup, tags []string, rs *ruleSetPicker, procKey s
 	var parts []any
 	for _, typ := range []string{settings.RuleDomain, settings.RuleDomainSuffix, settings.RuleDomainKeyword, settings.RuleDomainRegex, settings.RuleIPCIDR, settings.RuleProcess} {
 		if v := lists[typ]; len(v) > 0 {
-			key := typ
 			if typ == settings.RuleProcess {
-				key = procKey // Android 上"进程名"条件填的是应用包名
+				parts = append(parts, procCond(procKey, v)) // Android 上"进程名"条件填的是应用包名
+			} else {
+				parts = append(parts, obj(typ, v))
 			}
-			parts = append(parts, obj(key, v))
 		}
 	}
 	if len(ports) > 0 {
@@ -626,6 +655,66 @@ func nodeAddrs(p *profile.Profile) []nodeServer {
 		at[key] = len(out)
 		seenPort[key+":"+itoa(m.Port)] = true
 		out = append(out, n)
+	}
+	return out
+}
+
+// lanDest 目的地址"全是"局域网 / 私网地址才命中;extra 是要一并满足的条件。
+//
+// 不能只写 ip_is_private:目的地是域名时,它拿 resolve 解析出来的整组地址判,**有一个**不是公网就算命中,
+// 而直连出站会把这组地址挨个拨过去。恶意域名在 A 记录里混一个 0.0.0.0 / 10.x,本该走代理的连接就命中"私网直连",
+// 被直连到同组里的公网地址 —— 对方看到的是用户的真实 IP。再要求"没有一个是公网地址",混着公网地址的应答就落不进来;
+// IP 字面量的目的地判法不变。
+func lanDest(extra ...map[string]any) map[string]any {
+	var conds []any
+	for _, c := range extra {
+		conds = append(conds, c)
+	}
+	conds = append(conds, obj("ip_is_private", true), obj("ip_cidr", publicCIDRs, "invert", true))
+	return obj("type", "logical", "mode", "and", "rules", conds)
+}
+
+// publicCIDRs 公网地址全集:0.0.0.0/0 与 ::/0 减去局域网 / 私网段,给 lanDest 判"有没有公网地址"用。
+// 减掉的只能比 ip_is_private(sing 的 N.IsPublicAddr)认的非公网少、不能多 —— 多减一段,那段地址混进应答就又能被直连出去;
+// 所以 0.0.0.0、::、::1 没减(当公网看,只会让规则更严)。
+var publicCIDRs = func() []string {
+	var b netipx.IPSetBuilder
+	b.AddPrefix(netip.MustParsePrefix("0.0.0.0/0"))
+	b.AddPrefix(netip.MustParsePrefix("::/0"))
+	for _, p := range []string{"10.0.0.0/8", "127.0.0.0/8", "169.254.0.0/16", "172.16.0.0/12", "192.168.0.0/16", "224.0.0.0/4", "fc00::/7", "fe80::/10", "ff00::/8"} {
+		b.RemovePrefix(netip.MustParsePrefix(p))
+	}
+	set, _ := b.IPSet()
+	var out []string
+	for _, p := range set.Prefixes() {
+		out = append(out, p.String())
+	}
+	return out
+}()
+
+// procCond 用户填的进程名条件(按进程直连、规则组)。桌面上写成不分大小写的 process_path_regex:
+// Windows / macOS 的文件名本来就不分大小写,用户写 discord.exe,系统报出来的是 Discord.exe,
+// process_name 精确查表就对不上,而且没有任何提示。Android 的应用包名照旧精确匹配。
+func procCond(procKey string, names []string) map[string]any {
+	if procKey != "process_name" {
+		return obj(procKey, names)
+	}
+	re := make([]string, len(names))
+	for i, n := range names {
+		re[i] = `(?i)(^|[\\/])` + regexp.QuoteMeta(n) + `$`
+	}
+	return obj("process_path_regex", re)
+}
+
+// excludeHole 网段 from 挖掉 hole 之后剩下的那些网段。
+func excludeHole(from, hole string) []string {
+	var b netipx.IPSetBuilder
+	b.AddPrefix(netip.MustParsePrefix(from))
+	b.RemovePrefix(netip.MustParsePrefix(hole))
+	set, _ := b.IPSet()
+	var out []string
+	for _, p := range set.Prefixes() {
+		out = append(out, p.String())
 	}
 	return out
 }

@@ -3,6 +3,7 @@ package builder
 import (
 	"encoding/json"
 	"fmt"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -346,19 +347,38 @@ func TestBypassAppsRule(t *testing.T) {
 	s := settings.Default()
 	s.BypassApps = []string{"steam.exe", "qbittorrent.exe"}
 	c, raw := build(t, s)
-	var found bool
-	for _, r := range c.Route.Rules {
-		if r["outbound"] == "direct" && r["process_name"] != nil {
-			found = true
-		}
+	if !strings.Contains(raw, "\"find_process\": true") {
+		t.Fatalf("按进程直连应开 find_process: %s", raw)
 	}
-	if !found || !strings.Contains(raw, "\"find_process\": true") {
-		t.Fatalf("按进程直连应有 process_name 规则并开 find_process: %s", raw)
+	// 进程名不分大小写(Windows / macOS 的文件名本来就不分):写 steam.exe,系统报 Steam.exe 也要命中;
+	// 只按文件名比,别的程序路径里带着这个名字不算
+	for _, tc := range []struct {
+		proc, want string
+	}{
+		{"C:/Program Files (x86)/Steam/Steam.exe", "direct"},
+		{"/opt/qBittorrent/QBITTORRENT.EXE", "direct"},
+		{"C:/Program Files/Other/notsteam.exe", "proxy"},
+		{"C:/steam.exe/other.exe", "proxy"},
+	} {
+		if out, _ := route(t, c, "Rule", conn{dst: "93.184.216.34", proc: tc.proc}); out != tc.want {
+			t.Errorf("%s 应走 %s,实际 %s", tc.proc, tc.want, out)
+		}
 	}
 	s.BypassApps = nil
 	_, raw = build(t, s)
-	if strings.Contains(raw, "process_name") || strings.Contains(raw, "find_process") {
+	if strings.Contains(raw, "process_") || strings.Contains(raw, "find_process") {
 		t.Fatal("没有进程规则时不该开 find_process")
+	}
+}
+
+// 规则组里的进程名条件同样不分大小写。
+func TestRuleGroupProcessCaseInsensitive(t *testing.T) {
+	s := settings.Default()
+	s.RuleGroups = []settings.RuleGroup{{Name: "游戏", Enabled: true, Outbound: settings.OutDirect,
+		Rules: []settings.Rule{{Type: settings.RuleProcess, Value: "game.exe"}}}}
+	c, _ := build(t, s)
+	if out, _ := route(t, c, "Rule", conn{dst: "93.184.216.34", proc: "D:/Games/Game.EXE"}); out != "direct" {
+		t.Fatalf("规则组的进程名应不分大小写,实际 %s", out)
 	}
 }
 
@@ -399,6 +419,40 @@ func TestAndroidPackageRules(t *testing.T) {
 	}
 }
 
+// 开着 IPv6 + fake-ip + 局域网直通:v6 假地址段(fc00::/18)落在局域网的 fc00::/7 里,不能跟着被排除出隧道,
+// 否则发往 v6 假地址的连接从物理网卡发出去就没了;fc00::/7 其余部分照旧留给局域网。
+func TestFakeIP6NotExcludedFromTun(t *testing.T) {
+	s := settings.Default()
+	s.IPv6 = true
+	c, _ := build(t, s)
+	var ex []netip.Prefix
+	for _, in := range c.Inbounds {
+		if in["type"] == "tun" {
+			for _, v := range in["route_exclude_address"].([]any) {
+				ex = append(ex, netip.MustParsePrefix(v.(string)))
+			}
+		}
+	}
+	excluded := func(a string) bool {
+		for _, p := range ex {
+			if p.Contains(netip.MustParseAddr(a)) {
+				return true
+			}
+		}
+		return false
+	}
+	for _, a := range []string{"fc00::1", "fc00:3fff:ffff::1"} {
+		if excluded(a) {
+			t.Fatalf("v6 假地址 %s 被排除出隧道了: %v", a, ex)
+		}
+	}
+	for _, a := range []string{"fd12:3456::1", "fc00:4000::1", "fc01::1", "fe80::1", "192.168.1.1"} {
+		if !excluded(a) {
+			t.Fatalf("局域网地址 %s 应照旧留在隧道外: %v", a, ex)
+		}
+	}
+}
+
 // 关掉 IPv6 时,v6 也必须被接进隧道再拒绝;否则 v6 流量从物理网卡直接出网,等于绕过代理。
 func TestIPv6CapturedEvenWhenDisabled(t *testing.T) {
 	s := settings.Default()
@@ -428,6 +482,21 @@ func TestIPv6CapturedEvenWhenDisabled(t *testing.T) {
 	}
 }
 
+// 关 IPv6 = 全链路禁用,被按进程直连的程序也不例外:它写 IPv6 字面量的连接要被拒,不能从物理网卡直接出 v6
+// (「连接时停用网卡 IPv6」被关掉时,网卡上还挂着公网 v6)。IPv4 照旧直连。
+func TestBypassAppsNoIPv6(t *testing.T) {
+	s := settings.Default()
+	s.BypassApps = []string{"qbittorrent.exe"}
+	c, _ := build(t, s)
+	proc := "/opt/qbittorrent/qbittorrent.exe"
+	if out, at := route(t, c, "Rule", conn{dst: "2001:db8::1", proc: proc}); out != "reject" {
+		t.Fatalf("按进程直连的程序用 IPv6 字面量连接应被拒,实际走了 %s(规则 %d)", out, at)
+	}
+	if out, _ := route(t, c, "Rule", conn{dst: "93.184.216.34", proc: proc}); out != "direct" {
+		t.Fatalf("按进程直连的程序的 IPv4 连接照旧直连,实际 %s", out)
+	}
+}
+
 // 默认规则可改:改成"国内也走代理、其余直连"后配置要跟着变;还原后回到出厂。
 func TestDefaultRulesConfigurable(t *testing.T) {
 	s := settings.Default()
@@ -436,22 +505,39 @@ func TestDefaultRulesConfigurable(t *testing.T) {
 	if c.Route.Final != "direct" {
 		t.Fatalf("其余流量应走 direct,实际 %q", c.Route.Final)
 	}
-	var privReject, cnProxy bool
+	privReject, _ := route(t, c, "Rule", conn{dst: "192.168.1.1"})
+	var cnProxy bool
 	for _, r := range c.Route.Rules {
-		if r["ip_is_private"] == true && r["action"] == "reject" {
-			privReject = true
-		}
 		if fmt.Sprint(r["rule_set"]) == "[geosite-cn geoip-cn]" && r["outbound"] == "proxy" {
 			cnProxy = true
 		}
 	}
-	if !privReject || !cnProxy {
+	if privReject != "reject" || !cnProxy {
 		t.Fatalf("默认规则没按设置生成: priv=%v cn=%v %s", privReject, cnProxy, raw)
 	}
 	s.DefaultRules = settings.FactoryDefaultRules()
 	c2, _ := build(t, s)
 	if c2.Route.Final != "proxy" {
 		t.Fatalf("还原后其余流量应走 proxy,实际 %q", c2.Route.Final)
+	}
+
+	// 国内域名交给直连的本地 DNS,只在「国内」是直连时;改成代理 / 拒绝后解析也不能从本机直连出去
+	cnLocal := func(c cfg) bool {
+		for _, r := range c.DNS.Rules {
+			if fmt.Sprint(r["rule_set"]) == "[geosite-cn]" && r["server"] == "local" {
+				return true
+			}
+		}
+		return false
+	}
+	if !cnLocal(c2) {
+		t.Fatal("「国内」直连时国内域名应由本地 DNS 解析")
+	}
+	for _, out := range []string{settings.OutProxy, settings.OutReject} {
+		s.DefaultRules.CN = out
+		if c3, _ := build(t, s); cnLocal(c3) {
+			t.Fatalf("「国内」= %s 时国内域名不该再交给直连的本地 DNS", out)
+		}
 	}
 }
 

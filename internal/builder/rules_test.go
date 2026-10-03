@@ -1,6 +1,7 @@
 package builder
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -56,7 +57,9 @@ func TestRuleGroupsRendered(t *testing.T) {
 		t.Fatalf("拒绝出口应渲染成 action reject: %v", ad)
 	}
 
-	game := findRule(c, func(r map[string]any) bool { return r["type"] == "logical" && r["outbound"] == "direct" })
+	game := findRule(c, func(r map[string]any) bool {
+		return r["type"] == "logical" && r["outbound"] == "direct" && strings.Contains(fmt.Sprint(r["rules"]), "game")
+	})
 	if game == nil || !strings.Contains(raw, `"1.2.3.4/32"`) || !strings.Contains(raw, `"find_process": true`) {
 		t.Fatalf("进程 + IP 直连组没渲染对: %v %s", game, raw)
 	}
@@ -83,6 +86,27 @@ func TestRuleGroupsRendered(t *testing.T) {
 	}
 	if !(iMode < iUser && iUser < iCN) {
 		t.Fatalf("规则顺序不对: mode=%d user=%d cn=%d", iMode, iUser, iCN)
+	}
+}
+
+// 设置里收的 geosite 类别名(含 ! 和 @,如 geolocation-!cn、google@cn),本地有规则集时就得用上,不能报缺失。
+func TestGeositeNamesWithBangAndAt(t *testing.T) {
+	s := settings.Default()
+	s.RuleGroups = []settings.RuleGroup{{Name: "国外", Enabled: true, Outbound: settings.OutProxy,
+		Rules: []settings.Rule{{Type: settings.RuleGeosite, Value: "geolocation-!cn"}, {Type: settings.RuleGeosite, Value: "google@cn"}}}}
+	if err := s.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	raw, rep, err := BuildEx(Input{Profile: sampleProfile(), Settings: s, DataDir: t.TempDir(), ClashSecret: "sec",
+		RuleSetDir: ruleSetRoot(t, "geosite-geolocation-!cn", "geosite-google@cn")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rep.Missing) != 0 {
+		t.Fatalf("本地已有的规则集被报成缺失: %v", rep.Missing)
+	}
+	if !strings.Contains(string(raw), `"geosite-geolocation-!cn"`) || !strings.Contains(string(raw), `"geosite-google@cn"`) {
+		t.Fatalf("规则组没用上这两个规则集: %s", raw)
 	}
 }
 
