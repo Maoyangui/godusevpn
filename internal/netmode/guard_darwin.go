@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/Maoyangui/godusevpn/internal/builder"
 	"github.com/Maoyangui/godusevpn/internal/paths"
 )
 
@@ -41,6 +42,8 @@ func guardRules(spec GuardSpec) string {
 	// 就经路由器出了隧道;后两样能让本机程序向路由器问到宽带的真实公网地址。回环、root(守护进程)、隧道地址上的都在上面放行了。
 	b.WriteString(dnsBlockRule)
 	b.WriteString(upnpBlockRule)
+	// v6 假地址段落在下面局域网放行的 fc00::/7 里:隧道断开时发往它的包不能当局域网放出去(经隧道的上面已放行)
+	fmt.Fprintf(&b, "block drop out quick inet6 to %s\n", builder.FakeIP6)
 	if spec.LAN {
 		fmt.Fprintf(&b, "pass out quick to { %s }\n", strings.Join(privateV4, ", "))
 		fmt.Fprintf(&b, "pass out quick to { %s }\n", strings.Join(privateV6, ", "))

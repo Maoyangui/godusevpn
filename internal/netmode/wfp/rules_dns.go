@@ -12,6 +12,7 @@ const (
 	upnpBlockOutName6 = "Block UPnP / NAT-PMP outbound (IPv6)"
 	upnpBlockInName4  = "Block UPnP / NAT-PMP inbound (IPv4)"
 	upnpBlockInName6  = "Block UPnP / NAT-PMP inbound (IPv6)"
+	fakeIP6BlockName  = "Block fake-ip range (IPv6)"
 )
 
 // portBlock 一条按协议 + 端口拦的过滤器:装在哪一层、叫什么、比远端还是本地端口。
@@ -48,7 +49,41 @@ var (
 func namedBlocks() []portBlock {
 	all := append([]portBlock{}, dnsBlocks...)
 	all = append(all, upnpOutBlocks...)
-	return append(all, upnpInBlocks...)
+	all = append(all, upnpInBlocks...)
+	return append(all, portBlock{cFWPM_LAYER_ALE_AUTH_CONNECT_V6, fakeIP6BlockName, cFWPM_CONDITION_IP_REMOTE_ADDRESS})
+}
+
+// fakeIP6 客户端发给应用的 v6 假地址段(builder 的 fakeIP6,fc00::/18),落在局域网放行的 fc00::/7 里。
+// 包级变量:条件值以 uintptr 交给 DLL,理由同 lanV4。
+var fakeIP6 = wtFwpV6AddrAndMask{addr: [16]uint8{0xfc}, prefixLength: 18}
+
+// blockFakeIP6 压在局域网放行上面拦掉发往 v6 假地址段的包。开着 IPv6 + fake-ip 时,隧道断开的空档里应用还会往
+// 记下的假地址发包,局域网放行会把它们发给路由器 —— 假地址没有真实目的地,内容出不去,但包不该离开本机。
+// 经隧道的(本机地址是隧道地址)、回环、本服务都在它上面放行,连着时不受影响。
+func blockFakeIP6(session uintptr, baseObjects *baseObjects, weight uint8) error {
+	conditions := []wtFwpmFilterCondition0{{fieldKey: cFWPM_CONDITION_IP_REMOTE_ADDRESS, matchType: cFWP_MATCH_EQUAL}}
+	conditions[0].conditionValue._type = cFWP_V6_ADDR_MASK
+	conditions[0].conditionValue.value = uintptr(unsafe.Pointer(&fakeIP6))
+	displayData, err := createWtFwpmDisplayData0(fakeIP6BlockName, "")
+	if err != nil {
+		return wrapErr(err)
+	}
+	filter := wtFwpmFilter0{
+		displayData:         *displayData,
+		providerKey:         &baseObjects.provider,
+		layerKey:            cFWPM_LAYER_ALE_AUTH_CONNECT_V6,
+		subLayerKey:         baseObjects.filters,
+		weight:              filterWeight(weight),
+		flags:               blockFlags(),
+		numFilterConditions: 1,
+		filterCondition:     &conditions[0],
+		action:              wtFwpmAction0{_type: cFWP_ACTION_BLOCK},
+	}
+	filterID := uint64(0)
+	if err := fwpmFilterAdd0(session, &filter, 0, &filterID); err != nil {
+		return wrapErr(err)
+	}
+	return nil
 }
 
 // blockDNS 拦掉发往任何地址的 DNS,TCP 和 UDP 都拦。

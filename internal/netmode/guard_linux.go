@@ -77,6 +77,7 @@ func guardRuleset(spec GuardSpec, dns bool) string {
 		b.WriteString(dnsDrop)
 	}
 	if spec.LAN {
+		b.WriteString(fakeDrop) // 网关模式下局域网设备也拿到假地址
 		fmt.Fprintf(&b, "\t\tip daddr { %s } accept\n", strings.Join(privateV4, ", "))
 		fmt.Fprintf(&b, "\t\tip6 daddr { %s } accept\n", strings.Join(privateV6, ", "))
 	}
@@ -95,18 +96,24 @@ func selfMarks(spec GuardSpec) string {
 }
 
 // blockLeaks 压在局域网放行之上的几条:DNS(53 / 853,DNS 已接进隧道时才拦)、
-// UPnP 发现(SSDP,UDP 1900)与 NAT-PMP / PCP(UDP 5351)—— 本机程序靠后两样能向路由器问到宽带的真实公网地址。
+// UPnP 发现(SSDP,UDP 1900)与 NAT-PMP / PCP(UDP 5351)—— 本机程序靠后两样能向路由器问到宽带的真实公网地址;
+// 还有 v6 假地址段(见 fakeDrop)。
 func blockLeaks(b *strings.Builder, dns bool) {
 	if dns {
 		b.WriteString(dnsDrop)
 	}
 	b.WriteString(upnpDrop)
+	b.WriteString(fakeDrop)
 }
 
 const (
 	dnsDrop  = "\t\ttcp dport { 53, 853 } drop\n\t\tudp dport { 53, 853 } drop\n"
 	upnpDrop = "\t\tudp dport { 1900, 5351 } drop\n"
 )
+
+// fakeDrop 发往 v6 假地址段的包:它落在局域网放行的 fc00::/7 里,隧道断开的空档里应用还往记下的假地址发包,
+// 会被当成局域网流量发给路由器(假地址没有真实目的地,内容出不去,但包不该离开本机)。经隧道的在上面已放行。
+var fakeDrop = "\t\tip6 daddr " + builder.FakeIP6 + " drop\n"
 
 func ApplyGuard(spec GuardSpec) error {
 	nftMu.Lock()

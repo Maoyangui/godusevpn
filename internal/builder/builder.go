@@ -55,10 +55,12 @@ const (
 	// HijackDNS macOS 上接管系统 DNS 时填的地址。走的是"进了隧道就被 hijack-dns 接住"这条路,
 	// 所以填什么地址都一样(只要不是被排除在隧道外的私网段,也不能是 TUN 自己的地址 —— 那会被内核当本机地址回环)。
 	// 挑一个国内外都能用的公共解析器:万一哪次崩溃没来得及还原,机器照样能解析,不至于打不开网页。
-	HijackDNS     = "223.5.5.5"
-	TunAddr6      = "fdfe:dcba:9876::1/126"
-	fakeIP4       = "198.18.0.0/15"
-	fakeIP6       = "fc00::/18"
+	HijackDNS = "223.5.5.5"
+	TunAddr6  = "fdfe:dcba:9876::1/126"
+	fakeIP4   = "198.18.0.0/15"
+	fakeIP6   = "fc00::/18"
+	// FakeIP6 v6 假地址段。它落在局域网的 fc00::/7 里:三个平台的闸都要在局域网放行之前把它拦掉(见 netmode)
+	FakeIP6       = fakeIP6
 	ruleSetBase   = "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/"
 	ruleSetIPBase = "https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/"
 	// SealedBootstrapDoH 全局禁直连下「本地 DNS」若被设成 system,给节点域名解析用的加密替身(按地址连,不用再解析它自己)。

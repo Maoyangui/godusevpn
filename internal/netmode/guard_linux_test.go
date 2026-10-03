@@ -65,6 +65,10 @@ func TestGuardBlocksDNSAndUPnPBeforeLAN(t *testing.T) {
 	before(t, out, "tcp dport { 53, 853 } drop", "ip daddr {")
 	before(t, out, mark, "udp dport { 1900, 5351 } drop")
 	before(t, out, "udp dport { 1900, 5351 } drop", "ip daddr {")
+	before(t, out, "ip6 daddr "+builder.FakeIP6+" drop", "ip6 daddr {") // v6 假地址段不能当局域网放出去
+	spec := testSpec
+	spec.LAN = true
+	before(t, chain(t, guardRuleset(spec, true), "forward"), "ip6 daddr "+builder.FakeIP6+" drop", "ip6 daddr {")
 	if strings.Contains(guardRuleset(testSpec, false), "dport { 53, 853 }") {
 		t.Fatal("DNS 没接进隧道时不能拦:连着时就解析不了")
 	}

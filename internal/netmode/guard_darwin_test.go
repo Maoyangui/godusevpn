@@ -5,6 +5,8 @@ package netmode
 import (
 	"strings"
 	"testing"
+
+	"github.com/Maoyangui/godusevpn/internal/builder"
 )
 
 // 拦 DNS 那一条要在局域网放行之前(pf 从上到下第一条 quick 命中的说了算),在回环、root、隧道地址放行之后。
@@ -51,6 +53,10 @@ func TestGuardRulesBlockUPnPBeforeLAN(t *testing.T) {
 	}
 	if lan := strings.Index(r, "pass out quick to {"); lan < up {
 		t.Fatalf("要压在局域网放行之上:\n%s", r)
+	}
+	// v6 假地址段落在局域网放行的 fc00::/7 里:同样要在局域网放行之前拦掉
+	if fake := strings.Index(r, "block drop out quick inet6 to "+builder.FakeIP6); fake < 0 || fake > strings.Index(r, "pass out quick to {") {
+		t.Fatalf("v6 假地址段要在局域网放行之前拦掉:\n%s", r)
 	}
 }
 
