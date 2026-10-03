@@ -58,13 +58,13 @@ class App : Application() {
             // 措辞不能写成"已为你打开":这个方法跑在后台线程,授权页很可能被后台启动限制悄悄拦掉
             // 且不抛异常(用户在下载期间按了 Home、或者屏保介入 —— 电视上最典型的场景)。
             // 说成"可能会弹出",没弹的话下面那句指路仍然是对的。
-            notifyInstall("需要先允许本应用安装未知应用。系统授权页可能已弹出;没有的话到「系统设置 → 应用 → 特殊权限 → 安装未知应用」里允许本应用,然后再点一次更新")
+            notifyInstall(getString(R.string.install_need_permission))
             runCatching {
                 startActivity(Intent(android.provider.Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
                     android.net.Uri.parse("package:$packageName")).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
             }.onFailure {
                 Log.w(TAG, "打不开安装权限设置", it)
-                notifyInstall("这台设备不让应用自行安装更新,请到官网手动下载安装包")
+                notifyInstall(getString(R.string.install_blocked))
             }
             return
         }
@@ -74,7 +74,7 @@ class App : Application() {
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_GRANT_READ_URI_PERMISSION))
         }.onFailure {
             Log.w(TAG, "拉不起系统安装器", it)
-            notifyInstall("拉不起系统安装器。请打开应用后再点一次更新,或到官网手动下载安装包")
+            notifyInstall(getString(R.string.install_no_installer))
         }
     }
 

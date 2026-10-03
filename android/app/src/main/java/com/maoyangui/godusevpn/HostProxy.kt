@@ -59,11 +59,11 @@ object HostProxy : Host {
         val s = svc()
         if (s == null) {
             return org.json.JSONObject().put("queried", false)
-                .put("error", "VpnService 尚未运行，无法读取系统 Always-on/lockdown 状态").toString()
+                .put("error", App.instance.getString(R.string.lockdown_no_service)).toString()
         }
         if (android.os.Build.VERSION.SDK_INT < 29) {
             return org.json.JSONObject().put("queried", false)
-                .put("error", "Android API 低于 29，没有可读取 Always-on/lockdown 的系统接口").toString()
+                .put("error", App.instance.getString(R.string.lockdown_old_api)).toString()
         }
         return runCatching {
             org.json.JSONObject().put("queried", true)
@@ -71,7 +71,7 @@ object HostProxy : Host {
                 .put("lockdown", s.isLockdownEnabled).toString()
         }.getOrElse {
             org.json.JSONObject().put("queried", false)
-                .put("error", "读取系统 Always-on/lockdown 状态失败: ${it.message ?: it.javaClass.simpleName}").toString()
+                .put("error", App.instance.getString(R.string.lockdown_read_failed, it.message ?: it.javaClass.simpleName)).toString()
         }
     }
 }

@@ -136,6 +136,9 @@ class GodVpnService : VpnService() {
     }
 
     private fun updateNotification(state: JSONObject) {
+        // 状态没读到(界面层取状态失败时给的是一份空视图、状态写成断开):不能拿它判断「全局禁直连」开没开,
+        // 那样会把正当闸用的接口关掉,流量从 WiFi 出去。这一轮什么都不动,等下一次真实状态
+        if (!state.optBoolean("service", true)) return
         val view = state.optJSONObject("view") ?: return
         val status = view.optJSONObject("state")?.optString("status") ?: ""
         val text = when (status) {
