@@ -415,8 +415,8 @@ func (s *Service) Call(name string, args []json.RawMessage) (any, error) {
 		var p *ipc.ProfileView
 		err := s.dispatch(ipc.MSetProfileURL, map[string]string{"url": strings.TrimSpace(arg[string](args, 0))}, &p)
 		return p, err
-	case "RefreshProfile":
-		return profiles(ipc.MRefreshProfile, map[string]string{"id": arg[string](args, 0)})
+	case "RefreshProfile": // 第二个参数为真 = 后台刷新、立刻返回(结果随状态推送回来)
+		return profiles(ipc.MRefreshProfile, map[string]any{"id": arg[string](args, 0), "async": arg[bool](args, 1)})
 	case "GetProfiles":
 		return profiles(ipc.MGetProfiles, nil)
 	case "AddProfile":

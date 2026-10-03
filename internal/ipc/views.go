@@ -21,6 +21,8 @@ type ProfileView struct {
 	WebPage   string        `json:"webPage,omitempty"` // 面板给的「选购 / 续费」地址,空 = 没配
 	Usage     profile.Usage `json:"usage"`
 	Error     string        `json:"error,omitempty"` // 最近一次拉取失败的原因
+	// Refreshing 这条订阅正在刷新(界面点的刷新在后台做,结果随状态推送回来)
+	Refreshing bool `json:"refreshing,omitempty"`
 }
 
 // DeviceView 局域网设备(网关模式):设置里记过的带 Saved 与策略,只在网上看到的 Saved 为假。

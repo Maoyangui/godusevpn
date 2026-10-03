@@ -58,6 +58,28 @@ function codeText(code, detail) {
   return label + ' · ' + detail;
 }
 const errText = e => errParts(e).text;
+// refreshProfileBg 订阅刷新放到服务后台做:立刻返回、这条订阅标成"正在刷新",刷新结束(状态推送里 refreshing 落下)时
+// 这个 Promise 落定 —— 没有失败原因算成功,有就按它报错。回退链(当前节点 → 自动选择 → 直连)最长两分多钟,
+// 一次调用等不了那么久:控制管道 60 秒就断,以前界面报超时而后台其实还在刷、可能已经成功。
+const refreshWaits = [];
+async function refreshProfileBg(id) {
+  const list = await App().RefreshProfile(id, true) || [];
+  return new Promise((resolve, reject) => {
+    const w = { id, resolve, reject };
+    w.timer = setTimeout(() => { refreshWaits.splice(refreshWaits.indexOf(w), 1); reject(new Error(t('prof.refreshSlow'))); }, 240000);
+    refreshWaits.push(w);
+    checkRefreshWaits(list);
+  });
+}
+function checkRefreshWaits(list) {
+  for (const w of refreshWaits.slice()) {
+    const p = (list || []).find(x => x.id === w.id);
+    if (!p || p.refreshing) continue;
+    refreshWaits.splice(refreshWaits.indexOf(w), 1);
+    clearTimeout(w.timer);
+    if (p.error) w.reject(new Error(p.error)); else w.resolve(p);
+  }
+}
 // ---- 应用内对话框 ----
 // 不用浏览器自带的 confirm / prompt:Windows 的 WebView2 会画成「wails.localhost 显示」的系统弹窗贴在窗口左上角,
 // 安卓与浏览器面板也各带一行来源地址,样式和位置都跟应用对不上。这里自己画一个,三端一致。
@@ -732,7 +754,7 @@ function drawProfiles(list) {
   body.querySelectorAll('button[data-refresh]').forEach(b => b.addEventListener('click', async e => {
     e.stopPropagation();
     b.disabled = true; b.querySelector('svg').classList.add('spin');
-    try { await App().RefreshProfile(b.dataset.refresh); toast(t('prof.refreshed'), 'ok'); } catch (err) { toast(errText(err), 'err'); }
+    try { await refreshProfileBg(b.dataset.refresh); toast(t('prof.refreshed'), 'ok'); } catch (err) { toast(errText(err), 'err'); }
     if (!$('#sheet').classList.contains('show')) return;
     let l = [];
     try { l = await App().GetProfiles() || []; } catch (err) { l = state.view.profiles || []; }
@@ -801,7 +823,7 @@ async function drawNodes(testing) {
     if (p && !nodeFetchTried) { // 有订阅却没有节点 = 还没拉取过(比如刚导入设置),拉一次再画
       nodeFetchTried = true;
       $('#sheet-body').innerHTML = `<div class="empty"><span class="spinner"></span> ${t('node.fetching')}</div>`;
-      try { await App().RefreshProfile(p.id); } catch (e) { $('#sheet-body').innerHTML = `<div class="empty">${esc(errText(e))}</div>`; return; }
+      try { await refreshProfileBg(p.id); } catch (e) { $('#sheet-body').innerHTML = `<div class="empty">${esc(errText(e))}</div>`; return; }
       return drawNodes(testing);
     }
     $('#sheet-body').innerHTML = `<div class="empty">${p ? t('node.notFetched') : t('prof.empty')}</div>`; return;
@@ -972,7 +994,7 @@ function renderProfiles(el, editId) {
       try {
         if (act === 'renew') { openExternal((list.find(x => x.id === id) || {}).webPage); return; }
         if (act === 'use') { await App().SelectProfile(id); }
-        else if (act === 'refresh') { b.disabled = true; b.classList.add('busy'); await App().RefreshProfile(id); toast(t('prof.refreshed'), 'ok'); }
+        else if (act === 'refresh') { b.disabled = true; b.classList.add('busy'); await refreshProfileBg(id); toast(t('prof.refreshed'), 'ok'); }
         else if (act === 'edit') { showForm(list.find(x => x.id === id)); return; }
         else if (act === 'del') { if (!await askConfirm(t('prof.delConfirm', { n: b.dataset.name }), { ok: t('prof.del') })) return; await App().RemoveProfile(id); toast(t('prof.deleted'), 'ok'); }
       } catch (err) { toast(errText(err), 'err'); }
@@ -1588,6 +1610,7 @@ async function init() {
     if (view === 'onboard' && has) nav('home');
     else if (view === 'home' && !has && hadProfiles) nav('onboard');
     updateHome(); updateOnboardSvc();
+    checkRefreshWaits(st.view.profiles);
     if (view === 'about' && $('#about-svc')) $('#about-svc').textContent = svcText(st);
     // 关于页只渲染一次:没权限 ↔ 已登记来回变时,「修复」按钮与「退出」的说明要跟着变,否则说明会和实际行为相反
     if (view === 'about') {

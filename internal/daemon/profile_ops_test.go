@@ -158,3 +158,53 @@ func TestSetSettingsPreservesUnreadableFile(t *testing.T) {
 		t.Fatalf("文件可信之后的保存不该再另存,现在有 %d 份", len(baks))
 	}
 }
+
+// 界面点的刷新在后台做:立刻返回、这条订阅标成"正在刷新";刷完标记落下 —— 成功没有失败原因,失败带着原因。
+// 回退链最长两分多钟,控制管道一次调用 60 秒就断,同步等的话界面报超时而后台还在刷。
+func TestRefreshProfileAsync(t *testing.T) {
+	release := make(chan struct{})
+	var fail atomic.Bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		<-release
+		if fail.Load() {
+			http.Error(w, "gone", http.StatusNotFound)
+			return
+		}
+		_, _ = w.Write([]byte(subBody))
+	}))
+	defer srv.Close()
+	d := profileOpsDaemon(t)
+	d.settings.Profiles = []settings.Profile{{ID: "p1", Name: "一", URL: srv.URL + "/sub"}}
+	d.settings.ActiveProfile = "p1"
+	view := func() ipc.ProfileView { v, _ := d.profileViews(); return v[0] }
+	settle := func() ipc.ProfileView {
+		deadline := time.Now().Add(5 * time.Second)
+		for view().Refreshing && time.Now().Before(deadline) {
+			time.Sleep(10 * time.Millisecond)
+		}
+		return view()
+	}
+	raw, _ := json.Marshal(map[string]any{"id": "p1", "async": true})
+	began := time.Now()
+	res, err := d.Dispatch(ipc.MRefreshProfile, raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if time.Since(began) > time.Second {
+		t.Fatal("后台刷新应立刻返回,不等拉取")
+	}
+	if v, ok := res.([]ipc.ProfileView); !ok || len(v) != 1 || !v[0].Refreshing {
+		t.Fatalf("返回里这条订阅应标成正在刷新: %#v", res)
+	}
+	close(release)
+	if v := settle(); v.Refreshing || v.Error != "" || v.NodeCount != 1 {
+		t.Fatalf("刷成功后标记落下、没有失败原因、节点到手: %+v", v)
+	}
+	fail.Store(true)
+	if _, err := d.Dispatch(ipc.MRefreshProfile, raw); err != nil {
+		t.Fatal(err)
+	}
+	if v := settle(); v.Refreshing || v.Error == "" {
+		t.Fatalf("刷失败后标记照样落下,并带着原因: %+v", v)
+	}
+}

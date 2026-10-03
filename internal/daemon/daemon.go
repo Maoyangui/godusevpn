@@ -71,6 +71,7 @@ type Daemon struct {
 	fetchErr                   map[string]string           // 订阅 id → 最近一次拉取失败原因
 	fetchLink                  map[string]string           // 订阅 id → 拉取失败(404)时面板随响应给的「选购 / 续费」地址
 	refreshing                 map[string]*refreshCall     // 订阅 id → 正在跑的那次刷新:同一条订阅不叠第二条回退链
+	refreshQueued              map[string]bool             // 界面点的后台刷新:goroutine 还没登记进 refreshing 时也要显示"正在刷新"
 	running                    *profile.Profile            // 正在跑的内核是按哪份订阅生成的;刷新后拿它和缓存比,决定动不动隧道
 	prepared                   *profile.Profile            // prepare 刚按它生成了配置、内核还没起:start 成功后转成 running
 	guardOn                    bool                        // 「全局禁直连」的闸此刻开着
@@ -1800,7 +1801,8 @@ func (d *Daemon) profileViews() ([]ipc.ProfileView, *ipc.ProfileView) {
 	var active *ipc.ProfileView
 	out := make([]ipc.ProfileView, 0, len(d.settings.Profiles))
 	for _, sp := range d.settings.Profiles {
-		v := ipc.ProfileView{ID: sp.ID, Name: sp.Name, URL: sp.URL, Active: sp.ID == d.settings.ActiveProfile, Error: d.fetchErr[sp.ID]}
+		v := ipc.ProfileView{ID: sp.ID, Name: sp.Name, URL: sp.URL, Active: sp.ID == d.settings.ActiveProfile, Error: d.fetchErr[sp.ID],
+			Refreshing: d.refreshing[sp.ID] != nil || d.refreshQueued[sp.ID]}
 		if c := d.profiles[sp.ID]; c != nil {
 			v.Title, v.FetchedAt, v.NodeCount, v.Tags, v.Usage = c.Title, c.FetchedAt, len(c.Outbounds), c.Tags, c.Usage
 			v.WebPage = c.WebPage
@@ -2295,7 +2297,8 @@ func (d *Daemon) registerHandlers() {
 	})
 	h(ipc.MRefreshProfile, func(p json.RawMessage) (any, error) {
 		in, _ := ipc.Decode[struct {
-			ID string `json:"id"`
+			ID    string `json:"id"`
+			Async bool   `json:"async"`
 		}](p)
 		id := in.ID
 		if id == "" {
@@ -2304,14 +2307,42 @@ func (d *Daemon) registerHandlers() {
 		if id == "" {
 			return nil, &ipc.CallError{Code: state.CodeProfileMissing, Msg: "还没有添加订阅"}
 		}
-		changed, err := d.refreshProfile(context.Background(), id)
-		if err != nil {
-			return nil, &ipc.CallError{Code: state.CodeOf(err), Msg: err.Error()}
+		run := func() error {
+			changed, err := d.refreshProfile(context.Background(), id)
+			if err != nil {
+				return err
+			}
+			if changed {
+				d.afterRefresh(id)
+			} else {
+				d.logf("订阅刷新:无变化")
+			}
+			return nil
 		}
-		if changed {
-			d.afterRefresh(id)
-		} else {
-			d.logf("订阅刷新:无变化")
+		if in.Async {
+			// 界面用:放到后台刷、立刻返回,这条订阅标成"正在刷新";结果(拉取时间 / 失败原因)随状态推送回去。
+			// 回退链(当前节点 → 自动选择 → 直连)最长两分多钟,控制管道的一次调用 60 秒就断,界面会报超时而后台还在刷
+			d.mu.Lock()
+			if d.refreshQueued == nil {
+				d.refreshQueued = map[string]bool{}
+			}
+			d.refreshQueued[id] = true
+			d.mu.Unlock()
+			go func() {
+				defer func() {
+					d.mu.Lock()
+					delete(d.refreshQueued, id)
+					d.mu.Unlock()
+				}()
+				if err := run(); err != nil {
+					d.logf("订阅刷新失败: %v", err)
+				}
+			}()
+			views, _ := d.profileViews()
+			return views, nil
+		}
+		if err := run(); err != nil {
+			return nil, &ipc.CallError{Code: state.CodeOf(err), Msg: err.Error()}
 		}
 		views, _ := d.profileViews()
 		return views, nil

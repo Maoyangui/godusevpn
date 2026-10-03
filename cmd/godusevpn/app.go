@@ -547,10 +547,11 @@ func (a *App) SetProfileURL(url string) (*ipc.ProfileView, error) {
 	return p, err
 }
 
-// RefreshProfile 刷新一条订阅(id 为空 = 当前),返回全部订阅。
-func (a *App) RefreshProfile(id string) ([]ipc.ProfileView, error) {
+// RefreshProfile 刷新一条订阅(id 为空 = 当前),返回全部订阅。async 为真时服务在后台刷、立刻返回,
+// 结果随状态推送回来(回退链最长两分多钟,控制管道的一次调用 60 秒就断)。
+func (a *App) RefreshProfile(id string, async bool) ([]ipc.ProfileView, error) {
 	var out []ipc.ProfileView
-	err := a.call(ipc.MRefreshProfile, map[string]string{"id": id}, &out)
+	err := a.call(ipc.MRefreshProfile, map[string]any{"id": id, "async": async}, &out)
 	go a.refresh()
 	return out, err
 }
