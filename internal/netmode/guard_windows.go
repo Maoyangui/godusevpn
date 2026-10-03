@@ -61,6 +61,9 @@ func GuardTunUp(spec GuardSpec) error {
 	return wfp.TunUp(uint32(ifi.Index))
 }
 
+// GuardTunDown 隧道网卡没了:撤掉转发层按接口号装的「经隧道放行」(接口号会被别的网卡复用)。
+func GuardTunDown() error { return wfp.TunDown() }
+
 // ClearGuard 撤闸。失败要报出来:守护进程据此把状态记成"闸还在",不能记成"没开"。
 // 过滤器已经删干净、只是子层 / 提供者收尾没做完的不算失败(联网已经恢复),记成警告给日志看。
 func ClearGuard() error {

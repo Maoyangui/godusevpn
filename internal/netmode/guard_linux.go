@@ -134,6 +134,9 @@ func GuardTunUp(spec GuardSpec) error {
 	return routeDNSToTun(spec.TunName)
 }
 
+// GuardTunDown nft 按网卡名和地址放行,隧道网卡没了规则自然对不上,没有要撤的。
+func GuardTunDown() error { return nil }
+
 // ClearGuard 撤闸。表不随进程死(上次强杀留下的也要清),不存在也无妨;删了之后表还在才算失败。
 func ClearGuard() error {
 	nftMu.Lock()

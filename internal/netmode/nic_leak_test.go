@@ -16,7 +16,7 @@ func cidr(t *testing.T, s string) net.Addr {
 }
 
 // 停用网卡 IPv6 只在连接建立时做一次,连接期间新接一张网卡就会漏。守护进程靠这个判断要不要补做一次,
-// 所以"什么算漏"必须判准:判松了每 30 秒白跑一次 PowerShell,判严了就真漏了。
+// 所以"什么算漏"必须判准:判松了就频繁白跑 PowerShell,判严了就真漏了。
 func TestIfaceLeaksIPv6(t *testing.T) {
 	const tun = "godusevpn"
 	up := net.FlagUp

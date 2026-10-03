@@ -4,14 +4,52 @@ package wfp
 
 import "unsafe"
 
-// 拦 DNS 那两条过滤器的名字。guardCovers 按名字认它们(我们自己装的,名字固定)。
+// 按端口拦的那几条过滤器的名字。guardCovers 按名字认它们(我们自己装的,名字固定)。
 const (
-	dnsBlockName4 = "Block DNS (IPv4)"
-	dnsBlockName6 = "Block DNS (IPv6)"
+	dnsBlockName4     = "Block DNS (IPv4)"
+	dnsBlockName6     = "Block DNS (IPv6)"
+	upnpBlockOutName4 = "Block UPnP / NAT-PMP outbound (IPv4)"
+	upnpBlockOutName6 = "Block UPnP / NAT-PMP outbound (IPv6)"
+	upnpBlockInName4  = "Block UPnP / NAT-PMP inbound (IPv4)"
+	upnpBlockInName6  = "Block UPnP / NAT-PMP inbound (IPv6)"
 )
 
-// dnsBlockPorts DNS(53)与 DNS over TLS / QUIC(853)。
-var dnsBlockPorts = []uint16{53, 853}
+// portBlock 一条按协议 + 端口拦的过滤器:装在哪一层、叫什么、比远端还是本地端口。
+type portBlock struct {
+	layer windows_GUID
+	name  string
+	field windows_GUID // cFWPM_CONDITION_IP_REMOTE_PORT / cFWPM_CONDITION_IP_LOCAL_PORT
+}
+
+var (
+	// dnsBlockPorts DNS(53)与 DNS over TLS / QUIC(853)。
+	dnsBlockPorts = []uint16{53, 853}
+	dnsBlocks     = []portBlock{
+		{cFWPM_LAYER_ALE_AUTH_CONNECT_V4, dnsBlockName4, cFWPM_CONDITION_IP_REMOTE_PORT},
+		{cFWPM_LAYER_ALE_AUTH_CONNECT_V6, dnsBlockName6, cFWPM_CONDITION_IP_REMOTE_PORT},
+	}
+
+	// 发出去:SSDP 发现(1900,含组播 239.255.255.250 / ff02::c)与 NAT-PMP / PCP 请求(发往网关 5351)。
+	upnpOutPorts  = []uint16{1900, 5351}
+	upnpOutBlocks = []portBlock{
+		{cFWPM_LAYER_ALE_AUTH_CONNECT_V4, upnpBlockOutName4, cFWPM_CONDITION_IP_REMOTE_PORT},
+		{cFWPM_LAYER_ALE_AUTH_CONNECT_V6, upnpBlockOutName6, cFWPM_CONDITION_IP_REMOTE_PORT},
+	}
+	// 收进来:路由器主动发的 SSDP 通告(发往 1900)与 NAT-PMP / PCP 地址通告(发往 224.0.0.1 / ff02::1 的 5350,
+	// 里面直接带着公网地址)—— 只拦发出去的话,程序在这两个端口上听着照样能拿到。
+	upnpInPorts  = []uint16{1900, 5350}
+	upnpInBlocks = []portBlock{
+		{cFWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V4, upnpBlockInName4, cFWPM_CONDITION_IP_LOCAL_PORT},
+		{cFWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V6, upnpBlockInName6, cFWPM_CONDITION_IP_LOCAL_PORT},
+	}
+)
+
+// namedBlocks guardCovers 要求齐全的那几条按端口拦的过滤器。
+func namedBlocks() []portBlock {
+	all := append([]portBlock{}, dnsBlocks...)
+	all = append(all, upnpOutBlocks...)
+	return append(all, upnpInBlocks...)
+}
 
 // blockDNS 拦掉发往任何地址的 DNS,TCP 和 UDP 都拦。
 //
@@ -24,38 +62,50 @@ var dnsBlockPorts = []uint16{53, 853}
 //
 // 转发层(热点共享)没有端口字段,按端口拦不了:经本机转发、直接问局域网 DNS 的查询不归这组管。
 func blockDNS(session uintptr, baseObjects *baseObjects, weight uint8) error {
-	// 同一字段的几个条件之间是"或",不同字段之间是"且":(UDP 或 TCP)且(端口 53 或 853)。
-	conditions := make([]wtFwpmFilterCondition0, 0, 2+len(dnsBlockPorts))
-	for _, proto := range []wtIPProto{cIPPROTO_UDP, cIPPROTO_TCP} {
-		c := wtFwpmFilterCondition0{fieldKey: cFWPM_CONDITION_IP_PROTOCOL, matchType: cFWP_MATCH_EQUAL}
-		c.conditionValue._type = cFWP_UINT8
-		c.conditionValue.value = uintptr(proto)
-		conditions = append(conditions, c)
+	return addPortBlocks(session, baseObjects, weight, []wtIPProto{cIPPROTO_UDP, cIPPROTO_TCP}, dnsBlockPorts, dnsBlocks)
+}
+
+// blockUPnP 严格全局下,"局域网直通"也不放行 UPnP 发现(SSDP)与 NAT-PMP / PCP:任何程序都能靠它们向路由器
+// 问到宽带的公网 IPv4(IGD 的 GetExternalIPAddress、NAT-PMP 的外部地址),再经隧道报出去 —— 包没漏,
+// 真实地址漏了。代价:连着的时候局域网投屏、设备自动发现(DLNA 等)不可用,手动填 IP 访问照常。
+// 权重与 blockDNS 相同:压在局域网放行上面,经隧道的(本机地址是隧道地址)、回环、本服务都在它上面放行。
+func blockUPnP(session uintptr, baseObjects *baseObjects, weight uint8) error {
+	udp := []wtIPProto{cIPPROTO_UDP}
+	if err := addPortBlocks(session, baseObjects, weight, udp, upnpOutPorts, upnpOutBlocks); err != nil {
+		return err
 	}
-	for _, port := range dnsBlockPorts {
-		c := wtFwpmFilterCondition0{fieldKey: cFWPM_CONDITION_IP_REMOTE_PORT, matchType: cFWP_MATCH_EQUAL}
-		c.conditionValue._type = cFWP_UINT16
-		c.conditionValue.value = uintptr(port)
-		conditions = append(conditions, c)
-	}
-	for _, l := range []struct {
-		layer windows_GUID
-		name  string
-	}{
-		{cFWPM_LAYER_ALE_AUTH_CONNECT_V4, dnsBlockName4},
-		{cFWPM_LAYER_ALE_AUTH_CONNECT_V6, dnsBlockName6},
-	} {
-		displayData, err := createWtFwpmDisplayData0(l.name, "")
+	return addPortBlocks(session, baseObjects, weight, udp, upnpInPorts, upnpInBlocks)
+}
+
+// addPortBlocks 同一组(协议, 端口)在每个 portBlock 那一层各装一条拦截。
+// 同一字段的几个条件之间是"或",不同字段之间是"且":(协议之一)且(端口之一)。条件值都是直接放在
+// uintptr 里的整数,不指向任何内存。
+func addPortBlocks(session uintptr, baseObjects *baseObjects, weight uint8, protos []wtIPProto, ports []uint16, blocks []portBlock) error {
+	for _, b := range blocks {
+		conditions := make([]wtFwpmFilterCondition0, 0, len(protos)+len(ports))
+		for _, proto := range protos {
+			c := wtFwpmFilterCondition0{fieldKey: cFWPM_CONDITION_IP_PROTOCOL, matchType: cFWP_MATCH_EQUAL}
+			c.conditionValue._type = cFWP_UINT8
+			c.conditionValue.value = uintptr(proto)
+			conditions = append(conditions, c)
+		}
+		for _, port := range ports {
+			c := wtFwpmFilterCondition0{fieldKey: b.field, matchType: cFWP_MATCH_EQUAL}
+			c.conditionValue._type = cFWP_UINT16
+			c.conditionValue.value = uintptr(port)
+			conditions = append(conditions, c)
+		}
+		displayData, err := createWtFwpmDisplayData0(b.name, "")
 		if err != nil {
 			return wrapErr(err)
 		}
 		filter := wtFwpmFilter0{
 			displayData:         *displayData,
 			providerKey:         &baseObjects.provider,
-			layerKey:            l.layer,
+			layerKey:            b.layer,
 			subLayerKey:         baseObjects.filters,
 			weight:              filterWeight(weight),
-			flags:               curFlags,
+			flags:               blockFlags(),
 			numFilterConditions: uint32(len(conditions)),
 			filterCondition:     (*wtFwpmFilterCondition0)(unsafe.Pointer(&conditions[0])),
 			action: wtFwpmAction0{

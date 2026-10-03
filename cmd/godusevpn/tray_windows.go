@@ -2,7 +2,7 @@ package main
 
 import (
 	_ "embed"
-	"github.com/Maoyangui/godusevpn/internal/ipc"
+	"errors"
 	"os"
 	"path/filepath"
 	gort "runtime"
@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 
 	"github.com/energye/systray"
+	"golang.org/x/sys/windows"
 
 	"github.com/Maoyangui/godusevpn/internal/buildinfo"
 )
@@ -115,25 +116,15 @@ func (t *trayUI) onReady() {
 	t.global.Click(async(func() { _, _ = t.app.SetMode("global") }))
 	t.direct.Click(async(func() { _, _ = t.app.SetMode("direct") }))
 	t.quitItem.Click(async(func() { t.app.QuitApp() }))
-	// 恢复网络:服务活着就关掉「全局禁直连」的开关(闸随之撤);服务不在就提权跑恢复命令,直接删过滤器
+	// 恢复网络:和开始菜单的快捷方式同一条路 —— 提权跑 guard clear --popup(guardfix.Clear),按过滤器的实际条数
+	// 判断闸在不在;服务活着就先经控制口关掉两个隐私开关,再撤闸、还原网卡 IPv6,结果弹窗说清楚。
+	// 以前服务活着时只看守护进程内存里的闸状态:设置文件读不出来时它报"没开"而过滤器都在,点了什么都不做也不说;
+	// 而且只关「全局禁直连」,网卡 IPv6 不还原(审计 G057)。
 	t.guardFix.Click(async(func() {
-		if t.app.GetState().Service {
-			var v ipc.StateView
-			if err := t.app.call(ipc.MGetState, nil, &v); err == nil && v.Guard == "" && v.GuardError == "" {
-				return // 闸本来就没开,没什么可解除的;别顺手把「全局禁直连」开关关了
-			}
-			if s, err := t.app.GetSettings(); err == nil {
-				s.NoDirect = false
-				_, _ = t.app.SaveSettings(s)
-			}
-			return
-		}
-		exe, err := os.Executable()
-		if err != nil {
-			return
-		}
-		if p, err := serviceBinary(filepath.Dir(exe)); err == nil {
-			_ = runElevated(p, "guard clear --popup")
+		if err := restoreNetwork(); err != nil && !errors.Is(err, windows.ERROR_CANCELLED) {
+			text, _ := windows.UTF16PtrFromString(err.Error())
+			title, _ := windows.UTF16PtrFromString(t.tr("guardfix"))
+			_, _ = windows.MessageBox(0, text, title, windows.MB_OK|windows.MB_ICONWARNING|windows.MB_SETFOREGROUND)
 		}
 	}))
 	t.upgrade.Click(async(func() { t.app.showAbout() }))
@@ -141,6 +132,19 @@ func (t *trayUI) onReady() {
 	t.ready = true
 	t.mu.Unlock()
 	t.update(t.app.GetState())
+}
+
+// restoreNetwork 提权跑「恢复网络」;用户在 UAC 里点了"否"时返回 ERROR_CANCELLED。
+func restoreNetwork() error {
+	exe, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	p, err := serviceBinary(filepath.Dir(exe))
+	if err != nil {
+		return err
+	}
+	return runElevated(p, "guard clear --popup")
 }
 
 // update 按最新状态刷图标、提示与菜单文字。

@@ -100,6 +100,7 @@ func enablePF() error {
 
 // GuardTunUp pf 按地址放行,隧道网卡起不起来无所谓。
 func GuardTunUp(GuardSpec) error { return nil }
+func GuardTunDown() error        { return nil }
 
 // ClearGuard 撤闸。规则不随进程死(上次强杀留下的也要清),所以不管本进程有没有装过,锚点一律清空。
 // 清完锚点里还有规则才算失败。

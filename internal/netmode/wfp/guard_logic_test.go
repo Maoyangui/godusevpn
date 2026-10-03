@@ -3,17 +3,100 @@
 package wfp
 
 import (
+	"os"
+	"regexp"
+	"strings"
 	"testing"
 
 	"golang.org/x/sys/windows"
 )
 
-// dnsBlocks 两条拦 DNS 的过滤器(出站 IPv4 / IPv6 各一条,带条件),标志是 flag。
-func dnsBlocks(flag wtFwpmFilterFlags) []filterInfo {
-	return []filterInfo{
-		{layer: cFWPM_LAYER_ALE_AUTH_CONNECT_V4, name: dnsBlockName4, action: cFWP_ACTION_BLOCK, flags: flag, conds: 4},
-		{layer: cFWPM_LAYER_ALE_AUTH_CONNECT_V6, name: dnsBlockName6, action: cFWP_ACTION_BLOCK, flags: flag, conds: 4},
+// sourceFunc 从本包某个源文件里取一个函数的函数体(到顶格的 "}" 为止)。只读源码,不碰系统。
+func sourceFunc(t *testing.T, file, sig string) string {
+	t.Helper()
+	b, err := os.ReadFile(file)
+	if err != nil {
+		t.Fatalf("读不到 %s: %v", file, err)
 	}
+	src := strings.ReplaceAll(string(b), "\r\n", "\n")
+	i := strings.Index(src, sig)
+	if i < 0 {
+		t.Fatalf("%s 里找不到 %q —— 函数被改名或改签名了,这条测试要跟着更新", file, sig)
+	}
+	rest := src[i:]
+	if j := strings.Index(rest, "\n}\n"); j >= 0 {
+		return rest[:j]
+	}
+	return rest
+}
+
+// 放行本服务那条是硬放行(CLEAR_ACTION_RIGHT)。只按 exe 路径的话,任何账户用同一个 exe 起的进程
+// (挂起启动再注入、设 GODUSEVPN_DATA 跑 run)都命中它,从物理网卡直连。钉住:还要比进程令牌,
+// 令牌要求只认 LocalSystem(服务本身)与启用状态的管理员组(提权的前台 run),只给"匹配过滤器"这一项权限。
+func TestPermitSelfRequiresPrivilegedToken(t *testing.T) {
+	body := sourceFunc(t, "rules.go", "func permitSelf(")
+	for _, want := range []string{"cFWPM_CONDITION_ALE_APP_ID", "cFWPM_CONDITION_ALE_USER_ID", "selfUserSDDL", "pin.Pin(userID)"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("permitSelf 里没有 %s:放行本服务又只按 exe 路径了(或条件值没钉住)", want)
+		}
+	}
+	aces := regexp.MustCompile(`\(([^)]*)\)`).FindAllStringSubmatch(selfUserSDDL, -1)
+	if !strings.HasPrefix(selfUserSDDL, "D:") || len(aces) == 0 {
+		t.Fatalf("令牌要求不是一条 DACL: %q", selfUserSDDL)
+	}
+	sids := map[string]bool{}
+	for _, a := range aces {
+		f := strings.Split(a[1], ";")
+		// CC = 0x1 = FWP_ACTRL_MATCH_FILTER:WFP 判 ALE_USER_ID 时拿进程令牌对这份描述符做访问检查,要的就是这一位
+		if len(f) != 6 || f[0] != "A" || f[2] != "CC" {
+			t.Fatalf("ACE %q 应当是只给 CC 的允许项", a[1])
+		}
+		sids[f[5]] = true
+	}
+	if !sids["SY"] {
+		t.Fatal("LocalSystem 不在名单里:服务自己连节点、拉订阅都会被自己的闸拦死")
+	}
+	if !sids["BA"] {
+		t.Fatal("管理员组不在名单里:提权终端里的前台 run 排障模式会被自己的闸拦死")
+	}
+	for s := range sids {
+		if s != "SY" && s != "BA" {
+			t.Fatalf("%s 也能命中放行本服务:普通用户起的同一个 exe 又能直连了", s)
+		}
+	}
+	if cFWP_ACTRL_MATCH_FILTER != 1 {
+		t.Fatal("FWP_ACTRL_MATCH_FILTER 不是 0x1,SDDL 里的 CC 对不上")
+	}
+}
+
+// 运行期那组的拦截要做成"否决"(CLEAR_ACTION_RIGHT):sing-tun 严格路由在它自己的最高权重子层里按 exe 路径
+// 给内核进程装了硬放行,它的子层先判时,普通拦截盖不过它,同一个 exe 路径起的任何进程都能出去。
+// 开机那组不带(那时没有别的子层)。
+func TestBlockFlagsVetoInPersistentSet(t *testing.T) {
+	saved := curFlags
+	defer func() { curFlags = saved }()
+	curFlags = cFWPM_FILTER_FLAG_PERSISTENT
+	if f := blockFlags(); f&cFWPM_FILTER_FLAG_PERSISTENT == 0 || f&cFWPM_FILTER_FLAG_CLEAR_ACTION_RIGHT == 0 {
+		t.Fatalf("运行期那组的拦截没做成否决: %#x", f)
+	}
+	curFlags = cFWPM_FILTER_FLAG_BOOTTIME
+	if f := blockFlags(); f != cFWPM_FILTER_FLAG_BOOTTIME {
+		t.Fatalf("开机那组的拦截标志被改了: %#x", f)
+	}
+	for file, sig := range map[string]string{"rules.go": "func blockAll(", "rules_dns.go": "func addPortBlocks("} {
+		if !strings.Contains(sourceFunc(t, file, sig), "blockFlags()") {
+			t.Fatalf("%s 的 %s 没用 blockFlags():这组拦截盖不过别的子层按 exe 路径的硬放行", file, sig)
+		}
+	}
+}
+
+// portBlockFilters 按端口拦的那几条过滤器(namedBlocks:拦 DNS、拦 UPnP / NAT-PMP,带条件),标志是 flag。
+func portBlockFilters(flag wtFwpmFilterFlags) []filterInfo {
+	var fs []filterInfo
+	for _, b := range namedBlocks() {
+		fs = append(fs, filterInfo{layer: b.layer, name: b.name, action: cFWP_ACTION_BLOCK, flags: flag, conds: 4})
+	}
+	return fs
 }
 
 func TestBootGuardCoversRequiresEnabledBlockingLayer(t *testing.T) {
@@ -22,7 +105,7 @@ func TestBootGuardCoversRequiresEnabledBlockingLayer(t *testing.T) {
 	for _, layer := range layers {
 		fs = append(fs, filterInfo{layer: layer, action: cFWP_ACTION_BLOCK})
 	}
-	fs = append(fs, dnsBlocks(0)...)
+	fs = append(fs, portBlockFilters(0)...)
 	if bootGuardCovers(fs) {
 		t.Fatal("non-boot filters must not satisfy boot guard")
 	}
@@ -44,7 +127,7 @@ func TestGuardCoversRequiresEveryLayerAndFlag(t *testing.T) {
 	for i, layer := range layers {
 		fs[i] = filterInfo{layer: layer, action: cFWP_ACTION_BLOCK, flags: cFWPM_FILTER_FLAG_PERSISTENT}
 	}
-	fs = append(fs, dnsBlocks(cFWPM_FILTER_FLAG_PERSISTENT)...)
+	fs = append(fs, portBlockFilters(cFWPM_FILTER_FLAG_PERSISTENT)...)
 	if !guardCovers(fs, cFWPM_FILTER_FLAG_PERSISTENT) {
 		t.Fatal("complete persistent blocking set should pass")
 	}
@@ -141,7 +224,7 @@ func TestPersistentGuardReadyIgnoresBootTimeSet(t *testing.T) {
 		for _, l := range layers {
 			fs = append(fs, filterInfo{layer: l, action: cFWP_ACTION_BLOCK, flags: flag})
 		}
-		return append(fs, dnsBlocks(flag)...)
+		return append(fs, portBlockFilters(flag)...)
 	}
 
 	t.Run("运行期那组齐了、开机那组一条都没有:算就绪", func(t *testing.T) {
@@ -185,7 +268,7 @@ func TestGuardCoversNeedsUnconditionalBlockAndDNS(t *testing.T) {
 		for _, l := range ourLayers() {
 			fs = append(fs, filterInfo{layer: l, action: cFWP_ACTION_BLOCK, flags: p})
 		}
-		return append(fs, dnsBlocks(p)...)
+		return append(fs, portBlockFilters(p)...)
 	}
 	if !guardCovers(full(), p) {
 		t.Fatal("全拦齐了、两条拦 DNS 也在,应当算齐")
@@ -204,7 +287,8 @@ func TestGuardCoversNeedsUnconditionalBlockAndDNS(t *testing.T) {
 		}
 	})
 
-	for _, name := range []string{dnsBlockName4, dnsBlockName6} {
+	for _, b := range namedBlocks() {
+		name := b.name
 		t.Run("缺 "+name, func(t *testing.T) {
 			var fs []filterInfo
 			for _, f := range full() {
@@ -213,7 +297,7 @@ func TestGuardCoversNeedsUnconditionalBlockAndDNS(t *testing.T) {
 				}
 			}
 			if guardCovers(fs, p) {
-				t.Fatalf("少了 %s 还算齐:隧道断开时 DNS 能经局域网放行出去", name)
+				t.Fatalf("少了 %s 还算齐:它管的那类流量(DNS / UPnP / NAT-PMP)能经局域网放行出去", name)
 			}
 		})
 	}
@@ -250,8 +334,61 @@ func TestGuardCoversNeedsUnconditionalBlockAndDNS(t *testing.T) {
 		if bootGuardCovers(fs) {
 			t.Fatal("开机那组没有拦 DNS 也算齐了")
 		}
-		if !bootGuardCovers(append(fs, dnsBlocks(cFWPM_FILTER_FLAG_BOOTTIME)...)) {
+		if !bootGuardCovers(append(fs, portBlockFilters(cFWPM_FILTER_FLAG_BOOTTIME)...)) {
 			t.Fatal("开机那组齐了却判不齐")
 		}
 	})
+}
+
+// 严格全局下"局域网直通"也不放行 UPnP 发现与 NAT-PMP / PCP(2026-09-29 用户拍板):任何程序都能靠它们向路由器
+// 问到宽带的公网 IPv4。钉住范围 —— 发出去的 SSDP(1900)与 NAT-PMP / PCP 请求(5351),收进来的 SSDP 通告(1900)
+// 与 NAT-PMP / PCP 地址通告(5350,里面直接带着公网地址);两个地址族;只拦 UDP;装在该装的层、比该比的端口;
+// 和拦 DNS 同一权重(压在局域网放行上面、隧道地址 / 回环 / 本服务下面)。
+func TestUPnPBlocksCoverDiscoveryAndNATPMP(t *testing.T) {
+	has := func(ports []uint16, want ...uint16) bool {
+		for _, w := range want {
+			found := false
+			for _, p := range ports {
+				found = found || p == w
+			}
+			if !found {
+				return false
+			}
+		}
+		return true
+	}
+	if !has(upnpOutPorts, 1900, 5351) || len(upnpOutPorts) != 2 {
+		t.Fatalf("发出去要拦的端口不对: %v", upnpOutPorts)
+	}
+	if !has(upnpInPorts, 1900, 5350) || len(upnpInPorts) != 2 {
+		t.Fatalf("收进来要拦的端口不对: %v", upnpInPorts)
+	}
+	for _, c := range []struct {
+		blocks []portBlock
+		layers []windows.GUID
+		field  windows.GUID
+	}{
+		{upnpOutBlocks, []windows.GUID{cFWPM_LAYER_ALE_AUTH_CONNECT_V4, cFWPM_LAYER_ALE_AUTH_CONNECT_V6}, cFWPM_CONDITION_IP_REMOTE_PORT},
+		{upnpInBlocks, []windows.GUID{cFWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V4, cFWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V6}, cFWPM_CONDITION_IP_LOCAL_PORT},
+	} {
+		if len(c.blocks) != len(c.layers) {
+			t.Fatalf("%v 应当两个地址族各一条", c.blocks)
+		}
+		for i, b := range c.blocks {
+			if b.layer != c.layers[i] || b.field != c.field {
+				t.Fatalf("%s 装错了层或比错了端口字段", b.name)
+			}
+		}
+	}
+	body := sourceFunc(t, "rules_dns.go", "func blockUPnP(")
+	if !strings.Contains(body, "[]wtIPProto{cIPPROTO_UDP}") || strings.Contains(body, "cIPPROTO_TCP") {
+		t.Fatal("拦 UPnP / NAT-PMP 应当只拦 UDP")
+	}
+	set := sourceFunc(t, "guard.go", "func installSet(")
+	if !strings.Contains(set, "blockUPnP(session, base, 13)") || !strings.Contains(set, "blockDNS(session, base, 13)") {
+		t.Fatal("拦 UPnP / NAT-PMP 要和拦 DNS 同在权重 13:压在局域网放行(12)上面、隧道地址 / 回环(14)下面")
+	}
+	if strings.Index(set, "blockUPnP(") > strings.Index(set, "if spec.LAN {") {
+		t.Fatal("拦 UPnP / NAT-PMP 不能挂在「局域网直通」开关下面:开着直通时正是要拦它")
+	}
 }

@@ -145,10 +145,19 @@ function Get-WfpProviders() { # BFE 状态里名叫 godusevpn 的提供者(两�
   # 去掉 <?xml ?> 声明后整份包进一个自造的根里再解析,几个根都成了子元素,XPath //providers/item 照样能找到。
   $body = [regex]::Replace($raw, '<\?xml[^>]*\?>', '')
   $wfp = New-Object System.Xml.XmlDocument
+  $script:wfpDoc = $null
   try { $wfp.LoadXml("<godusevpn-wrap>" + $body + "</godusevpn-wrap>") } catch { Write-Host "  (WFP 状态 XML 解析失败: $($_.Exception.Message))"; return $null }
+  $script:wfpDoc = $wfp
   $found = @($wfp.SelectNodes("//providers/item") | Where-Object { $_.displayData.name -eq "godusevpn" })
   return ,$found
 }
+# 上一次 Get-WfpProviders 读到的状态里,按显示名取过滤器(XML 节点)。读不到状态时返回 $null。
+function Wfp-Filters($name) {
+  if ($null -eq $script:wfpDoc) { return $null }
+  return ,@($script:wfpDoc.SelectNodes("//filters/item") | Where-Object { $_.displayData.name -eq $name })
+}
+function Filter-Fields($f) { return @($f.filterCondition.item | ForEach-Object { $_.fieldKey }) }
+function Filter-Flags($f) { return @($f.flags.item) }
 function Providers-Detail($p) {
   if ($null -eq $p) { return "(读不到 WFP 状态)" }
   if ($p.Count -eq 0) { return "(没有我们的提供者)" }
@@ -188,6 +197,13 @@ $hij = Resolve-DnsName -Name "www.google.com" -Server 8.8.8.8 -Type A -ErrorActi
 Check "直接问 8.8.8.8 也被劫持(答案仍是 fake-ip)" ($hij -and $hij.IPAddress -like "198.1[89].*") ($(if ($hij) { $hij.IPAddress } else { "no answer" }))
 $aaaa = Resolve-DnsName -Name "www.google.com" -Type AAAA -ErrorAction SilentlyContinue | Where-Object { $_.Type -eq "AAAA" }
 Check "AAAA 为空(禁 IPv6)" ($null -eq $aaaa) ($(if ($aaaa) { ($aaaa | Select-Object -First 1).IPAddress } else { "" }))
+# 连接时停用网卡 IPv6 要连隐藏接口(Teredo、6to4、IP-HTTPS、Wi-Fi Direct)一起停:判"确证在漏"看得见它们(审计 G003)。
+# Not Present 的不算(不在场,没有地址);停不掉的会在每次连接时挂一条告警,这里先在真机上暴露出来。
+$absent6 = @{}
+foreach ($x in @(Get-NetAdapter -IncludeHidden)) { if ($x.Status -eq 'Not Present') { $absent6[$x.Name] = $true } }
+$tunNames = @($tun | ForEach-Object { $_.Name })
+$on6 = @(Get-NetAdapterBinding -ComponentID ms_tcpip6 -IncludeHidden | Where-Object { $_.Enabled -and $tunNames -notcontains $_.Name -and -not $absent6.ContainsKey($_.Name) } | ForEach-Object { $_.Name })
+Check "连着时除 TUN 外在场网卡(含隐藏接口)的 IPv6 绑定都已停用" ($on6.Count -eq 0) ($on6 -join ", ")
 
 Write-Host "== 3.7 全局禁直连(WFP 闸:绑物理网卡的直连被拦,经隧道照常;停服务闸仍在;切回规则模式闸清空)" -ForegroundColor Cyan
 # 正控制:规则模式下(闸没开)绑物理网卡的直连必须是通的(2xx / 3xx),否则探测本身跑不通,下面"被拦"的断言没有意义。
@@ -224,6 +240,15 @@ Check "严格全局下系统 DNS 照常(fake-ip)" ($gd -match '^198\.1[89]\.') "
 $g8 = (Resolve-DnsName -Name "www.google.com" -Type A -Server 8.8.8.8 -DnsOnly -ErrorAction SilentlyContinue | Where-Object { $_.Type -eq "A" } | Select-Object -First 1).IPAddress
 Check "严格全局下直接问 8.8.8.8 也照常被劫持" ($g8 -match '^198\.1[89]\.') "$g8"
 Check "闸里有拦 DNS 的规则" (($null -ne $ours) -and ($script:wfpStateText -match 'block dns \(ipv4\)') -and ($script:wfpStateText -match 'block dns \(ipv6\)')) ""
+Check "闸里有拦 UPnP / NAT-PMP 的规则(出入 × v4 / v6)" (($null -ne $ours) -and ($script:wfpStateText -match 'block upnp / nat-pmp outbound \(ipv4\)') -and ($script:wfpStateText -match 'block upnp / nat-pmp outbound \(ipv6\)') -and ($script:wfpStateText -match 'block upnp / nat-pmp inbound \(ipv4\)') -and ($script:wfpStateText -match 'block upnp / nat-pmp inbound \(ipv6\)')) ""
+# 放行本服务除了 exe 路径还要比进程令牌(只认 LocalSystem / 提权管理员):只按路径的话,任何账户用同一个 exe
+# 起的进程都能直连。服务自己照常连节点(上面"经隧道照常"、下面"服务重启后自动恢复连接")说明令牌要求没把它拦死。
+$ps = Wfp-Filters "Permit unrestricted outbound traffic for godusevpn service (IPv4)"
+Check "放行本服务同时比 exe 路径与进程令牌" (($null -ne $ps) -and ($ps.Count -gt 0) -and -not ($ps | Where-Object { ((Filter-Fields $_) -notcontains 'FWPM_CONDITION_ALE_USER_ID') -or ((Filter-Fields $_) -notcontains 'FWPM_CONDITION_ALE_APP_ID') })) ($(if ($ps) { ($ps | ForEach-Object { (Filter-Fields $_) -join '+' }) -join ', ' } else { '(读不到)' }))
+# 运行期的全拦是"否决"(CLEAR_ACTION_RIGHT):sing-tun 严格路由按 exe 路径的硬放行在另一个同权重子层里,盖不过它
+$ba = Wfp-Filters "Block all outbound (IPv4)"
+$ba = @($ba | Where-Object { $_ -and ((Filter-Flags $_) -contains 'FWPM_FILTER_FLAG_PERSISTENT') })
+Check "运行期的全拦是否决(带 CLEAR_ACTION_RIGHT)" (($ba.Count -gt 0) -and -not ($ba | Where-Object { (Filter-Flags $_) -notcontains 'FWPM_FILTER_FLAG_CLEAR_ACTION_RIGHT' })) (($ba | ForEach-Object { (Filter-Flags $_) -join '+' }) -join ', ')
 # 闸是持久的:服务停了也必须还在拦。这是 m29 绑服务名之后失效的那条性质,直接停服务实测。
 & $svc stop | Out-Null
 Start-Sleep -Seconds 3
@@ -240,6 +265,18 @@ $p80 = Tcp-Probe 80
 $p53 = Tcp-Probe 53
 Check "服务停着时私网 80 端口照常发出(局域网放行在,对照)" ($p80.rc -eq 28) ("curl=" + $p80.rc + " " + $p80.ms + "ms")
 Check "服务停着时私网 53 端口被当场拒绝(拦 DNS 压在局域网放行上面)" (($p53.rc -ne 28) -and ($p53.rc -ne 0) -and ($p53.ms -lt 2000)) ("curl=" + $p53.rc + " " + $p53.ms + "ms")
+# UPnP 发现(SSDP 1900)与 NAT-PMP / PCP(5351)同样压在局域网放行上面:程序不能经局域网向路由器问公网 IPv4。
+# UDP 被闸拦下时 Send 当场报错;对照端口 5000 按局域网放行照常发出。对照没过就判不了,按失败报。
+function Udp-Probe($ip, $port) {
+  $u = New-Object System.Net.Sockets.UdpClient
+  try { [void]$u.Send([byte[]](0), 1, $ip, $port); return "sent" } catch { return ("error: " + $_.Exception.Message) } finally { $u.Close() }
+}
+$u5000 = Udp-Probe "10.255.255.1" 5000
+$u5351 = Udp-Probe "10.255.255.1" 5351
+$u1900 = Udp-Probe "239.255.255.250" 1900
+Check "服务停着时私网 UDP 5000 照常发出(局域网放行在,对照)" ($u5000 -eq "sent") $u5000
+Check "服务停着时 NAT-PMP / PCP(私网 UDP 5351)被拦" (($u5000 -eq "sent") -and ($u5351 -ne "sent")) $u5351
+Check "服务停着时 SSDP 发现(239.255.255.250:1900)被拦" (($u5000 -eq "sent") -and ($u1900 -ne "sent")) $u1900
 & $svc start | Out-Null
 $stb = Wait-Status "connected" 60
 Check "服务重启后自动恢复连接(落盘的连接意愿)" ($stb -match "状态:\s+connected") ($stb.Trim() -replace "`r?`n", " | ")
@@ -300,8 +337,14 @@ if ($script:nicInjected) {
   Start-Sleep -Seconds 5
   Check "断开后网卡 IPv6 备份已清理(含那张不存在的网卡)" (-not (Test-Path $nicb)) ($(if (Test-Path $nicb) { (Get-Content $nicb) -join " | " } else { "" }))
   $slog = Join-Path $env:ProgramData "godusevpn\logs\service.log"
-  $gone = if (Test-Path $slog) { @(Select-String -Path $slog -Pattern "已经不在了" -SimpleMatch).Count } else { 0 }
+  $gone = if (Test-Path $slog) { @(Select-String -Path $slog -Pattern "还原时这些网卡不在" -SimpleMatch).Count } else { 0 }
   Check "服务日志记下了已消失的网卡" ($gone -gt 0) "matches=$gone"
+  # 不在的网卡不再丢掉:挪进待还原清单(它再出现时开回去),并落进"原值丢失"记录让首页 / 恢复网络说出来
+  $pend = Join-Path $env:ProgramData "godusevpn\nic-ipv6-pending.txt"
+  $lost = Join-Path $env:ProgramData "godusevpn\nic-ipv6-lost.txt"
+  Check "已消失的网卡挪进了待还原清单" ((Test-Path $pend) -and (((Get-Content $pend) -join "|") -match "ZZ-Gone-Adapter-For-Test")) ($(if (Test-Path $pend) { (Get-Content $pend) -join " | " } else { "no pending" }))
+  Check "已消失的网卡落进了持久提示" ((Test-Path $lost) -and (((Get-Content $lost -Encoding UTF8) -join "|") -match "ZZ-Gone-Adapter-For-Test")) ""
+  Remove-Item $pend, $lost -ErrorAction SilentlyContinue # 假网卡,别留给后面的段落和下一次验收
   if ($script:nicBroken) {
     $bad = $nicb + ".bad"
     Check "无效的备份行挪到了 .bad" ((Test-Path $bad) -and (((Get-Content $bad) -join "|") -match "broken on purpose")) ($(if (Test-Path $bad) { (Get-Content $bad) -join " | " } else { "no .bad" }))

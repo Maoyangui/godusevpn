@@ -3,10 +3,15 @@
 package wfp
 
 import (
+	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"regexp"
 	"strings"
+	"syscall"
 	"testing"
+	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
@@ -99,4 +104,88 @@ func TestLiveEnableKeep(t *testing.T) {
 	}
 	n, _ := Count()
 	t.Logf("开闸(不撤): %d 条, warn=%q", n, warn)
+}
+
+// TestLiveSelfPermitNeedsPrivilegedToken 放行本服务按 exe 路径 + 进程令牌:把 curl 复制一份当"本服务",
+// 提权的它绑物理网卡直连应当放行(前台 run 排障模式靠这个),同一个 exe 换成管理员组只能用来拒绝的令牌
+// (等同没提权 / 普通用户)必须被拦,别的 exe 照样被拦。要管理员;期间本机除它以外的直连全拦几秒。
+func TestLiveSelfPermitNeedsPrivilegedToken(t *testing.T) {
+	if os.Getenv("GODUSEVPN_WFP_LIVE") != "1" {
+		t.Skip("GODUSEVPN_WFP_LIVE=1 才跑(要管理员,会动系统的过滤器)")
+	}
+	if !windows.GetCurrentProcessToken().IsElevated() {
+		t.Skip("不是管理员")
+	}
+	c, err := net.Dial("udp4", "1.1.1.1:80") // 只查路由,不发包
+	if err != nil {
+		t.Skipf("没有 IPv4 默认路由: %v", err)
+	}
+	phys := c.LocalAddr().(*net.UDPAddr).IP.String()
+	c.Close()
+	sysCurl := filepath.Join(os.Getenv("SystemRoot"), "System32", "curl.exe")
+	b, err := os.ReadFile(sysCurl)
+	if err != nil {
+		t.Skipf("没有 curl.exe: %v", err)
+	}
+	self := filepath.Join(t.TempDir(), "self-curl.exe")
+	if err := os.WriteFile(self, b, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	passed := regexp.MustCompile(`^[23]\d\d$`)
+	probe := func(exe string, tok windows.Token) string {
+		cmd := exec.Command(exe, "-s", "--interface", phys, "-m", "6", "-o", "NUL", "-w", "%{http_code}", "http://1.1.1.1/cdn-cgi/trace")
+		if tok != 0 {
+			cmd.SysProcAttr = &syscall.SysProcAttr{Token: syscall.Token(tok)}
+		}
+		out, _ := cmd.Output()
+		return strings.TrimSpace(string(out))
+	}
+	if code := probe(self, 0); !passed.MatchString(code) {
+		t.Skipf("正控制没过:闸没开时绑物理网卡的直连就不通(%q)", code)
+	}
+	restricted, err := denyOnlyAdminsToken()
+	if err != nil {
+		t.Fatalf("造受限令牌: %v", err)
+	}
+	defer restricted.Close()
+
+	if err := Disable(); err != nil {
+		t.Fatalf("清理: %v", err)
+	}
+	defer Disable()
+	if _, err := Enable(Spec{LAN: true, Tun4: [4]byte{172, 19, 0, 1}, SelfPath: self}); err != nil {
+		t.Fatalf("开闸: %v", err)
+	}
+	if code := probe(self, 0); !passed.MatchString(code) {
+		t.Fatalf("提权的本服务 exe 被拦了(%q):服务自己 / 前台 run 会被自己的闸拦死", code)
+	}
+	if code := probe(self, restricted); passed.MatchString(code) {
+		t.Fatalf("管理员组只能用来拒绝的同一个 exe 也放行了(%q):任何账户起的同路径进程都能直连", code)
+	}
+	if code := probe(sysCurl, 0); passed.MatchString(code) {
+		t.Fatalf("别的 exe 也放行了(%q)", code)
+	}
+}
+
+// denyOnlyAdminsToken 当前令牌的受限副本:管理员组改成只能用来拒绝、去掉特权 —— 和没提权的管理员、普通用户一样,
+// 匹配不上放行本服务的令牌要求。
+func denyOnlyAdminsToken() (windows.Token, error) {
+	ba, err := windows.CreateWellKnownSid(windows.WinBuiltinAdministratorsSid)
+	if err != nil {
+		return 0, err
+	}
+	var cur windows.Token
+	if err := windows.OpenProcessToken(windows.CurrentProcess(), windows.TOKEN_DUPLICATE|windows.TOKEN_QUERY|windows.TOKEN_ASSIGN_PRIMARY, &cur); err != nil {
+		return 0, err
+	}
+	defer cur.Close()
+	disable := windows.SIDAndAttributes{Sid: ba}
+	var out windows.Token
+	const disableMaxPrivilege = 0x1
+	r, _, e := windows.NewLazySystemDLL("advapi32.dll").NewProc("CreateRestrictedToken").Call(
+		uintptr(cur), disableMaxPrivilege, 1, uintptr(unsafe.Pointer(&disable)), 0, 0, 0, 0, uintptr(unsafe.Pointer(&out)))
+	if r == 0 {
+		return 0, e
+	}
+	return out, nil
 }

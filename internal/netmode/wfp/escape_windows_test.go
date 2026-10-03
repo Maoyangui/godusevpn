@@ -15,8 +15,8 @@ import (
 //   - 输出参数(枚举句柄、条目指针、条数、提供者指针)经 callProc 以 uintptr 传进去。callProc 不带
 //     //go:uintptrescapes 时它们留在栈上,调用途中栈一扩容搬家,DLL 就把结果写进已释放的旧栈 —— 写进另一个
 //     协程里,把它的指针改成别的值或空指针(v0.7.5 真机验收里服务刚连上就在系统 DLL 里写空指针 +0x48 崩溃)。
-//   - 条件值(隧道地址掩码)以 uintptr 挂在 FWP_CONDITION_VALUE0 里,栈一搬家 DLL 读到的是垃圾,闸的放行范围
-//     可能被读错。局域网段用的是包级变量(静态内存),不在这里查。
+//   - 条件值(隧道地址掩码、放行本服务时的令牌要求)以 uintptr 挂在 FWP_CONDITION_VALUE0 里,栈一搬家 DLL
+//     读到的是垃圾,闸的放行范围可能被读错。局域网段用的是包级变量(静态内存),不在这里查。
 //
 // 这件事由编译器的逃逸分析决定,就直接问编译器。
 func TestDLLArgumentsLiveOnHeap(t *testing.T) {
@@ -40,6 +40,7 @@ func TestDLLArgumentsLiveOnHeap(t *testing.T) {
 		`enum_windows\.go:\d+:\d+: moved to heap: tpl\b`,
 		`rules_tun\.go:\d+:\d+: &wtFwpV4AddrAndMask\{\.\.\.\} escapes to heap`,
 		`rules_tun\.go:\d+:\d+: &wtFwpV6AddrAndMask\{\.\.\.\} escapes to heap`,
+		`rules\.go:\d+:\d+: &wtFwpByteBlob\{\.\.\.\} escapes to heap`,
 	} {
 		if !regexp.MustCompile(want).Match(out) {
 			t.Errorf("逃逸分析里没有 %q —— 这个值留在了协程栈上,DLL 可能读写到已经搬走的旧栈", want)

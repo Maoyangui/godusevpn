@@ -10,6 +10,7 @@ package wfp
 // 改自 wireguard-windows tunnel/firewall/rules.go(MIT)。
 
 import (
+	"runtime"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -25,10 +26,16 @@ var (
 	linkLocalRouterMulticast = wtFwpByteArray16{[16]uint8{0xFF, 0x02, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x2}}
 )
 
+// selfUserSDDL 放行本服务时对进程令牌的要求:LocalSystem(服务本身),或管理员组处于启用状态(提权终端里的
+// 前台 run 排障模式)。普通用户、没提权的管理员(令牌里管理员组只能用来拒绝)用同一个 exe 起的进程都不匹配。
+// CC 即 FWP_ACTRL_MATCH_FILTER。
+const selfUserSDDL = "D:(A;;CC;;;SY)(A;;CC;;;BA)"
+
 func permitSelf(session uintptr, baseObjects *baseObjects, weight uint8, selfPath string) error {
-	// 只按 exe 路径放行:上游还要求进程令牌里带服务 SID(它的服务按 SERVICE_SID_TYPE_UNRESTRICTED 装),
-	// 我们的服务是普通 LocalSystem,没有那个 SID。那个条件只为区分同一个 exe 起的别的进程,这里够了。
-	var conditions [1]wtFwpmFilterCondition0
+	// exe 路径和进程令牌两个条件都要满足。只按路径的话,任何账户用同一个 exe 起的进程(挂起启动再注入、
+	// 或者设 GODUSEVPN_DATA 跑 run)都能命中这条硬放行,直接从物理网卡出去。上游为此要求进程令牌里带服务 SID
+	// (它的服务按 SERVICE_SID_TYPE_UNRESTRICTED 装);我们的服务是普通 LocalSystem,没有那个 SID,改按令牌身份判。
+	var conditions [2]wtFwpmFilterCondition0
 
 	//
 	// First condition is the exe path of the current process.
@@ -51,6 +58,28 @@ func permitSelf(session uintptr, baseObjects *baseObjects, weight uint8, selfPat
 		conditionValue: wtFwpConditionValue0{
 			_type: cFWP_BYTE_BLOB_TYPE,
 			value: uintptr(unsafe.Pointer(appID)),
+		},
+	}
+
+	//
+	// Second condition is the token of the process: LocalSystem or an elevated administrator.
+	//
+	sd, err := windows.SecurityDescriptorFromString(selfUserSDDL)
+	if err != nil {
+		return wrapErr(err)
+	}
+	// 条件值以 uintptr 交给 DLL,编译器和垃圾回收都看不见这个引用:Pin 住(见 permitTunAddress)
+	var pin runtime.Pinner
+	defer pin.Unpin()
+	pin.Pin(sd)
+	userID := &wtFwpByteBlob{size: sd.Length(), data: (*uint8)(unsafe.Pointer(sd))}
+	pin.Pin(userID)
+	conditions[1] = wtFwpmFilterCondition0{
+		fieldKey:  cFWPM_CONDITION_ALE_USER_ID,
+		matchType: cFWP_MATCH_EQUAL,
+		conditionValue: wtFwpConditionValue0{
+			_type: cFWP_SECURITY_DESCRIPTOR_TYPE,
+			value: uintptr(unsafe.Pointer(userID)),
 		},
 	}
 
@@ -722,7 +751,7 @@ func blockAll(session uintptr, baseObjects *baseObjects, weight uint8) error {
 		providerKey: &baseObjects.provider,
 		subLayerKey: baseObjects.filters,
 		weight:      filterWeight(weight),
-		flags:       curFlags,
+		flags:       blockFlags(),
 		action: wtFwpmAction0{
 			_type: cFWP_ACTION_BLOCK,
 		},
@@ -804,5 +833,3 @@ func blockAll(session uintptr, baseObjects *baseObjects, weight uint8) error {
 
 	return nil
 }
-
-// Block all DNS traffic except towards specified DNS servers.

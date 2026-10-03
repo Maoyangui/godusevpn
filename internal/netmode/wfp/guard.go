@@ -3,8 +3,8 @@
 // Package wfp 在 Windows 过滤平台(WFP)里放一组过滤器,做「全局禁直连」的闸。
 //
 // 这个包改自 wireguard-windows 的 tunnel/firewall(MIT,Copyright (C) 2019-2021 WireGuard LLC,
-// 许可证全文见仓库 NOTICE):过滤器、系统调用与类型定义照搬,去掉了 DNS 限制与 Hyper-V 那两块,
-// 加了按局域网放行、按隧道地址放行,以及把对象改成持久的。
+// 许可证全文见仓库 NOTICE):过滤器、系统调用与类型定义照搬,去掉了原来"只许问指定 DNS 服务器"的限制与 Hyper-V 那块,
+// 加了按局域网放行、按隧道地址放行、拦 53 / 853 的 DNS(rules_dns.go),以及把对象改成持久的。
 //
 // 闸是持久的:提供者、子层、过滤器都带 PERSISTENT 标志,写进 BFE 的持久存储 —— 进程退出、被强杀、
 // 崩溃、升级换文件、机器重启,闸都还在;另有一组 BOOTTIME 过滤器,从内核网络初始化到 BFE 启动之间
@@ -81,6 +81,18 @@ var (
 	mu       sync.Mutex
 	curFlags wtFwpmFilterFlags // 正在装的这一批过滤器的标志(持久 / 开机),rules.go 里每条过滤器都带上
 )
+
+// blockFlags 本机那四层(ALE)拦截过滤器的标志。运行期那组再带上 CLEAR_ACTION_RIGHT,做成"否决":
+// 连着的时候 sing-tun 的严格路由在它自己的子层(权重和我们一样是最高)里按 exe 路径给内核进程装了硬放行,
+// 两个子层谁先判没有保证 —— 它先判的话,我们的普通拦截盖不过那条硬放行,同一个 exe 路径起的任何进程
+// (不论哪个账户)都能从物理网卡出去。否决只在我们这个子层判成"拦"时起作用:本服务、隧道地址、回环、
+// 局域网这些在我们这里先被放行的流量不受影响。开机那组不带(那时没有别的子层,BFE 也还没起来)。
+func blockFlags() wtFwpmFilterFlags {
+	if curFlags&cFWPM_FILTER_FLAG_PERSISTENT != 0 {
+		return curFlags | cFWPM_FILTER_FLAG_CLEAR_ACTION_RIGHT
+	}
+	return curFlags
+}
 
 func notFound(err error) bool {
 	return errors.Is(err, fwpEFilterNotFound) || errors.Is(err, fwpEProviderNotFound) || errors.Is(err, fwpESublayerNotFound) || errors.Is(err, fwpENotFound)
@@ -177,11 +189,11 @@ func ensureBase(session uintptr) error {
 //
 // 权重(同一子层里大的先判,先命中的说了算):
 //
-//	15 放行本服务      14 放行回环、隧道地址      13 拦 DNS(53 / 853)
+//	15 放行本服务      14 放行回环、隧道地址      13 拦 DNS(53 / 853)、UPnP / NAT-PMP(1900 / 5351 / 5350)
 //	12 局域网、DHCP、邻居发现      0 其余全拦
 //
 // 拦 DNS 必须压在局域网放行上面(见 blockDNS),又必须在隧道地址、回环、本服务下面 —— 所以隧道地址和回环
-// 从 12 / 13 提到了 14。只影响 DNS 的先后,别的流量这几条规则的结果不变。
+// 从 12 / 13 提到了 14。只影响 DNS 的先后,别的流量这几条规则的结果不变。拦 UPnP / NAT-PMP 同理(见 blockUPnP)。
 func installSet(session uintptr, spec Spec, withSelf, withForward bool) error {
 	if withSelf {
 		if err := permitSelf(session, base, 15, spec.SelfPath); err != nil {
@@ -195,6 +207,9 @@ func installSet(session uintptr, spec Spec, withSelf, withForward bool) error {
 		return err
 	}
 	if err := blockDNS(session, base, 13); err != nil {
+		return err
+	}
+	if err := blockUPnP(session, base, 13); err != nil {
 		return err
 	}
 	if spec.LAN {
@@ -390,24 +405,28 @@ func Count() (int, error) {
 }
 
 // guardCovers 这一组(required 那个标志)齐不齐:我们保护的每一层都有一条生效的、**不带条件的**拦截(全拦),
-// 两个出站层还各有一条生效的拦 DNS。
+// 按端口拦的那几条(namedBlocks:两条拦 DNS、四条拦 UPnP / NAT-PMP)也都生效、挂在该挂的层上。
 //
 // 只认不带条件的拦截:拦 DNS 也是一条拦截,要是也算,出站层的全拦丢了也看不出来。
-// DNS 那两条也要在:少了它们,隧道断开的空档里 DNS 能经局域网放行出去(见 blockDNS)。从没有这两条的旧版
-// 升上来,这里判不齐,守护进程就会按当前设置重装。
+// 按端口拦的也要齐:少了拦 DNS,隧道断开的空档里 DNS 能经局域网放行出去(见 blockDNS);少了拦 UPnP / NAT-PMP,
+// 程序能经局域网放行向路由器问到公网 IPv4(见 blockUPnP)。从没有它们的旧版升上来,这里判不齐,
+// 守护进程就会按当前设置重装。
 func guardCovers(fs []filterInfo, required wtFwpmFilterFlags) bool {
 	covered := make(map[windows.GUID]bool, len(ourLayers()))
-	dns := map[windows.GUID]bool{}
+	named := map[string]bool{}
+	want := namedBlocks()
 	for _, f := range fs {
 		if f.flags&required == 0 || f.flags&cFWPM_FILTER_FLAG_DISABLED != 0 || f.action != cFWP_ACTION_BLOCK {
 			continue
 		}
-		switch {
-		case f.conds == 0:
+		if f.conds == 0 {
 			covered[f.layer] = true
-		case f.name == dnsBlockName4 && f.layer == cFWPM_LAYER_ALE_AUTH_CONNECT_V4,
-			f.name == dnsBlockName6 && f.layer == cFWPM_LAYER_ALE_AUTH_CONNECT_V6:
-			dns[f.layer] = true
+			continue
+		}
+		for _, b := range want {
+			if f.name == b.name && f.layer == b.layer {
+				named[b.name] = true
+			}
 		}
 	}
 	for _, layer := range ourLayers() {
@@ -415,7 +434,12 @@ func guardCovers(fs []filterInfo, required wtFwpmFilterFlags) bool {
 			return false
 		}
 	}
-	return dns[cFWPM_LAYER_ALE_AUTH_CONNECT_V4] && dns[cFWPM_LAYER_ALE_AUTH_CONNECT_V6]
+	for _, b := range want {
+		if !named[b.name] {
+			return false
+		}
+	}
+	return true
 }
 
 // PersistentGuardReady 核查的是**运行期**那组(PERSISTENT):它要覆盖我们保护的每一层。

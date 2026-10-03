@@ -6,6 +6,7 @@ package netmode
 // 误报成可覆盖崩溃/重启的隐私保护。
 func ApplyGuard(GuardSpec) error { return nil }
 func GuardTunUp(GuardSpec) error { return nil }
+func GuardTunDown() error        { return nil }
 func ClearGuard() error          { return nil }
 
 func GuardStatus() (int, error) { return 0, nil }

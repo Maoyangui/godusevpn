@@ -840,6 +840,7 @@ func (d *Daemon) stop() error {
 	d.running = nil
 	d.mu.Unlock()
 	err := d.core.Stop()
+	d.dropTunPermit() // 隧道网卡随内核没了
 	// 网卡 IPv6 不在这里还原:内核停了不代表用户不想连了(崩了在退避重试、切订阅重连、服务被杀、关机),
 	// 这些时候地址一冒出来就能被程序读走。只有用户真的断开 / 关掉开关 / 卸载才还原,和闸一个道理。
 	d.mu.Lock()
@@ -1281,6 +1282,16 @@ func keepNICWhenIntentUnknown(strict bool, guardN int, guardErr error) bool {
 	return strict || guardErr != nil || guardN > 0
 }
 
+// nicLeakMessage 确证有网卡挂着公网 IPv6 时说给用户的话:点名是哪几张。拨号连接不是网卡、停用脚本改不到,
+// Teredo 这类隧道接口停用了也可能地址还在,都只能手动关;不说名字用户无从下手,最后多半去关「连接时停用网卡 IPv6」—— 正是这道门要避免的。
+func nicLeakMessage(names []string) string {
+	if len(names) == 0 {
+		return "网卡上又冒出公网 IPv6 地址(这会儿查不到是哪张)"
+	}
+	return "这些网卡 / 连接上仍挂着公网 IPv6 地址,没能停用:" + strings.Join(names, "、") +
+		"。拨号连接、停用后地址仍在的 Teredo 等接口要手动关掉它的 IPv6(见文档「关于 IPv6」)"
+}
+
 // privacyChecks 决定启动前要核查哪些闸相关的不变量。
 //
 // installable=false 的平台(Android:闸就是宿主 VpnService 的接口,由系统持有)没有可核查的对象;
@@ -1354,8 +1365,8 @@ func (d *Daemon) nicReady() error {
 		// 这里是**拒绝连接**的门,必须用确证谓词:NICIPv6Leaking 把"枚举失败 / 某张网卡读不到地址"
 		// 也算成在漏,一次瞬时的系统调用失败就能让人连不上,而且没有自愈路径。
 		// 别处那几个 NICIPv6Leaking 是"要不要再跑一遍昂贵的停用脚本",宁可多跑,保持不变。
-		if netmode.NICIPv6LeakConfirmed(builder.TunName) {
-			return state.Errf(state.CodePrivacyNIC, "确认物理网卡上仍挂着公网 IPv6 地址")
+		if l := netmode.NICIPv6Leakers(builder.TunName); len(l) > 0 {
+			return state.Errf(state.CodePrivacyNIC, "%s", nicLeakMessage(l))
 		}
 	}
 	return nil
@@ -1423,13 +1434,15 @@ func (d *Daemon) autoProbeLoop(ctx context.Context) {
 
 // nicIPv6Loop 连接期间盯着网卡:新插一张网卡、开个热点、起个虚拟机,那张新网卡上的 IPv6 没人管,
 // 公网 v6 地址就又能被程序读走了(数据包有闸挡着不会真漏流量,但"地址读不到"才是这个功能的意义)。
-// 停用那一步要起 PowerShell,挺贵;所以先用标准库枚举一遍地址,真发现漏了才去跑。
+// 停用那一步要起 PowerShell,挺贵;所以先用标准库枚举一遍地址(便宜,每 nicWatchEvery 一次),真发现漏了才去跑。
+// 以前 30 秒才看一次,新网卡拿到公网 v6 之后最多要半分钟加脚本那几秒才停掉,够程序读走了。
 func (d *Daemon) nicIPv6Loop(ctx context.Context) {
-	t := time.NewTicker(30 * time.Second)
+	t := time.NewTicker(nicWatchEvery)
 	defer t.Stop()
-	// 关不掉的情况是存在的(权限不够、或者某些虚拟网卡自己又开回来)。真碰上就别每半分钟白跑一次
-	// PowerShell 还把日志刷满:连着几轮没治好就退避,只在第一次和恢复时各说一句。
+	// 关不掉的情况是存在的(权限不够、程序够不着的拨号 / 隧道接口、或者某些虚拟网卡自己又开回来)。真碰上就别
+	// 每几秒白跑一次 PowerShell 还把日志刷满:连着几次没治好就退避,只在第一次和恢复时各说一句。
 	fails, quiet := 0, false
+	var lastTry, lastTunUp time.Time
 	for {
 		select {
 		case <-ctx.Done():
@@ -1437,7 +1450,8 @@ func (d *Daemon) nicIPv6Loop(ctx context.Context) {
 		case <-t.C:
 		}
 		// 顺带:隧道网卡的转发层放行上次没成功(网卡晚注册),这里每半分钟补一次,不用等用户动手
-		if d.tunUpPending.Load() && d.core.Running() {
+		if d.tunUpPending.Load() && d.core.Running() && time.Since(lastTunUp) >= 30*time.Second {
+			lastTunUp = time.Now()
 			d.guardTunUp()
 		}
 		// 顺带:连接时做的系统网络保护只按那一刻的状态做了一次 —— Linux 的回包规则按当时的地址(PPPoE 重拨、
@@ -1462,8 +1476,7 @@ func (d *Daemon) nicIPv6Loop(ctx context.Context) {
 			fails, quiet = 0, false
 			continue
 		}
-		if quiet && fails%20 != 0 { // 退避后改成每 10 分钟试一次
-			fails++
+		if !nicRetryDue(quiet, lastTry, time.Now()) {
 			continue
 		}
 		if !quiet {
@@ -1477,6 +1490,7 @@ func (d *Daemon) nicIPv6Loop(ctx context.Context) {
 			fails, quiet = 0, false
 			continue
 		}
+		lastTry = time.Now()
 		err := netmode.DisableNICIPv6(builder.TunName)
 		if err != nil {
 			d.nicDisablePending.Store(true)
@@ -1496,9 +1510,19 @@ func (d *Daemon) nicIPv6Loop(ctx context.Context) {
 		fails++
 		if fails >= 3 && !quiet {
 			quiet = true
-			d.logf("连着几次都没能停掉这张网卡的 IPv6,改成每 10 分钟再试;先去设置里看看「连接时停用网卡 IPv6」这一项")
+			d.logf("连着几次都没能停掉网卡的 IPv6,改成每 10 分钟再试。%s", nicLeakMessage(netmode.NICIPv6Leakers(builder.TunName)))
 		}
 	}
+}
+
+const (
+	nicWatchEvery = 5 * time.Second  // 连着的时候多久看一次网卡上有没有冒出公网 v6
+	nicQuietRetry = 10 * time.Minute // 连着几次没停掉之后,停用脚本改成这么久才再跑一次
+)
+
+// nicRetryDue 这一轮发现在漏时要不要去跑停用脚本:没退避就跑;退避了离上次跑满 nicQuietRetry 才跑。
+func nicRetryDue(quiet bool, last, now time.Time) bool {
+	return !quiet || now.Sub(last) >= nicQuietRetry
 }
 
 // currentNode 内核里 proxy 组此刻实际落在哪个节点;自动选择时是 auto 组选中的那个。

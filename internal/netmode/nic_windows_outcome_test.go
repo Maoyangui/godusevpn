@@ -16,9 +16,18 @@ func TestRestoreOutcome(t *testing.T) {
 			t.Fatalf("got %q %v", w, err)
 		}
 	})
-	t.Run("只有消失的网卡:成功但有告警", func(t *testing.T) {
-		w, err := restoreOutcome("GODUSEVPN-GONE: USB 网卡")
-		if err != nil || !strings.Contains(w, "USB 网卡") {
+	// 还原时不在的网卡挪进待还原清单:做完了能做的,但必须如实说(0.7.5 只进内存告警,日志与「恢复网络」弹窗说"已还原")
+	t.Run("有挪进待还原清单的网卡:做完了但要如实说", func(t *testing.T) {
+		w, err := restoreOutcome("GODUSEVPN-PENDING: WLAN 2, 以太网 2")
+		var inc *NICRestoreIncomplete
+		if !errors.As(err, &inc) || !strings.Contains(inc.Detail, "WLAN 2, 以太网 2") || !strings.Contains(w, "不在") {
+			t.Fatalf("got %q %v", w, err)
+		}
+	})
+	t.Run("有 FAILED 也有待还原:普通失败,待还原只在告警里", func(t *testing.T) {
+		w, err := restoreOutcome("GODUSEVPN-FAILED: 以太网: 拒绝访问\nGODUSEVPN-PENDING: WLAN 2")
+		var inc *NICRestoreIncomplete
+		if err == nil || errors.As(err, &inc) || strings.Contains(err.Error(), "WLAN 2") || !strings.Contains(w, "WLAN 2") {
 			t.Fatalf("got %q %v", w, err)
 		}
 	})
@@ -43,4 +52,45 @@ func TestRestoreOutcome(t *testing.T) {
 			t.Fatalf("got %q %v", w, err)
 		}
 	})
+}
+
+// 网卡名按 -ceq 精确比对后经管道交给 Enable-/Disable-NetAdapterBinding。-Name 在这组命令里是通配符(WQL LIKE):
+// 「本地连接* 2」会连带开 / 关「本地连接 2」(用户自己关的那张),名字带 [ ] 的又匹配不到自己、被当成"已不在"。
+// 还原在 -IncludeHidden 的列表里找(拔掉 / 隐藏的网卡也试),找不到的挪进待还原清单而不是丢掉;
+// 停用时清单里的网卡再出现,原值按清单记成开着。只看生成的脚本文本,不跑任何命令。
+func TestNICScriptsMatchAdapterNamesExactly(t *testing.T) {
+	for name, s := range map[string]string{"停用": disableScript("godusevpn"), "还原": restoreScript()} {
+		for _, bad := range []string{"-Name $a.Name", "-Name $p[0]", "-Name $w.Name"} {
+			if strings.Contains(s, bad) {
+				t.Fatalf("%s脚本还在用 %s:-Name 是通配符,会误中别的网卡或找不到自己", name, bad)
+			}
+		}
+		if !strings.Contains(s, "-ceq") || !strings.Contains(s, nicPending()) {
+			t.Fatalf("%s脚本没按名字精确比对,或没管待还原清单", name)
+		}
+	}
+	r := restoreScript()
+	for _, want := range []string{"Get-NetAdapterBinding -ComponentID ms_tcpip6 -IncludeHidden", "| Enable-NetAdapterBinding", "GODUSEVPN-PENDING: ", "Not Present"} {
+		if !strings.Contains(r, want) {
+			t.Fatalf("还原脚本里没有 %q", want)
+		}
+	}
+	if strings.Index(r, "Write-Lines $pf") > strings.Index(r, "Write-Lines $f $left") {
+		t.Fatal("还原脚本要先落待还原清单、再动备份:反过来的话中间被杀掉,挪进清单的那几行就没了")
+	}
+	d := disableScript("godusevpn")
+	// 停用也要看隐藏接口(Teredo、6to4、IP-HTTPS、Wi-Fi Direct):判"确证在漏"用的 net.Interfaces 看得见它们,
+	// 只停可见网卡的话,隐藏接口上的公网 v6 停不掉又挡着连接。停用前列网卡与停用后复核都要带上。
+	if strings.Count(d, "Get-NetAdapterBinding -ComponentID ms_tcpip6 -IncludeHidden") != 2 {
+		t.Fatal("停用脚本列网卡和停用后复核都要带 -IncludeHidden,否则隐藏接口上的公网 IPv6 停不掉")
+	}
+	if !strings.Contains(d, "Get-NetAdapter -IncludeHidden") || !strings.Contains(d, "'Not Present'") {
+		t.Fatal("停用脚本要跳过 Not Present 的网卡登记,否则每次连接都报一条假的\"没停成\"")
+	}
+	if !strings.Contains(d, "| Disable-NetAdapterBinding") || !strings.Contains(d, "pend.ContainsKey($_.Name)") {
+		t.Fatal("停用脚本没经管道停用、或没按待还原清单把再出现的网卡记成开着")
+	}
+	if strings.Index(d, "Write-Lines $b") > strings.Index(d, "Write-Lines $pf $rest") {
+		t.Fatal("停用脚本要先把原值写进备份、再从待还原清单里拿掉")
+	}
 }

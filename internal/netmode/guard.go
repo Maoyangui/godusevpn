@@ -8,7 +8,8 @@ package netmode
 // 点断开、切到规则 / 直连模式、关掉开关,闸立刻撤。
 //
 // 各平台的做法不一样,接口一样:
-//   - Windows:WFP 动态会话里的一组过滤器(见 wfp 包),进程一退出规则自动消失
+//   - Windows:WFP 里一组持久(PERSISTENT)过滤器,外加一组开机(BOOTTIME)过滤器管开机到 BFE 启动那几秒;
+//     进程退出、被杀、崩溃、重启都还在,只有明确撤闸才删(见 wfp 包)
 //   - macOS:pf 里 com.apple/godusevpn 锚点的一组规则
 //   - Linux:nftables 的 inet godusevpn_guard 表
 //   - Android:不在这里做——VPN 接口本身就是闸,内核重启时不关它就行(见 mobile 包)
