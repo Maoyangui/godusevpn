@@ -532,7 +532,7 @@ func (d *Daemon) fetchProfile(ctx context.Context, url string) (*profile.Profile
 		p, err := d.fetchWith(ctx, url, cl)
 		if err == nil {
 			if tag != "proxy" {
-				d.logf("订阅经 %s 拉取成功(当前代理不通)", tag)
+				d.logf("订阅经 %s 拉取成功(经当前节点没拉到)", tag)
 			}
 			return p, nil
 		}

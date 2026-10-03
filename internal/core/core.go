@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"strings"
@@ -375,13 +376,31 @@ func (c *Core) HTTPClient(tag string, timeout time.Duration) (*http.Client, erro
 	}
 	tr := &http.Transport{
 		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-			return ob.DialContext(ctx, "tcp", M.ParseSocksaddr(addr))
+			conn, err := ob.DialContext(ctx, "tcp", M.ParseSocksaddr(addr))
+			if err != nil {
+				return nil, err
+			}
+			return eofConn{conn}, nil
 		},
 		TLSHandshakeTimeout: 10 * time.Second,
 		ForceAttemptHTTP2:   true,
 		DisableKeepAlives:   true,
 	}
 	return &http.Client{Transport: tr, Timeout: timeout}, nil
+}
+
+// eofConn 把出站连接读到结尾时给的"包了一层的 EOF"还原成 io.EOF。hysteria2 的连接(sing-quic 的 qtls.WrapError)
+// 读到对方正常结束时返回的是包过的 io.EOF,而 crypto/tls 只认原装的 io.EOF:包过的被当成出错,和结束一起到的最后几个
+// TLS 记录就丢了 —— 订阅服务"发完就关"(HTTP/1.1),最后一段数据总是和结束一起到,于是经 hysteria2 节点拉订阅总是
+// "读取订阅失败: EOF"(正文少了最后约 2 KB)。经隧道的应用流量不受影响:TLS 在应用里,收到的是普通的 TCP 结束。
+type eofConn struct{ net.Conn }
+
+func (c eofConn) Read(p []byte) (int, error) {
+	n, err := c.Conn.Read(p)
+	if err != nil && err != io.EOF && errors.Is(err, io.EOF) {
+		err = io.EOF
+	}
+	return n, err
 }
 
 // URLTest 经某个出站(节点或选择组)测一次延迟,毫秒。
