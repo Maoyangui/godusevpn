@@ -25,11 +25,6 @@ func before(t *testing.T, fn, a, b, why string) {
 // startTestCore 给测试守护进程起一个只有出站的内核:当前节点是连不上的本机端口,不往外发包、不碰路由。
 func startTestCore(t *testing.T, d *Daemon, mode string) {
 	t.Helper()
-	if raceBuild {
-		// sing-box 1.14.0 自己有一处竞争(route/network.go:Start 末尾写 r.started、网卡变化的后台协程读它),-race 一律判失败。
-		// CI 的 -race 那一步因此不跑 internal/core,真起内核的这几条同理;不带 -race 的那一步照常跑
-		t.Skip("真起 sing-box 的测试不在 -race 下跑(sing-box 1.14.0 自身的竞争)")
-	}
 	cache := filepath.ToSlash(filepath.Join(t.TempDir(), "cache.db"))
 	cfg := `{"log":{"level":"error"},
 "outbounds":[{"type":"selector","tag":"proxy","outbounds":["hk1"]},{"type":"socks","tag":"hk1","server":"127.0.0.1","server_port":1},{"type":"direct","tag":"direct"}],

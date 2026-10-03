@@ -9,6 +9,7 @@ import (
 
 	"github.com/sagernet/sing-box/adapter"
 	C "github.com/sagernet/sing-box/constant"
+	"github.com/sagernet/sing-box/experimental/clashmode"
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/option"
 	R "github.com/sagernet/sing-box/route/rule"
@@ -20,13 +21,11 @@ import (
 // ip_cidr 是"任一地址命中"、logical 的 invert……)。这里用 sing-box 自己的规则引擎把生成的路由规则
 // 从上往下过一遍,和内核 matchRule 同一个顺序。
 
-// fakeClash 只为 clash_mode 规则项提供"当前模式"。
-type fakeClash struct {
-	adapter.ClashServer
-	mode string
+// clashModeCtx 给 clash_mode 规则项一个"当前模式"(1.14.2 起由 clashmode.Manager 提供)。
+func clashModeCtx(mode string) context.Context {
+	ctx := context.Background()
+	return service.ContextWithPtr(ctx, clashmode.NewManager(ctx, log.NewNOPFactory().Logger(), mode, []string{"Rule", "Global", "Direct"}))
 }
-
-func (f fakeClash) Mode() string { return f.mode }
 
 // conn 一条要路由的连接。
 type conn struct {
@@ -55,7 +54,7 @@ func route(t *testing.T, c cfg, mode string, cn conn) (string, int) {
 func routeV(t *testing.T, c cfg, mode string, cn conn) verdict {
 	t.Helper()
 	var server string
-	ctx := service.ContextWith[adapter.ClashServer](context.Background(), fakeClash{mode: mode})
+	ctx := clashModeCtx(mode)
 	md := adapter.InboundContext{Network: "tcp"}
 	port := cn.port
 	if port == 0 {

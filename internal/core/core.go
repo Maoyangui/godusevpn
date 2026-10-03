@@ -22,6 +22,7 @@ import (
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/common/urltest"
 	"github.com/sagernet/sing-box/experimental/cachefile"
+	"github.com/sagernet/sing-box/experimental/clashmode"
 	"github.com/sagernet/sing-box/include"
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/option"
@@ -260,12 +261,13 @@ func (c *Core) snapshot() (*sb.Box, context.Context, bool) {
 	return c.box, c.ctx, c.running
 }
 
-func (c *Core) clash() (adapter.ClashServer, error) {
+// clash 模式管理器(1.14.2 起从 Clash API 里拆出来,开着 Clash API 时才有)。
+func (c *Core) clash() (*clashmode.Manager, error) {
 	_, ctx, ok := c.snapshot()
 	if !ok {
 		return nil, errors.New("内核未运行")
 	}
-	cs := service.FromContext[adapter.ClashServer](ctx)
+	cs := service.PtrFromContext[clashmode.Manager](ctx)
 	if cs == nil {
 		return nil, errors.New("内核没有开启 Clash API")
 	}

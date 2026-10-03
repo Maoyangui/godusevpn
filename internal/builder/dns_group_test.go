@@ -1,7 +1,6 @@
 package builder
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -11,7 +10,6 @@ import (
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/option"
 	R "github.com/sagernet/sing-box/route/rule"
-	"github.com/sagernet/sing/service"
 
 	"github.com/Maoyangui/godusevpn/internal/settings"
 )
@@ -26,7 +24,7 @@ const (
 // 测试里的域名都不在规则集里)。返回交给哪台服务器("reject" = 拒绝)与命中规则的下标(-1 = final)。
 func dnsRoute(t *testing.T, c cfg, mode, domain string, qtype uint16) (string, int) {
 	t.Helper()
-	ctx := service.ContextWith[adapter.ClashServer](context.Background(), fakeClash{mode: mode})
+	ctx := clashModeCtx(mode)
 	logger := log.NewNOPFactory().Logger()
 	md := adapter.InboundContext{Domain: domain, QueryType: qtype}
 	for i, raw := range c.DNS.Rules {
