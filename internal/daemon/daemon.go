@@ -794,6 +794,9 @@ func (d *Daemon) start(cfg []byte) error {
 		} else {
 			d.setProtectWarn("")
 		}
+		if w := netmode.RouteWarning(); w != "" {
+			d.logf("回包路由:%s", w)
+		}
 	}
 	// 内核启动时先读缓存里记着的模式与选中节点、盖过配置(见 core.PresetCache),起之前按这份配置对齐
 	d.mu.Lock()

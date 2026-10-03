@@ -46,7 +46,12 @@ if wait_status connected 60; then check "进入 connected" 1 "$("$BIN" status | 
 echo "== 3. 网络栈"
 check "TUN 网卡存在" "$(ip -4 addr show godusevpn 2>/dev/null | grep -c 'inet ')" "$(ip -4 addr show godusevpn 2>/dev/null | grep 'inet ' | awk '{print $2}')"
 check "公网地址的路由走 TUN" "$(ip route get 104.26.12.205 2>/dev/null | grep -c 'dev godusevpn')" "$(ip route get 104.26.12.205 2>/dev/null | head -1)"
-check "本机地址回包走主表(SSH 不断)" "$(ip rule show | grep -c 'from .* lookup main')" "$(ip rule show | grep 'lookup main' | grep -v '^0:' | head -2 | tr '\n' ' ')"
+# 外部连进来的连接(SSH、面板)回包走主表:连接跟踪打标记 + 按标记的策略路由;只把套接字绑在物理网卡地址上的
+# (WebRTC 枚举本机地址就这么干)不再绕开隧道 —— 以前按"from 本机地址"放行,规则 / 普通全局下会露真实 IP
+check "外部连进来的连接回包走主表:标记规则(SSH 不断)" "$(ip rule show | grep -c 'fwmark 0x10000000/0x10000000 lookup main')" "$(ip rule show | grep -E '^5000:' | head -2 | tr '\n' ' ')"
+check "外部连进来的连接回包走主表:nft 按连接方向打标记" "$(nft list table ip godusevpn_reply 2>/dev/null | grep -c 'ct direction reply meta mark set')" "$(nft list table ip godusevpn_reply 2>/dev/null | grep -c 'tcp dport @inbound') 条兜底规则"
+check "带回包标记的包走物理网卡" "$(ip route get 1.1.1.1 mark 0x10000000 2>/dev/null | grep -c "dev $defif")" "$(ip route get 1.1.1.1 mark 0x10000000 2>/dev/null | head -1)"
+check "只绑物理网卡地址的不再绕开隧道" "$([ -n "$dip" ] && ip route get 1.1.1.1 from "$dip" 2>/dev/null | grep -c 'dev godusevpn' || echo 0)" "$(ip route get 1.1.1.1 from "$dip" 2>/dev/null | head -1)"
 g=$(resolve www.google.com); check "代理域名得到 fake-ip(198.18/15)" "$(echo "$g" | grep -c '^198\.1[89]\.')" "$g"
 b=$(resolve www.baidu.com); check "国内域名是真实 IP" "$([ -n "$b" ] && echo "$b" | grep -vc '^198\.1[89]\.' || echo 0)" "$b"
 a6=$(getent ahostsv6 www.google.com 2>/dev/null | awk '{print $1}' | grep -v '^::ffff' | head -1); check "AAAA 为空(禁 IPv6)" "$([ -z "$a6" ] && echo 1 || echo 0)" "$a6"
@@ -89,12 +94,14 @@ fi
 
 echo "== 3.7 全局禁直连(nftables 闸:普通用户绑物理网卡直连被拦,经隧道照常;切回规则模式闸表清空)"
 # Linux 的闸是 nftables 的一张 inet 表,由守护进程装、只在严格全局模式下存在。这里不验"程序会不会拒绝服务",
-# 验的是闸真的拦得住:拿普通用户绑物理网卡实打实打一次。
+# 验的是闸真的拦得住:拿普通用户绑物理网卡实打实打一次。按网卡名绑(SO_BINDTODEVICE,5.7 起普通用户也能用):
+# 只绑地址的已经不会从物理网卡出去了(见上面"只绑物理网卡地址的不再绕开隧道"),要强制走物理网卡得按网卡绑 ——
+# NetworkManager 按网卡做的联网检测就是这种。
 # 正控制:规则模式下(闸没开)普通用户绑物理网卡的直连必须是通的(2xx / 3xx),否则探测本身跑不通,
 # 下面"被拦"的断言就没有意义 —— 那种情况按失败报(见下面的 check),而不是让一个空串冒充"被拦"。
 direct_ok=0
-if [ -n "$U" ] && [ -n "$dip" ]; then
-  d0=$(su -s /bin/sh "$U" -c "curl -s --interface $dip -m 6 -o /dev/null -w '%{http_code}' http://1.1.1.1/cdn-cgi/trace" 2>/dev/null || true)
+if [ -n "$U" ] && [ -n "$defif" ]; then
+  d0=$(su -s /bin/sh "$U" -c "curl -s --interface $defif -m 6 -o /dev/null -w '%{http_code}' http://1.1.1.1/cdn-cgi/trace" 2>/dev/null || true)
   # 明文 http 会被 1.1.1.1 跳转到 https(301),那也是"通了";闸拦住时 curl 连不上,状态码是 000
   case "$d0" in 2*|3*) direct_ok=1;; esac
 fi
@@ -107,9 +114,9 @@ check "全局模式下连接仍在" "$(wait_status connected 15 && echo 1 || ech
 rules=$(nft list table inet godusevpn_guard 2>/dev/null)
 check "nft 闸表存在且有 drop 规则" "$(echo "$rules" | grep -c 'drop')" "$(echo "$rules" | grep -c .) 行"
 if [ "$direct_ok" = 1 ]; then
-  d=$(su -s /bin/sh "$U" -c "curl -s --interface $dip -m 6 -o /dev/null -w '%{http_code}' http://1.1.1.1/cdn-cgi/trace" 2>/dev/null || true)
+  d=$(su -s /bin/sh "$U" -c "curl -s --interface $defif -m 6 -o /dev/null -w '%{http_code}' http://1.1.1.1/cdn-cgi/trace" 2>/dev/null || true)
   case "$d" in 2*|3*) blocked=0;; *) blocked=1;; esac # 2xx/3xx 都是通了;被拦是 000
-  check "普通用户绑物理网卡的直连被拦" "$blocked" "http=${d:-000}(网卡 $defif $dip 用户 $U)"
+  check "普通用户绑物理网卡的直连被拦" "$blocked" "http=${d:-000}(网卡 $defif 用户 $U)"
 fi
 tc=$(curl -s -m 15 -o /dev/null -w '%{http_code}' https://1.1.1.1/cdn-cgi/trace 2>/dev/null || true)
 check "经隧道照常" "$([ "$tc" = "200" ] && echo 1 || echo 0)" "http=${tc:-000}"
@@ -120,7 +127,7 @@ check "闸不再整个放行 root" "$([ -z "$bare" ] && echo 1 || echo 0)" "$bar
 check "本机模式也有 forward 链(Docker / 虚拟机 NAT / 热点)" "$(echo "$rules" | grep -c 'hook forward')" ""
 check "拦 UPnP 发现 / NAT-PMP" "$(echo "$rules" | grep -c '1900')" ""
 if [ "$direct_ok" = 1 ]; then
-  r0=$(curl -s --interface "$dip" -m 6 -o /dev/null -w '%{http_code}' http://1.1.1.1/cdn-cgi/trace 2>/dev/null || true)
+  r0=$(curl -s --interface "$defif" -m 6 -o /dev/null -w '%{http_code}' http://1.1.1.1/cdn-cgi/trace 2>/dev/null || true)
   case "$r0" in 2*|3*) rb=0;; *) rb=1;; esac
   check "root 绑物理网卡的直连也被拦" "$rb" "http=${r0:-000}"
 fi
@@ -165,6 +172,11 @@ echo "== 4. 出口"
 now=$(pub4); check "规则模式出口 IP 变了" "$([ -n "$now" ] && [ "$now" != "$before" ] && echo 1 || echo 0)" "before=$before now=$now"
 v6=$(pub6); check "IPv6 出网被阻断" "$([ -z "$v6" ] && echo 1 || echo 0)" "v6=$v6"
 via=$(curl -s -4 --max-time 15 --resolve "api.ipify.org:443:$real" https://api.ipify.org); check "直连真实 IP 也走代理" "$([ -n "$via" ] && [ "$via" != "$before" ] && echo 1 || echo 0)" "real=$real got=$via"
+if [ -n "$dip" ]; then
+  # 套接字绑在物理网卡地址上(WebRTC 的做法)出去的也是节点出口,不再露出本机真实 IP
+  if [ -n "$U" ]; then wb=$(su -s /bin/sh "$U" -c "curl -s -4 --interface $dip --max-time 15 https://api.ipify.org" 2>/dev/null); else wb=$(curl -s -4 --interface "$dip" --max-time 15 https://api.ipify.org); fi
+  check "绑物理网卡地址出去的也走隧道(WebRTC 不露真实 IP)" "$([ -n "$wb" ] && [ "$wb" != "$before" ] && echo 1 || echo 0)" "before=$before got=$wb(地址 $dip)"
+fi
 lat=$("$BIN" test 2>&1); check "延迟测试" "$(echo "$lat" | grep -c ' ms')" "$lat"
 
 echo "== 5. 模式切换"
@@ -178,6 +190,7 @@ kill $deadman 2>/dev/null; pkill -f "sleep 420" 2>/dev/null
 "$BIN" disconnect >/dev/null; sleep 3
 check "断开后 TUN 网卡消失" "$([ -z "$(ip link show godusevpn 2>/dev/null)" ] && echo 1 || echo 0)" ""
 check "断开后策略路由撤掉" "$([ "$(ip rule show | grep -c '^5000:')" = 0 ] && echo 1 || echo 0)" ""
+check "断开后回包标记的 nft 表撤掉" "$([ -z "$(nft list table ip godusevpn_reply 2>/dev/null)" ] && echo 1 || echo 0)" ""
 after=$(pub4); check "断开后出口恢复" "$([ "$after" = "$before" ] && echo 1 || echo 0)" "after=$after"
 if [ "$nicb" = 1 ]; then
   check "断开后网卡 IPv6 备份已清理(含那张不存在的网卡)" "$([ ! -f "$NICB" ] && echo 1 || echo 0)" "$(cat "$NICB" 2>/dev/null)"
