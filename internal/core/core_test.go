@@ -53,6 +53,15 @@ func TestBuiltConfigPassesDryRun(t *testing.T) {
 		}
 		return s
 	}(), func() settings.Settings {
+		// 规则组生成的 DNS 规则(logical and + clash_mode + query_type,拒绝的是 DNS 层的 reject):不开 fake-ip、开 IPv6 那一支
+		s := settings.Default()
+		s.FakeIP, s.IPv6 = false, true
+		s.RuleGroups = []settings.RuleGroup{
+			{Name: "代理", Enabled: true, Outbound: settings.OutProxy, Rules: []settings.Rule{{Type: settings.RuleDomainSuffix, Value: "bilibili.com"}, {Type: settings.RuleDomain, Value: "a.example"}}},
+			{Name: "拒绝", Enabled: true, Outbound: settings.OutReject, Rules: []settings.Rule{{Type: settings.RuleDomainRegex, Value: "^ad[0-9]+\\."}}},
+		}
+		return s
+	}(), func() settings.Settings {
 		// 手动指定节点时自动选择组换成很长的测速间隔:间隔与 idle_timeout 的关系写错,内核会直接拒绝启动
 		s := settings.Default()
 		s.Selected = "hk"
