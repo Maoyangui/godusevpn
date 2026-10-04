@@ -317,12 +317,15 @@ Check "闸里有热点那三条放行(DHCP 收 / 回、DNS 代理)" ($hotMissing
 Start-Sleep -Seconds 3
 & auditpol.exe /set /subcategory:"$auditSub" /failure:enable | Out-Null
 $auditFrom2 = (Get-Date).AddSeconds(-2)
+# 返回实际用的源端口,绑不上返回 -1。对照那一路让系统挑端口:写死的端口可能落进 Windows 的保留端口段
+# (Hyper-V 等每次开机划的不一样),绑定被拒、包根本没发出去,对照就成了假失败
 function Udp-SendFrom($lport, $ip, $port) {
-  $u = New-Object System.Net.Sockets.UdpClient($lport)
-  try { [void]$u.Send([byte[]](0), 1, $ip, $port) } catch {} finally { $u.Close() }
+  $u = $null
+  try { $u = New-Object System.Net.Sockets.UdpClient($lport); [void]$u.Send([byte[]](0), 1, $ip, $port); return $u.Client.LocalEndPoint.Port }
+  catch { return -1 } finally { if ($u) { $u.Close() } }
 }
-Udp-SendFrom 67 "10.255.255.1" 68
-Udp-SendFrom 50667 "10.255.255.1" 68
+$dhcpPort = Udp-SendFrom 67 "10.255.255.1" 68
+$ctlPort = Udp-SendFrom 0 "10.255.255.1" 68
 Start-Sleep -Seconds 2
 $hotBlocked = @{} # "源端口/目的地址/目的端口" → 拦它的过滤器编号
 foreach ($e in @(Get-WinEvent -FilterHashtable @{ LogName = 'Security'; Id = 5157; StartTime = $auditFrom2 } -ErrorAction SilentlyContinue)) {
@@ -330,9 +333,11 @@ foreach ($e in @(Get-WinEvent -FilterHashtable @{ LogName = 'Security'; Id = 515
   if ($d['Protocol'] -eq '17') { $hotBlocked[$d['SourcePort'] + "/" + $d['DestAddress'] + "/" + $d['DestPort']] = $d['FilterRTID'] }
 }
 & auditpol.exe /set /subcategory:"$auditSub" /failure:disable | Out-Null
-$hotNote = "拦截事件=" + (($hotBlocked.Keys | ForEach-Object { $_ + "#" + $hotBlocked[$_] }) -join " ")
-Check "局域网直通关着时别的源端口发往私网 68 被拦(对照)" $hotBlocked.ContainsKey("50667/10.255.255.1/68") $hotNote
-Check "局域网直通关着时 DHCP 服务端回包(67→私网 68)放行" ($hotBlocked.ContainsKey("50667/10.255.255.1/68") -and -not $hotBlocked.ContainsKey("67/10.255.255.1/68")) $hotNote
+$hotNote = "源端口 67 绑定=" + $dhcpPort + " 对照源端口=" + $ctlPort + " 拦截事件=" + (($hotBlocked.Keys | ForEach-Object { $_ + "#" + $hotBlocked[$_] }) -join " ")
+$ctlBlocked = ($ctlPort -gt 0) -and $hotBlocked.ContainsKey("$ctlPort/10.255.255.1/68")
+Check "局域网直通关着时别的源端口发往私网 68 被拦(对照)" $ctlBlocked $hotNote
+# 67 绑不上就判不了(没发出去自然没有拦截事件),按失败报
+Check "局域网直通关着时 DHCP 服务端回包(67→私网 68)放行" ($ctlBlocked -and ($dhcpPort -eq 67) -and -not $hotBlocked.ContainsKey("67/10.255.255.1/68")) $hotNote
 & $svc start | Out-Null
 $null = Wait-Status "connected" 60
 & $cli settings lanBypass=true 2>&1 | Out-Null
