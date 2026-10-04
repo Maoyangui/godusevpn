@@ -173,6 +173,12 @@ gs=$("$BIN" guard status 2>&1)
 check "pf 被关掉后闸如实报没开" "$(echo "$gs" | grep -c '没开')" "$gs"
 "$BIN" mode rule >/dev/null 2>&1; "$BIN" mode global >/dev/null 2>&1; sleep 2
 check "重装闸时重新打开了 pf" "$(pfctl -s info 2>/dev/null | grep -c 'Status: Enabled')" "$("$BIN" guard status 2>&1)"
+# 闸开着时本机回环(面板、本地开发服务)要照常:pf 的锚点第一条就放行 lo0。连不上时把 pf 与监听的现场带出来
+loopdiag() {
+  echo "pf=$(pfctl -s info 2>/dev/null | awk '/Status:/{print $2}') 主规则=$(pfctl -sr 2>/dev/null | tr '\n' ';' | cut -c1-200) 锚点=$(pfctl -a com.apple/godusevpn -sr 2>/dev/null | head -3 | tr '\n' ';') 监听=$(lsof -nP -iTCP:9800 -sTCP:LISTEN 2>/dev/null | tail -n +2 | awk '{print $1,$2,$9}' | tr '\n' ';') 回环路由=$(route -n get 127.0.0.1 2>/dev/null | awk '/interface:/{print $2}') 状态表=$(pfctl -ss 2>/dev/null | grep -c '127.0.0.1')"
+}
+lp=$(curl -s --max-time 3 http://127.0.0.1:9800/api/ping)
+check "严格全局下本机访问面板照常(回环)" "$(echo "$lp" | grep -c version)" "$([ -n "$lp" ] && echo "$lp" | cut -c1-60 || loopdiag)"
 # 开机闸:pf 的锚点规则不过重启。模拟开机 —— 服务停掉、锚点清空、pf 关掉(开机时就是这样),
 # 再让 launchd 跑一次开机闸的 LaunchDaemon:锚点和 pf 都要回来,普通用户绑物理网卡照样出不去;之后服务起来接着连
 BOOTPF="/Library/Application Support/godusevpn/data/guard-boot.pf"
@@ -196,6 +202,8 @@ check "服务起来后接着连上" "$(wait_status connected 60 && echo 1 || ech
 # 服务重启过,面板的登录会话只在内存里、跟着没了:重新登录,第 7 段的页面接口才调得通。
 # 面板比自动连接晚起来一点,先等它能访问再登录
 i=0; while [ $i -lt 15 ] && ! curl -s --max-time 2 http://127.0.0.1:9800/api/ping | grep -q version; do sleep 1; i=$((i+1)); done
+lp=$(curl -s --max-time 3 http://127.0.0.1:9800/api/ping)
+check "模拟开机后本机访问面板照常(回环)" "$(echo "$lp" | grep -c version)" "$([ -n "$lp" ] && echo "$lp" | cut -c1-60 || loopdiag)"
 curl -s --max-time 5 -c "$JAR" -X POST -H 'Content-Type: application/json' -d "{\"password\":\"$PW\"}" http://127.0.0.1:9800/api/login >/dev/null
 r=$(api GetSettings); check "服务重启后重新登录面板" "$(echo "$r" | grep -c '"result"')" "$(echo "$r" | cut -c1-60)"
 check "切回规则模式成功" "$("$BIN" mode rule >/dev/null 2>&1 && echo 1 || echo 0)" ""
