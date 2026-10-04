@@ -30,6 +30,21 @@ func TestGuardRulesBlockDNSBeforeLAN(t *testing.T) {
 	}
 }
 
+// 回环那条必须 no state:pf 默认的"flags S/SA keep state"只认 TCP 首包,本机回环里服务端回的 SYN-ACK 也是从 lo0 出去,
+// 会落到最后一条被丢,严格全局下 127.0.0.1 上的 TCP 全卡死。
+func TestGuardRulesLoopbackNoState(t *testing.T) {
+	r := guardRules(GuardSpec{TunAddr4: "172.19.0.1"})
+	if !strings.HasPrefix(r, "pass out quick on lo0 all no state\n") {
+		t.Fatalf("第一条要是不建状态的回环放行:\n%s", r)
+	}
+	// 局域网直通同理:设备连进来时本机的回包不是首包
+	for _, l := range strings.Split(guardRules(GuardSpec{LAN: true}), "\n") {
+		if strings.HasPrefix(l, "pass out quick to {") && !strings.HasSuffix(l, "} no state") {
+			t.Fatalf("局域网放行要 no state:%q", l)
+		}
+	}
+}
+
 // DHCP 与邻居发现的例外要和 Linux / Windows 一样收窄:不限目的的 UDP 68→67、不限类型的 ICMPv6,
 // 任何普通程序都能借它们从物理网卡直接发包。
 func TestGuardRulesNarrowDHCPAndICMPv6(t *testing.T) {

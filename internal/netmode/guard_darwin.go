@@ -30,7 +30,10 @@ var pfMu sync.Mutex
 // guardRules pf 规则文本:从上到下第一条 quick 命中的说了算,最后一条把剩下的全丢。
 func guardRules(spec GuardSpec) string {
 	var b strings.Builder
-	b.WriteString("pass out quick on lo0 all\n")
+	// 回环一律放行,而且不能建状态:pf 给 pass 规则默认补上"flags S/SA keep state",只有 TCP 首包(SYN)能命中。
+	// 本机回环连接里服务端回的 SYN-ACK 也是"从 lo0 出去"、又不是首包,匹配不上这条和已有状态,落到最后一条被丢 ——
+	// 严格全局下所有 127.0.0.1 上的 TCP(本地开发服务、本机面板、各种辅助程序)全卡死(CI 验收实测撞到)。
+	b.WriteString("pass out quick on lo0 all no state\n")
 	b.WriteString("pass out quick user root\n") // 守护进程(内核在它里面):节点连接、订阅刷新的回退直连
 	if spec.TunAddr4 != "" {
 		fmt.Fprintf(&b, "pass out quick from %s\n", spec.TunAddr4) // 经隧道出去的流量
@@ -45,8 +48,10 @@ func guardRules(spec GuardSpec) string {
 	// v6 假地址段落在下面局域网放行的 fc00::/7 里:隧道断开时发往它的包不能当局域网放出去(经隧道的上面已放行)
 	fmt.Fprintf(&b, "block drop out quick inet6 to %s\n", builder.FakeIP6)
 	if spec.LAN {
-		fmt.Fprintf(&b, "pass out quick to { %s }\n", strings.Join(privateV4, ", "))
-		fmt.Fprintf(&b, "pass out quick to { %s }\n", strings.Join(privateV6, ", "))
+		// 同样 no state:不然局域网设备连进来(文件共享、本机开的服务)时本机回的包不是首包、被最后一条丢掉,
+		// 局域网直通只通一半;Linux / Windows 的局域网放行本来就是两个方向都通
+		fmt.Fprintf(&b, "pass out quick to { %s } no state\n", strings.Join(privateV4, ", "))
+		fmt.Fprintf(&b, "pass out quick to { %s } no state\n", strings.Join(privateV6, ", "))
 	}
 	// 系统的 DHCP 客户端是 root,上面已经放行;这里只给广播留口子,和 Linux / Windows 一样限定目的地址,
 	// 不然任何程序绑个 68 端口就能把 UDP 发到任意地址的 67。邻居发现同理只放那四种类型。
