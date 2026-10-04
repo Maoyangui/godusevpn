@@ -42,7 +42,8 @@ if (fs.existsSync(shots)) copyDir(shots, path.join(DIST, 'assets/shots'));
 // 在线演示:客户端页面原样一份 + 演示数据
 const app = path.join(DIST, 'demo/app');
 copyDir(path.join(ROOT, 'web/dist'), app);
-fs.copyFileSync(path.join(SITE, 'demo/demo.js'), path.join(app, 'demo.js'));
+// 演示里显示的版本号跟着最近的 tag 走(没打过 tag 时写 dev)
+fs.writeFileSync(path.join(app, 'demo.js'), fs.readFileSync(path.join(SITE, 'demo/demo.js'), 'utf8').replaceAll('{{version}}', version.replace(/^v/, '') || 'dev'));
 fs.rmSync(path.join(DIST, 'demo/demo.js'), { force: true });
 const idx = path.join(app, 'index.html');
 let html = fs.readFileSync(idx, 'utf8');

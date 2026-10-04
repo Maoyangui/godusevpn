@@ -30,6 +30,7 @@ if (fs.existsSync(DIST)) {
   need(fs.existsSync(path.join(APP, 'flags/hk.svg')), '旗帜没拷进来');
   // 3. 演示数据不能有真东西:示例域名之外的订阅地址、看着像密钥的长串
   const demo = fs.readFileSync(path.join(APP, 'demo.js'), 'utf8');
+  need(!demo.includes('{{version}}'), 'demo.js 里的 {{version}} 没替换');
   const PUBLIC = ['1.1.1.1', '223.5.5.5', '8.8.8.8', 'cloudflare.com', 'www.cloudflare.com', 'ipwho.is', 'github.com'];
   for (const m of demo.matchAll(/https?:\/\/([a-z0-9.-]+)/gi)) {
     const host = m[1].toLowerCase();

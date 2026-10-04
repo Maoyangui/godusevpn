@@ -103,7 +103,7 @@ section.block > p.sub { color: var(--muted); margin: 0 0 1.6rem; max-width: 46re
 .ctaband p { color: var(--muted); margin: 0 0 1.2rem; }
 
 /* 文档页:左边目录常驻,右边正文 */
-.docs { display: grid; grid-template-columns: 216px minmax(0, 1fr); gap: 2.6rem; padding: 2.2rem 0 3.5rem; align-items: start; }
+.docs { display: grid; grid-template-columns: 216px minmax(0, 1fr); gap: 2.6rem; padding-top: 2.2rem; padding-bottom: 3.5rem; align-items: start; } /* 左右留白沿用 .wrap */
 .side { position: sticky; top: 76px; font-size: .92rem; }
 .side strong { display: block; font-size: .74rem; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); margin: 1.1rem 0 .4rem; }
 .side strong:first-child { margin-top: 0; }
@@ -128,7 +128,7 @@ article.doc th { color: var(--muted); font-weight: 600; font-size: .8rem; letter
 .copy button { position: absolute; top: .55rem; right: .55rem; border: 1px solid var(--border); background: var(--surface); color: var(--muted); border-radius: 7px; padding: .18rem .55rem; font-size: .74rem; cursor: pointer; font-family: inherit; }
 .copy button:hover { color: var(--primary); border-color: var(--primary); }
 @media (max-width: 860px) {
-  .docs { grid-template-columns: 1fr; gap: 1.2rem; }
+  .docs { grid-template-columns: minmax(0, 1fr); gap: 1.2rem; } /* 写成 1fr 时长代码行会把整栏撑宽,手机上正文被截掉 */
   .side { position: static; display: flex; flex-wrap: wrap; gap: .4rem; }
   .side strong { display: none; }
   .side a { border: 1px solid var(--border); border-left-width: 1px; border-radius: 999px; padding: .18rem .7rem; font-size: .84rem; }

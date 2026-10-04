@@ -94,7 +94,7 @@
   applyExit();
 
   const logs = [
-    '服务启动,版本 0.6.4(演示)',
+    '服务启动,版本 {{version}}(演示)',
     '订阅「演示订阅」拉取成功,' + NODES.length + ' 个节点',
     '内核启动,TUN=godusevpn 协议栈=mixed 严格路由=开',
     '停用网卡 IPv6:以太网、WLAN(断开时还原)',
@@ -118,7 +118,7 @@
   let up = 0, down = 0, totalUp = 2.14e8, totalDown = 2.25e9;
   let st = {
     service: true, svcState: 'running', view, up, down, totalUp, totalDown,
-    lang: 'zh', theme: 'system', version: '0.6.4', platform: 'demo', web: false,
+    lang: 'zh', theme: 'system', version: '{{version}}', platform: 'demo', web: false,
   };
   const L = {};
   const emit = (n, d) => (L[n] || []).forEach(f => { try { f(d); } catch (e) { /* 界面自己的事 */ } });
