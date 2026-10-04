@@ -193,6 +193,8 @@ fi
 launchctl bootout system/com.maoyangui.godusevpn.guard >/dev/null 2>&1
 launchctl bootstrap system /Library/LaunchDaemons/com.maoyangui.godusevpn.plist >/dev/null 2>&1
 check "服务起来后接着连上" "$(wait_status connected 60 && echo 1 || echo 0)" "$("$BIN" status | sed -n 2p)"
+# 服务重启过,面板的登录会话只在内存里、跟着没了:重新登录,第 7 段的页面接口才调得通
+curl -s --max-time 5 -c "$JAR" -X POST -H 'Content-Type: application/json' -d "{\"password\":\"$PW\"}" http://127.0.0.1:9800/api/login >/dev/null
 check "切回规则模式成功" "$("$BIN" mode rule >/dev/null 2>&1 && echo 1 || echo 0)" ""
 sleep 2
 check "切回规则模式后锚点清空" "$([ -z "$(pfctl -a com.apple/godusevpn -sr 2>/dev/null)" ] && echo 1 || echo 0)" "$(pfctl -a com.apple/godusevpn -sr 2>/dev/null | tr '\n' ';')"
