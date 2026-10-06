@@ -2,7 +2,8 @@
 # 佛跳墙 macOS 一键安装 / 升级。用管理员权限执行:
 #   curl -fsSL https://raw.githubusercontent.com/Maoyangui/godusevpn/master/deploy/macos-install.sh | sudo sh
 #   或指定版本:  ... | sudo sh -s -- v0.6.2
-# 也可以在解开的 tar.gz 目录里直接 sudo sh install.sh(用旁边的文件,不联网)。
+# 也可以在解开的 tar.gz 目录里直接 sudo sh install.sh(用旁边的文件,不联网);
+# 不用终端的人双击同目录的「安装佛跳墙.command」,它清掉隔离标记后替你跑这一句(见 deploy/macos/)。
 #
 # 为什么走 curl 装:Gatekeeper 的隔离标记是浏览器下载时打上的,用 curl 拿到的文件没有这个标记,
 # 因此不需要花钱买苹果的开发者证书,也不用让你去"系统设置 → 隐私与安全性"里点允许。
@@ -14,11 +15,15 @@ WANT="${1:-}"
 [ "$(id -u)" = 0 ] || { echo "请用管理员权限运行(sudo sh macos-install.sh)"; exit 1; }
 [ "$(uname -s)" = Darwin ] || { echo "这个脚本是给 macOS 用的;Linux 请用 deploy/install.sh"; exit 1; }
 
-case "$(uname -m)" in
-  arm64) ARCH=arm64 ;;          # 苹果芯片
-  x86_64) ARCH=amd64 ;;         # 英特尔芯片
-  *) echo "不支持的芯片: $(uname -m)"; exit 1 ;;
-esac
+# 按硬件判断,不按 uname -m:终端被设成"使用 Rosetta 打开"时,苹果芯片上的 uname -m 也报 x86_64
+if [ "$(sysctl -n hw.optional.arm64 2>/dev/null)" = 1 ]; then
+  ARCH=arm64                    # 苹果芯片
+else
+  case "$(uname -m)" in
+    x86_64) ARCH=amd64 ;;       # 英特尔芯片
+    *) echo "不支持的芯片: $(uname -m)"; exit 1 ;;
+  esac
+fi
 
 HERE=$(cd "$(dirname "$0")" 2>/dev/null && pwd)
 if [ -n "$HERE" ] && [ -f "$HERE/godusevpn" ]; then
@@ -40,6 +45,17 @@ else
 fi
 
 [ -f "$SRC/godusevpn" ] || { echo "包里没有 godusevpn,可能下错了架构"; exit 1; }
+# 自己下的包可能拿错芯片:英特尔 Mac 跑不了 arm64;苹果芯片上的 amd64 版得靠 Rosetta,没验过,不装
+case "$(file -b "$SRC/godusevpn" 2>/dev/null)" in
+  *arm64*) PKGARCH=arm64 ;;
+  *x86_64*) PKGARCH=amd64 ;;
+  *) PKGARCH=$ARCH ;;           # 认不出来就不拦,交给后面
+esac
+if [ "$PKGARCH" != "$ARCH" ]; then
+  if [ "$ARCH" = arm64 ]; then want="苹果芯片版 godusevpn-<版本>-macos-arm64.tar.gz"; else want="英特尔版 godusevpn-<版本>-macos-amd64.tar.gz"; fi
+  echo "这个包的芯片和本机不符(包是 $PKGARCH,本机要 $ARCH)。请下载 $want 再装。"
+  exit 1
+fi
 
 # 先停旧服务再换文件:升级不能走 uninstall,那是用户明确"卸载"语义,
 # 会撤持久禁直连闸并恢复网卡 IPv6,在替换文件期间制造直连泄漏窗口。
@@ -56,6 +72,8 @@ if ! install -m 755 "$SRC/godusevpn" /usr/local/bin/godusevpn; then
   echo "  sudo /usr/local/bin/godusevpn stop"
   exit 1
 fi
+# 浏览器下载的包里那份带着隔离标记;装好的这份不管 install(1) 拷没拷扩展属性,都清一次(CI 验装好后没有标记)
+xattr -d com.apple.quarantine /usr/local/bin/godusevpn 2>/dev/null || true
 
 if [ -d "$SRC/godusevpn.app" ]; then
   rm -rf /Applications/godusevpn.app

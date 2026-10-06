@@ -65,16 +65,18 @@
     <p>关掉窗口只是收进托盘,连接不断。托盘的"退出"才会断开连接并停掉后台服务,TUN 网卡随之消失。</p>
 
     <h2 id="mac">macOS</h2>
-    <p>需要 <b>macOS 13(Ventura)或更高</b>,苹果芯片与英特尔各一个包。要管理员密码:</p>
+    <p>需要 <b>macOS 13(Ventura)或更高</b>,苹果芯片与英特尔各一个包。两种装法,都要输一次开机密码:</p>
+    <p><b>不用终端</b>:到 <a href="https://github.com/Maoyangui/godusevpn/releases/latest">Releases</a> 下载 <code>godusevpn-&lt;版本&gt;-macos-arm64.tar.gz</code>(苹果芯片)或 <code>-amd64</code>(英特尔),双击解开,照文件夹里的「安装说明」双击「安装佛跳墙.command」,在弹出的终端里输开机密码。第一次会被 macOS 拦一次:macOS 13 / 14 右键 →「打开」,macOS 15 起到「系统设置 → 隐私与安全性」点「仍要打开」。放行之后它清掉整个文件夹的隔离标记,装好的佛跳墙不会再被拦。</p>
+    <p><b>用终端</b>(不会被拦,也不用放行):</p>
     <div class="copy"><pre><code>curl -fsSL https://raw.githubusercontent.com/Maoyangui/godusevpn/master/deploy/macos-install.sh | sudo sh</code></pre></div>
-    <p>用 curl 装是有原因的:Gatekeeper 的"来自互联网"隔离标记是浏览器下载时打上的,curl 拿到的文件没有这个标记,所以不用买开发者证书,也不用你去系统设置里点允许。已经用浏览器下过包的话,<code>install.sh</code> 会顺手把标记清掉。</p>
+    <p>curl 这条不会被拦是因为 Gatekeeper 的"来自互联网"隔离标记是浏览器下载时打上的,curl 拿到的文件没有这个标记,所以不用买开发者证书。</p>
     <p>装完是两样东西:</p>
     <table>
       <tr><th>路径</th><th>是什么</th></tr>
       <tr><td><code>/usr/local/bin/godusevpn</code></td><td>守护进程兼命令行,注册成 launchd 服务开机自启</td></tr>
       <tr><td><code>/Applications/godusevpn.app</code></td><td>图形界面,启动台里叫「佛跳墙」</td></tr>
     </table>
-    <p>这一版没有菜单栏图标,关窗口只是关界面,隧道照常在后台跑,从启动台再打开就回来了。卸载:<code>sudo godusevpn uninstall</code>,再删掉上面两个路径。</p>
+    <p>这一版没有菜单栏图标,关窗口只是关界面,隧道照常在后台跑,从启动台再打开就回来了。卸载:双击安装包里的「卸载佛跳墙.command」,或 <code>sudo godusevpn uninstall</code> 再删掉上面两个路径。</p>
     <div class="note">macOS 上连接时会<b>接管系统 DNS</b>,断开按原值还原。不这么做的话系统一直问路由器,而私网段在隧道之外,解析记录就泄漏给本地网络了。</div>
 
     <h2 id="linux">Linux 与软路由</h2>

@@ -4,19 +4,34 @@
 
 ## 装
 
-要管理员密码:
+两种装法,都要输一次开机密码(管理员)。
+
+### 不用终端:双击安装
+
+1. 到 [Releases](https://github.com/Maoyangui/godusevpn/releases/latest) 下载对应芯片的包:苹果芯片 `godusevpn-<版本>-macos-arm64.tar.gz`,英特尔 `-amd64`(苹果菜单 →「关于本机」能看到是哪种)。
+2. 双击解开,打开文件夹里的「安装说明」(浏览器里看,中英双语),双击「安装佛跳墙.command」。
+3. 第一次会被 macOS 拦下 —— 佛跳墙没有苹果开发者证书,这一步绕不过去,但只拦这一个文件、只拦一次:
+   - **macOS 15 Sequoia 及更新**:弹窗点「完成」→「系统设置 → 隐私与安全性」→ 拉到「安全性」,点「仍要打开」→ 输密码或触控 ID → 再点「仍要打开」。
+   - **macOS 13 / 14**:按住 Control 点「安装佛跳墙.command」(或右键)→「打开」→ 弹窗里再点「打开」。
+4. 在弹出的终端里输开机密码(**输入时不显示任何字符**,输完回车)。看到「✅ 安装完成」佛跳墙会自动打开。
+
+放行之后脚本先清掉整个文件夹的隔离标记,再跑 `sudo sh install.sh`,装好的程序不会再被拦。包的芯片和本机不符时会直接提示该下哪个(按硬件判断,终端开着 Rosetta 也认得出苹果芯片)。
+
+### 用终端:一行装
+
+不会被拦,也不用放行:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Maoyangui/godusevpn/master/deploy/macos-install.sh | sudo sh
 ```
 
-也可以自己下 `godusevpn-<版本>-macos-<架构>.tar.gz`,解开后 `sudo sh install.sh`。
+已经解开了包的话,在那个文件夹里 `sudo sh install.sh` 也行。
 
-### 为什么用 curl 装
+### 为什么 curl 那条不会被拦
 
 Gatekeeper 的「来自互联网」隔离标记是**浏览器下载时**打上的,curl 拿到的文件没有这个标记。
 所以不用买苹果开发者证书,也不用你去「系统设置 → 隐私与安全性」里点允许。
-已经用浏览器下过包也没关系,`install.sh` 会顺手把标记清掉。
+用浏览器下的包,`install.sh` 也会把装好的守护进程与 `.app` 上的标记清掉。
 
 ## 装完是什么
 
@@ -42,6 +57,8 @@ Gatekeeper 的「来自互联网」隔离标记是**浏览器下载时**打上�
 
 ## 卸载
 
+双击安装包里的「卸载佛跳墙.command」(输 y 确认、再输开机密码);或者在终端里:
+
 ```bash
 sudo godusevpn uninstall            # 撤掉 launchd 服务
 sudo rm -rf /Applications/godusevpn.app /usr/local/bin/godusevpn
@@ -53,6 +70,6 @@ sudo rm -rf /Applications/godusevpn.app /usr/local/bin/godusevpn
 sudo sh deploy/macos-test.sh <订阅地址>
 ```
 
-共 53 项;CI 每次提交都在 GitHub 的苹果芯片跑机上真跑一遍,另加一步把 `.app` 装进 `/Applications` 打开看它能不能活下来。
+共 53 项;CI 每次提交都在 GitHub 的苹果芯片跑机上真跑一遍,另加一步把 `.app` 装进 `/Applications` 打开看它能不能活下来,再拿打上浏览器隔离标记的安装包走一遍双击安装 / 卸载。
 
 相关:[[日常使用]] · [[排障]]

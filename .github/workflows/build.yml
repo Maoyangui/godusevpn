@@ -293,6 +293,13 @@ jobs:
             cp /tmp/icon.icns "$APP/Contents/Resources/icon.icns"
             cp deploy/macos-install.sh dist/macos/$arch/install.sh
             chmod +x dist/macos/$arch/install.sh
+            # 给不用终端的人:双击安装 / 卸载,外加一页安装说明(浏览器打开,不会被 Gatekeeper 拦)。
+            # 应用内升级只认包根目录的 godusevpn 与 godusevpn.app,多这几个文件不碍事。
+            install -m755 deploy/macos/install.command "dist/macos/$arch/安装佛跳墙.command"
+            install -m755 deploy/macos/uninstall.command "dist/macos/$arch/卸载佛跳墙.command"
+            if [ "$arch" = arm64 ]; then AN="苹果芯片"; AE="Apple silicon"; else AN="英特尔芯片"; AE="Intel"; fi
+            sed -e "s/__VERSION__/$V/g" -e "s/__ARCH__/$arch/g" -e "s/__ARCHNAME__/$AN/g" -e "s/__ARCHNAME_EN__/$AE/g" \
+              deploy/macos/guide.html > "dist/macos/$arch/安装说明.html"
             tar -C dist/macos/$arch -czf out/godusevpn-$V-macos-$arch.tar.gz .
           done
           file dist/macos/*/godusevpn dist/macos/*/godusevpn.app/Contents/MacOS/godusevpn
@@ -326,6 +333,48 @@ jobs:
           fi
           echo "图形界面起来了,进程 $(pgrep -f '/Applications/godusevpn.app/Contents/MacOS/godusevpn' | tr '\n' ' ')"
           osascript -e 'quit app "godusevpn"' 2>/dev/null || pkill -f "/Applications/godusevpn.app/Contents/MacOS/godusevpn" || true
+
+      # 不会用终端的人走的路:浏览器下载 → 双击解开 → 双击「安装佛跳墙.command」。
+      # 先给解开的文件全打上浏览器那种隔离标记,再只去掉 .command 自己的(相当于用户在系统设置里放行了它),
+      # 然后像访达双击那样交给「终端」去跑。验:服务装上了、图形界面被打开了、装好的程序与解开的文件夹都不再带隔离标记
+      # (带着的话装完第一次打开还要再被拦一次)、说明页的占位符都填上了;最后用「卸载佛跳墙.command」卸掉。
+      - name: 双击安装 / 卸载(模拟浏览器下载的包)
+        run: |
+          set -e
+          V="${{ needs.version.outputs.version }}"
+          A=arm64; [ "$(uname -m)" = "x86_64" ] && A=amd64
+          sudo /usr/local/bin/godusevpn uninstall >/dev/null 2>&1 || true
+          sudo rm -rf /Applications/godusevpn.app /usr/local/bin/godusevpn
+          D="$RUNNER_TEMP/下载/godusevpn-$V-macos-$A"
+          mkdir -p "$D"
+          tar -C "$D" -xzf "out/godusevpn-$V-macos-$A.tar.gz"
+          ls -la "$D"
+          # 分开写:set -e 管不到 && 链中间那几个
+          test -x "$D/安装佛跳墙.command"
+          test -x "$D/卸载佛跳墙.command"
+          test -f "$D/安装说明.html"
+          if grep -n '__[A-Z_]*__' "$D/安装说明.html"; then echo "说明页还有没替换的占位符"; exit 1; fi
+          grep -q "v$V" "$D/安装说明.html"
+          Q="0083;$(printf %x "$(date +%s)");Safari;$(uuidgen)"
+          find "$D" -exec xattr -w com.apple.quarantine "$Q" {} \;
+          xattr -d com.apple.quarantine "$D/安装佛跳墙.command"
+          open "$D/安装佛跳墙.command"
+          ok=0
+          for i in $(seq 1 90); do
+            if launchctl print system/com.maoyangui.godusevpn >/dev/null 2>&1 && pgrep -f "/Applications/godusevpn.app/Contents/MacOS/godusevpn" >/dev/null; then ok=1; break; fi
+            sleep 2
+          done
+          if [ $ok != 1 ]; then echo "双击安装 180 秒内没装好"; ls -la /usr/local/bin/godusevpn /Applications/godusevpn.app 2>&1 | head; exit 1; fi
+          echo "服务:$(sudo /usr/local/bin/godusevpn status 2>&1 | head -3 | tr '\n' ' ')"
+          if xattr -p com.apple.quarantine /usr/local/bin/godusevpn 2>/dev/null; then echo "装好的守护进程还带着隔离标记"; exit 1; fi
+          if xattr -lr /Applications/godusevpn.app | grep -q com.apple.quarantine; then echo "装好的图形界面还带着隔离标记"; exit 1; fi
+          if xattr -lr "$D" | grep -q com.apple.quarantine; then echo "解开的文件夹里还有隔离标记"; exit 1; fi
+          osascript -e 'quit app "godusevpn"' 2>/dev/null || true
+          pkill -x Terminal || true
+          printf 'y\n' | sh "$D/卸载佛跳墙.command"
+          if launchctl print system/com.maoyangui.godusevpn >/dev/null 2>&1; then echo "卸载后服务还在"; exit 1; fi
+          if [ -e /usr/local/bin/godusevpn ] || [ -e /Applications/godusevpn.app ]; then echo "卸载后文件还在"; exit 1; fi
+          echo "双击安装 / 卸载都通过"
 
       - uses: actions/upload-artifact@v4
         with:

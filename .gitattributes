@@ -13,3 +13,7 @@
 *.ico binary
 *.mp4 binary
 *.woff2 binary
+
+# 在 macOS / Linux 上执行的脚本只能是 LF:带 CR 的话 #!/bin/sh 后面多一个回车符,双击 .command 直接报找不到解释器
+*.sh text eol=lf
+*.command text eol=lf
