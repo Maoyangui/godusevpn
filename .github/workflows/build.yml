@@ -375,6 +375,19 @@ jobs:
           if xattr -p com.apple.quarantine /usr/local/bin/godusevpn 2>/dev/null; then echo "装好的守护进程还带着隔离标记"; exit 1; fi
           if xattr -lr /Applications/godusevpn.app | grep -q com.apple.quarantine; then echo "装好的图形界面还带着隔离标记"; exit 1; fi
           if xattr -lr "$D" | grep -q com.apple.quarantine; then echo "解开的文件夹里还有隔离标记"; exit 1; fi
+          # 开着界面再双击一次(相当于拿安装包升级):旧界面要退掉、换成新开的进程,服务照常在
+          GUI="/Applications/godusevpn.app/Contents/MacOS/godusevpn"
+          p1=$(pgrep -f "$GUI" | head -1)
+          open "$D/安装佛跳墙.command"
+          ok=0
+          for i in $(seq 1 60); do
+            p2=$(pgrep -f "$GUI" | head -1)
+            if [ -n "$p2" ] && [ "$p2" != "$p1" ] && ! kill -0 "$p1" 2>/dev/null; then ok=1; break; fi
+            sleep 2
+          done
+          if [ $ok != 1 ]; then echo "再装一次时旧界面没换成新的(原 $p1,现 $(pgrep -f "$GUI" | tr '\n' ' '))"; exit 1; fi
+          launchctl print system/com.maoyangui.godusevpn >/dev/null
+          echo "再装一次:界面 $p1 → $p2,服务在"
           osascript -e 'quit app "godusevpn"' 2>/dev/null || true
           pkill -x Terminal || true
           printf 'y\n' | sh "$D/卸载佛跳墙.command"

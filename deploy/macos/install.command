@@ -34,6 +34,12 @@ fi
 # 文件是当前用户解压出来的,自己就能清,不用管理员权限。
 xattr -dr com.apple.quarantine "$DIR" 2>/dev/null || true
 
+# 开着旧版界面时先退出:不然装完 open -a 只是把还在跑的旧进程调到前台,看到的还是旧界面。
+# 只退界面,后台服务和隧道照常(关窗口本来就不断开);没在跑就不发,免得反而把它拉起来。
+if pgrep -f "/Applications/godusevpn.app/Contents/MacOS/godusevpn" >/dev/null 2>&1; then
+  osascript -e 'quit app "godusevpn"' >/dev/null 2>&1 || true
+fi
+
 echo "接下来要输入这台 Mac 的开机密码(管理员账户的密码)。"
 echo "输入时屏幕上不会出现任何字符,连星号也没有 —— 这是正常的,输完直接按回车。"
 echo

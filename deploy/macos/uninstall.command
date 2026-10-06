@@ -28,7 +28,9 @@ case "$ans" in
   *) echo "已取消。"; finish 0 ;;
 esac
 
-osascript -e 'quit app "godusevpn"' >/dev/null 2>&1 || true
+if pgrep -f "/Applications/godusevpn.app/Contents/MacOS/godusevpn" >/dev/null 2>&1; then
+  osascript -e 'quit app "godusevpn"' >/dev/null 2>&1 || true
+fi
 echo
 echo "接下来要输入开机密码(输入时不显示字符,输完按回车)。"
 # 卸载子命令失败也要继续删文件:服务可能早就坏了,用户要的是"别在我电脑上了"
