@@ -147,6 +147,8 @@
     service: true, svcState: 'running', view, up, down, totalUp, totalDown,
     lang: 'zh', theme: 'system', version: '{{version}}', platform: 'demo', web: false,
   };
+  // 调试用:演示页地址带 ?update=1 时模拟"有新版本"(首页顶栏的 NEW、侧栏与关于页的提示)
+  if (/[?&]update=1(&|$)/.test(location.search)) st.update = { version: '0.7.99' };
   const L = {};
   const emit = (n, d) => (L[n] || []).forEach(f => { try { f(d); } catch (e) { /* 界面自己的事 */ } });
   const push = () => { st.up = up; st.down = down; st.totalUp = totalUp; st.totalDown = totalDown; emit('state', st); };

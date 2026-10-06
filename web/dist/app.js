@@ -302,6 +302,14 @@ function setTop(title, back) {
   $('#topbar-title').textContent = title;
   $('#back-btn').hidden = !back;
   $('#menu-btn').hidden = !!back || view === 'onboard';
+  renderTopNew();
+}
+// 有新版本时首页顶栏标题右边亮一个 NEW:不少人从不打开侧栏,只靠那里的提示会一直停在旧版本
+function renderTopNew() {
+  const b = $('#top-new'), up = state && state.update;
+  if (!b) return;
+  b.hidden = !(up && view === 'home');
+  if (up) { const tip = t('top.newTip', { v: up.version }); b.title = tip; b.setAttribute('aria-label', tip); }
 }
 
 // ---- 页面切换 ----
@@ -1684,6 +1692,7 @@ async function init() {
   $('#drawer-backdrop').addEventListener('click', closeDrawer);
   $('#theme-btn').addEventListener('click', () => setTheme(THEME_NEXT[curTheme()] || 'system'));
   $('#drawer-upd').addEventListener('click', () => { closeDrawer(); nav('about'); });
+  $('#top-new').addEventListener('click', () => nav('about'));
   $('#sheet-backdrop').addEventListener('click', closeSheet);
   window.runtime.EventsOn('nav', name => { closeDrawer(); closeSheet(); if (PAGES[name]) nav(name); });
   $('#min-btn').addEventListener('click', () => App().Minimize());
@@ -1705,7 +1714,7 @@ async function init() {
     const has = st.view.profiles && st.view.profiles.length;
     if (view === 'onboard' && has) nav('home');
     else if (view === 'home' && !has && hadProfiles) nav('onboard');
-    updateHome(); updateOnboardSvc();
+    updateHome(); updateOnboardSvc(); renderTopNew();
     checkRefreshWaits(st.view.profiles);
     if (view === 'about' && $('#about-svc')) $('#about-svc').textContent = svcText(st);
     // 关于页只渲染一次:没权限 ↔ 已登记来回变时,「修复」按钮与「退出」的说明要跟着变,否则说明会和实际行为相反
