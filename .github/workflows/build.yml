@@ -345,6 +345,12 @@ jobs:
           A=arm64; [ "$(uname -m)" = "x86_64" ] && A=amd64
           sudo /usr/local/bin/godusevpn uninstall >/dev/null 2>&1 || true
           sudo rm -rf /Applications/godusevpn.app /usr/local/bin/godusevpn
+          # 反向:拿另一种芯片的包装,要被拦下并说清该下哪个,而且什么都不装
+          B=amd64; [ "$A" = amd64 ] && B=arm64
+          if out=$(sudo sh "dist/macos/$B/install.sh" 2>&1); then echo "芯片不符的包居然装上了:$out"; exit 1; fi
+          echo "$out"
+          echo "$out" | grep -q "芯片和本机不符"
+          if [ -e /usr/local/bin/godusevpn ] || [ -e /Applications/godusevpn.app ]; then echo "芯片不符却留下了文件"; exit 1; fi
           D="$RUNNER_TEMP/下载/godusevpn-$V-macos-$A"
           mkdir -p "$D"
           tar -C "$D" -xzf "out/godusevpn-$V-macos-$A.tar.gz"
