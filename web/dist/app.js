@@ -1088,7 +1088,10 @@ async function renderSettings(el) {
     });
     $('#set-nores').hidden = !q || hit > 0;
   });
-  const watch = ['f-tun', 'f-stack', 'f-strict', 'f-lan', 'f-mixed', 'f-probe', 'f-update', 'f-rdns', 'f-ldns', 'f-fakeip', 'f-ipv6', 'f-nicv6', 'f-ad', 'f-bypass', 'f-log', 'f-logdays', 'f-netmode', 'f-weblisten'].filter(id => $('#' + id));
+  // 除了即点即生效的几项(开机自启、语言、主题),页面上每个设置项一改就要点亮"保存";
+  // 以前手写名单,新加的「全局禁直连」漏在外面,单独拨它保存按钮不亮
+  const immediate = ['f-autostart', 'f-lang', 'f-theme'];
+  const watch = [...el.querySelectorAll('input[id^="f-"], select[id^="f-"], textarea[id^="f-"]')].map(x => x.id).filter(id => !immediate.includes(id));
   const dirty = on => { $('#save').disabled = !on; $('#savebar').classList.toggle('dirty', on); $('#save-note').textContent = on ? t('set.unsaved') + ' · ' + t('set.note') : t('set.clean'); $('#save').textContent = t(on ? 'set.saveChanges' : 'set.save'); };
   watch.forEach(id => ['input', 'change'].forEach(ev => $('#' + id).addEventListener(ev, () => dirty(true))));
   $('#save').addEventListener('click', async () => {
@@ -1398,18 +1401,50 @@ async function copyText(s) {
     return ok;
   } catch (e) { return false; }
 }
-// logParse 把一行拆成 时间 / 级别 / 正文 三段,拆不出来就整行当正文
+// logParse 把一行拆成 时间 / 级别 / 连接号 / 正文,拆不出来就整行当正文。
+// 老版本落盘的内核日志里还带着终端颜色码和 sing-box 自己的 "INFO[0055] " 前缀,这里一并去掉
 const LOG_LV = /\b(ERROR|ERR|FATAL|PANIC|WARN|WARNING|INFO|DEBUG|TRACE)\b/i;
+const LOG_ANSI = /\x1b\[[0-9;]*m/g;
+const LOG_CORE_PFX = /^[A-Z]{4,5}\[\d+\]\s+/;
+const LOG_CONN = /^\[(\d+) [^\]]*\]\s+/;
+const logClean = line => String(line).replace(LOG_ANSI, '');
 function logParse(line) {
-  const s = String(line);
+  const s = logClean(line);
   const tm = s.match(/\d{2}:\d{2}:\d{2}/);
   const lv = s.slice(0, 64).match(LOG_LV);
-  if (!tm && !lv) return { time: '', lv: '', text: s };
+  if (!tm && !lv) return { time: '', lv: '', id: '', text: s };
   let text = s;
   if (lv) text = s.slice(s.indexOf(lv[0]) + lv[0].length).trim();
   else if (tm) text = s.slice(s.indexOf(tm[0]) + tm[0].length).trim();
+  text = text.replace(LOG_CORE_PFX, '');
+  const c = text.match(LOG_CONN);
+  if (c) text = text.slice(c[0].length);
   const L = lv ? lv[0].toUpperCase() : '';
-  return { time: tm ? tm[0] : '', lv: L === 'WARNING' ? 'WARN' : L === 'ERR' ? 'ERROR' : L, text };
+  return { time: tm ? tm[0] : '', lv: L === 'WARNING' ? 'WARN' : L === 'ERR' ? 'ERROR' : L, id: c ? c[1] : '', text };
+}
+// 内核日志的分类:出站那一行说明这条连接最后去了哪(走隧道 / 直连 / 拦截);DNS 单独一类
+const LOG_OUT = /^outbound\/([a-z0-9-]+)\[([^\]]*)\]: outbound (?:packet )?connection to (\S+)/;
+function logKind(r) {
+  const m = r.text.match(LOG_OUT);
+  if (m) return m[1] === 'direct' ? { kind: 'direct', dest: m[3] } : m[1] === 'block' ? { kind: 'block', dest: m[3] } : { kind: 'tunnel', node: m[2], dest: m[3] };
+  if (/\breject(ed)?\b/i.test(r.text)) return { kind: 'block' };
+  if (/^dns\b/.test(r.text)) return { kind: 'dns' };
+  return { kind: '' };
+}
+// 同一条连接的几行(按连接号)里拼出它是谁发的、访问的是哪个域名:出站那一行只有解析后的 IP
+function logConnInfo(rows) {
+  const info = {};
+  rows.forEach(r => {
+    if (!r.id) return;
+    const o = info[r.id] || (info[r.id] = {});
+    let m = r.text.match(/^router: found (?:process path|package name): (.+)$/);
+    if (m) { o.proc = m[1].split(/[\\/]/).pop(); return; }
+    m = r.text.match(/^dns: lookup succeed for ([^:\s]+):/);
+    if (m && !o.domain) { o.domain = m[1]; return; }
+    m = r.text.match(/inbound (?:packet )?connection to (\S+)$/);
+    if (m && !/^[\d.]+:\d+$|^\[[0-9a-f:]+\]:\d+$/i.test(m[1])) o.domain = o.domain || m[1].replace(/:\d+$/, '');
+  });
+  return info;
 }
 function logClass(lv) {
   if (lv === 'ERROR' || lv === 'FATAL' || lv === 'PANIC') return 'err';
@@ -1427,24 +1462,71 @@ function renderLogs(el) {
       <button class="chip" id="log-pause">${t('logs.pause')}</button>
       ${window.__web || window.__android ? '' : `<button class="chip" id="log-open">${t('logs.open')}</button>`}
     </div>
+    <div class="chips" id="log-cats" hidden></div>
     <div class="logbox" id="log" tabindex="0"></div>
     <div class="logact">
       <button class="btn" id="log-copy">${t('logs.copy')}</button>
       <button class="btn primary" id="diag">${t('logs.diag')}</button>
     </div>
     <p class="pagehint center">${t('logs.diagNote')}</p>`;
+  // 内核日志的分类筛选(全部 / 走隧道 / 直连 / 拦截 / DNS)与"只看这一条连接"
+  let cat = '', conn = '';
+  const CATS = ['', 'tunnel', 'direct', 'block', 'dns'];
+  const drawCats = (counts) => {
+    const box = $('#log-cats'); if (!box) return;
+    box.hidden = !core;
+    if (!core) return;
+    const html = CATS.map(c => `<button class="chip ${c === cat && !conn ? 'on' : ''}" data-cat="${c}">${t(c ? 'logs.cat.' + c : 'logs.cat.all')}${c && counts[c] ? ` <em>${counts[c]}</em>` : ''}</button>`).join('')
+      + (conn ? `<button class="chip on" data-cat="${cat}">${esc(t('logs.connOnly', { id: '#' + conn.slice(-4) }))} ✕</button>` : '');
+    if (box.__html !== html) { box.__html = html; box.innerHTML = html; }
+  };
+  // 出站那一行改写成"进程 → 域名:端口(IP)"并标上去向;连接号可点,只看这一条连接的全部日志
+  const rowHTML = (r, k, info) => {
+    const idBtn = core && r.id ? `<button class="lid" data-conn="${esc(r.id)}" title="${esc(t('logs.connOnlyTip'))}">#${esc(r.id.slice(-4))}</button>` : '';
+    let body = esc(r.text);
+    if (k.dest) {
+      const i = info[r.id] || {}, port = (k.dest.match(/:(\d+)$/) || [])[1];
+      const target = i.domain ? `${esc(i.domain)}${port ? ':' + port : ''} <span class="ldim">${esc(k.dest.replace(/:\d+$/, ''))}</span>` : esc(k.dest);
+      const tag = k.kind === 'tunnel' ? `${t('logs.cat.tunnel')} · ${esc(k.node)}` : t('logs.cat.' + k.kind);
+      body = `<span class="ltag ${k.kind}">${tag}</span>${i.proc ? esc(i.proc) + ' → ' : ''}${target}`;
+    } else if (k.kind === 'block') {
+      body = `<span class="ltag block">${t('logs.cat.block')}</span>${body}`;
+    }
+    return `<div class="lrow ${logClass(r.lv)}"><span class="lt">${esc(r.time)}</span><span class="ll">${esc(r.lv)}</span>${idBtn}<span class="lx">${body}</span></div>`;
+  };
   const draw = () => {
     const box = $('#log'); if (!box) return;
-    const rows = raw.map(logParse).filter(r => !errOnly || logClass(r.lv) === 'err' || logClass(r.lv) === 'warn');
+    const all = raw.map(logParse);
+    const kinds = all.map(r => core ? logKind(r) : { kind: '' });
+    const info = core ? logConnInfo(all) : {};
+    const counts = {};
+    kinds.forEach(k => { if (k.kind) counts[k.kind] = (counts[k.kind] || 0) + 1; });
+    drawCats(counts);
+    const rows = [];
+    all.forEach((r, i) => {
+      if (errOnly && logClass(r.lv) !== 'err' && logClass(r.lv) !== 'warn') return;
+      if (core && conn && r.id !== conn) return;
+      if (core && !conn && cat && kinds[i].kind !== cat) return;
+      rows.push(rowHTML(r, kinds[i], info));
+    });
     const atBottom = box.scrollTop + box.clientHeight >= box.scrollHeight - 10;
-    const html = rows.length
-      ? rows.map(r => `<div class="lrow ${logClass(r.lv)}"><span class="lt">${esc(r.time)}</span><span class="ll">${esc(r.lv)}</span><span class="lx">${esc(r.text)}</span></div>`).join('')
-      : `<div class="lempty">${t(errOnly ? 'logs.noErr' : 'logs.empty')}</div>`;
+    const html = rows.length ? rows.join('')
+      : `<div class="lempty">${t(errOnly ? 'logs.noErr' : (core && (cat || conn)) ? 'logs.noCat' : 'logs.empty')}</div>`;
     if (box.__html === html) return; // 没有新行就什么都别动,免得三秒清一次选中的文字
     box.__html = html;
     box.innerHTML = html;
     if (atBottom) box.scrollTop = box.scrollHeight;
   };
+  $('#log-cats').addEventListener('click', e => {
+    const b = e.target.closest('[data-cat]'); if (!b) return;
+    cat = b.dataset.cat; conn = '';
+    draw();
+  });
+  $('#log').addEventListener('click', e => {
+    const b = e.target.closest('[data-conn]'); if (!b) return;
+    conn = conn === b.dataset.conn ? '' : b.dataset.conn;
+    draw();
+  });
   const load = async () => {
     if (paused) return;
     try { raw = await App().GetLogs(300, core) || []; draw(); }
@@ -1452,6 +1534,7 @@ function renderLogs(el) {
   };
   $('#log-chips').querySelectorAll('.chip[data-src]').forEach(c => c.addEventListener('click', () => {
     core = c.dataset.src === '1';
+    cat = ''; conn = '';
     $('#log-chips').querySelectorAll('.chip[data-src]').forEach(x => x.classList.toggle('on', x === c));
     load();
   }));
@@ -1464,7 +1547,7 @@ function renderLogs(el) {
   });
   const op = $('#log-open'); if (op) op.addEventListener('click', () => App().OpenLogs().catch(e => toast(errText(e), 'err')));
   $('#log-copy').addEventListener('click', async () => {
-    const ok = await copyText(raw.join('\n'));
+    const ok = await copyText(raw.map(logClean).join('\n'));
     toast(t(ok ? 'logs.copied' : 'logs.copyFail'), ok ? 'ok' : 'err');
   });
   $('#diag').addEventListener('click', exportDiag);

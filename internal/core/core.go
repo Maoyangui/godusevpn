@@ -85,8 +85,39 @@ func (w Writer) WriteMessage(level log.Level, message string) {
 		return
 	}
 	if w.Printf != nil {
-		w.Printf(strings.ToUpper(log.FormatLevel(level)), "%s", message)
+		w.Printf(strings.ToUpper(log.FormatLevel(level)), "%s", CleanMessage(message))
 	}
+}
+
+// CleanMessage 去掉 sing-box 交给平台写入器的消息里的终端颜色码,和它自己的 "INFO[0055] " 级别前缀
+// (平台写入器的格式在 sing-box 内部写死、关不掉颜色;级别和时间由我们的日志行头给出,留着就重复)。
+// 剩下 "[连接号 耗时] 标签: 内容"。
+func CleanMessage(m string) string {
+	if strings.IndexByte(m, '\x1b') >= 0 {
+		var b strings.Builder
+		b.Grow(len(m))
+		for i := 0; i < len(m); i++ {
+			if m[i] == '\x1b' && i+1 < len(m) && m[i+1] == '[' {
+				j := i + 2
+				for j < len(m) && (m[j] == ';' || m[j] >= '0' && m[j] <= '9') {
+					j++
+				}
+				if j < len(m) && m[j] == 'm' {
+					i = j
+					continue
+				}
+			}
+			b.WriteByte(m[i])
+		}
+		m = b.String()
+	}
+	// "LEVEL[秒数] ":级别是全大写字母,方括号里全是数字
+	if i := strings.IndexByte(m, '['); i >= 4 && i <= 5 && strings.ToUpper(m[:i]) == m[:i] {
+		if j := strings.Index(m[i:], "] "); j > 1 && strings.Trim(m[i+1:i+j], "0123456789") == "" {
+			m = m[i+j+2:]
+		}
+	}
+	return m
 }
 
 // LevelOf 设置里的级别名转成 sing-box 的数值;认不出按 info。

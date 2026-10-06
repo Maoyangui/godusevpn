@@ -101,6 +101,33 @@
   ];
   const stamp = () => new Date().toLocaleString('zh-CN', { hour12: false });
   const log = s => { logs.push(s); if (logs.length > 200) logs.shift(); };
+  // 内核日志:几条像样的连接(进程 → 域名 → 走隧道 / 直连 / 拦截),格式和客户端落盘的一样;拦截那一行是 debug 级别
+  const coreLogs = () => {
+    if (view.state.status !== 'connected') return [];
+    const node = view.node && view.node !== 'auto' ? view.node : '香港3-高带宽';
+    const proto = (NODES.find(x => x.name === node) || {}).type || 'anytls';
+    const C = [
+      ['C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe', 'claude.ai', '203.0.113.10', 'tunnel'],
+      ['C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe', 'www.youtube.com', '203.0.113.21', 'tunnel'],
+      ['C:\\Program Files\\Tencent\\WeChat\\WeChat.exe', 'weixin.qq.com', '198.51.100.23', 'direct'],
+      ['C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe', 'ads.example.com', '', 'block'],
+      ['C:\\Program Files\\Git\\mingw64\\bin\\git-remote-https.exe', 'github.com', '203.0.113.66', 'tunnel'],
+      ['C:\\Windows\\System32\\svchost.exe', 'update.microsoft.com', '198.51.100.82', 'direct'],
+      ['C:\\Program Files (x86)\\Steam\\steam.exe', 'steamcdn-a.akamaihd.net', '203.0.113.81', 'tunnel'],
+    ];
+    const out = [], t0 = Date.now() - C.length * 4000;
+    C.forEach(([proc, host, ip, kind], i) => {
+      const id = String(305896061 + i * 7919), at = t0 + i * 4000;
+      const L = (lv, ms, s) => out.push(new Date(at + ms).toLocaleString('zh-CN', { hour12: false }) + ' ' + lv + ' [' + id + ' ' + ms + 'ms] ' + s);
+      L('INFO', 0, 'inbound/tun[tun-in]: inbound connection from 172.19.0.1:' + (51000 + i * 13));
+      L('INFO', 0, 'inbound/tun[tun-in]: inbound connection to 198.18.0.' + (20 + i) + ':443');
+      L('INFO', 1, 'router: found process path: ' + proc);
+      if (kind === 'block') { L('DEBUG', 1, 'router: connection closed: rejected'); return; }
+      L('INFO', 38, 'dns: lookup succeed for ' + host + ': ' + ip);
+      L('INFO', 39, (kind === 'direct' ? 'outbound/direct[direct]' : 'outbound/' + proto + '[' + node + ']') + ': outbound connection to ' + ip + ':443');
+    });
+    return out;
+  };
   log('已连接 香港3-高带宽 81 ms');
 
   const HOSTS = [
@@ -191,7 +218,7 @@
     SetAutostart: async () => null,
     GetConnections: async () => (on() ? conns.map(c => ({ ...c })) : []),
     CloseConnection: async id => { const i = conns.findIndex(c => c.id === id); if (i >= 0) conns.splice(i, 1); },
-    GetLogs: async (n, core) => logs.slice(-(n || 200)).map(x => stamp() + (core ? ' INFO  ' : ' ') + x),
+    GetLogs: async (n, core) => (core ? coreLogs() : logs.slice(-(n || 200)).map(x => stamp() + ' ' + x)),
     GetDevices: async () => [],
     ExportDiag: async () => { throw new Error('演示里没有真实日志可导'); },
     RepairService: async () => { log('服务已修复'); push(); },
