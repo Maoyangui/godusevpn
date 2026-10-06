@@ -537,11 +537,13 @@ body.tv .drawer-brand b { font-size: 22px; }
 .lrow.dim .ll, .lrow.dim .lx { color: #7c8797; }
 .lempty { color: #5b6472; text-align: center; padding: 26px 0; }
 /* 内核日志:去向标签(走隧道 / 直连 / 拦截)、可点的连接号、分类筛选上的条数 */
-.ltag { display: inline-block; margin-right: 6px; padding: 0 6px; border-radius: 6px; font-size: 10.5px; line-height: 17px; vertical-align: 1px; white-space: nowrap; max-width: 15em; overflow: hidden; text-overflow: ellipsis; }
+.ltag { display: inline-block; margin-right: 6px; padding: 0 6px; border-radius: 6px; font-size: 10.5px; line-height: 17px; vertical-align: middle; white-space: nowrap; max-width: 15em; overflow: hidden; text-overflow: ellipsis; }
 .ltag.tunnel { color: #9ec5ff; background: rgba(47, 139, 255, .18); }
 .ltag.direct { color: #86efac; background: rgba(34, 197, 94, .16); }
 .ltag.block { color: #fca5a5; background: rgba(248, 113, 113, .18); }
 .ldim { color: #6b7686; }
+/* 进程名(git-remote-https.exe 这种)不从连字符处拆成两行:放不下就整个挪到下一行,比整行还长才在里面折 */
+.lproc { display: inline-block; max-width: 100%; word-break: break-all; }
 .lid { flex: none; align-self: flex-start; border: 0; background: none; padding: 0; color: #5b6472; font: inherit; cursor: pointer; }
 .lid:hover, .lid:focus { color: #8fb8ff; text-decoration: underline; outline: none; }
 #log-cats .chip em { font-style: normal; opacity: .7; margin-left: 2px; }

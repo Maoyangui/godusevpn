@@ -1488,7 +1488,7 @@ function renderLogs(el) {
       const i = info[r.id] || {}, port = (k.dest.match(/:(\d+)$/) || [])[1];
       const target = i.domain ? `${esc(i.domain)}${port ? ':' + port : ''} <span class="ldim">${esc(k.dest.replace(/:\d+$/, ''))}</span>` : esc(k.dest);
       const tag = k.kind === 'tunnel' ? `${t('logs.cat.tunnel')} · ${esc(k.node)}` : t('logs.cat.' + k.kind);
-      body = `<span class="ltag ${k.kind}">${tag}</span>${i.proc ? esc(i.proc) + ' → ' : ''}${target}`;
+      body = `<span class="ltag ${k.kind}">${tag}</span>${i.proc ? `<span class="lproc">${esc(i.proc)}</span> → ` : ''}${target}`;
     } else if (k.kind === 'block') {
       body = `<span class="ltag block">${t('logs.cat.block')}</span>${body}`;
     }
