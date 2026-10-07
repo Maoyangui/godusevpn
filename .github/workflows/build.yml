@@ -390,9 +390,19 @@ jobs:
           echo "再装一次:界面 $p1 → $p2,服务在"
           osascript -e 'quit app "godusevpn"' 2>/dev/null || true
           pkill -x Terminal || true
+          # 反向:撤服务失败(用一个遇到 uninstall 就报错的替身顶上)时,卸载脚本必须报失败、不删程序 ——
+          # 「禁直连」规则在系统里,程序删了就没人能撤它
+          sudo cp /usr/local/bin/godusevpn "$RUNNER_TEMP/godusevpn.real"
+          printf '#!/bin/sh\n[ "$1" = uninstall ] && exit 1\nexec %s "$@"\n' "$RUNNER_TEMP/godusevpn.real" | sudo tee /usr/local/bin/godusevpn >/dev/null
+          sudo chmod 755 /usr/local/bin/godusevpn
+          if printf 'y\n' | sh "$D/卸载佛跳墙.command"; then echo "撤服务失败时卸载脚本却报成功"; exit 1; fi
+          if [ ! -e /usr/local/bin/godusevpn ] || [ ! -e /Applications/godusevpn.app ]; then echo "撤服务失败时程序被删了"; exit 1; fi
+          sudo install -m755 "$RUNNER_TEMP/godusevpn.real" /usr/local/bin/godusevpn
+          echo "撤服务失败时程序留着:通过"
           printf 'y\n' | sh "$D/卸载佛跳墙.command"
           if launchctl print system/com.maoyangui.godusevpn >/dev/null 2>&1; then echo "卸载后服务还在"; exit 1; fi
           if [ -e /usr/local/bin/godusevpn ] || [ -e /Applications/godusevpn.app ]; then echo "卸载后文件还在"; exit 1; fi
+          if [ -n "$(sudo pfctl -a com.apple/godusevpn -sr 2>/dev/null)" ]; then echo "卸载后 pf 锚点里还有规则"; exit 1; fi
           echo "双击安装 / 卸载都通过"
 
       - uses: actions/upload-artifact@v4

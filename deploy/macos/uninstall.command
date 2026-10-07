@@ -1,6 +1,6 @@
 #!/bin/sh
 # 佛跳墙 macOS 双击卸载。打包时改名为「卸载佛跳墙.command」。
-# 做的就是文档里那两行:godusevpn uninstall(撤服务、撤禁直连闸、恢复网络设置)+ 删掉程序。
+# 做的就是文档里那两行:godusevpn uninstall(撤服务、撤禁直连闸、恢复网络设置)+ 删掉程序;前一步失败就不删程序。
 # 设置与订阅留在 /Library/Application Support/godusevpn,重装后还在。
 
 finish() {
@@ -33,15 +33,19 @@ if pgrep -f "/Applications/godusevpn.app/Contents/MacOS/godusevpn" >/dev/null 2>
 fi
 echo
 echo "接下来要输入开机密码(输入时不显示字符,输完按回车)。"
-# 卸载子命令失败也要继续删文件:服务可能早就坏了,用户要的是"别在我电脑上了"
-if ! sudo -p "开机密码:" sh -c '
-  if [ -x /usr/local/bin/godusevpn ]; then /usr/local/bin/godusevpn uninstall || echo "(撤服务时报了错,继续删除文件)"; fi
+# 撤服务失败就别删程序:「禁直连」的规则在系统里,程序删了就没人能撤它 —— 严格全局下会断网且没有工具恢复。
+sudo -p "开机密码:" sh -c '
+  if [ -x /usr/local/bin/godusevpn ]; then /usr/local/bin/godusevpn uninstall || exit 3; fi
   rm -rf /Applications/godusevpn.app /usr/local/bin/godusevpn
-'; then
-  echo
-  echo "❌ 没有卸载完成(多半是密码不对或者不是管理员账户)。"
-  finish 1
-fi
+'
+rc=$?
 echo
-echo "✅ 已卸载。"
-finish 0
+case $rc in
+  0) echo "✅ 已卸载。"; finish 0 ;;
+  3)
+    echo "❌ 撤后台服务 / 防火墙规则时出错,程序先留着没删(规则在系统里,程序删了就没人能撤它)。"
+    echo "   再双击一次这个文件试试;还不行的话把这个窗口截图发给我们。"
+    echo "   断网了的话,在终端里执行这一行可以先恢复网络:sudo pfctl -a com.apple/godusevpn -F all"
+    finish 1 ;;
+  *) echo "❌ 没有卸载完成(多半是密码不对或者不是管理员账户)。"; finish 1 ;;
+esac
