@@ -113,7 +113,7 @@ CGO_ENABLED=1 CGO_LDFLAGS="-framework UniformTypeIdentifiers" go build -tags des
 
 **系统要求:macOS 13(Ventura)或更高**,苹果芯片与英特尔芯片各有一个包(Go 1.27 编出来的程序就是 13 起步)。两种装法,都要输一次开机密码(管理员):
 
-**不用终端**:到 [Releases](https://github.com/Maoyangui/godusevpn/releases/latest) 下载 `godusevpn-<版本>-macos-arm64.tar.gz`(苹果芯片)或 `-amd64`(英特尔),双击解开,照文件夹里的「安装说明」双击「安装佛跳墙.command」,在弹出的终端里输开机密码。浏览器下载的文件带着隔离标记,这个脚本第一次会被 macOS 拦一次 —— macOS 13 / 14 右键 →「打开」,macOS 15 起到「系统设置 → 隐私与安全性」点「仍要打开」;放行之后它清掉整个文件夹的隔离标记,装好的佛跳墙不会再被拦。下错芯片的包会直接提示该下哪个。
+**不用终端**:到 [Releases](https://github.com/Maoyangui/godusevpn/releases/latest) 下载 `godusevpn-<版本>-macos-arm64.tar.gz`(苹果芯片)或 `-amd64`(英特尔),双击解开,照文件夹里的「安装说明」双击「安装佛跳墙.command」,在弹出的终端里输开机密码(问能否访问「下载」文件夹时点「好」)。浏览器下载的文件带着隔离标记,这个脚本第一次会被 macOS 拦一次 —— macOS 13 / 14 右键 →「打开」,macOS 15 起到「系统设置 → 隐私与安全性」点「仍要打开」;放行之后它清掉整个文件夹的隔离标记,装好的佛跳墙不会再被拦。下错芯片的包会直接提示该下哪个。
 
 **用终端**(不会被拦,也不用放行):
 

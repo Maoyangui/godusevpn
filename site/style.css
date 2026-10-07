@@ -96,7 +96,7 @@ section.block > p.sub { color: var(--muted); margin: 0 0 1.6rem; max-width: 46re
 .plat .req { color: var(--muted); font-size: .84rem; margin: 0 0 .8rem; }
 .plat p { color: var(--muted); font-size: .92rem; margin: 0 0 1rem; }
 .plat pre { font-size: .78rem; margin: 0 0 1rem; }
-.plat .go { margin-top: auto; }
+.plat .go { margin-top: auto; display: flex; flex-wrap: wrap; gap: 8px; }
 
 .ctaband { text-align: center; background: linear-gradient(135deg, var(--primary-soft), var(--surface)); border: 1px solid var(--border); border-radius: var(--radius); padding: 2.4rem 1.2rem; margin: 3rem 0 0; box-shadow: var(--shadow); }
 .ctaband h2 { margin: 0 0 .5rem; font-size: 1.6rem; }

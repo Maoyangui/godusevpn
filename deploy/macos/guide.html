@@ -32,6 +32,7 @@
   ul{padding-left:20px;margin:8px 0}
   li{margin:4px 0}
   .muted{color:var(--muted);font-size:14px}
+  a{color:var(--accent)}
   [hidden]{display:none!important}
 </style>
 </head>
@@ -60,6 +61,7 @@
     弹窗点 <span class="f">完成</span> → 打开「系统设置」→「隐私与安全性」→ 拉到下面的「安全性」,在"已阻止使用「安装佛跳墙.command」"旁边点 <span class="f">仍要打开</span> → 输入密码或用触控 ID → 再点 <span class="f">仍要打开</span>。</div>
   <div class="os"><b>macOS 13 Ventura / 14 Sonoma</b>
     按住 <kbd>control</kbd> 点「安装佛跳墙.command」(或右键)→ <span class="f">打开</span> → 弹窗里再点 <span class="f">打开</span>。</div>
+  <p class="muted">接着要是弹出"「终端」想访问「下载」文件夹中的文件",点 <span class="f">好</span> —— 安装程序要读这个文件夹里的文件。</p>
 </div></div>
 
 <div class="step"><div class="n">3</div><div>
@@ -86,6 +88,7 @@
   <ul>
     <li><b>双击后提示没有权限 / 什么也没发生</b>:换个解压方式可能丢了执行权限,用上面"会用终端"那一行装。</li>
     <li><b>提示芯片和本机不符</b>:下载另一个包(苹果芯片 arm64,英特尔 amd64)。</li>
+    <li><b>终端里出现 Operation not permitted</b>:访问「下载」文件夹的询问点了「不允许」。到「系统设置 → 隐私与安全性 → 文件和文件夹 → 终端」打开「"下载"文件夹」,再双击一次;或者把整个文件夹挪到自己的用户目录(访达里按 <kbd>⌘</kbd> <kbd>⇧</kbd> <kbd>H</kbd>)再装。</li>
     <li><b>终端里出现 is not in the sudoers file</b>:当前账户不是管理员,换管理员账户登录后再装。</li>
     <li>更多见 <a href="https://github.com/Maoyangui/godusevpn/wiki/安装-macOS">Wiki · 安装 macOS</a>。</li>
   </ul>
@@ -109,6 +112,7 @@
     Click <span class="f">Done</span> → System Settings → Privacy &amp; Security → scroll to Security, next to "安装佛跳墙.command was blocked" click <span class="f">Open Anyway</span> → enter your password or use Touch ID → <span class="f">Open Anyway</span> again.</div>
   <div class="os"><b>macOS 13 Ventura / 14 Sonoma</b>
     Control-click (or right-click) "安装佛跳墙.command" → <span class="f">Open</span> → <span class="f">Open</span> in the dialog.</div>
+  <p class="muted">If Terminal then asks to access files in your Downloads folder, click <span class="f">OK</span> — the installer reads the files in this folder.</p>
 </div></div>
 
 <div class="step"><div class="n">3</div><div>
@@ -128,6 +132,17 @@
 <div class="box">
   <h3>Uninstall</h3>
   <p>Double-click "卸载佛跳墙.command" (Uninstall), type y, then your password. It removes the service and the kill-switch firewall rules, restores network settings and deletes the app; settings stay in <code>/Library/Application Support/godusevpn</code>.</p>
+</div>
+
+<div class="box">
+  <h3>Troubleshooting</h3>
+  <ul>
+    <li><b>Permission denied, or nothing happens on double-click</b>: the unpacker may have dropped the execute bit; use the one-line Terminal install above.</li>
+    <li><b>"wrong chip" message</b>: download the other package (Apple silicon arm64, Intel amd64).</li>
+    <li><b>Terminal shows "Operation not permitted"</b>: Terminal was denied access to Downloads. Turn on "Downloads Folder" under System Settings → Privacy &amp; Security → Files and Folders → Terminal and double-click again, or move the whole folder to your home folder (<kbd>⌘</kbd> <kbd>⇧</kbd> <kbd>H</kbd> in Finder) first.</li>
+    <li><b>"is not in the sudoers file"</b>: this account is not an administrator; sign in with an admin account.</li>
+    <li>More in the <a href="https://github.com/Maoyangui/godusevpn/wiki/安装-macOS">wiki</a>.</li>
+  </ul>
 </div>
 </section>
 </div>
