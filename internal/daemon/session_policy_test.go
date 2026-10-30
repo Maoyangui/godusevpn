@@ -242,7 +242,7 @@ func TestProbeNodesGate(t *testing.T) {
 		if err == nil {
 			t.Fatalf("闸开着、内核没跑,却做了直连测速:%v", res)
 		}
-		if !strings.Contains(err.Error(), "防逃逸") {
+		if !strings.Contains(err.Error(), "防流量逃逸") {
 			t.Fatalf("拒绝的理由要说清是防逃逸的闸在挡,得: %v", err)
 		}
 		if err.Error() == "服务内部错误" {

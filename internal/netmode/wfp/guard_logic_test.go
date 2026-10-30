@@ -39,7 +39,7 @@ func TestRuleModeWeights(t *testing.T) {
 			t.Fatalf("installSet 里没有 %s", want)
 		}
 	}
-	if strings.Index(set, "if rule {") < strings.Index(set, "permitHotspot(") {
+	if strings.Index(set, "blockTunnelPorts(") < strings.Index(set, "permitHotspot(") {
 		t.Fatal("规则模式那几条要排在局域网放行后面")
 	}
 	if a, b := directAddrs(nil); len(a)+len(b) != 0 {
