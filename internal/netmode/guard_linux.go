@@ -181,7 +181,14 @@ var fakeDrop = "\t\tip6 daddr " + builder.FakeIP6 + " drop\n"
 func ApplyGuard(spec GuardSpec) error {
 	nftMu.Lock()
 	defer nftMu.Unlock()
-	dns, why := sealDNS()
+	// 规则模式不把 DNS 接进隧道:本地 DNS 填 system(或 DoH 填域名)时内核自己要问系统解析器,接进隧道就绕回自己;
+	// 全局模式那边有密封 DNS 兜着,规则模式没有。和以前一样:问路由器的直接问。从全局切过来时把策略路由撤掉。
+	dns, why := false, ""
+	if spec.Rule {
+		unsealDNS()
+	} else {
+		dns, why = sealDNS()
+	}
 	cmd := exec.Command("nft", "-f", "-")
 	cmd.Stdin = strings.NewReader(guardRuleset(spec, dns))
 	if out, err := cmd.CombinedOutput(); err != nil {

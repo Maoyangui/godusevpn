@@ -213,6 +213,7 @@ func TestProbeNodesGate(t *testing.T) {
 
 	t.Run("没有订阅:先报没订阅,闸开没开都一样", func(t *testing.T) {
 		d := newPolicyTestDaemon(t)
+		d.settings.NoDirect, d.settings.Mode = true, settings.ModeGlobal
 		d.guardOn = true
 		_, err := d.server.Dispatch(ipc.MProbeNodes, nil)
 		if err == nil || !strings.Contains(err.Error(), "还没有订阅") {
@@ -231,6 +232,7 @@ func TestProbeNodesGate(t *testing.T) {
 	t.Run("闸开着、内核没跑:拒绝直连测速,且不走到 probeDirect", func(t *testing.T) {
 		d := newPolicyTestDaemon(t)
 		withProfile(t, d, noAddr)
+		d.settings.NoDirect, d.settings.Mode = true, settings.ModeGlobal
 		d.guardOn = true
 		if v := d.stateView(); v.Guard != "on" {
 			t.Fatalf("测试前提:闸应记为开着,状态视图却给 %q", v.Guard)

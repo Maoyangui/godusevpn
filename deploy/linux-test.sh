@@ -210,6 +210,7 @@ echo "== 3.8 规则模式的防流量逃逸:直连规则的地址段照常,其�
 rr=$(nft list table inet godusevpn_guard 2>/dev/null)
 check "规则模式下闸在、带放行段" "$(echo "$rr" | grep -c 'set direct4')" "$(echo "$rr" | grep -c .) 行"
 check "规则模式不拦 DNS / UPnP" "$([ -z "$(echo "$rr" | grep -E 'dport \{ (53, 853|1900, 5351) \} drop')" ] && echo 1 || echo 0)" ""
+check "规则模式不把 DNS 接进隧道(切过来时撤了策略路由)" "$([ "$(ip rule show | grep -c 'lookup 5053')" = 0 ] && echo 1 || echo 0)" "$(ip rule show | grep 5053 | tr '\n' ';')"
 CNIP=223.5.5.5 # 阿里 DNS,在 geoip-cn 里
 nicprobe() { su -s /bin/sh "$U" -c "curl -sk --interface $defif -m 6 -o /dev/null -w '%{http_code}' $1" 2>/dev/null || true; }
 plainprobe() { su -s /bin/sh "$U" -c "curl -sk -m 6 -o /dev/null -w '%{http_code}' $1" 2>/dev/null || true; }
@@ -248,7 +249,6 @@ check "闸表被清掉后自动装回" "$(nft list table inet godusevpn_guard 2>
 # 撤闸:防火墙回到连接前。开关一关,闸、DNS 策略路由、开机版都得没了
 "$BIN" settings noDirect=false >/dev/null 2>&1; sleep 2
 check "关开关后闸表清空" "$([ -z "$(nft list table inet godusevpn_guard 2>/dev/null)" ] && echo 1 || echo 0)" "$(nft list table inet godusevpn_guard 2>/dev/null | head -3 | tr '\n' ' ')"
-check "撤闸后 DNS 的策略路由也撤了" "$([ "$(ip rule show | grep -c 'lookup 5053')" = 0 ] && echo 1 || echo 0)" "$(ip rule show | grep 5053 | tr '\n' ';')"
 check "撤闸后开机版的闸也删了" "$([ ! -f /var/lib/godusevpn/guard-boot.nft ] && echo 1 || echo 0)" ""
 "$BIN" settings noDirect=true >/dev/null 2>&1; sleep 2
 check "开回开关:闸回来,隧道没断" "$(nft list table inet godusevpn_guard 2>/dev/null | grep -c 'set direct4')" ""

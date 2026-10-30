@@ -66,7 +66,7 @@ func TestNeedsPrivacyRebuild(t *testing.T) {
 		{"防逃逸开:规则 ↔ 直连", mode(true, r), mode(true, d), false},
 		{"防逃逸关:规则 → 全局", mode(false, r), mode(false, g), false},
 		{"防逃逸关:全局 → 直连", mode(false, g), mode(false, d), false},
-		{"规则模式下开关防逃逸", mode(false, r), mode(true, r), true},
+		{"规则模式下开关防逃逸", mode(false, r), mode(true, r), false},
 		{"打开 IPv6", mode(false, r), func() settings.Settings { s := mode(false, r); s.IPv6 = true; return s }(), true},
 		{"关掉连接时停用网卡 IPv6", mode(false, r), func() settings.Settings { s := mode(false, r); s.DisableNICIPv6 = false; return s }(), true},
 		{"关掉 TUN", mode(false, r), func() settings.Settings { s := mode(false, r); s.TUN = false; return s }(), true},

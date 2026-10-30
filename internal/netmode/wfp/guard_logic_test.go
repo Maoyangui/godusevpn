@@ -3,6 +3,7 @@
 package wfp
 
 import (
+	"net/netip"
 	"os"
 	"regexp"
 	"strings"
@@ -28,6 +29,29 @@ func sourceFunc(t *testing.T, file, sig string) string {
 		return rest[:j]
 	}
 	return rest
+}
+
+// 规则模式那几条的权重:局域网(12)> 走隧道的端口(11)> 放行段、入站(10)> DNS、UPnP(9)> 全拦(0)。
+func TestRuleModeWeights(t *testing.T) {
+	set := sourceFunc(t, "guard.go", "func installSet(")
+	for _, want := range []string{"blockTunnelPorts(session, base, 11,", "permitDirect(session, base, 10,", "permitInbound(session, base, 10)"} {
+		if !strings.Contains(set, want) {
+			t.Fatalf("installSet 里没有 %s", want)
+		}
+	}
+	if strings.Index(set, "if rule {") < strings.Index(set, "permitHotspot(") {
+		t.Fatal("规则模式那几条要排在局域网放行后面")
+	}
+	if a, b := directAddrs(nil); len(a)+len(b) != 0 {
+		t.Fatal("空列表不该有地址")
+	}
+	v4, v6 := directAddrs([]netip.Prefix{netip.MustParsePrefix("223.5.5.0/24"), netip.MustParsePrefix("0.0.0.0/1"), netip.MustParsePrefix("2400:3200::/32")})
+	if len(v4) != 2 || len(v6) != 1 || v4[0].addr != 0xDF050500 || v4[0].mask != 0xFFFFFF00 || v4[1].mask != 0x80000000 || v6[0].prefixLength != 32 || v6[0].addr[0] != 0x24 {
+		t.Fatalf("地址转换不对: %+v %+v", v4, v6)
+	}
+	if v4Mask(0) != 0 || v4Mask(32) != 0xFFFFFFFF {
+		t.Fatal("掩码不对")
+	}
 }
 
 // 放行本服务那条是硬放行(CLEAR_ACTION_RIGHT)。只按 exe 路径的话,任何账户用同一个 exe 起的进程
@@ -385,8 +409,11 @@ func TestUPnPBlocksCoverDiscoveryAndNATPMP(t *testing.T) {
 		t.Fatal("拦 UPnP / NAT-PMP 应当只拦 UDP")
 	}
 	set := sourceFunc(t, "guard.go", "func installSet(")
-	if !strings.Contains(set, "blockUPnP(session, base, 13)") || !strings.Contains(set, "blockDNS(session, base, 13)") {
-		t.Fatal("拦 UPnP / NAT-PMP 要和拦 DNS 同在权重 13:压在局域网放行(12)上面、隧道地址 / 回环(14)下面")
+	if !strings.Contains(set, "blockUPnP(session, base, leak)") || !strings.Contains(set, "blockDNS(session, base, leak)") || !strings.Contains(set, "leak := uint8(13)") {
+		t.Fatal("全局模式下拦 UPnP / NAT-PMP 要和拦 DNS 同在权重 13:压在局域网放行(12)上面、隧道地址 / 回环(14)下面")
+	}
+	if !strings.Contains(set, "rule := spec.Rule && withSelf") || !strings.Contains(set, "leak = 9") {
+		t.Fatal("规则模式下才把它们挪到放行段(10)下面,而且只有运行期那组:开机那组不变")
 	}
 	if strings.Index(set, "blockUPnP(") > strings.Index(set, "if spec.LAN {") {
 		t.Fatal("拦 UPnP / NAT-PMP 不能挂在「局域网直通」开关下面:开着直通时正是要拦它")

@@ -30,6 +30,7 @@ func TestDirectHTTPUsesDoHWhenGuardArmed(t *testing.T) {
 	if d.directHTTP() != d.http {
 		t.Fatal("闸没开时行为不该变")
 	}
+	d.settings.NoDirect, d.settings.Mode = true, settings.ModeGlobal
 	d.guardOn = true
 	for _, local := range []string{"127.0.0.1", "system", "dns.example.invalid"} {
 		d.settings.LocalDNS = local
@@ -59,6 +60,7 @@ func TestFetchProfileWithoutCoreUsesDirectHTTP(t *testing.T) {
 	d := newPolicyTestDaemon(t)
 	d.http = &http.Client{Timeout: 30 * time.Second}
 	d.settings.NoDirect, d.settings.Mode, d.settings.LocalDNS = true, settings.ModeGlobal, "127.0.0.1"
+	d.settings.NoDirect, d.settings.Mode = true, settings.ModeGlobal
 	d.guardOn = true
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -79,6 +81,7 @@ func TestSelfHTTPRefusesDirectWhenGuardArmed(t *testing.T) {
 	if c, err := d.SelfHTTP(time.Second); err != nil || c == nil {
 		t.Fatalf("闸没开时应当照常给客户端:%v", err)
 	}
+	d.settings.NoDirect, d.settings.Mode = true, settings.ModeGlobal
 	d.guardOn = true
 	if c, err := d.SelfHTTP(time.Second); !errors.Is(err, errSealed) || c != nil {
 		t.Fatalf("闸开着、内核没跑时不该给直连客户端:c=%v err=%v", c, err)
@@ -88,6 +91,7 @@ func TestSelfHTTPRefusesDirectWhenGuardArmed(t *testing.T) {
 // 接线:补规则集走 SelfHTTP —— 闸开着、内核没跑时报"不从本机直连出去",而不是去直连。
 func TestFillMissingRuleSetsUsesSelfHTTP(t *testing.T) {
 	d := newPolicyTestDaemon(t)
+	d.settings.NoDirect, d.settings.Mode = true, settings.ModeGlobal
 	d.guardOn = true
 	d.missingSets = []builder.MissingRuleSet{{Tag: "geosite-zz-test", URL: "https://rules.example.invalid/zz.srs"}}
 	d.fillMissingRuleSets() // 里面先等 3 秒
@@ -131,6 +135,7 @@ func TestSelfHTTPStopsWhenGuardArmsMidway(t *testing.T) {
 	}
 
 	d.mu.Lock()
+	d.settings.NoDirect, d.settings.Mode = true, settings.ModeGlobal
 	d.guardOn = true
 	d.mu.Unlock()
 	if _, err := resp.Body.Read(buf); !errors.Is(err, errArmedMidway) {
@@ -154,6 +159,7 @@ func TestCancelOnGuard(t *testing.T) {
 	case <-time.After(300 * time.Millisecond):
 	}
 	d.mu.Lock()
+	d.settings.NoDirect, d.settings.Mode = true, settings.ModeGlobal
 	d.guardOn = true
 	d.mu.Unlock()
 	select {
@@ -180,5 +186,23 @@ func TestCancelDirectCancelsHeld(t *testing.T) {
 	}
 	if ctxB.Err() != nil {
 		t.Fatal("已注销的不该再被取消")
+	}
+}
+
+// 只有严格全局的闸才拦服务自己的直连动作:规则模式本来就有直连,更新检查、未连接时的测速和以前一样。
+func TestGuardArmedOnlySealed(t *testing.T) {
+	d := newPolicyTestDaemon(t)
+	d.guardOn = true
+	d.settings.NoDirect, d.settings.Mode = true, settings.ModeRule
+	if d.guardArmed() {
+		t.Fatal("规则模式的闸不该拦服务自己的直连")
+	}
+	d.settings.Mode = settings.ModeGlobal
+	if !d.guardArmed() {
+		t.Fatal("严格全局的闸要拦")
+	}
+	d.guardOn, d.guardArming, d.settings.Mode = false, true, settings.ModeRule
+	if !d.guardArmed() {
+		t.Fatal("正在装严格全局的闸时也要拦")
 	}
 }

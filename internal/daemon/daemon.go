@@ -1081,8 +1081,7 @@ func needsPrivacyRebuild(prev, next settings.Settings) bool {
 // "没在连"去撤闸、还原 IPv6 —— 而用户只是改了一项和保护无关的设置。放宽只认改了这几项。
 func protectionChanged(prev, next settings.Settings) bool {
 	return prev.Mode != next.Mode || prev.NoDirect != next.NoDirect || prev.LANBypass != next.LANBypass ||
-		prev.NetMode != next.NetMode || prev.TUN != next.TUN || prev.IPv6 != next.IPv6 || prev.DisableNICIPv6 != next.DisableNICIPv6 ||
-		ruleGuardChanged(prev, next)
+		prev.NetMode != next.NetMode || prev.TUN != next.TUN || prev.IPv6 != next.IPv6 || prev.DisableNICIPv6 != next.DisableNICIPv6
 }
 
 // ruleGuardChanged 规则模式闸照着执行的规则变了:放行段要跟着变。
@@ -2055,6 +2054,10 @@ func (d *Daemon) guardNoteNow() string {
 		return note
 	}
 	note = netmode.GuardWarning()
+	if !netmode.GuardInstallable() && !d.getSettings().Sealed() {
+		// Android 规则模式:系统的「阻止未经 VPN 的连接」会连直连一起断,不该为没开它挂告警(开关说明里写了)
+		note = ""
+	}
 	d.mu.Lock()
 	d.guardNote, d.guardNoteAt = note, time.Now()
 	d.mu.Unlock()
@@ -2633,8 +2636,8 @@ func (d *Daemon) registerHandlers() {
 				go d.refreshExit(d.beginExit(d.currentNode()))
 			}
 		}
-		// 跨过严格全局边界(防逃逸 + 全局)、或动了 IPv6 / TUN / 防逃逸开关,会改变密封 DNS 与闸的安全边界,
-		// 运行中必须整份重建;边界没变的切模式在下面就地切。
+		// 跨过严格全局边界(防逃逸 + 全局)、或动了 IPv6 / TUN,会改变密封 DNS 与闸的安全边界,
+		// 运行中必须整份重建;边界没变的切模式在下面就地切。规则模式下开关防逃逸只动防火墙,配置一字不变,不用重建。
 		if d.core.Running() && needsPrivacyRebuild(prev, next) {
 			if err := d.restartForPrivacySettings(prev); err != nil {
 				msg := "隐私设置切换失败,已保持旧配置与隐私保护: " + err.Error()
@@ -2651,6 +2654,8 @@ func (d *Daemon) registerHandlers() {
 			if err := d.syncNICIPv6(); err != nil { // 关掉「连接时停用网卡 IPv6」或打开 IPv6 时,这里把绑定还原回去
 				return nil, err
 			}
+		} else if ruleGuardChanged(prev, next) {
+			d.refreshRuleGuard()
 		}
 		if !next.TUN {
 			if err := netmode.UnprotectChecked(); err != nil {

@@ -274,6 +274,22 @@ func (d *Daemon) syncGuard() {
 	}
 }
 
+// refreshRuleGuard 规则变了:闸开着就按新规则重装。只换规格,不判该不该开 —— 保存规则时服务可能刚起还没自动连上,
+// 这时拿"没在连"去撤闸是错的(见 protectionChanged 的说明)。
+func (d *Daemon) refreshRuleGuard() {
+	if d.shuttingDown.Load() {
+		return
+	}
+	d.guardMu.Lock()
+	defer d.guardMu.Unlock()
+	d.mu.Lock()
+	on := d.guardOn
+	d.mu.Unlock()
+	if on && d.appliedGuardSpec() != d.guardSpec() {
+		d.applyGuard("规则变了,防火墙已按新规则重装")
+	}
+}
+
 // guardArmed 严格全局的闸此刻开着(按守护进程自己的记录),或者正在装(见 cancelDirect):直连动作一律按开着处理。
 // 规则模式的闸不算:规则模式本来就有直连,服务自己的直连动作(更新检查、未连接时的测速)和以前一样。
 func (d *Daemon) guardArmed() bool {
