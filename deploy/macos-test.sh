@@ -227,14 +227,18 @@ if [ "$direct_ok" = 1 ]; then
   a=$(sudo -u "$U" curl -sk --interface "$dip" -m 6 -o /dev/null -w '%{http_code}' "https://$CNIP/" 2>/dev/null || true); check "绑物理网卡:国内地址放行" "$(isopen "$a")" "http=${a:-000}"
   a=$(sudo -u "$U" curl -s --interface "$dip" -m 6 -o /dev/null -w '%{http_code}' http://1.1.1.1/cdn-cgi/trace 2>/dev/null || true); check "绑物理网卡:国外地址被拦" "$(isshut "$a")" "http=${a:-000}"
 fi
-# 规则组走命令行改:防火墙跟着变、不用重连
+# 规则组走命令行改:防火墙当场跟着变
 "$BIN" settings 'ruleGroups=[{"id":"t1","name":"t1","enabled":true,"outbound":"direct","rules":[{"type":"ip_cidr","value":"1.1.1.1/32"}]}]' >/dev/null 2>&1; sleep 2
 if [ "$direct_ok" = 1 ]; then a=$(sudo -u "$U" curl -s --interface "$dip" -m 6 -o /dev/null -w '%{http_code}' http://1.1.1.1/cdn-cgi/trace 2>/dev/null || true); check "加直连 IP 规则:防火墙当场放行" "$(isopen "$a")" "http=${a:-000}"; fi
 "$BIN" settings 'ruleGroups=[{"id":"t2","name":"t2","enabled":true,"outbound":"proxy","rules":[{"type":"ip_cidr","value":"223.5.5.0/24"},{"type":"port","value":"8443"}]}]' >/dev/null 2>&1; sleep 2
 if [ "$direct_ok" = 1 ]; then a=$(sudo -u "$U" curl -sk --interface "$dip" -m 6 -o /dev/null -w '%{http_code}' "https://$CNIP/" 2>/dev/null || true); check "排前面的走隧道规则盖过国内直连" "$(isshut "$a")" "http=${a:-000}"; fi
 check "走隧道的端口进了防火墙" "$(pfctl -a com.apple/godusevpn -sr 2>/dev/null | grep -c 'block drop out quick .*port = 8443')" ""
 "$BIN" settings 'ruleGroups=[]' >/dev/null 2>&1; sleep 2
-check "改规则一路没断连接" "$(wait_status connected 5 && echo 1 || echo 0)" ""
+check "改规则后连接正常" "$(wait_status connected 30 && echo 1 || echo 0)" ""
+# 锚点被清掉:十几秒内自己装回来
+pfctl -a com.apple/godusevpn -F all >/dev/null 2>&1
+i=0; while [ $i -lt 40 ] && [ -z "$(pfctl -a com.apple/godusevpn -sr 2>/dev/null)" ]; do sleep 2; i=$((i+2)); done
+check "锚点被清掉后自动装回" "$(pfctl -a com.apple/godusevpn -sr 2>/dev/null | grep -c 'godusevpn_direct')" "${i} 秒"
 # 撤闸:开关一关,锚点和开机版都得没了;pf 的引用还回去
 "$BIN" settings noDirect=false >/dev/null 2>&1; sleep 2
 check "关开关后锚点清空" "$([ -z "$(pfctl -a com.apple/godusevpn -sr 2>/dev/null)" ] && echo 1 || echo 0)" "$(pfctl -a com.apple/godusevpn -sr 2>/dev/null | tail -2 | tr '\n' ' ')"

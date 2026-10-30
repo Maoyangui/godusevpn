@@ -118,6 +118,12 @@ func joinWarn(a, b string) string {
 	}
 }
 
+// GuardPresent 闸还在不在。查不了不算不在。
+func GuardPresent() bool {
+	n, err := wfp.Count()
+	return err != nil || n > 0
+}
+
 // GuardStatus 闸里现在有多少条过滤器;0 = 没开。
 func GuardStatus() (int, error) { return wfp.Count() }
 

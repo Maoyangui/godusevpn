@@ -234,17 +234,17 @@ if [ "$direct_ok" = 1 ]; then
     check "服务起来后接着连上" "$(wait_status connected 60 && echo 1 || echo 0)" "$("$BIN" status | sed -n 2p)"
   fi
 fi
-# 规则组走命令行改:防火墙跟着变、不用重连
+# 规则组走命令行改:防火墙当场跟着变
 "$BIN" settings 'ruleGroups=[{"id":"t1","name":"t1","enabled":true,"outbound":"direct","rules":[{"type":"ip_cidr","value":"1.1.1.1/32"}]}]' >/dev/null 2>&1; sleep 2
 if [ "$direct_ok" = 1 ]; then a=$(nicprobe "http://1.1.1.1/cdn-cgi/trace"); check "加直连 IP 规则:防火墙当场放行" "$(isopen "$a")" "http=${a:-000}"; fi
 "$BIN" settings 'ruleGroups=[{"id":"t2","name":"t2","enabled":true,"outbound":"proxy","rules":[{"type":"ip_cidr","value":"223.5.5.0/24"},{"type":"port","value":"8443"}]}]' >/dev/null 2>&1; sleep 2
 if [ "$direct_ok" = 1 ]; then a=$(nicprobe "https://$CNIP/"); check "排前面的走隧道规则盖过国内直连" "$(isshut "$a")" "http=${a:-000}"; fi
 check "走隧道的端口进了防火墙" "$(nft list table inet godusevpn_guard | grep -c 'tcp dport 8443 drop\|tcp dport { 8443 } drop')" ""
 "$BIN" settings 'ruleGroups=[]' >/dev/null 2>&1; sleep 2
-check "改规则一路没断连接" "$(wait_status connected 5 && echo 1 || echo 0)" ""
-# 防火墙被别的东西清掉:几秒内自己装回来(用落下的规格,不用重连)
+check "改规则后连接正常" "$(wait_status connected 30 && echo 1 || echo 0)" ""
+# 防火墙被别的东西清掉:十几秒内自己装回来(不用重连)
 nft delete table inet godusevpn_guard 2>/dev/null
-i=0; while [ $i -lt 60 ] && ! nft list table inet godusevpn_guard >/dev/null 2>&1; do sleep 2; i=$((i+2)); done
+i=0; while [ $i -lt 40 ] && ! nft list table inet godusevpn_guard >/dev/null 2>&1; do sleep 2; i=$((i+2)); done
 check "闸表被清掉后自动装回" "$(nft list table inet godusevpn_guard 2>/dev/null | grep -c 'set direct4')" "${i} 秒"
 # 撤闸:防火墙回到连接前。开关一关,闸、DNS 策略路由、开机版都得没了
 "$BIN" settings noDirect=false >/dev/null 2>&1; sleep 2

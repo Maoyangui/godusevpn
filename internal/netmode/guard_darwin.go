@@ -144,9 +144,27 @@ func ApplyBootGuard() error {
 	cmd := exec.Command("pfctl", "-a", pfAnchor, "-f", "-")
 	cmd.Stdin = strings.NewReader(string(rules))
 	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("pfctl 装开机闸: %v: %s", err, strings.TrimSpace(string(out)))
+		// 落盘的那份读不了(文件坏了):按最严的装,不留空档。服务起来后按当前设置整份换掉
+		bad := fmt.Errorf("pfctl 装开机闸: %v: %s", err, strings.TrimSpace(string(out)))
+		cmd := exec.Command("pfctl", "-a", pfAnchor, "-f", "-")
+		cmd.Stdin = strings.NewReader(guardRules(strictFallback()))
+		if out, err := cmd.CombinedOutput(); err != nil {
+			return errors.Join(bad, fmt.Errorf("pfctl 装最严的闸: %v: %s", err, strings.TrimSpace(string(out))))
+		}
+		return errors.Join(bad, enablePF())
 	}
 	return enablePF()
+}
+
+// strictFallback 开机版的闸读不了时用的规格:隧道地址是定的,局域网放行(不然连路由器都连不上,没法排障)。
+func strictFallback() GuardSpec {
+	return GuardSpec{TunAddr4: strings.Split(builder.TunAddr4, "/")[0], TunAddr6: strings.Split(builder.TunAddr6, "/")[0], LAN: true}
+}
+
+// GuardPresent 闸还在不在(pf 被关掉、锚点被清掉都算不在)。查不了不算不在。
+func GuardPresent() bool {
+	n, err := GuardStatus()
+	return err != nil || n > 0
 }
 
 // enablePF 确认 pf 真的开着。以前只在本进程第一次装闸时 -E 一次、还不看结果:别的程序 pfctl -d 之后,

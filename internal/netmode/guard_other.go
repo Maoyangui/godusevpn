@@ -10,6 +10,7 @@ func GuardTunDown() error        { return nil }
 func ClearGuard() error          { return nil }
 
 func GuardStatus() (int, error) { return 0, nil }
+func GuardPresent() bool        { return true }
 func GuardWarning() string      { return "当前平台没有可证明的持久防流量逃逸保护" }
 
 // GuardInstallable 这个平台的闸是不是由我们自己装、并且装完能核查。

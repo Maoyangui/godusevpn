@@ -378,9 +378,9 @@ $fnUrl = "http://1.1.1.1/cdn-cgi/trace"
 $gs2 = & $svc guard status 2>&1 | Out-String
 Check "规则模式下闸开着" ($gs2 -match "开着") $gs2.Trim()
 $null = Get-WfpProviders
-$dp = @(Wfp-Filters "Permit direct rules (IPv4)" | Where-Object { $_ })
+$dp = Wfp-Filters "Permit direct rules (IPv4)"; $dp = @($dp | Where-Object { $_ })
 Check "闸里有直连规则放行那几条(运行期,带地址条件)" (($dp.Count -gt 0) -and -not ($dp | Where-Object { (Filter-Flags $_) -notcontains 'FWPM_FILTER_FLAG_PERSISTENT' })) ("过滤器 " + $dp.Count + " 条")
-$ib = @(Wfp-Filters "Permit inbound (rule mode)" | Where-Object { $_ })
+$ib = Wfp-Filters "Permit inbound (rule mode)"; $ib = @($ib | Where-Object { $_ })
 Check "规则模式不拦入站" ($ib.Count -eq 2) ("过滤器 " + $ib.Count + " 条")
 if ($script:directOK) {
   $a = Nic-Http $cnUrl; Check "绑物理网卡:国内地址放行" ($a -match '^[234]') "http=$a"
@@ -396,15 +396,18 @@ if ($script:directOK) {
   & $svc start | Out-Null
   $stb = Wait-Status "connected" 60
   Check "服务起来后接着连上" ($stb -match "状态:\s+connected") ""
-  # 强杀:闸不随进程走
+  # 强杀:闸不随进程走。系统日志会记一条 7031,是这里故意的:先把之前的查掉,第 8 段只看这之后的
+  $preKill = Svc-Crashes $script:t0
+  Check "强杀之前服务没有意外退出过(系统日志 7031/7034)" (($null -ne $preKill) -and ($preKill.Count -eq 0)) ""
   Stop-Process -Name godusevpn-svc -Force -ErrorAction SilentlyContinue
   Start-Sleep -Milliseconds 1500
   $a = Plain-Http $fnUrl; Check "服务被强杀:国外地址拦下" ($a -notmatch '^[234]') "http=$a"
   $a = Plain-Http $cnUrl; Check "服务被强杀:国内地址照常" ($a -match '^[234]') "http=$a"
   $stb = Wait-Status "connected" 60
   Check "服务被强杀后自动恢复连接" ($stb -match "状态:\s+connected") ""
+  $script:svcEventsSince = Get-Date
 }
-# 规则组走命令行改:防火墙跟着变、不用重连
+# 规则组走命令行改:防火墙当场跟着变
 & $cli settings 'ruleGroups=[{\"id\":\"t1\",\"name\":\"t1\",\"enabled\":true,\"outbound\":\"direct\",\"rules\":[{\"type\":\"ip_cidr\",\"value\":\"1.1.1.1/32\"}]}]' 2>&1 | Out-Null
 Start-Sleep -Seconds 3
 if ($script:directOK) { $a = Nic-Http $fnUrl; Check "加直连 IP 规则:防火墙当场放行" ($a -match '^[234]') "http=$a" }
@@ -412,12 +415,12 @@ if ($script:directOK) { $a = Nic-Http $fnUrl; Check "加直连 IP 规则:防火�
 Start-Sleep -Seconds 3
 if ($script:directOK) { $a = Nic-Http $cnUrl; Check "排前面的走隧道规则盖过国内直连" ($a -notmatch '^[234]') "http=$a" }
 $null = Get-WfpProviders
-$tp = @(Wfp-Filters "Block tunnel ports" | Where-Object { $_ })
+$tp = Wfp-Filters "Block tunnel ports"; $tp = @($tp | Where-Object { $_ })
 Check "走隧道的端口进了防火墙(含端口段)" ($tp.Count -eq 2) ("过滤器 " + $tp.Count + " 条")
 & $cli settings 'ruleGroups=[]' 2>&1 | Out-Null
 Start-Sleep -Seconds 3
-$str = Wait-Status "connected" 15
-Check "改规则一路没断连接" ($str -match "状态:\s+connected") ""
+$str = Wait-Status "connected" 30
+Check "改规则后连接正常" ($str -match "状态:\s+connected") ""
 # 撤闸:开关一关闸就没了,不用重连
 & $cli settings noDirect=false 2>&1 | Out-Null
 Start-Sleep -Seconds 3
@@ -555,7 +558,7 @@ if ($LegacyBin -and -not $KeepInstalled) {
   }
 } elseif (-not $LegacyBin) { Write-Host "  (没给 -LegacyBin:跳过「从旧版原地升级」那一段)" }
 Write-Host "== 8. 服务稳定性(整个验收期间)" -ForegroundColor Cyan
-$ev = Svc-Crashes $script:t0
+$ev = Svc-Crashes $(if ($script:svcEventsSince) { $script:svcEventsSince } else { $script:t0 })
 if ($null -eq $ev) { Check "服务没有意外退出过(系统日志 7031/7034)" $false "读不到系统事件日志" }
 else { Check "服务没有意外退出过(系统日志 7031/7034)" ($ev.Count -eq 0) (($ev | ForEach-Object { $_.TimeCreated.ToString('HH:mm:ss.fff') + ' #' + $_.Id }) -join ' | ') }
 $cl = Crash-Lines

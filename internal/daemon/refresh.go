@@ -1,9 +1,11 @@
 package daemon
 
 import (
+	"context"
 	"fmt"
 	"runtime"
 	"strings"
+	"time"
 
 	"github.com/Maoyangui/godusevpn/internal/builder"
 	"github.com/Maoyangui/godusevpn/internal/netmode"
@@ -270,6 +272,30 @@ func (d *Daemon) syncGuard() {
 		}
 		if d.releaseTun != nil && !d.core.Running() {
 			d.releaseTun() // Android:内核没在跑时留着的 VPN 接口是个黑洞,撤闸就得关掉
+		}
+	}
+}
+
+// guardWatchEvery 多久看一次闸还在不在。
+const guardWatchEvery = 15 * time.Second
+
+// guardWatchLoop 闸被别的程序清掉了(nft flush、防火墙服务重启、pfctl -F、安全软件清 WFP)就马上装回。
+// health 也会发现,但它要隧道连着、而且好几分钟才一轮;内核不在的时候正是最需要这道闸的时候。
+func (d *Daemon) guardWatchLoop(ctx context.Context) {
+	t := time.NewTicker(guardWatchEvery)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+		d.mu.Lock()
+		on := d.guardOn
+		d.mu.Unlock()
+		if on && d.GuardWanted() && !netmode.GuardPresent() {
+			d.logf("防流量逃逸:防火墙规则不见了(可能被别的程序清掉了),按当前设置装回")
+			d.syncGuard()
 		}
 	}
 }

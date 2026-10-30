@@ -53,6 +53,9 @@ func GuardStatus() (int, error) {
 	return 0, nil
 }
 
+// GuardPresent 这个平台没有可装的防火墙。
+func GuardPresent() bool { return true }
+
 func GuardWarning() string {
 	s, err := androidVPNProtection()
 	if err != nil || !s.Queried {

@@ -230,6 +230,12 @@ func ApplyBootGuard() error {
 	if _, err := os.Stat(BootGuardFile()); err == nil {
 		if out, err := exec.Command("nft", "-f", BootGuardFile()).CombinedOutput(); err != nil {
 			errs = append(errs, nftError("nft 装开机闸", err, out).Error())
+			// 落盘的那份读不了(文件坏了):按最严的装,不留空档。服务起来后按当前设置整表换掉
+			cmd := exec.Command("nft", "-f", "-")
+			cmd.Stdin = strings.NewReader(guardRuleset(strictFallback(), true))
+			if out, err := cmd.CombinedOutput(); err != nil {
+				errs = append(errs, nftError("nft 装最严的闸", err, out).Error())
+			}
 		}
 	}
 	if len(errs) > 0 {
@@ -248,6 +254,16 @@ var bootRARuleset = "table inet " + bootRATable + " {}\ndelete table inet " + bo
 
 // DropBootRA 撤掉开机时挡路由器通告的表(没有也无妨)。
 func DropBootRA() { _ = exec.Command("nft", "delete", "table", "inet", bootRATable).Run() }
+
+// strictFallback 开机版的闸读不了时用的规格:隧道网卡名是定的,局域网放行(不然连路由器都连不上,没法排障)。
+func strictFallback() GuardSpec { return GuardSpec{TunName: builder.TunName, LAN: true} }
+
+// GuardPresent 闸的表还在不在。只看一条链:表里的放行段有几千条,这个每十几秒查一次,不该每次都把它们打出来。
+// 查不了(没有 nft)不算不在:那样谈不上"被清掉"。
+func GuardPresent() bool {
+	out, err := exec.Command("nft", "list", "chain", "inet", guardTable, "output").CombinedOutput()
+	return err == nil || !nftMissing(out, err) || errors.Is(err, exec.ErrNotFound)
+}
 
 // GuardTunUp 隧道网卡起来之后,给 DNS 的那张表补上"默认走隧道网卡"。放行本身按网卡名,不用等网卡。
 func GuardTunUp(spec GuardSpec) error {

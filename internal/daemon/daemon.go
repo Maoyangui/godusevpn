@@ -302,6 +302,9 @@ func (d *Daemon) Run(ctx context.Context) error {
 	d.reconcileGuard()
 	d.reconcileNICIPv6()
 	go d.autoProbeLoop(ctx)
+	if netmode.GuardInstallable() {
+		go d.guardWatchLoop(ctx)
+	}
 	if netmode.NICIPv6Manageable() {
 		go d.nicIPv6Loop(ctx)
 	}
