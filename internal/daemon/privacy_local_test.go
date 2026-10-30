@@ -36,7 +36,7 @@ func TestCoreLogDestinationsStayInMemory(t *testing.T) {
 	d.corePrintf("ERROR", "%s", "inbound/tun: open connection to www.failed-site.com:443: i/o timeout")
 
 	disk := diskText(t, d)
-	for _, s := range []string{"visited-site", "failed-site"} {
+	for _, s := range []string{"visited-site", "failed-site", "outbound connection"} {
 		if strings.Contains(disk, s) {
 			t.Errorf("磁盘上不该有 %s:\n%s", s, disk)
 		}
