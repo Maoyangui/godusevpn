@@ -72,7 +72,7 @@ class GodVpnService : VpnService() {
 
     /** 按引擎给的 TunSpec 建 VPN,返回 fd(所有权交给引擎,自己留一个句柄用于关闭)。 */
     fun openTun(specJSON: String): Int {
-        // 「全局禁直连」时内核重启不会关掉接口(引擎里 hostTun.Close 只关自己那份):参数没变就把现有接口再给一次,
+        // 「防流量逃逸」时内核重启不会关掉接口(引擎里 hostTun.Close 只关自己那份):参数没变就把现有接口再给一次,
         // 系统的 VPN 一直在,内核起来之前落进去的流量只会被丢,不会从 WiFi 漏出去
         tun?.let { if (specJSON == lastSpec) { Log.i(App.TAG, "TUN 沿用现有接口"); return it.fd } }
         val old = tun
@@ -136,7 +136,7 @@ class GodVpnService : VpnService() {
     }
 
     private fun updateNotification(state: JSONObject) {
-        // 状态没读到(界面层取状态失败时给的是一份空视图、状态写成断开):不能拿它判断「全局禁直连」开没开,
+        // 状态没读到(界面层取状态失败时给的是一份空视图、状态写成断开):不能拿它判断「防流量逃逸」开没开,
         // 那样会把正当闸用的接口关掉,流量从 WiFi 出去。这一轮什么都不动,等下一次真实状态
         if (!state.optBoolean("service", true)) return
         val view = state.optJSONObject("view") ?: return
@@ -149,7 +149,7 @@ class GodVpnService : VpnService() {
             else -> getString(R.string.st_disconnected)
         }
         val node = view.optString("autoNow").ifEmpty { view.optString("node") }
-        // 内核不在跑就别让 VPN 接口留着吞流量 —— 除非「全局禁直连」正开着:那时接口本身就是闸,留着才不漏;用户点断开时守护进程会来关
+        // 内核不在跑就别让 VPN 接口留着吞流量 —— 除非「防流量逃逸」正开着:那时接口本身就是闸,留着才不漏;用户点断开时守护进程会来关
         val guard = view.optJSONObject("settings")?.optBoolean("noDirect") == true && view.optString("mode") == "global" && view.optJSONObject("state")?.optBoolean("wanted") == true
         if ((status == "disconnected" || status == "error" || status == "stopping") && !guard) closeTun()
         val n = buildNotification(text, if (status == "connected") node else null)

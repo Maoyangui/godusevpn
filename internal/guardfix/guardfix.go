@@ -1,7 +1,7 @@
-// Package guardfix 「恢复网络」:把「全局禁直连」的闸撤掉、把停用的网卡 IPv6 还原,让机器回到没装过的样子。
+// Package guardfix 「恢复网络」:把「防流量逃逸」的闸撤掉、把停用的网卡 IPv6 还原,让机器回到没装过的样子。
 //
 // 托盘菜单、开始菜单快捷方式、godusevpn-svc / CLI 的 guard clear 都走这里,行为一致:
-// 服务要是活着,先把「全局禁直连」和「连接时停用网卡 IPv6」两个开关都关掉 —— 不然它下一次重连
+// 服务要是活着,先把「防流量逃逸」和「连接时停用网卡 IPv6」两个开关都关掉 —— 不然它下一次重连
 // (内核崩了退避重试、切节点)会发现"闸不见了"又装回来,用户刚恢复的网络几秒后再断;网卡 IPv6 那边
 // 更快,守护进程每 5 秒巡检一次,看到地址又冒出来就再关回去。开关关掉之后,才轮到把规则和绑定清干净。
 package guardfix
@@ -30,9 +30,8 @@ func Clear() (text string, ok bool) {
 	// 闸没开着就不该去动用户的隐私开关 —— 关开关唯一的理由是"不关的话守护进程下一轮又把闸装回来",
 	// 闸都没装,这个理由不成立。
 	//
-	// 这里的判断必须只看闸。出厂默认是**规则模式**(settings.go:77 Mode=ModeRule),规则模式不装闸
-	// (refresh.go 的 GuardWanted 要求 Mode==Global),但「连接时停用网卡 IPv6」默认开着、连一次就会
-	// 落下备份文件。所以"闸没开 + 有网卡备份"恰恰是默认装机连过一次之后的常态 ——
+	// 这里的判断必须只看闸。「连接时停用网卡 IPv6」默认开着、连一次就会落下备份文件,
+	// 所以"闸没开 + 有网卡备份"恰恰是断开之后、或开关关着时连过一次的常态 ——
 	// 要是把这两个条件用 && 连起来当早退条件,这一路就会落到 switchOff(),
 	// 把 NoDirect 和 DisableNICIPv6 一起写成 false 并落盘,而用户只是想把 IPv6 还原回去。
 	// m28 在这里是分开处理的,本版照它来。
@@ -60,7 +59,7 @@ func Clear() (text string, ok bool) {
 		if lost := orDefault(takeNICLoss(), incDetail); lost != "" {
 			return "闸本来就没开;网卡 IPv6 能还原的都还原了,但" + lost + " " + dns + "两个隐私开关都没动。", dnsOK
 		}
-		return "闸本来就没开;网卡上被停用的 IPv6 已还原。" + dns + "「全局禁直连」与「连接时停用网卡 IPv6」两个开关都没动。", dnsOK
+		return "闸本来就没开;网卡上被停用的 IPv6 已还原。" + dns + "「防流量逃逸」与「连接时停用网卡 IPv6」两个开关都没动。", dnsOK
 	}
 
 	switchedOff, switchErr := switchOff()
@@ -96,7 +95,7 @@ func Clear() (text string, ok bool) {
 		if clearErr != nil {
 			why = clearErr.Error()
 		}
-		bad = append(bad, fmt.Sprintf("禁直连闸没撤干净,过滤器还剩 %d 条(%s)", n, why))
+		bad = append(bad, fmt.Sprintf("防逃逸闸没撤干净,过滤器还剩 %d 条(%s)", n, why))
 	}
 	if restoreErr != nil {
 		bad = append(bad, "网卡 IPv6 没能还原回去("+restoreErr.Error()+"),下次启动服务时会自动再试")
@@ -112,7 +111,7 @@ func Clear() (text string, ok bool) {
 		}
 	}
 	if switchErr != nil {
-		bad = append(bad, "没能关掉「全局禁直连」/「连接时停用网卡 IPv6」两个开关("+switchErr.Error()+"),服务下一次重连可能又把闸装回来;真装回来就去设置 → 隐私里手动关掉")
+		bad = append(bad, "没能关掉「防流量逃逸」/「连接时停用网卡 IPv6」两个开关("+switchErr.Error()+"),服务下一次重连可能又把闸装回来;真装回来就去设置 → 隐私里手动关掉")
 	}
 	note := ""
 	if w := netmode.GuardWarning(); w != "" {
@@ -124,16 +123,16 @@ func Clear() (text string, ok bool) {
 			lead = "没能完全恢复:"
 		}
 		text := lead + strings.Join(bad, ";")
-		// 两个隐私开关被关掉这件事不能因为别处有没做完的就不说:用户会以为「全局禁直连」还护着他
+		// 两个隐私开关被关掉这件事不能因为别处有没做完的就不说:用户会以为「防流量逃逸」还护着他
 		if switchedOff {
-			text += "。另外已关掉「全局禁直连」与「连接时停用网卡 IPv6」两个开关,免得服务一重连又装回来;要再用,去设置 → 隐私打开"
+			text += "。另外已关掉「防流量逃逸」与「连接时停用网卡 IPv6」两个开关,免得服务一重连又装回来;要再用,去设置 → 隐私打开"
 		}
 		return text + note, netOK && restoreErr == nil && dnsErr == nil
 	}
 	if switchedOff {
-		return "禁直连闸已解除,网卡 IPv6 也还原了,网络恢复。已顺手关掉「全局禁直连」与「连接时停用网卡 IPv6」两个开关,免得服务一重连又装回来;要再用,去设置 → 隐私打开。" + note, true
+		return "防逃逸闸已解除,网卡 IPv6 也还原了,网络恢复。已顺手关掉「防流量逃逸」与「连接时停用网卡 IPv6」两个开关,免得服务一重连又装回来;要再用,去设置 → 隐私打开。" + note, true
 	}
-	return "禁直连闸已解除,直连恢复。要再开闸,启动服务并连接即可。" + note, true
+	return "防逃逸闸已解除,直连恢复。要再开闸,启动服务并连接即可。" + note, true
 }
 
 // restoreOrphanProtect 服务不在时,还原它留下的系统 DNS(macOS)/ 回包路由(Linux)。返回给人看的一句(没做事就是空串)。

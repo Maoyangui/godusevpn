@@ -72,7 +72,7 @@
   const view = {
     state: { status: 'connected', since: 0, wanted: true, retries: 0 },
     mode: 'rule', node: '香港3-高带宽', autoNow: '香港3-高带宽',
-    guard: '', // 全局禁直连的闸:切到全局模式时亮起(见 SetMode)
+    guard: 'on', // 防流量逃逸的闸:全局和规则模式都亮着,切到直连才灭(见 SetMode)
     nodes: NODES.map(n => n.name), ping: 81,
     exitIp: '', exitLoc: '', exitCity: '', exitRegion: '', exitIsp: '',
     uptime: 4127,
@@ -201,7 +201,7 @@
       log('切换节点 → ' + name);
       push();
     },
-    SetMode: async m => { view.mode = m; settings.mode = m; view.guard = m === 'global' ? 'on' : ''; log('模式 → ' + m); push(); },
+    SetMode: async m => { view.mode = m; settings.mode = m; view.guard = m !== 'direct' ? 'on' : ''; log('模式 → ' + m); push(); },
     Connect: connect,
     Disconnect: disconnect,
     TestAll: async () => {

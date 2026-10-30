@@ -18,7 +18,7 @@ import (
 // 变量是为了测试能换成连不上的地址。
 var sealedDoH = builder.SealedBootstrapDoH
 
-// directHTTP 内核没跑时,服务自己直连拉订阅用的客户端("订阅刷新的回退"是禁直连下明写的例外)。
+// directHTTP 内核没跑时,服务自己直连拉订阅用的客户端("订阅刷新的回退"是防逃逸下明写的例外)。
 //
 // 闸开着时,域名不能交给系统解析器:Windows 上 Go 的解析交给系统的 DNS Client 服务去发,发包的是 svchost 而不是
 // 本服务,闸只放行本服务,这组查询会被"拦 DNS"挡下;挡下之前,它是明文发给路由器的,本身就是隧道外的 DNS。
@@ -68,10 +68,10 @@ func (d *Daemon) directHTTP() *http.Client {
 }
 
 // errSealed 闸开着、隧道没起来时,服务自己不从本机直连出去。
-var errSealed = errors.New("全局禁直连的闸开着、隧道还没起来:这时不从本机直连出去,稍后再试")
+var errSealed = errors.New("防流量逃逸的闸开着、隧道还没起来:这时不从本机直连出去,稍后再试")
 
 // errArmedMidway 闸没开时开始的直连请求,途中闸开了:剩下的不再在隧道外进行。
-var errArmedMidway = errors.New("全局禁直连的闸开了:在隧道外进行的直连请求停下,稍后再试")
+var errArmedMidway = errors.New("防流量逃逸的闸开了:在隧道外进行的直连请求停下,稍后再试")
 
 // SelfHTTP 服务自己访问外网用的客户端(更新检查、下载安装包、补规则集;拉订阅另走 fetchProfile)。
 //

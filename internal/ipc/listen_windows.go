@@ -24,7 +24,7 @@ func Address() string { return PipeName }
 
 // sddlFallback 用于尚未登记控制用户的旧安装。缺少登记文件时只允许
 // SYSTEM/Administrators,绝不能退回所有交互用户可写,否则普通本机用户
-// 可以借控制管道修改全局禁直连或网卡 IPv6 设置。重新安装后会写入
+// 可以借控制管道修改防流量逃逸或网卡 IPv6 设置。重新安装后会写入
 // 当前安装用户 SID,恢复该用户的非管理员托盘控制能力。
 const sddlFallback = "D:P(A;;GA;;;SY)(A;;GA;;;BA)"
 
@@ -35,7 +35,7 @@ func controllerSIDPath() string { return filepath.Join(paths.DataDir(), "control
 // RegisterControllerOwner 在安装时登记当前交互会话的 Windows 用户。UAC
 // 可能使用另一位管理员的令牌，不能把安装进程令牌误当成托盘用户。文件只由
 // SYSTEM/Administrators 可读,守护进程用它生成命名管道 ACL;普通交互用户
-// 即使能发现管道名也不能修改全局禁直连或网卡 IPv6 设置。
+// 即使能发现管道名也不能修改防流量逃逸或网卡 IPv6 设置。
 func RegisterControllerOwner() error {
 	var session uint32
 	if err := windows.ProcessIdToSessionId(uint32(os.Getpid()), &session); err != nil {
@@ -252,7 +252,7 @@ const serviceName = "godusevpn"
 
 // verifyPipeServer 管道对面得是佛跳墙服务。服务停着或崩溃重启的空档里,同机任何账户都能抢先建一个同名管道
 // (服务随后因为名字被占监听失败);客户端不认对端的话,界面里加的订阅地址、改的设置就发给了它,它还能回假状态说
-// "已连接、禁直连已生效"。另一个登记过的控制用户也能给现有管道多开一个实例截流。
+// "已连接、防逃逸已生效"。另一个登记过的控制用户也能给现有管道多开一个实例截流。
 func verifyPipeServer(c net.Conn) error {
 	f, ok := c.(interface{ Fd() uintptr })
 	if !ok {

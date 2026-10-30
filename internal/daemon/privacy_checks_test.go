@@ -7,8 +7,8 @@ import "testing"
 // m29 曾经把这条做成无条件硬门:`!GuardPersistentSupported()` 就拒绝连接。而这个谓词只有
 // Windows 返回真 —— macOS、Linux、OpenWrt 网关是硬编码 false(没有任何设置能打开),
 // Android 要系统的 Always-on + lockdown 且 API≥29(本应用 minSdk=26,Android 8~9 的设备
-// 和电视根本没有那两个接口)。结果是除 Windows 外的所有平台在「全局模式 + 全局禁直连」下
-// 一律连不上,用户只能去**关掉**「全局禁直连」才能上网 —— 一道以隐私为名的检查,
+// 和电视根本没有那两个接口)。结果是除 Windows 外的所有平台在「全局模式 + 防流量逃逸」下
+// 一律连不上,用户只能去**关掉**「防流量逃逸」才能上网 —— 一道以隐私为名的检查,
 // 实际把人推向了更不私密的配置。这条钉住:能核查才核查,核查不了就如实报告而不是挡死。
 func TestPrivacyChecks(t *testing.T) {
 	for _, c := range []struct {

@@ -31,11 +31,11 @@ func TestDNSRulesHaveNoOutboundItem(t *testing.T) {
 			}
 			for _, r := range c.DNS.Rules {
 				if _, ok := r["outbound"]; ok {
-					t.Fatalf("模式 %s 禁直连 %v:DNS 规则还在用已排期移除的 outbound 项: %v", mode, noDirect, r)
+					t.Fatalf("模式 %s 防逃逸 %v:DNS 规则还在用已排期移除的 outbound 项: %v", mode, noDirect, r)
 				}
 			}
 			if c.Route.DefaultDomainResolver != "local" {
-				t.Fatalf("模式 %s 禁直连 %v:节点域名应由 local 解析,实际 %q", mode, noDirect, c.Route.DefaultDomainResolver)
+				t.Fatalf("模式 %s 防逃逸 %v:节点域名应由 local 解析,实际 %q", mode, noDirect, c.Route.DefaultDomainResolver)
 			}
 		}
 	}

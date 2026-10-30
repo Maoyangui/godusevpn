@@ -638,7 +638,7 @@ function updateHome() {
   $('#status').textContent = state.service ? t('st.' + st) : svcText(state);
   $('#status-sub').hidden = !err;
   $('#status-sub').textContent = err;
-  // 全局禁直连的闸:开着就亮一颗小盾;该开却没开成(防火墙不可用之类)标成警告
+  // 防流量逃逸的闸:开着就亮一颗小盾;该开却没开成(防火墙不可用之类)标成警告
   const gp = $('#guard-pill');
   // 闸开着但有异常(比如转发层没放行隧道网卡)和闸根本没开成是两回事,标题要分开说
   if (v.guardError) { gp.hidden = false; gp.className = 'guard-pill warn'; gp.innerHTML = ICON_WARN + `<span>${t(v.guard === 'on' ? 'home.guardWarn' : 'home.guardErr')} · ${esc(v.guardError)}</span>`; }
@@ -707,7 +707,7 @@ function updateHome() {
   const want = state.service ? '' : (state.svcState === 'no-permission' ? 'noperm' : 'down');
   if (want !== bannerKind(b)) { // 只有横幅出现/消失/换种类时才动 DOM,免得每次推送都把按钮换掉
     const vs = state.view && state.view.settings;
-    const stuck = want === 'down' && !window.__android && vs && vs.noDirect && state.view.mode === 'global' && state.view.state.wanted ? ' ' + t('banner.guardStuck') : '';
+    const stuck = want === 'down' && !window.__android && vs && vs.noDirect && (state.view.mode === 'global' || (state.view.mode === 'rule' && vs.tun)) && state.view.state.wanted ? ' ' + t('banner.guardStuck') : '';
     b.innerHTML = svcBanner('repair', 'register', esc(stuck));
     wireBanner(b, 'repair', 'register'); // 只在横幅里找:关于页也有个 #repair
   }
@@ -1099,7 +1099,7 @@ async function renderSettings(el) {
     $('#set-nores').hidden = !q || hit > 0;
   });
   // 除了即点即生效的几项(开机自启、语言、主题),页面上每个设置项一改就要点亮"保存";
-  // 以前手写名单,新加的「全局禁直连」漏在外面,单独拨它保存按钮不亮
+  // 以前手写名单,新加的「防流量逃逸」漏在外面,单独拨它保存按钮不亮
   const immediate = ['f-autostart', 'f-lang', 'f-theme'];
   const watch = [...el.querySelectorAll('input[id^="f-"], select[id^="f-"], textarea[id^="f-"]')].map(x => x.id).filter(id => !immediate.includes(id));
   const dirty = on => { $('#save').disabled = !on; $('#savebar').classList.toggle('dirty', on); $('#save-note').textContent = on ? t('set.unsaved') + ' · ' + t('set.note') : t('set.clean'); $('#save').textContent = t(on ? 'set.saveChanges' : 'set.save'); };

@@ -10,7 +10,7 @@ import (
 	"github.com/Maoyangui/godusevpn/internal/settings"
 )
 
-// 网卡层面的 IPv6 和「全局禁直连」的闸是同一套语义:跟的是"用户想不想连着",不是"内核在不在跑"。
+// 网卡层面的 IPv6 和「防流量逃逸」的闸是同一套语义:跟的是"用户想不想连着",不是"内核在不在跑"。
 // 这套判断错一格,轻则用户的 IPv6 永久回不来,重则该藏起来的公网地址露在外面,所以穷举钉死。
 func TestNICIPv6Action(t *testing.T) {
 	cases := []struct {

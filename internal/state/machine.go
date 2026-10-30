@@ -432,7 +432,7 @@ const degradedGiveUp = 4
 // 注意"返回 true"以前只表示"内核死了",现在也包括"内核还在跑,但这条线路已经救不回来"。
 // 调用方(run)两种情况的处理本来就一样:停干净、退避、从头 Prepare + Start。
 // 早先没有这条出路 —— 手动选定节点的用户夜里节点被墙,界面就永久停在「已连接 · 节点不稳」,
-// 既不会自己换线也不会重连,开着「全局禁直连」时连直连都没有,只能人去点断开再连。
+// 既不会自己换线也不会重连,开着「防流量逃逸」时连直连都没有,只能人去点断开再连。
 // isPrivacyCode 隐私核查类错误:闸、网卡 IPv6。这类错误拆隧道没有任何好处,见 watch 里的说明。
 func isPrivacyCode(code string) bool { return code == CodePrivacyGuard || code == CodePrivacyNIC }
 

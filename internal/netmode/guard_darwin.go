@@ -25,11 +25,20 @@ import (
 // 表跟不上就把自己拦死),两样都不是改几条规则的事。
 const pfAnchor = "com.apple/godusevpn"
 
+// pfDirectTable 规则模式放行段的表(在锚点内,随锚点一起清)。
+const pfDirectTable = "godusevpn_direct"
+
 var pfMu sync.Mutex
 
 // guardRules pf 规则文本:从上到下第一条 quick 命中的说了算,最后一条把剩下的全丢。
 func guardRules(spec GuardSpec) string {
 	var b strings.Builder
+	v4, v6 := spec.directFamilies()
+	direct := append(v4, v6...)
+	if len(direct) > 0 {
+		// 规则模式放行的地址段(国内 IP 有几千段),放表里。pf 要求表写在规则前面
+		fmt.Fprintf(&b, "table <%s> const { %s }\n", pfDirectTable, strings.Join(direct, ", "))
+	}
 	// 回环一律放行,而且不能建状态:pf 给 pass 规则默认补上"flags S/SA keep state",只有 TCP 首包(SYN)能命中。
 	// 本机回环连接里服务端回的 SYN-ACK 也是"从 lo0 出去"、又不是首包,匹配不上这条和已有状态,落到最后一条被丢 ——
 	// 严格全局下所有 127.0.0.1 上的 TCP(本地开发服务、本机面板、各种辅助程序)全卡死(CI 验收实测撞到)。
@@ -41,10 +50,16 @@ func guardRules(spec GuardSpec) string {
 	if spec.TunAddr6 != "" {
 		fmt.Fprintf(&b, "pass out quick from %s\n", spec.TunAddr6)
 	}
-	// 拦 DNS(53 / 853)与 UPnP 发现 / NAT-PMP:必须在局域网放行前面。隧道断开时系统的 DNS 查询要是能发给路由器(私网地址),
-	// 就经路由器出了隧道;后两样能让本机程序向路由器问到宽带的真实公网地址。回环、root(守护进程)、隧道地址上的都在上面放行了。
-	b.WriteString(dnsBlockRule)
-	b.WriteString(upnpBlockRule)
+	if spec.Rule {
+		// 规则模式不拦 DNS 和 UPnP:物理网卡上的 DNS 通常是路由器或运营商,拦了直连的网站就解析不了;发往放行段以外的照样落到最后一条。
+		// 也不拦入站(规则管的是本机去哪儿):入站这一头建好状态,回包才不会被最后一条丢掉。
+		b.WriteString("pass in quick all\n")
+	} else {
+		// 拦 DNS(53 / 853)与 UPnP 发现 / NAT-PMP:必须在局域网放行前面。隧道断开时系统的 DNS 查询要是能发给路由器(私网地址),
+		// 就经路由器出了隧道;后两样能让本机程序向路由器问到宽带的真实公网地址。回环、root(守护进程)、隧道地址上的都在上面放行了。
+		b.WriteString(dnsBlockRule)
+		b.WriteString(upnpBlockRule)
+	}
 	// v6 假地址段落在下面局域网放行的 fc00::/7 里:隧道断开时发往它的包不能当局域网放出去(经隧道的上面已放行)
 	fmt.Fprintf(&b, "block drop out quick inet6 to %s\n", builder.FakeIP6)
 	if spec.LAN {
@@ -52,6 +67,15 @@ func guardRules(spec GuardSpec) string {
 		// 局域网直通只通一半;Linux / Windows 的局域网放行本来就是两个方向都通
 		fmt.Fprintf(&b, "pass out quick to { %s } no state\n", strings.Join(privateV4, ", "))
 		fmt.Fprintf(&b, "pass out quick to { %s } no state\n", strings.Join(privateV6, ", "))
+	}
+	if spec.Rule {
+		if ports := splitList(spec.TunnelPorts); len(ports) > 0 {
+			// 规则明确走隧道的端口压在放行段上面。pf 的端口段写成 a:b
+			fmt.Fprintf(&b, "block drop out quick proto { tcp, udp } from any to any port { %s }\n", strings.ReplaceAll(strings.Join(ports, ", "), "-", ":"))
+		}
+		if len(direct) > 0 {
+			fmt.Fprintf(&b, "pass out quick to <%s> no state\n", pfDirectTable) // no state:理由同上面局域网那条
+		}
 	}
 	// 系统的 DHCP 客户端是 root,上面已经放行;这里只给广播留口子,和 Linux / Windows 一样限定目的地址,
 	// 不然任何程序绑个 68 端口就能把 UDP 发到任意地址的 67。邻居发现同理只放那四种类型。
@@ -244,7 +268,7 @@ func BootGuardReady() (bool, error) { return false, nil }
 // GuardInstallable 这个平台的闸是不是由我们自己装、并且装完能核查。
 // Windows(WFP)、Linux(nftables)、macOS(pf)都是;Android 不是 —— 那边的闸就是宿主
 // VpnService 的接口本身,由系统持有,我们既装不了也数不出条数。对这种平台做"闸装没装"的
-// 硬核查只会把连接整个挡死,而用户挡不住就会去把「全局禁直连」关掉,反倒更不私密。
+// 硬核查只会把连接整个挡死,而用户挡不住就会去把「防流量逃逸」关掉,反倒更不私密。
 func GuardInstallable() bool { return true }
 
 // GuardPersistentSupported macOS 没有 Windows 那种由系统保管、能核查装没装全的持久组(开机那段见 BootGuardFile)。

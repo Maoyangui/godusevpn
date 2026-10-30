@@ -83,7 +83,7 @@ Source: "deps\MicrosoftEdgeWebview2Setup.exe"; DestDir: "{tmp}"; Flags: deleteaf
 [Icons]
 Name: "{group}\{#AppName}"; Filename: "{app}\godusevpn.exe"
 Name: "{group}\卸载 {#AppName}"; Filename: "{uninstallexe}"
-Name: "{group}\恢复网络(解除禁直连闸)"; Filename: "{app}\godusevpn-svc.exe"; Parameters: "guard clear --popup"; Comment: "服务起不来、网络被禁直连闸拦住时用"
+Name: "{group}\恢复网络(解除防逃逸闸)"; Filename: "{app}\godusevpn-svc.exe"; Parameters: "guard clear --popup"; Comment: "服务起不来、网络被防逃逸闸拦住时用"
 Name: "{autodesktop}\{#AppName}"; Filename: "{app}\godusevpn.exe"
 
 [Registry]
@@ -125,7 +125,7 @@ begin
     // 提示里那句"以管理员身份重试"根本无从执行。
     // 改成:文件留下,把话说清楚,让用户还能用「恢复网络」或者手动启动服务。
     if (not Exec(ExpandConstant('{app}\godusevpn-svc.exe'), 'install', '', SW_HIDE, ewWaitUntilTerminated, rc)) or (rc <> 0) then
-      MsgBox('后台服务没能注册或启动(错误码 ' + IntToStr(rc) + ')。程序文件已经装好，现有隐私保护也没有被撤销。'#13#10#13#10'如果现在上不了网，用开始菜单里的「恢复网络」把全局禁直连闸解除；之后可以再打开客户端重试。', mbError, MB_OK);
+      MsgBox('后台服务没能注册或启动(错误码 ' + IntToStr(rc) + ')。程序文件已经装好，现有隐私保护也没有被撤销。'#13#10#13#10'如果现在上不了网，用开始菜单里的「恢复网络」把防流量逃逸闸解除；之后可以再打开客户端重试。', mbError, MB_OK);
   end;
 end;
 
@@ -153,7 +153,7 @@ begin
       // 中止之前把服务拉回来:界面已经被关掉、服务可能已停,严格全局下闸还在而隧道没了,整机会一直断网
       Exec(ExpandConstant('{app}\godusevpn-svc.exe'), 'start', '', SW_HIDE, ewWaitUntilTerminated, rc);
       // 先说清楚再中止:Abort 不带"Runtime error"那种英文前缀,静默卸载时对话框也会被 /SUPPRESSMSGBOXES 压住
-      SuppressibleMsgBox('无法解除佛跳墙的全局禁直连闸,卸载已中止 —— 现在删掉程序的话机器会一直断网且无法恢复。'#13#10#13#10'原程序与「恢复网络」工具都保留着:先用开始菜单里的「恢复网络」(右键以管理员身份运行)把闸解除,再来卸载。', mbCriticalError, MB_OK, IDOK);
+      SuppressibleMsgBox('无法解除佛跳墙的防流量逃逸闸,卸载已中止 —— 现在删掉程序的话机器会一直断网且无法恢复。'#13#10#13#10'原程序与「恢复网络」工具都保留着:先用开始菜单里的「恢复网络」(右键以管理员身份运行)把闸解除,再来卸载。', mbCriticalError, MB_OK, IDOK);
       Abort;
     end;
   // 网卡 IPv6 没能还原(备份还在)、或动手前的原值丢了:svc uninstall 在控制台里说过,但那个窗口看不见,这里再说一次
@@ -206,7 +206,7 @@ begin
       // 这三种都说明没有正在跑的服务挡着文件;别的才是真停不掉。
       if (rc <> 0) and (rc <> 1062) and (rc <> 1060) then
       begin
-        Result := '无法安全停止后台服务,升级已中止以保留全局禁直连保护。';
+        Result := '无法安全停止后台服务,升级已中止以保留防流量逃逸保护。';
         exit;
       end;
       Sleep(3000); // sc stop 是异步的,给它几秒真正退出,免得文件还被占着

@@ -20,7 +20,7 @@ import (
 // 隧道起来之前的域名解析(节点服务器用域名写的时候要先把它解成地址)。
 //
 // 以前直接用系统解析器:那是明文 53 发到路由器 / 运营商的 DNS,节点的域名就这么露出去了。
-// 全局禁直连的本意是"隧道以外一个字节都不放",这一步是唯一绕不开的直连 —— 节点自己的地址总得先解出来 ——
+// 防流量逃逸的本意是"隧道以外一个字节都不放",这一步是唯一绕不开的直连 —— 节点自己的地址总得先解出来 ——
 // 那就至少用加密的 DoH,和内核给节点域名配的那台(设置里的「本地 DNS」)保持同一台。
 // 「本地 DNS」设成 system、或填的是域名 DoH(解析它自己又得先走系统解析器)时,闸开着就干脆不解析
 // (节点按域名匹配直连规则,靠嗅探到的 SNI 也能命中),闸没开的模式下才退回系统解析器。
@@ -30,14 +30,14 @@ func (d *Daemon) bootResolver(s settings.Settings) func(ctx context.Context, hos
 	sealed := s.NoDirect && s.Mode == settings.ModeGlobal
 	if s.LocalDNS == "system" {
 		if sealed {
-			return nil // 明文系统解析在禁直连下一个包都不该发
+			return nil // 明文系统解析在防逃逸下一个包都不该发
 		}
 		return func(ctx context.Context, host string) ([]string, error) {
 			return net.DefaultResolver.LookupHost(ctx, host)
 		}
 	}
 	if !settings.IsIP(s.LocalDNS) {
-		// DoH 服务器自己是域名:解它又得先走系统解析器,禁直连下同样不做
+		// DoH 服务器自己是域名:解它又得先走系统解析器,防逃逸下同样不做
 		if sealed {
 			return nil
 		}

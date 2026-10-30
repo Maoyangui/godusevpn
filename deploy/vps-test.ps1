@@ -127,7 +127,7 @@ Write-Host "连接前公网 IPv4: $ipBefore"
 # 先记下一个境外域名的真实 IP,连上后直接连这个 IP(不经 fake-ip)验证也走代理
 $realIp = (Resolve-DnsName -Name "api.ipify.org" -Type A -ErrorAction SilentlyContinue | Where-Object { $_.Type -eq "A" } | Select-Object -First 1).IPAddress
 Write-Host "api.ipify.org 真实 IP: $realIp"
-# 连上以后默认路由指向 TUN,物理网卡的地址要现在记下来:绑它发直连是全局禁直连闸的实测
+# 连上以后默认路由指向 TUN,物理网卡的地址要现在记下来:绑它发直连是防流量逃逸闸的实测
 $physIp = (Find-NetRoute -RemoteIPAddress 1.1.1.1 -ErrorAction SilentlyContinue | Select-Object -First 1).IPAddress
 Write-Host "连接前默认出口网卡地址: $physIp"
 function Direct-Http() { # 绑物理网卡发一个明文请求,返回状态码;被闸拦下时是 000
@@ -215,12 +215,18 @@ $tunNames = @($tun | ForEach-Object { $_.Name })
 $on6 = @(Get-NetAdapterBinding -ComponentID ms_tcpip6 -IncludeHidden | Where-Object { $_.Enabled -and $tunNames -notcontains $_.Name -and -not $absent6.ContainsKey($_.Name) } | ForEach-Object { $_.Name })
 Check "连着时除 TUN 外在场网卡(含隐藏接口)的 IPv6 绑定都已停用" ($on6.Count -eq 0) ($on6 -join ", ")
 
-Write-Host "== 3.7 全局禁直连(WFP 闸:绑物理网卡的直连被拦,经隧道照常;停服务闸仍在;切回规则模式闸清空)" -ForegroundColor Cyan
-# 正控制:规则模式下(闸没开)绑物理网卡的直连必须是通的(2xx / 3xx),否则探测本身跑不通,下面"被拦"的断言没有意义。
+Write-Host "== 3.7 防流量逃逸(WFP 闸:绑物理网卡的直连被拦,经隧道照常;停服务闸仍在;切回规则模式闸清空)" -ForegroundColor Cyan
+# 正控制:防流量逃逸关着时绑物理网卡的直连必须是通的(2xx / 3xx),否则探测本身跑不通,下面"被拦"的断言没有意义。
 # 没过就按失败报,不静默跳过(Linux / macOS 同样处理):否则后面所有"直连被拦"的断言都会被跳过,脚本照样全部通过。
+& $cli settings noDirect=false 2>&1 | Out-Null
+Start-Sleep -Seconds 3
+$gs0 = & $svc guard status 2>&1 | Out-String
+Check "关掉开关:规则模式下闸撤了" ($gs0 -match "没开") $gs0.Trim()
 $d0 = Direct-Http
 $script:directOK = ($d0 -match '^[23]') # 明文 http 被 1.1.1.1 跳转到 https(301)也是"通了";被拦是 000
-Check "正控制:规则模式下绑物理网卡的直连是通的" $script:directOK ("http=" + $d0 + "(网卡 " + $physIp + ")")
+Check "正控制:防流量逃逸关着时绑物理网卡的直连是通的" $script:directOK ("http=" + $d0 + "(网卡 " + $physIp + ")")
+& $cli settings noDirect=true 2>&1 | Out-Null
+Start-Sleep -Seconds 3
 & $cli mode global | Out-Null
 Start-Sleep -Seconds 2
 $stg = Wait-Status "connected" 15
@@ -358,10 +364,69 @@ if (Test-Path $nicb) {
 } else { Write-Host "  (没有网卡 IPv6 备份:跳过消失网卡的还原测试)" }
 & $cli mode rule | Out-Null
 Start-Sleep -Seconds 2
-$gs2 = & $svc guard status 2>&1 | Out-String
-Check "切回规则模式后闸清空" ($gs2 -match "没开") $gs2.Trim()
 $str = Wait-Status "connected" 15
 Check "规则模式恢复连接" ($str -match "状态:\s+connected") ""
+
+Write-Host "== 3.8 规则模式的防流量逃逸:直连规则的地址段照常,其余只许走隧道" -ForegroundColor Cyan
+function Nic-Http($url) { # 绑物理网卡;连上了(哪怕 4xx)就是通,被闸拦下是 000
+  if (-not $physIp) { return "" }
+  try { return (& curl.exe -sk --interface $physIp -m 6 -o NUL -w "%{http_code}" $url) } catch { return "000" }
+}
+function Plain-Http($url) { try { return (& curl.exe -sk -m 6 -o NUL -w "%{http_code}" $url) } catch { return "000" } }
+$cnUrl = "https://223.5.5.5/" # 阿里 DNS,在 geoip-cn 里
+$fnUrl = "http://1.1.1.1/cdn-cgi/trace"
+$gs2 = & $svc guard status 2>&1 | Out-String
+Check "规则模式下闸开着" ($gs2 -match "开着") $gs2.Trim()
+$null = Get-WfpProviders
+$dp = @(Wfp-Filters "Permit direct rules (IPv4)" | Where-Object { $_ })
+Check "闸里有直连规则放行那几条(运行期,带地址条件)" (($dp.Count -gt 0) -and -not ($dp | Where-Object { (Filter-Flags $_) -notcontains 'FWPM_FILTER_FLAG_PERSISTENT' })) ("过滤器 " + $dp.Count + " 条")
+$ib = @(Wfp-Filters "Permit inbound (rule mode)" | Where-Object { $_ })
+Check "规则模式不拦入站" ($ib.Count -eq 2) ("过滤器 " + $ib.Count + " 条")
+if ($script:directOK) {
+  $a = Nic-Http $cnUrl; Check "绑物理网卡:国内地址放行" ($a -match '^[234]') "http=$a"
+  $a = Nic-Http $fnUrl; Check "绑物理网卡:国外地址被拦" ($a -notmatch '^[234]') "http=$a"
+  & $svc stop | Out-Null
+  Start-Sleep -Seconds 3
+  $a = Plain-Http $cnUrl; Check "服务停着:国内地址照常直连" ($a -match '^[234]') "http=$a"
+  $a = Plain-Http $fnUrl; Check "服务停着:国外地址拦下" ($a -notmatch '^[234]') "http=$a"
+  $g = (Resolve-DnsName -Name "www.baidu.com" -Type A -Server 223.5.5.5 -DnsOnly -QuickTimeout -ErrorAction SilentlyContinue | Where-Object { $_.Type -eq "A" } | Select-Object -First 1).IPAddress
+  Check "服务停着:问国内 DNS 能解析" ([bool]$g) "$g"
+  $g = (Resolve-DnsName -Name "www.google.com" -Type A -Server 8.8.8.8 -DnsOnly -QuickTimeout -ErrorAction SilentlyContinue | Where-Object { $_.Type -eq "A" } | Select-Object -First 1).IPAddress
+  Check "服务停着:问国外 DNS 被拦" (-not $g) "$g"
+  & $svc start | Out-Null
+  $stb = Wait-Status "connected" 60
+  Check "服务起来后接着连上" ($stb -match "状态:\s+connected") ""
+  # 强杀:闸不随进程走
+  Stop-Process -Name godusevpn-svc -Force -ErrorAction SilentlyContinue
+  Start-Sleep -Milliseconds 1500
+  $a = Plain-Http $fnUrl; Check "服务被强杀:国外地址拦下" ($a -notmatch '^[234]') "http=$a"
+  $a = Plain-Http $cnUrl; Check "服务被强杀:国内地址照常" ($a -match '^[234]') "http=$a"
+  $stb = Wait-Status "connected" 60
+  Check "服务被强杀后自动恢复连接" ($stb -match "状态:\s+connected") ""
+}
+# 规则组走命令行改:防火墙跟着变、不用重连
+& $cli settings 'ruleGroups=[{\"id\":\"t1\",\"name\":\"t1\",\"enabled\":true,\"outbound\":\"direct\",\"rules\":[{\"type\":\"ip_cidr\",\"value\":\"1.1.1.1/32\"}]}]' 2>&1 | Out-Null
+Start-Sleep -Seconds 3
+if ($script:directOK) { $a = Nic-Http $fnUrl; Check "加直连 IP 规则:防火墙当场放行" ($a -match '^[234]') "http=$a" }
+& $cli settings 'ruleGroups=[{\"id\":\"t2\",\"name\":\"t2\",\"enabled\":true,\"outbound\":\"proxy\",\"rules\":[{\"type\":\"ip_cidr\",\"value\":\"223.5.5.0/24\"},{\"type\":\"port\",\"value\":\"8443\"},{\"type\":\"port\",\"value\":\"9000-9100\"}]}]' 2>&1 | Out-Null
+Start-Sleep -Seconds 3
+if ($script:directOK) { $a = Nic-Http $cnUrl; Check "排前面的走隧道规则盖过国内直连" ($a -notmatch '^[234]') "http=$a" }
+$null = Get-WfpProviders
+$tp = @(Wfp-Filters "Block tunnel ports" | Where-Object { $_ })
+Check "走隧道的端口进了防火墙(含端口段)" ($tp.Count -eq 2) ("过滤器 " + $tp.Count + " 条")
+& $cli settings 'ruleGroups=[]' 2>&1 | Out-Null
+Start-Sleep -Seconds 3
+$str = Wait-Status "connected" 15
+Check "改规则一路没断连接" ($str -match "状态:\s+connected") ""
+# 撤闸:开关一关闸就没了,不用重连
+& $cli settings noDirect=false 2>&1 | Out-Null
+Start-Sleep -Seconds 3
+$gs3 = & $svc guard status 2>&1 | Out-String
+Check "关开关后闸清空" ($gs3 -match "没开") $gs3.Trim()
+& $cli settings noDirect=true 2>&1 | Out-Null
+Start-Sleep -Seconds 3
+$gs3 = & $svc guard status 2>&1 | Out-String
+Check "开回开关:闸回来" ($gs3 -match "开着") $gs3.Trim()
 
 Write-Host "== 4. 出口" -ForegroundColor Cyan
 $ipProxy = Public-IP4
@@ -477,10 +542,10 @@ if ($LegacyBin -and -not $KeepInstalled) {
     if ($script:directOK) { $ud2 = Direct-Http; Check "升级后停服务闸仍在拦" ($ud2 -and $ud2 -notmatch '^[23]') "http=$ud2" }
     & $svc start | Out-Null
     Wait-Status "connected" 60 | Out-Null
-    & $cli mode rule | Out-Null
+    & $cli mode direct | Out-Null
     Start-Sleep -Seconds 2
     $gs4 = & $svc guard status 2>&1 | Out-String
-    Check "切回规则模式后闸清空(升级场景)" ($gs4 -match "没开") $gs4.Trim()
+    Check "切到直连模式后闸清空(升级场景)" ($gs4 -match "没开") $gs4.Trim()
     $ep = Get-WfpProviders
     Check "撤闸后两代提供者都不在" (($null -ne $ep) -and ($ep.Count -eq 0) -and ($script:wfpStateText -notmatch '6f6d9e2[cdef]-3a41-4b8e-9d55-676f64757365')) (Providers-Detail $ep)
     & $cli disconnect | Out-Null

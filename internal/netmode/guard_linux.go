@@ -51,20 +51,36 @@ func guardRuleset(spec GuardSpec, dns bool) string {
 	fmt.Fprintf(&b, "table inet %s {}\n", guardTable)
 	fmt.Fprintf(&b, "delete table inet %s\n", guardTable)
 	fmt.Fprintf(&b, "table inet %s {\n", guardTable)
+	v4, v6 := spec.directFamilies()
+	if len(v4) > 0 {
+		fmt.Fprintf(&b, "\tset direct4 {\n\t\ttype ipv4_addr\n\t\tflags interval\n\t\telements = { %s }\n\t}\n", strings.Join(v4, ", "))
+	}
+	if len(v6) > 0 {
+		fmt.Fprintf(&b, "\tset direct6 {\n\t\ttype ipv6_addr\n\t\tflags interval\n\t\telements = { %s }\n\t}\n", strings.Join(v6, ", "))
+	}
 	b.WriteString("\tchain output {\n\t\ttype filter hook output priority filter; policy accept;\n")
 	b.WriteString("\t\toifname \"lo\" accept\n")
 	if spec.TunName != "" {
 		fmt.Fprintf(&b, "\t\toifname %q accept\n", spec.TunName) // 经隧道出去的流量(按名字比,网卡还没建也认)
 	}
-	fmt.Fprintf(&b, "\t\tmeta mark %s accept\n", selfMarks(spec))        // 本服务:节点连接、订阅刷新的回退直连、DoH
-	b.WriteString("\t\tmeta skuid 0 ct direction reply accept\n")        // root 服务回应入站连接(sshd、本面板)
+	fmt.Fprintf(&b, "\t\tmeta mark %s accept\n", selfMarks(spec)) // 本服务:节点连接、订阅刷新的回退直连、DoH
+	if spec.Rule {
+		b.WriteString("\t\tct direction reply accept\n") // 规则模式不拦入站:规则管的是本机去哪儿,不是谁连进来
+	} else {
+		b.WriteString("\t\tmeta skuid 0 ct direction reply accept\n") // root 服务回应入站连接(sshd、本面板)
+	}
 	b.WriteString("\t\tmeta skuid 0 udp sport 68 udp dport 67 accept\n") // 系统 DHCP 客户端的单播续租
-	blockLeaks(&b, dns)
+	if spec.Rule {
+		b.WriteString(fakeDrop) // 规则模式不拦 DNS 和 UPnP:物理网卡上的 DNS 通常是路由器或运营商,拦了直连的网站就解析不了;发往放行段以外的照样落到最后的 drop
+	} else {
+		blockLeaks(&b, dns)
+	}
 	if spec.LAN {
 		fmt.Fprintf(&b, "\t\tip daddr { %s } accept\n", strings.Join(privateV4, ", "))
 		fmt.Fprintf(&b, "\t\tip6 daddr { %s } accept\n", strings.Join(privateV6, ", "))
 		b.WriteString("\t\tmeta skuid 0 ip daddr 168.63.129.16 accept\n") // Azure 平台地址(来宾代理),和它不进隧道是一个道理
 	}
+	ruleAllow(&b, spec, false)
 	// 只放行 DHCP 客户端的源端口，并限制到广播目的，避免把任意 UDP/67 当成直连例外。
 	b.WriteString("\t\tudp sport 68 udp dport 67 ip daddr 255.255.255.255 accept\n") // DHCP 续租
 	b.WriteString("\t\ticmpv6 type { nd-neighbor-solicit, nd-neighbor-advert, nd-router-solicit, nd-router-advert } accept\n")
@@ -76,7 +92,9 @@ func guardRuleset(spec GuardSpec, dns bool) string {
 		fmt.Fprintf(&b, "\t\toifname %q accept\n", spec.TunName)
 		fmt.Fprintf(&b, "\t\tiifname %q accept\n", spec.TunName) // 从隧道回来、转给设备的应答(UDP、ping)
 	}
-	if dns {
+	if spec.Rule {
+		b.WriteString("\t\tct direction reply accept\n")
+	} else if dns {
 		b.WriteString(dnsDrop)
 	}
 	if spec.LAN {
@@ -84,9 +102,51 @@ func guardRuleset(spec GuardSpec, dns bool) string {
 		fmt.Fprintf(&b, "\t\tip daddr { %s } accept\n", strings.Join(privateV4, ", "))
 		fmt.Fprintf(&b, "\t\tip6 daddr { %s } accept\n", strings.Join(privateV6, ", "))
 	}
+	ruleAllow(&b, spec, true)
 	b.WriteString("\t\tdrop\n\t}\n")
 	b.WriteString("}\n")
 	return b.String()
+}
+
+// ruleAllow 规则模式放行直连的那几条(全局模式什么都不写)。forward = 转发链,多一层局域网设备的策略:
+// 设成走代理 / 拒绝的设备不看放行段,设成直连的不看规则。
+func ruleAllow(b *strings.Builder, spec GuardSpec, forward bool) {
+	if !spec.Rule {
+		return
+	}
+	if forward {
+		deviceMatch(b, splitList(spec.DevBlock), "drop")
+		deviceMatch(b, splitList(spec.DevDirect), "accept")
+	}
+	if ports := splitList(spec.TunnelPorts); len(ports) > 0 {
+		list := strings.Join(ports, ", ")
+		fmt.Fprintf(b, "\t\ttcp dport { %s } drop\n\t\tudp dport { %s } drop\n", list, list)
+	}
+	v4, v6 := spec.directFamilies()
+	if len(v4) > 0 {
+		b.WriteString("\t\tip daddr @direct4 accept\n")
+	}
+	if len(v6) > 0 {
+		b.WriteString("\t\tip6 daddr @direct6 accept\n")
+	}
+}
+
+// deviceMatch 按来源匹配设备:有 MAC 按 MAC,手改设置文件才有的只有 IP 的按 IP。
+func deviceMatch(b *strings.Builder, who []string, verdict string) {
+	var macs, ips []string
+	for _, w := range who {
+		if strings.Contains(w, ":") && len(w) == 17 {
+			macs = append(macs, w)
+		} else if !strings.Contains(w, ":") {
+			ips = append(ips, w)
+		}
+	}
+	if len(macs) > 0 {
+		fmt.Fprintf(b, "\t\tether saddr { %s } %s\n", strings.Join(macs, ", "), verdict)
+	}
+	if len(ips) > 0 {
+		fmt.Fprintf(b, "\t\tip saddr { %s } %s\n", strings.Join(ips, ", "), verdict)
+	}
 }
 
 // selfMarks 本服务的套接字带的标记。网关模式下 sing-box 不许设 route.default_mark(和 auto_redirect 冲突),
@@ -130,8 +190,8 @@ func ApplyGuard(spec GuardSpec) error {
 	}
 	dnsSealed = dns
 	guardWarn = why
-	// 开机版落盘:nft 的表不过重启,开机到服务起来之间由开机单元先装上它(见 BootGuardFile)。
-	// 拦 DNS 那几条总是带上:开机时没有隧道,DNS 本来就不该出去
+	// 开机版落盘(这也是闸的备份):nft 的表不过重启,开机到服务起来之间由开机单元先装上它(见 BootGuardFile)。
+	// 全局模式拦 DNS 那几条总是带上:开机时没有隧道,DNS 本来就不该出去
 	if err := writeAtomic(BootGuardFile(), []byte(guardRuleset(spec, true)), 0o600); err != nil {
 		if guardWarn != "" {
 			guardWarn += ";"
@@ -250,7 +310,7 @@ func nftMissing(out []byte, err error) bool {
 
 func nftError(what string, err error, out []byte) error {
 	if errors.Is(err, exec.ErrNotFound) {
-		return fmt.Errorf("%s: 系统里没有 nft 命令,装不上全局禁直连的闸;先装 nftables(OpenWrt: opkg install nftables,Debian / Ubuntu: apt install nftables)", what)
+		return fmt.Errorf("%s: 系统里没有 nft 命令,装不上防流量逃逸的闸;先装 nftables(OpenWrt: opkg install nftables,Debian / Ubuntu: apt install nftables)", what)
 	}
 	return fmt.Errorf("%s: %v: %s", what, err, strings.TrimSpace(string(out)))
 }
@@ -345,7 +405,7 @@ func BootGuardReady() (bool, error) { return false, nil }
 // GuardInstallable 这个平台的闸是不是由我们自己装、并且装完能核查。
 // Windows(WFP)、Linux(nftables)、macOS(pf)都是;Android 不是 —— 那边的闸就是宿主
 // VpnService 的接口本身,由系统持有,我们既装不了也数不出条数。对这种平台做"闸装没装"的
-// 硬核查只会把连接整个挡死,而用户挡不住就会去把「全局禁直连」关掉,反倒更不私密。
+// 硬核查只会把连接整个挡死,而用户挡不住就会去把「防流量逃逸」关掉,反倒更不私密。
 func GuardInstallable() bool { return true }
 
 // GuardPersistentSupported Linux 没有 Windows 那种由系统保管、能核查装没装全的持久组(开机那段见 BootGuardFile)。

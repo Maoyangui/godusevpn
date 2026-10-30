@@ -92,7 +92,7 @@ type ifaceSpec struct {
 // platform 实现 sing-box 的 adapter.PlatformInterface,只做 Android 需要的部分,其余明确回答"不支持"。
 type platform struct {
 	host           Host
-	keepTun        func() bool // 内核关 TUN 时要不要把宿主那份也关掉的反面:「全局禁直连」开着就留着,接口本身就是闸
+	keepTun        func() bool // 内核关 TUN 时要不要把宿主那份也关掉的反面:「防流量逃逸」开着就留着,接口本身就是闸
 	networkManager adapter.NetworkManager
 	mu             sync.Mutex
 	myTunName      string
@@ -201,7 +201,7 @@ type hostTun struct {
 	once sync.Once
 }
 
-// Close 内核关 TUN。「全局禁直连」开着(全局模式、用户没点断开)就只关内核自己那份描述符,
+// Close 内核关 TUN。「防流量逃逸」开着(全局模式、用户没点断开)就只关内核自己那份描述符,
 // 宿主那份留着:系统的 VPN 接口还在、没人读,流量落进去就丢 —— 内核重启的空档一滴都漏不出去。
 // 撤闸(用户点断开)时守护进程会另行通知宿主关掉。
 func (t *hostTun) Close() error {

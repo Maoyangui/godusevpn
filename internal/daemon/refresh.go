@@ -7,6 +7,7 @@ import (
 
 	"github.com/Maoyangui/godusevpn/internal/builder"
 	"github.com/Maoyangui/godusevpn/internal/netmode"
+	"github.com/Maoyangui/godusevpn/internal/paths"
 	"github.com/Maoyangui/godusevpn/internal/profile"
 	"github.com/Maoyangui/godusevpn/internal/settings"
 )
@@ -150,24 +151,52 @@ func (d *Daemon) needRebuildFor(tag string) bool {
 	return hadOld && hasNew && old != nw
 }
 
-// ---- 「全局禁直连」的闸 ----
+// ---- 「防流量逃逸」的闸 ----
 
-// GuardWanted 闸此刻该不该开着:开关开、模式是全局、用户想连着(没点断开)。
+// GuardWanted 闸此刻该不该开着:开关开、模式是全局或规则、用户想连着(没点断开)。
 // 内核停了、崩了、在重启,只要这三条还成立,闸就该在。Android 的 VPN 接口按它决定要不要留着。
 func (d *Daemon) GuardWanted() bool {
-	s := d.getSettings()
-	return s.NoDirect && s.Mode == settings.ModeGlobal && d.wantConnected()
+	return d.getSettings().GuardOn() && d.wantConnected()
 }
 
 func (d *Daemon) guardSpec() netmode.GuardSpec {
 	s := d.getSettings()
-	return netmode.GuardSpec{
+	spec := netmode.GuardSpec{
 		TunName:  builder.TunName,
 		TunAddr4: strings.Split(builder.TunAddr4, "/")[0],
 		TunAddr6: strings.Split(builder.TunAddr6, "/")[0],
 		LAN:      s.LANBypass, // 跟随「局域网直通」:关了它,内核不在的那几秒连局域网也不放
 		Gateway:  s.NetMode == settings.NetGateway,
 	}
+	if s.RuleGuard() {
+		d.fillRuleGuard(&spec, s)
+	}
+	return spec
+}
+
+// fillRuleGuard 规则模式:把规则折算成防火墙放行的东西。折算要解析规则集,输入没变就用上次的结果 —— 规格每轮同步都要比一次。
+// Android 没有可装的防火墙(闸就是 VPN 接口),不用折算。
+func (d *Daemon) fillRuleGuard(spec *netmode.GuardSpec, s settings.Settings) {
+	spec.Rule = true
+	if !netmode.GuardInstallable() {
+		return
+	}
+	root := paths.RuleSets()
+	key := builder.RuleGuardKey(s, root)
+	d.ruleGuardMu.Lock()
+	defer d.ruleGuardMu.Unlock()
+	if key != d.ruleGuardKey {
+		r := builder.RuleGuard(s, root)
+		direct := make([]string, 0, len(r.Direct))
+		for _, p := range r.Direct {
+			direct = append(direct, p.String())
+		}
+		d.ruleGuardKey = key
+		d.ruleGuardMemo = netmode.GuardSpec{Direct: strings.Join(direct, ","), TunnelPorts: strings.Join(r.TunnelPorts, ","),
+			DevBlock: strings.Join(r.DeviceBlock, ","), DevDirect: strings.Join(r.DeviceDirect, ",")}
+	}
+	m := d.ruleGuardMemo
+	spec.Direct, spec.TunnelPorts, spec.DevBlock, spec.DevDirect = m.Direct, m.TunnelPorts, m.DevBlock, m.DevDirect
 }
 
 // syncGuard 把闸的状态和"该不该开"对齐。连接意愿、模式、设置变了都要调一次;幂等。
@@ -231,13 +260,13 @@ func (d *Daemon) syncGuard() {
 		// 其实过滤器一条没少,托盘的「恢复网络」看到"没开"直接返回 —— 用户在界面里怎么点都救不回来。
 		if err := netmode.ClearGuard(); err != nil {
 			d.setGuard(true, "撤闸失败: "+err.Error())
-			d.logf("全局禁直连:撤闸失败,过滤器还在,直连仍被拦: %v", err)
+			d.logf("防流量逃逸:撤闸失败,过滤器还在,直连仍被拦: %v", err)
 			return
 		}
 		d.setGuard(false, "")
-		d.logf("全局禁直连:已撤闸")
+		d.logf("防流量逃逸:已撤闸")
 		if w := netmode.GuardWarning(); w != "" {
-			d.logf("全局禁直连:%s", w)
+			d.logf("防流量逃逸:%s", w)
 		}
 		if d.releaseTun != nil && !d.core.Running() {
 			d.releaseTun() // Android:内核没在跑时留着的 VPN 接口是个黑洞,撤闸就得关掉
@@ -245,11 +274,13 @@ func (d *Daemon) syncGuard() {
 	}
 }
 
-// guardArmed 闸此刻开着(按守护进程自己的记录),或者正在装(见 cancelDirect):直连动作一律按开着处理。
+// guardArmed 严格全局的闸此刻开着(按守护进程自己的记录),或者正在装(见 cancelDirect):直连动作一律按开着处理。
+// 规则模式的闸不算:规则模式本来就有直连,服务自己的直连动作(更新检查、未连接时的测速)和以前一样。
 func (d *Daemon) guardArmed() bool {
+	sealed := d.getSettings().Sealed()
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	return d.guardOn || d.guardArming
+	return d.guardArming || (d.guardOn && sealed)
 }
 
 // guardRedoReason 闸已经开着时,要不要重装、为什么。返回空串 = 不用动。
@@ -279,13 +310,16 @@ func (d *Daemon) appliedGuardSpec() netmode.GuardSpec {
 	return d.guardApplied
 }
 
-// applyGuard 装闸并把结果记进状态与日志;失败时如实记着(界面标「禁直连未生效」),
+// applyGuard 装闸并把结果记进状态与日志;失败时如实记着(界面标「防逃逸未生效」),
 // 隧道照常起(见 guardReady),health 每轮原地重试。
 func (d *Daemon) applyGuard(okMsg string) {
 	// 装闸之前先把只在闸没开时才做的直连动作取消掉:闸放行本服务,装好以后它们再发出的都是隧道外的包。
 	// 从这一刻起到装完,新来的直连动作也按"闸开着"拒掉(guardArming),不然装闸那几百毫秒里开始的照样出去。
-	d.cancelDirect()
-	defer d.endArming()
+	// 规则模式的闸不用:见 guardArmed。
+	if d.getSettings().Sealed() {
+		d.cancelDirect()
+		defer d.endArming()
+	}
 	spec := d.guardSpec()
 	d.mu.Lock()
 	previousOn, previousSpec := d.guardOn, d.guardApplied
@@ -297,16 +331,19 @@ func (d *Daemon) applyGuard(okMsg string) {
 		d.guardApplied = previousSpec
 		d.mu.Unlock()
 		d.setGuard(previousOn, err.Error())
-		d.logf("全局禁直连:开闸失败(隧道照常建立,稍后重试): %v", err)
+		d.logf("防流量逃逸:开闸失败(隧道照常建立,稍后重试): %v", err)
 		return
 	}
 	d.mu.Lock()
 	d.guardApplied = spec
 	d.mu.Unlock()
 	d.setGuard(true, "")
-	d.logf("全局禁直连:%s", okMsg)
+	if spec.Rule {
+		okMsg += "(规则模式:直连规则的地址段照常放行)"
+	}
+	d.logf("防流量逃逸:%s", okMsg)
 	if w := netmode.GuardWarning(); w != "" {
-		d.logf("全局禁直连:%s", w)
+		d.logf("防流量逃逸:%s", w)
 	}
 	if w := netmode.RouteWarning(); w != "" {
 		d.logf("回包路由:%s", w)
@@ -324,10 +361,10 @@ func (d *Daemon) reconcileGuard() {
 	// 这条日志只陈述事实,后面怎么处理看下面各分支自己的日志;它是每次开机的自证,出现了就说明
 	// "重启不漏"在这台机器上不成立,要反馈。标志在提供者对象上,本次开机内服务重启还会再报一次。
 	if dis, err := netmode.GuardBootDisabled(); err == nil && dis {
-		d.logf("全局禁直连:本次开机时防火墙引擎停用过闸的规则(提供者带 DISABLED 标志),开机到本服务启动之间可能没有闸。请把这条日志反馈给开发者")
+		d.logf("防流量逃逸:本次开机时防火墙引擎停用过闸的规则(提供者带 DISABLED 标志),开机到本服务启动之间可能没有闸。请把这条日志反馈给开发者")
 	}
 	if !d.settingsTrusted() {
-		d.logf("全局禁直连:设置读不出来,保持现状(不撤闸也不开闸)")
+		d.logf("防流量逃逸:设置读不出来,保持现状(不撤闸也不开闸)")
 		return
 	}
 	s := d.getSettings()
@@ -335,30 +372,30 @@ func (d *Daemon) reconcileGuard() {
 	if !d.persistedStateOK() {
 		// 全新安装、或者刚清过数据的机器根本没有状态文件,这是最正常不过的事。
 		// m29 在这里无条件 setGuard(true, "连接状态不可读…"),于是第一次打开客户端,
-		// 首页就挂着一条"禁直连有异常 · 连接状态不可读"的橙色告警 —— 什么毛病都没有。
+		// 首页就挂着一条"防逃逸有异常 · 连接状态不可读"的橙色告警 —— 什么毛病都没有。
 		// 只有闸确实还在、真有东西要保留的时候,才值得说这一句。
 		if n, err := netmode.GuardStatus(); err == nil && n == 0 {
 			return
 		}
-		if s.NoDirect && s.Mode == settings.ModeGlobal {
+		if s.GuardOn() {
 			// 设置说就该有闸、闸也确实在:按当前设置原地重装(事务内替换,不放宽任何保护)。
 			// 不重装的话,从 0.6.25-m29 ~ 0.7.1 升上来的机器闸会一直挂在绑了服务名的第一代提供者下,
 			// 直到用户手动点一次连接 —— 这段时间闸能不能跨过开机取决于服务的启动类型(见 wfp.baseProvider)。
 			d.applyGuard("连接状态不可读,闸一直在,已按当前设置重装")
 			return
 		}
-		d.setGuard(true, "连接状态不可读,保留全局禁直连保护")
-		d.logf("全局禁直连:连接状态不可读,不撤闸")
+		d.setGuard(true, "连接状态不可读,保留防流量逃逸保护")
+		d.logf("防流量逃逸:连接状态不可读,不撤闸")
 		return
 	}
-	if !p.Wanted || !s.NoDirect || s.Mode != settings.ModeGlobal {
+	if !p.Wanted || !s.GuardOn() {
 		if err := netmode.ClearGuard(); err != nil {
 			d.setGuard(true, "撤闸失败: "+err.Error())
-			d.logf("全局禁直连:上次残留的闸清不掉,直连仍被拦: %v", err)
+			d.logf("防流量逃逸:上次残留的闸清不掉,直连仍被拦: %v", err)
 		} else {
 			d.setGuard(false, "") // Run 开头按实物记成了开着
 			if w := netmode.GuardWarning(); w != "" {
-				d.logf("全局禁直连:%s", w)
+				d.logf("防流量逃逸:%s", w)
 			}
 		}
 		return
@@ -384,7 +421,7 @@ func (d *Daemon) dropTunPermit() {
 		return
 	}
 	if err := guardTunDown(); err != nil {
-		d.logf("全局禁直连:隧道网卡没了,转发层的隧道放行没撤掉(下次连上时会换掉): %v", err)
+		d.logf("防流量逃逸:隧道网卡没了,转发层的隧道放行没撤掉(下次连上时会换掉): %v", err)
 	}
 }
 
@@ -406,7 +443,7 @@ func (d *Daemon) guardTunUp() {
 	if err := netmode.GuardTunUp(d.guardSpec()); err != nil {
 		d.tunUpPending.Store(true) // 网卡可能晚几秒才注册好:下一次同步、或半分钟一次的巡检再试
 		d.setGuard(true, tunUpFailText+err.Error())
-		d.logf("全局禁直连:%s%v", tunUpFailText, err)
+		d.logf("防流量逃逸:%s%v", tunUpFailText, err)
 		return
 	}
 	d.tunUpPending.Store(false)

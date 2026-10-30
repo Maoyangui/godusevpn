@@ -39,7 +39,7 @@ type Settings struct {
 	TUN           bool      `json:"tun"`                  // TUN 模式(默认开);关掉只留混合端口
 	TUNStack      string    `json:"tunStack"`             // mixed | system | gvisor
 	StrictRoute   bool      `json:"strictRoute"`          // 严格路由:防泄漏,代价是部分局域网访问要靠 lanBypass
-	// NoDirect 全局禁直连:全局模式下只要还想连着(没点断开),任何流量都不许绕过隧道直连 —— 隧道没起来、
+	// NoDirect 防流量逃逸:全局模式下只要还想连着(没点断开),任何流量都不许绕过隧道直连 —— 隧道没起来、
 	// 内核在重启、节点不通、崩了在重试,统统只能等。放行的只有隧道自己(节点连接、订阅刷新的回退)、局域网、回环。
 	NoDirect  bool   `json:"noDirect"`
 	LANBypass bool   `json:"lanBypass"` // 私网段不进 TUN(打印机、NAS 直通)
@@ -114,6 +114,16 @@ func Load(path string) (Settings, error) {
 }
 
 // migrate schema 1 → 2:单个 profileUrl 变成订阅列表。
+// Sealed 严格全局:全局模式 + 防流量逃逸。隧道以外只剩节点连接本身、回环、(局域网直通开着时的)局域网。
+func (s Settings) Sealed() bool { return s.NoDirect && s.Mode == ModeGlobal }
+
+// RuleGuard 规则模式 + 防流量逃逸:防火墙照着规则放行直连,其余只许走隧道。
+// 要开着 TUN:没有 TUN 时规则只管连混合端口的程序,别的程序本来就不归隧道管,不能因为这个开关断它们的网。
+func (s Settings) RuleGuard() bool { return s.NoDirect && s.Mode == ModeRule && s.TUN }
+
+// GuardOn 按设置,防火墙这道闸该不该在(还要看用户想不想连着)。
+func (s Settings) GuardOn() bool { return s.Sealed() || s.RuleGuard() }
+
 func (s *Settings) migrate() {
 	if s.ProfileURL != "" && len(s.Profiles) == 0 {
 		id := NewID()
@@ -129,7 +139,7 @@ func (s *Settings) migrate() {
 		s.DisableNICIPv6 = true // 这一项是后加的,老设置文件里读出来是 false,按新默认值补上
 	}
 	if s.Schema < 4 {
-		s.NoDirect = true // 同上:全局禁直连默认开
+		s.NoDirect = true // 同上:防流量逃逸默认开
 	}
 	s.Schema = Schema
 }
@@ -307,17 +317,23 @@ func (s Settings) Apply(key, value string) (Settings, error) {
 		return s, fmt.Errorf("没有这个设置项: %s", key)
 	}
 	var v any
-	switch strings.ToLower(value) {
-	case "true", "on", "yes":
-		v = true
-	case "false", "off", "no":
-		v = false
-	default:
-		var n int
-		if _, err := fmt.Sscanf(value, "%d", &n); err == nil && fmt.Sprint(n) == value {
-			v = n
-		} else {
-			v = value
+	if strings.HasPrefix(value, "[") || strings.HasPrefix(value, "{") { // 规则组、默认规则这类结构化的设置项,值写 JSON
+		if err := json.Unmarshal([]byte(value), &v); err != nil {
+			return s, fmt.Errorf("%s 的值不是合法的 JSON: %w", key, err)
+		}
+	} else {
+		switch strings.ToLower(value) {
+		case "true", "on", "yes":
+			v = true
+		case "false", "off", "no":
+			v = false
+		default:
+			var n int
+			if _, err := fmt.Sscanf(value, "%d", &n); err == nil && fmt.Sprint(n) == value {
+				v = n
+			} else {
+				v = value
+			}
 		}
 	}
 	vb, _ := json.Marshal(v)

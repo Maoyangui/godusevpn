@@ -7,10 +7,10 @@ import (
 	"github.com/Maoyangui/godusevpn/internal/settings"
 )
 
-// 全局禁直连下「本地 DNS = system」的替换(builder.go 里 localDNS 那一段):
+// 防流量逃逸下「本地 DNS = system」的替换(builder.go 里 localDNS 那一段):
 // 全局模式里本地 DNS 只剩一个用处 —— 给节点服务器自己的域名做解析(default_domain_resolver)。
-// 设成 system 就是明文 53 发到路由器 / 运营商,与"全局禁直连"的承诺相悖,要换成按地址连的加密 DoH。
-// 规则 / 直连模式、或者没开禁直连时不改:那本来就不承诺不直连。
+// 设成 system 就是明文 53 发到路由器 / 运营商,与"防流量逃逸"的承诺相悖,要换成按地址连的加密 DoH。
+// 规则 / 直连模式、或者没开防逃逸时不改:那本来就不承诺不直连。
 
 // sealedDNSCfg 只解这组测试关心的几个字段:builder_test.go 里的 cfg 没取 route.default_domain_resolver。
 type sealedDNSCfg struct {
@@ -54,19 +54,19 @@ func dnsServerByTag(t *testing.T, c sealedDNSCfg, tag string) map[string]any {
 	return found
 }
 
-// sealedSettings 全局 + 禁直连 + 本地 DNS 用系统解析:正是要被替换的那组。
+// sealedSettings 全局 + 防逃逸 + 本地 DNS 用系统解析:正是要被替换的那组。
 func sealedSettings() settings.Settings {
 	s := settings.Default()
 	s.LocalDNS, s.NoDirect, s.Mode = "system", true, settings.ModeGlobal
 	return s
 }
 
-// 全局禁直连 + 本地 DNS 设成 system:tag=local 必须换成按地址连的加密 DoH,不能再是明文的系统解析。
+// 防流量逃逸 + 本地 DNS 设成 system:tag=local 必须换成按地址连的加密 DoH,不能再是明文的系统解析。
 func TestSealedGlobalSystemLocalDNSBecomesDoH(t *testing.T) {
 	c := sealedBuild(t, sealedSettings())
 	local := dnsServerByTag(t, c, "local")
 	if local["type"] != "https" {
-		t.Fatalf("全局禁直连下本地 DNS 应换成 DoH(https),实际 type=%v: %v", local["type"], local)
+		t.Fatalf("防流量逃逸下本地 DNS 应换成 DoH(https),实际 type=%v: %v", local["type"], local)
 	}
 	if local["server"] != "223.5.5.5" {
 		t.Fatalf("替身 DoH 应是 223.5.5.5,实际 %v", local["server"])
@@ -81,22 +81,22 @@ func TestSealedGlobalSystemLocalDNSBecomesDoH(t *testing.T) {
 	// 明文的 type=local / tag=local 一个都不能留(留着就是没换干净,两个同名内核也起不来)
 	for _, sv := range c.DNS.Servers {
 		if sv["type"] == "local" && sv["tag"] == "local" {
-			t.Fatalf("全局禁直连下不该还有 type=local 的 \"local\" 服务器: %v", c.DNS.Servers)
+			t.Fatalf("防流量逃逸下不该还有 type=local 的 \"local\" 服务器: %v", c.DNS.Servers)
 		}
 	}
 }
 
-// 替换只发生在「全局 + 禁直连」这一种组合下:规则 / 直连模式、或者禁直连关着时,tag=local 照旧是系统解析。
+// 替换只发生在「全局 + 防逃逸」这一种组合下:规则 / 直连模式、或者防逃逸关着时,tag=local 照旧是系统解析。
 func TestSealedRewriteOnlyWhenGlobalAndNoDirect(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
 		mode     string
 		noDirect bool
 	}{
-		{"规则模式+禁直连", settings.ModeRule, true},
-		{"直连模式+禁直连", settings.ModeDirect, true},
-		{"全局模式+不禁直连", settings.ModeGlobal, false},
-		{"规则模式+不禁直连", settings.ModeRule, false},
+		{"规则模式+防逃逸", settings.ModeRule, true},
+		{"直连模式+防逃逸", settings.ModeDirect, true},
+		{"全局模式+不防逃逸", settings.ModeGlobal, false},
+		{"规则模式+不防逃逸", settings.ModeRule, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s := settings.Default()
@@ -139,7 +139,7 @@ func TestSealedLocalDNSAddressUntouched(t *testing.T) {
 			}
 		})
 	}
-	// 反过来也要成立:不在全局禁直连下,填的地址同样原样保留(没被误改成 system 或替身)
+	// 反过来也要成立:不在防流量逃逸下,填的地址同样原样保留(没被误改成 system 或替身)
 	s := settings.Default()
 	s.LocalDNS, s.Mode = "119.29.29.29", settings.ModeRule
 	local := dnsServerByTag(t, sealedBuild(t, s), "local")
@@ -155,7 +155,7 @@ func TestSealedPrivacyBoundaryUnchanged(t *testing.T) {
 		name string
 		s    settings.Settings
 	}{
-		{"全局禁直连+system", sealedSettings()},
+		{"防流量逃逸+system", sealedSettings()},
 		{"出厂默认", settings.Default()},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

@@ -1,6 +1,6 @@
 #!/bin/sh
 # 佛跳墙 macOS 双击卸载。打包时改名为「卸载佛跳墙.command」。
-# 做的就是文档里那两行:godusevpn uninstall(撤服务、撤禁直连闸、恢复网络设置)+ 删掉程序;前一步失败就不删程序。
+# 做的就是文档里那两行:godusevpn uninstall(撤服务、撤防逃逸闸、恢复网络设置)+ 删掉程序;前一步失败就不删程序。
 # 设置与订阅留在 /Library/Application Support/godusevpn,重装后还在。
 
 finish() {
@@ -18,7 +18,7 @@ if [ ! -e /usr/local/bin/godusevpn ] && [ ! -d /Applications/godusevpn.app ]; th
   echo "这台 Mac 上没有装佛跳墙,不用卸载。"
   finish 0
 fi
-echo "会撤掉后台服务和「禁直连」的防火墙规则、把网络设置恢复成连接前的样子,再删掉程序。"
+echo "会撤掉后台服务和「防逃逸」的防火墙规则、把网络设置恢复成连接前的样子,再删掉程序。"
 echo "设置和订阅会留在 /Library/Application Support/godusevpn(想彻底清掉,卸载后把这个文件夹也删了)。"
 echo
 printf '确定卸载吗?输入 y 再按回车:'
@@ -33,7 +33,7 @@ if pgrep -f "/Applications/godusevpn.app/Contents/MacOS/godusevpn" >/dev/null 2>
 fi
 echo
 echo "接下来要输入开机密码(输入时不显示字符,输完按回车)。"
-# 撤服务失败就别删程序:「禁直连」的规则在系统里,程序删了就没人能撤它 —— 严格全局下会断网且没有工具恢复。
+# 撤服务失败就别删程序:「防逃逸」的规则在系统里,程序删了就没人能撤它 —— 严格全局下会断网且没有工具恢复。
 sudo -p "开机密码:" sh -c '
   if [ -x /usr/local/bin/godusevpn ]; then /usr/local/bin/godusevpn uninstall || exit 3; fi
   rm -rf /Applications/godusevpn.app /usr/local/bin/godusevpn

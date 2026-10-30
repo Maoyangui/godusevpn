@@ -37,7 +37,7 @@ type trayUI struct {
 func newTray(a *App) *trayUI { return &trayUI{app: a} }
 
 var trayText = map[string]map[string]string{
-	"zh": {"show": "显示主窗口", "connect": "连接", "disconnect": "断开", "mode": "模式", "rule": "规则", "global": "全局", "direct": "直连", "quit": "退出", "svcdown": "服务未运行", "upgrade": "升级到", "guardfix": "恢复网络(解除禁直连闸)", "svcnoperm": "服务在跑,但当前账户没登记为控制用户"},
+	"zh": {"show": "显示主窗口", "connect": "连接", "disconnect": "断开", "mode": "模式", "rule": "规则", "global": "全局", "direct": "直连", "quit": "退出", "svcdown": "服务未运行", "upgrade": "升级到", "guardfix": "恢复网络(解除防逃逸闸)", "svcnoperm": "服务在跑,但当前账户没登记为控制用户"},
 	"en": {"show": "Show window", "connect": "Connect", "disconnect": "Disconnect", "mode": "Mode", "rule": "Rule", "global": "Global", "direct": "Direct", "quit": "Quit", "svcdown": "Service not running", "upgrade": "Update to", "guardfix": "Restore network (lift no-direct guard)", "svcnoperm": "Service running, but this account is not registered as a controller"},
 }
 
@@ -119,7 +119,7 @@ func (t *trayUI) onReady() {
 	// 恢复网络:和开始菜单的快捷方式同一条路 —— 提权跑 guard clear --popup(guardfix.Clear),按过滤器的实际条数
 	// 判断闸在不在;服务活着就先经控制口关掉两个隐私开关,再撤闸、还原网卡 IPv6,结果弹窗说清楚。
 	// 以前服务活着时只看守护进程内存里的闸状态:设置文件读不出来时它报"没开"而过滤器都在,点了什么都不做也不说;
-	// 而且只关「全局禁直连」,网卡 IPv6 不还原(审计 G057)。
+	// 而且只关「防流量逃逸」,网卡 IPv6 不还原(审计 G057)。
 	t.guardFix.Click(async(func() {
 		if err := restoreNetwork(); err != nil && !errors.Is(err, windows.ERROR_CANCELLED) {
 			text, _ := windows.UTF16PtrFromString(err.Error())

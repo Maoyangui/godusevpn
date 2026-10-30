@@ -38,7 +38,7 @@ func (d *Daemon) MissingRuleSets() []builder.MissingRuleSet {
 	return append([]builder.MissingRuleSet(nil), d.missingSets...)
 }
 
-// fillMissingRuleSets 连上之后把缺的规则集下回来。客户端见 SelfHTTP:全局禁直连的闸开着时经代理出站 ——
+// fillMissingRuleSets 连上之后把缺的规则集下回来。客户端见 SelfHTTP:防流量逃逸的闸开着时经代理出站 ——
 // 只开混合端口(TUN 关)时服务自己的连接不进隧道,直连就是隧道外流量;闸没开照常。
 // 全下完也不重启内核:那会让用户刚连上就断一下。下次连接自然就带上了。
 func (d *Daemon) fillMissingRuleSets() {

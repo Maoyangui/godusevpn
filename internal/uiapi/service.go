@@ -33,7 +33,7 @@ type Backend interface {
 	Logf(format string, a ...any)
 }
 
-// selfHTTP 后端要是给得出"服务自己访问外网"的客户端,更新检查与下载安装包就用它:守护进程在全局禁直连的闸的
+// selfHTTP 后端要是给得出"服务自己访问外网"的客户端,更新检查与下载安装包就用它:守护进程在防流量逃逸的闸的
 // 放行名单里(macOS 按 root),默认客户端直连出去就是隧道外流量(见 daemon.SelfHTTP)。
 type selfHTTP interface {
 	SelfHTTP(timeout time.Duration) (*http.Client, error)

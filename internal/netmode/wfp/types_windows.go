@@ -299,6 +299,12 @@ const (
 	cFWP_DATA_TYPE_MAX                 wtFwpDataType = cFWP_RANGE_TYPE + 1
 )
 
+// FWP_RANGE0 defined in fwptypes.h
+type wtFwpRange0 struct {
+	valueLow  wtFwpValue0
+	valueHigh wtFwpValue0
+}
+
 // FWP_V4_ADDR_AND_MASK defined in fwptypes.h
 // (https://docs.microsoft.com/en-us/windows/desktop/api/fwptypes/ns-fwptypes-fwp_v4_addr_and_mask).
 type wtFwpV4AddrAndMask struct {

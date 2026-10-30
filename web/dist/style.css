@@ -616,7 +616,7 @@ body.tv .drawer-brand b { font-size: 22px; }
 .pm-act .btn { flex: 1; padding: 7px 0; border-radius: 10px; }
 .pm-act .btn.icon { flex: none; width: 38px; padding: 7px 0; }
 
-/* 全局禁直连的小盾(首页状态下面):带盾牌图标的胶囊,渐变边和品牌色一致;该开没开成换成橙色警告 */
+/* 防流量逃逸的小盾(首页状态下面):带盾牌图标的胶囊,渐变边和品牌色一致;该开没开成换成橙色警告 */
 .guard-pill { display: inline-flex; align-items: center; gap: 6px; margin-top: 10px; padding: 5px 12px 5px 9px; border-radius: 999px; font-size: 12px; font-weight: 500; color: var(--brand2);
   background: linear-gradient(120deg, rgba(106, 68, 242, .10), rgba(47, 139, 255, .10) 60%, rgba(24, 227, 232, .10)); border: 1px solid rgba(47, 139, 255, .28); box-shadow: 0 2px 10px rgba(47, 139, 255, .10); max-width: 100%; }
 .nogap .guard-pill > *:not([hidden]) + *:not([hidden]) { margin-left: 6px; }

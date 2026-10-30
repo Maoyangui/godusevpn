@@ -63,13 +63,13 @@ const (
 	FakeIP6       = fakeIP6
 	ruleSetBase   = "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/"
 	ruleSetIPBase = "https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/"
-	// SealedBootstrapDoH 全局禁直连下「本地 DNS」若被设成 system,给节点域名解析用的加密替身(按地址连,不用再解析它自己)。
+	// SealedBootstrapDoH 防流量逃逸下「本地 DNS」若被设成 system,给节点域名解析用的加密替身(按地址连,不用再解析它自己)。
 	// 守护进程直连拉订阅时同样用它(见 daemon.directHTTP)。
 	SealedBootstrapDoH = "223.5.5.5"
-	// RemoteBootstrapDoH 全局禁直连下「远程 DNS」填的是域名时,经代理解析它用的公共 DoH(按地址连)。
+	// RemoteBootstrapDoH 防流量逃逸下「远程 DNS」填的是域名时,经代理解析它用的公共 DoH(按地址连)。
 	RemoteBootstrapDoH = "1.1.1.1"
 	// RouteMark Linux 上内核出站套接字带的标记(route.default_mark);守护进程自己的直连也打它(netmode.SelfControl)。
-	// 全局禁直连的闸按它放行本服务,而不是放行整个 root。取在高位,避开 mwan3 / kube-proxy 常用的标记位。
+	// 防流量逃逸的闸按它放行本服务,而不是放行整个 root。取在高位,避开 mwan3 / kube-proxy 常用的标记位。
 	RouteMark = 0x676f0000
 )
 
@@ -182,7 +182,7 @@ func buildConfig(in Input, rep *Report) ([]byte, error) {
 		strategy = "prefer_ipv4"
 	}
 	// tag=system 只用来解析 DoH 服务器自己的域名(远程 / 本地 DNS 填的是域名时)。
-	// 全局禁直连开着时这一步也不能走明文 53:换成按地址连的加密公共 DoH,和下面 localDNS 的替身是同一台。
+	// 防流量逃逸开着时这一步也不能走明文 53:换成按地址连的加密公共 DoH,和下面 localDNS 的替身是同一台。
 	systemDNS := obj("type", "local", "tag", "system")
 	if s.NoDirect && s.Mode == settings.ModeGlobal {
 		systemDNS = obj("type", "https", "tag", "system", "server", SealedBootstrapDoH)
@@ -191,7 +191,7 @@ func buildConfig(in Input, rep *Report) ([]byte, error) {
 	remote := obj("type", "https", "tag", "remote", "server", s.RemoteDNS, "detour", "proxy")
 	if !settings.IsIP(s.RemoteDNS) {
 		if s.NoDirect && s.Mode == settings.ModeGlobal {
-			// 全局禁直连下 system 是按地址直连的公共 DoH:拿它解析远程 DNS 服务器自己的域名,就是在隧道外问了一次
+			// 防流量逃逸下 system 是按地址直连的公共 DoH:拿它解析远程 DNS 服务器自己的域名,就是在隧道外问了一次
 			// "这个用户用的是哪家远程解析"。远程 DNS 本来就经代理,它的域名也经代理解析(按地址连的公共 DoH)。
 			servers = append(servers, obj("type", "https", "tag", "remote-boot", "server", RemoteBootstrapDoH, "detour", "proxy"))
 			remote["domain_resolver"] = "remote-boot"
@@ -201,7 +201,7 @@ func buildConfig(in Input, rep *Report) ([]byte, error) {
 	}
 	servers = append(servers, remote)
 	// 「本地 DNS」在全局模式下只剩一个用处:给节点服务器自己的域名做解析(default_domain_resolver)。
-	// 设成 system 就是明文 53 发到路由器 / 运营商 —— 全局禁直连开着的时候不能这么干,
+	// 设成 system 就是明文 53 发到路由器 / 运营商 —— 防流量逃逸开着的时候不能这么干,
 	// 换成加密的公共 DoH(按地址连,不再需要任何别的解析)。规则 / 直连模式不改,那本来就不承诺不直连。
 	localDNS := s.LocalDNS
 	if localDNS == "system" && s.NoDirect && s.Mode == settings.ModeGlobal {
@@ -282,7 +282,7 @@ func buildConfig(in Input, rep *Report) ([]byte, error) {
 			// 网关模式(Linux 软路由):经本机转发的局域网流量由 sing-box 用 nftables 直接导入(比策略路由快),需要内核带 nftables
 			tun["auto_redirect"] = true
 		}
-		// 全局禁直连下不排除:排除出去的应用整个绕过 VPN,就是隧道外的流量(见下面路由规则处的说明)
+		// 防流量逃逸下不排除:排除出去的应用整个绕过 VPN,就是隧道外的流量(见下面路由规则处的说明)
 		if android && len(s.BypassApps) > 0 && !(s.NoDirect && s.Mode == settings.ModeGlobal) {
 			tun["exclude_package"] = s.BypassApps // 这些应用整个不进 VPN(VpnService.addDisallowedApplication)
 		}
@@ -310,7 +310,7 @@ func buildConfig(in Input, rep *Report) ([]byte, error) {
 		// 照样能用 IPv6 从物理网卡出去。要在 DNS 劫持之后,发往 v6 地址 53 端口的查询仍得收进内核。
 		rules = append(rules, obj("ip_version", 6, "action", "reject"))
 	}
-	// 全局禁直连:隧道以外只剩节点连接本身、回环、(局域网直通开着时的)局域网 —— 按进程 / 按应用直连、网关模式
+	// 防流量逃逸:隧道以外只剩节点连接本身、回环、(局域网直通开着时的)局域网 —— 按进程 / 按应用直连、网关模式
 	// 里设成"直连"的设备,这时都不生效(照样走隧道)。它们是给规则模式配的;在严格全局下直连出去,闸又放行本服务,
 	// 就是隧道外的流量。
 	sealed := s.NoDirect && s.Mode == settings.ModeGlobal
@@ -380,7 +380,7 @@ func buildConfig(in Input, rep *Report) ([]byte, error) {
 	//
 	// 全局模式下这几条只放内核自己(SelfProcess):规则本身只看目的地址和端口,不限定是谁发的 —— 用户去往和节点
 	// 同域名 / 同地址、同端口的连接也会命中。CDN 节点很常见(server 写优选域名 www.visa.com、或 Cloudflare 的共享
-	// 地址,端口 443),浏览器一打开同一个站点、或恰好解析到同一地址的别的站点,就从本服务直连出去了(禁直连开着时闸还放行本服务)。
+	// 地址,端口 443),浏览器一打开同一个站点、或恰好解析到同一地址的别的站点,就从本服务直连出去了(防逃逸开着时闸还放行本服务)。
 	// 限定成内核自己的进程,绕圈照样避开,用户的连接照常走隧道;网关模式下局域网设备去节点地址的连接没有本机进程,也走隧道。
 	// 规则 / 直连模式不加:那本来就有直连,按进程查找对每条连接都有开销(路由器上尤其)。
 	var self map[string]any
@@ -789,11 +789,14 @@ func lanDest(extra ...map[string]any) map[string]any {
 // publicCIDRs 公网地址全集:0.0.0.0/0 与 ::/0 减去局域网 / 私网段,给 lanDest 判"有没有公网地址"用。
 // 减掉的只能比 ip_is_private(sing 的 N.IsPublicAddr)认的非公网少、不能多 —— 多减一段,那段地址混进应答就又能被直连出去;
 // 所以 0.0.0.0、::、::1 没减(当公网看,只会让规则更严)。
+// privateCIDRs 局域网 / 私网段(默认规则「私网」)。
+var privateCIDRs = []string{"10.0.0.0/8", "127.0.0.0/8", "169.254.0.0/16", "172.16.0.0/12", "192.168.0.0/16", "224.0.0.0/4", "fc00::/7", "fe80::/10", "ff00::/8"}
+
 var publicCIDRs = func() []string {
 	var b netipx.IPSetBuilder
 	b.AddPrefix(netip.MustParsePrefix("0.0.0.0/0"))
 	b.AddPrefix(netip.MustParsePrefix("::/0"))
-	for _, p := range []string{"10.0.0.0/8", "127.0.0.0/8", "169.254.0.0/16", "172.16.0.0/12", "192.168.0.0/16", "224.0.0.0/4", "fc00::/7", "fe80::/10", "ff00::/8"} {
+	for _, p := range privateCIDRs {
 		b.RemovePrefix(netip.MustParsePrefix(p))
 	}
 	set, _ := b.IPSet()

@@ -103,7 +103,7 @@ func main() {
 			}
 		}
 		if err := netmode.ClearGuard(); err != nil {
-			fail(fmt.Errorf("撤销全局禁直连失败,未执行卸载: %w", err))
+			fail(fmt.Errorf("撤销防流量逃逸失败,未执行卸载: %w", err))
 		}
 		// 网卡 IPv6 没还原**不能**挡住卸载。它和闸不是一回事:闸还在等于机器断网、删掉工具就锁死,
 		// 所以上面那道门必须守住;而网卡 IPv6 关着顶多是某几张网卡没有 v6,网照常能上。
@@ -261,7 +261,7 @@ func printPanel(s settings.Settings, pw string) {
 		}
 		// 闸在的时候不去问公网回显服务:macOS 上 root 被闸放行,这一问就是从隧道外直连出去(Linux 上会被拦、白等)(升级 / 重装时闸通常还在)
 		if n, _ := netmode.GuardStatus(); n > 0 {
-			fmt.Println("  (全局禁直连的闸开着:不去查公网地址)")
+			fmt.Println("  (防流量逃逸的闸开着:不去查公网地址)")
 		} else if pub := publicIPv4(); pub != "" && !contains(locals, pub) {
 			fmt.Printf("  http://%s:%s/   (公网;云主机要在安全组 / 防火墙放行 TCP %s)\n", pub, port, port)
 		}

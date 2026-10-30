@@ -24,7 +24,7 @@ echo "== 0. 环境"
 uname -r; grep PRETTY_NAME /etc/os-release
 before=$(pub4); echo "连接前公网 IPv4: $before"
 real=$(resolve api.ipify.org); echo "api.ipify.org 真实 IP: $real"
-# 连上以后默认路由已经指向隧道,物理网卡要在这之前记下来;绑它发直连是全局禁直连闸的实测
+# 连上以后默认路由已经指向隧道,物理网卡要在这之前记下来;绑它发直连是防流量逃逸闸的实测
 defif=$(ip route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}')
 dip=$(ip -4 addr show "$defif" 2>/dev/null | awk '/inet /{print $2; exit}' | cut -d/ -f1)
 # nft 的闸按标记放行本服务,root 只放行它回应入站连接的包;直连探测普通用户和 root 各试一次。跑机上是 uid 1001,别的机器退到 nobody
@@ -94,13 +94,15 @@ if [ -n "$np" ]; then
   check "朝节点服务器发起的连接判给了直连" "$hit" "$np(试了 $i 次)"
 fi
 
-echo "== 3.7 全局禁直连(nftables 闸:普通用户绑物理网卡直连被拦,经隧道照常;切回规则模式闸表清空)"
+echo "== 3.7 防流量逃逸(nftables 闸:普通用户绑物理网卡直连被拦,经隧道照常;切回规则模式闸表清空)"
 # Linux 的闸是 nftables 的一张 inet 表,由守护进程装、只在严格全局模式下存在。这里不验"程序会不会拒绝服务",
 # 验的是闸真的拦得住:拿普通用户绑物理网卡实打实打一次。按网卡名绑(SO_BINDTODEVICE,5.7 起普通用户也能用):
 # 只绑地址的已经不会从物理网卡出去了(见上面"只绑物理网卡地址的不再绕开隧道"),要强制走物理网卡得按网卡绑 ——
 # NetworkManager 按网卡做的联网检测就是这种。
-# 正控制:规则模式下(闸没开)普通用户绑物理网卡的直连必须是通的(2xx / 3xx),否则探测本身跑不通,
+# 正控制:防流量逃逸关着时普通用户绑物理网卡的直连必须是通的(2xx / 3xx),否则探测本身跑不通,
 # 下面"被拦"的断言就没有意义 —— 那种情况按失败报(见下面的 check),而不是让一个空串冒充"被拦"。
+"$BIN" settings noDirect=false >/dev/null 2>&1; sleep 2
+check "关掉开关:规则模式下闸撤了,隧道没断" "$([ -z "$(nft list table inet godusevpn_guard 2>/dev/null)" ] && wait_status connected 5 && echo 1 || echo 0)" ""
 direct_ok=0
 if [ -n "$U" ] && [ -n "$defif" ]; then
   d0=$(su -s /bin/sh "$U" -c "curl -s --interface $defif -m 6 -o /dev/null -w '%{http_code}' http://1.1.1.1/cdn-cgi/trace" 2>/dev/null || true)
@@ -108,7 +110,8 @@ if [ -n "$U" ] && [ -n "$defif" ]; then
   case "$d0" in 2*|3*) direct_ok=1;; esac
 fi
 # 正控制没过就按失败报,不再静默跳过:这是唯一一条证明 nft 闸"真拦得住"的断言,跳过它作业照样是绿的
-check "正控制:规则模式下普通用户绑物理网卡直连是通的" "$direct_ok" "http=${d0:-000}(用户 ${U:-无} 网卡 ${defif:-无} ${dip:-无})"
+check "正控制:防流量逃逸关着时普通用户绑物理网卡直连是通的" "$direct_ok" "http=${d0:-000}(用户 ${U:-无} 网卡 ${defif:-无} ${dip:-无})"
+"$BIN" settings noDirect=true >/dev/null 2>&1; sleep 2
 gres=$("$BIN" mode global 2>&1); grc=$?
 check "切到严格全局模式被接受" "$([ "$grc" = 0 ] && echo 1 || echo 0)" "$gres"
 sleep 2
@@ -201,10 +204,54 @@ else
 fi
 check "切回规则模式成功" "$("$BIN" mode rule >/dev/null 2>&1 && echo 1 || echo 0)" ""
 sleep 2
-check "切回规则模式后闸表清空" "$([ -z "$(nft list table inet godusevpn_guard 2>/dev/null)" ] && echo 1 || echo 0)" "$(nft list table inet godusevpn_guard 2>/dev/null | head -3 | tr '\n' ';')"
+check "规则模式恢复连接" "$(wait_status connected 15 && echo 1 || echo 0)" ""
+
+echo "== 3.8 规则模式的防流量逃逸:直连规则的地址段照常,其余只许走隧道"
+rr=$(nft list table inet godusevpn_guard 2>/dev/null)
+check "规则模式下闸在、带放行段" "$(echo "$rr" | grep -c 'set direct4')" "$(echo "$rr" | grep -c .) 行"
+check "规则模式不拦 DNS / UPnP" "$([ -z "$(echo "$rr" | grep -E 'dport \{ (53, 853|1900, 5351) \} drop')" ] && echo 1 || echo 0)" ""
+CNIP=223.5.5.5 # 阿里 DNS,在 geoip-cn 里
+nicprobe() { su -s /bin/sh "$U" -c "curl -sk --interface $defif -m 6 -o /dev/null -w '%{http_code}' $1" 2>/dev/null || true; }
+plainprobe() { su -s /bin/sh "$U" -c "curl -sk -m 6 -o /dev/null -w '%{http_code}' $1" 2>/dev/null || true; }
+isopen() { case "$1" in 2*|3*|4*) echo 1;; *) echo 0;; esac; }
+isshut() { case "$1" in 2*|3*|4*) echo 0;; *) echo 1;; esac; }
+if [ "$direct_ok" = 1 ]; then
+  a=$(nicprobe "https://$CNIP/"); check "绑物理网卡:国内地址放行" "$(isopen "$a")" "http=${a:-000}"
+  a=$(nicprobe "http://1.1.1.1/cdn-cgi/trace"); check "绑物理网卡:国外地址被拦" "$(isshut "$a")" "http=${a:-000}"
+  if command -v systemctl >/dev/null 2>&1; then
+    systemctl stop godusevpn; sleep 2
+    check "服务停着:隧道网卡没了、闸还在" "$([ -z "$(ip -4 addr show godusevpn 2>/dev/null)" ] && nft list table inet godusevpn_guard >/dev/null 2>&1 && echo 1 || echo 0)" ""
+    a=$(plainprobe "https://$CNIP/"); check "服务停着:国内地址照常直连" "$(isopen "$a")" "http=${a:-000}"
+    a=$(plainprobe "http://1.1.1.1/cdn-cgi/trace"); check "服务停着:国外地址拦下" "$(isshut "$a")" "http=${a:-000}"
+    if command -v dig >/dev/null 2>&1; then
+      g=$(su -s /bin/sh "$U" -c "dig +short +time=3 +tries=1 @$CNIP www.baidu.com A" 2>/dev/null | head -1)
+      check "服务停着:问国内 DNS 能解析" "$([ -n "$g" ] && ! echo "$g" | grep -q 'timed out' && echo 1 || echo 0)" "$g"
+      g=$(su -s /bin/sh "$U" -c "dig +short +time=3 +tries=1 @8.8.8.8 www.google.com A" 2>/dev/null | grep -E '^[0-9.]+$' | head -1)
+      check "服务停着:问国外 DNS 被拦" "$([ -z "$g" ] && echo 1 || echo 0)" "$g"
+    fi
+    pkill -9 -x godusevpn; systemctl start godusevpn
+    check "服务起来后接着连上" "$(wait_status connected 60 && echo 1 || echo 0)" "$("$BIN" status | sed -n 2p)"
+  fi
+fi
+# 规则组走命令行改:防火墙跟着变、不用重连
+"$BIN" settings 'ruleGroups=[{"id":"t1","name":"t1","enabled":true,"outbound":"direct","rules":[{"type":"ip_cidr","value":"1.1.1.1/32"}]}]' >/dev/null 2>&1; sleep 2
+if [ "$direct_ok" = 1 ]; then a=$(nicprobe "http://1.1.1.1/cdn-cgi/trace"); check "加直连 IP 规则:防火墙当场放行" "$(isopen "$a")" "http=${a:-000}"; fi
+"$BIN" settings 'ruleGroups=[{"id":"t2","name":"t2","enabled":true,"outbound":"proxy","rules":[{"type":"ip_cidr","value":"223.5.5.0/24"},{"type":"port","value":"8443"}]}]' >/dev/null 2>&1; sleep 2
+if [ "$direct_ok" = 1 ]; then a=$(nicprobe "https://$CNIP/"); check "排前面的走隧道规则盖过国内直连" "$(isshut "$a")" "http=${a:-000}"; fi
+check "走隧道的端口进了防火墙" "$(nft list table inet godusevpn_guard | grep -c 'tcp dport 8443 drop\|tcp dport { 8443 } drop')" ""
+"$BIN" settings 'ruleGroups=[]' >/dev/null 2>&1; sleep 2
+check "改规则一路没断连接" "$(wait_status connected 5 && echo 1 || echo 0)" ""
+# 防火墙被别的东西清掉:几秒内自己装回来(用落下的规格,不用重连)
+nft delete table inet godusevpn_guard 2>/dev/null
+i=0; while [ $i -lt 60 ] && ! nft list table inet godusevpn_guard >/dev/null 2>&1; do sleep 2; i=$((i+2)); done
+check "闸表被清掉后自动装回" "$(nft list table inet godusevpn_guard 2>/dev/null | grep -c 'set direct4')" "${i} 秒"
+# 撤闸:防火墙回到连接前。开关一关,闸、DNS 策略路由、开机版都得没了
+"$BIN" settings noDirect=false >/dev/null 2>&1; sleep 2
+check "关开关后闸表清空" "$([ -z "$(nft list table inet godusevpn_guard 2>/dev/null)" ] && echo 1 || echo 0)" "$(nft list table inet godusevpn_guard 2>/dev/null | head -3 | tr '\n' ' ')"
 check "撤闸后 DNS 的策略路由也撤了" "$([ "$(ip rule show | grep -c 'lookup 5053')" = 0 ] && echo 1 || echo 0)" "$(ip rule show | grep 5053 | tr '\n' ';')"
 check "撤闸后开机版的闸也删了" "$([ ! -f /var/lib/godusevpn/guard-boot.nft ] && echo 1 || echo 0)" ""
-check "规则模式恢复连接" "$(wait_status connected 15 && echo 1 || echo 0)" ""
+"$BIN" settings noDirect=true >/dev/null 2>&1; sleep 2
+check "开回开关:闸回来,隧道没断" "$(nft list table inet godusevpn_guard 2>/dev/null | grep -c 'set direct4')" ""
 
 echo "== 4. 出口"
 now=$(pub4); check "规则模式出口 IP 变了" "$([ -n "$now" ] && [ "$now" != "$before" ] && echo 1 || echo 0)" "before=$before now=$now"

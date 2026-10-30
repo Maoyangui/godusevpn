@@ -142,7 +142,7 @@ func TestProtectionChanged(t *testing.T) {
 	}
 	for name, mut := range map[string]func(*settings.Settings){
 		"模式":        func(s *settings.Settings) { s.Mode = settings.ModeGlobal },
-		"禁直连":       func(s *settings.Settings) { s.NoDirect = false },
+		"防逃逸":       func(s *settings.Settings) { s.NoDirect = false },
 		"局域网直通":     func(s *settings.Settings) { s.LANBypass = false },
 		"网关模式":      func(s *settings.Settings) { s.NetMode = settings.NetGateway },
 		"TUN":       func(s *settings.Settings) { s.TUN = false },

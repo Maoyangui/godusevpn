@@ -127,20 +127,23 @@ if [ -n "$np" ]; then
   check "朝节点服务器发起的连接判给了直连" "$hit" "$np(试了 $i 次)"
 fi
 
-echo "== 3.7 全局禁直连(全局模式下闸要在:普通用户绑物理网卡直连被拦,经隧道照常;切回规则模式锚点清空)"
+echo "== 3.7 防流量逃逸(全局模式下闸要在:普通用户绑物理网卡直连被拦,经隧道照常;切回规则模式锚点清空)"
 # macOS 的闸是守护进程自己装的 pf 锚点,没有"守护进程之外也在"的开机期覆盖 —— 这是平台限制,README 写明的,
 # 不是拒绝连接的理由。m29 曾把"没有开机期保护就不许进严格全局模式"做成硬门,结果除 Windows 外的平台一律连不上,
-# 用户唯一的绕法是去关掉「全局禁直连」—— 一道以隐私为名的检查,实际把人推向更不私密的配置。
+# 用户唯一的绕法是去关掉「防流量逃逸」—— 一道以隐私为名的检查,实际把人推向更不私密的配置。
 # 所以这里验的是运行期的闸真的拦得住:拿普通用户绑物理网卡实打实地打一次,而不是验"它拒绝服务"。
-# 正控制:规则模式下(闸没开)同一个探测必须是通的,否则探测本身跑不通,下面"被拦"的 000 就什么也证明不了。
+# 正控制:防流量逃逸关着时同一个探测必须是通的,否则探测本身跑不通,下面"被拦"的 000 就什么也证明不了。
 # 没过就按失败报,不静默跳过。
+"$BIN" settings noDirect=false >/dev/null 2>&1; sleep 2
+check "关掉开关:规则模式下锚点清空,隧道没断" "$([ -z "$(pfctl -a com.apple/godusevpn -sr 2>/dev/null)" ] && wait_status connected 5 && echo 1 || echo 0)" ""
 dip=""; direct_ok=0
 if [ -n "$U" ] && [ -n "$defif" ]; then
   dip=$(ipconfig getifaddr "$defif" 2>/dev/null)
   d0=$(sudo -u "$U" curl -s --interface "$dip" -m 6 -o /dev/null -w '%{http_code}' http://1.1.1.1/cdn-cgi/trace 2>/dev/null || true)
   case "$d0" in 2*|3*) direct_ok=1;; esac
 fi
-check "正控制:规则模式下普通用户绑物理网卡直连是通的" "$direct_ok" "http=${d0:-000}(用户 ${U:-无} 网卡 ${defif:-无} ${dip:-无})"
+check "正控制:防流量逃逸关着时普通用户绑物理网卡直连是通的" "$direct_ok" "http=${d0:-000}(用户 ${U:-无} 网卡 ${defif:-无} ${dip:-无})"
+"$BIN" settings noDirect=true >/dev/null 2>&1; sleep 2
 gres=$("$BIN" mode global 2>&1); grc=$?
 check "切到严格全局模式被接受" "$([ "$grc" = 0 ] && echo 1 || echo 0)" "$gres"
 sleep 2
@@ -208,9 +211,36 @@ curl -s --max-time 5 -c "$JAR" -X POST -H 'Content-Type: application/json' -d "{
 r=$(api GetSettings); check "服务重启后重新登录面板" "$(echo "$r" | grep -c '"result"')" "$(echo "$r" | cut -c1-60)"
 check "切回规则模式成功" "$("$BIN" mode rule >/dev/null 2>&1 && echo 1 || echo 0)" ""
 sleep 2
-check "切回规则模式后锚点清空" "$([ -z "$(pfctl -a com.apple/godusevpn -sr 2>/dev/null)" ] && echo 1 || echo 0)" "$(pfctl -a com.apple/godusevpn -sr 2>/dev/null | tr '\n' ';')"
-check "撤闸后开机版的闸也删了" "$([ ! -f "$BOOTPF" ] && echo 1 || echo 0)" ""
 check "规则模式恢复连接" "$(wait_status connected 15 && echo 1 || echo 0)" ""
+
+echo "== 3.8 规则模式的防流量逃逸:直连规则的地址段照常,其余只许走隧道"
+rr=$(pfctl -a com.apple/godusevpn -sr 2>/dev/null)
+check "规则模式下锚点里有放行段那条" "$(echo "$rr" | grep -c 'pass out quick .*to <godusevpn_direct>')" "$(echo "$rr" | grep -c .) 条"
+tn=$(pfctl -a com.apple/godusevpn -t godusevpn_direct -T show 2>/dev/null | wc -l | tr -d ' ')
+check "放行段读到了国内地址" "$([ "${tn:-0}" -gt 1000 ] && echo 1 || echo 0)" "${tn:-0} 段"
+check "规则模式不拦 DNS / UPnP" "$([ -z "$(echo "$rr" | grep -E 'block drop out quick .*port = (domain|53|1900|ssdp|5351|nat-pmp)')" ] && echo 1 || echo 0)" ""
+check "规则模式入站建状态(回包不被最后一条丢掉)" "$(echo "$rr" | grep -c '^pass in quick')" ""
+CNIP=223.5.5.5 # 阿里 DNS,在 geoip-cn 里
+isopen() { case "$1" in 2*|3*|4*) echo 1;; *) echo 0;; esac; }
+isshut() { case "$1" in 2*|3*|4*) echo 0;; *) echo 1;; esac; }
+if [ "$direct_ok" = 1 ]; then
+  a=$(sudo -u "$U" curl -sk --interface "$dip" -m 6 -o /dev/null -w '%{http_code}' "https://$CNIP/" 2>/dev/null || true); check "绑物理网卡:国内地址放行" "$(isopen "$a")" "http=${a:-000}"
+  a=$(sudo -u "$U" curl -s --interface "$dip" -m 6 -o /dev/null -w '%{http_code}' http://1.1.1.1/cdn-cgi/trace 2>/dev/null || true); check "绑物理网卡:国外地址被拦" "$(isshut "$a")" "http=${a:-000}"
+fi
+# 规则组走命令行改:防火墙跟着变、不用重连
+"$BIN" settings 'ruleGroups=[{"id":"t1","name":"t1","enabled":true,"outbound":"direct","rules":[{"type":"ip_cidr","value":"1.1.1.1/32"}]}]' >/dev/null 2>&1; sleep 2
+if [ "$direct_ok" = 1 ]; then a=$(sudo -u "$U" curl -s --interface "$dip" -m 6 -o /dev/null -w '%{http_code}' http://1.1.1.1/cdn-cgi/trace 2>/dev/null || true); check "加直连 IP 规则:防火墙当场放行" "$(isopen "$a")" "http=${a:-000}"; fi
+"$BIN" settings 'ruleGroups=[{"id":"t2","name":"t2","enabled":true,"outbound":"proxy","rules":[{"type":"ip_cidr","value":"223.5.5.0/24"},{"type":"port","value":"8443"}]}]' >/dev/null 2>&1; sleep 2
+if [ "$direct_ok" = 1 ]; then a=$(sudo -u "$U" curl -sk --interface "$dip" -m 6 -o /dev/null -w '%{http_code}' "https://$CNIP/" 2>/dev/null || true); check "排前面的走隧道规则盖过国内直连" "$(isshut "$a")" "http=${a:-000}"; fi
+check "走隧道的端口进了防火墙" "$(pfctl -a com.apple/godusevpn -sr 2>/dev/null | grep -c 'block drop out quick .*port = 8443')" ""
+"$BIN" settings 'ruleGroups=[]' >/dev/null 2>&1; sleep 2
+check "改规则一路没断连接" "$(wait_status connected 5 && echo 1 || echo 0)" ""
+# 撤闸:开关一关,锚点和开机版都得没了;pf 的引用还回去
+"$BIN" settings noDirect=false >/dev/null 2>&1; sleep 2
+check "关开关后锚点清空" "$([ -z "$(pfctl -a com.apple/godusevpn -sr 2>/dev/null)" ] && echo 1 || echo 0)" "$(pfctl -a com.apple/godusevpn -sr 2>/dev/null | tail -2 | tr '\n' ' ')"
+check "撤闸后开机版的闸也删了" "$([ ! -f "$BOOTPF" ] && echo 1 || echo 0)" ""
+"$BIN" settings noDirect=true >/dev/null 2>&1; sleep 2
+check "开回开关:锚点回来,隧道没断" "$(pfctl -a com.apple/godusevpn -sr 2>/dev/null | grep -c 'godusevpn_direct')" ""
 
 echo "== 4. IPv6:关闭时必须是真拒绝,且不能绕过隧道出去"
 a6=$(resolve6 www.google.com); check "AAAA 为空" "$([ -z "$a6" ] && echo 1 || echo 0)" "${a6:-(空)}"

@@ -1,6 +1,6 @@
 //go:build windows
 
-// Package wfp 在 Windows 过滤平台(WFP)里放一组过滤器,做「全局禁直连」的闸。
+// Package wfp 在 Windows 过滤平台(WFP)里放一组过滤器,做「防流量逃逸」的闸。
 //
 // 这个包改自 wireguard-windows 的 tunnel/firewall(MIT,Copyright (C) 2019-2021 WireGuard LLC,
 // 许可证全文见仓库 NOTICE):过滤器、系统调用与类型定义照搬,去掉了原来"只许问指定 DNS 服务器"的限制与 Hyper-V 那块,
@@ -16,6 +16,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"net/netip"
 	"sync"
 	"syscall"
 	"unsafe"
@@ -64,6 +65,10 @@ type Spec struct {
 	Tun6 [16]byte // 隧道 v6 地址
 	// SelfPath 放行的进程:空 = 当前进程。真机测试时测试进程给现役服务开闸,就填服务 exe 的路径
 	SelfPath string
+	// 规则模式(只进运行期那组,见 rules_direct.go)
+	Rule        bool
+	Direct      []netip.Prefix // 直连规则放行的地址段
+	TunnelPorts []PortRange    // 规则明确走隧道的端口
 }
 
 const (
@@ -136,7 +141,7 @@ func baseProvider(dd *wtFwpmDisplayData0) wtFwpmProvider0 {
 
 // dropLegacyBase 收掉第一代的子层与提供者。只在第一代的过滤器已经删光之后调(Enable 的持久事务提交后、
 // Disable 删完过滤器后),否则 BFE 会按"还被引用"拒绝。它们名下已经没有任何过滤器,留着不影响闸,
-// 删不掉也只是收尾没做完:返回警告,绝不能让开闸因为收拾旧账而失败,否则用户只能去关「全局禁直连」。
+// 删不掉也只是收尾没做完:返回警告,绝不能让开闸因为收拾旧账而失败,否则用户只能去关「防流量逃逸」。
 //
 // 第一代提供者在 m29 那几版被绑上了服务名(闸能不能跨过开机就取决于服务的启动类型,见 baseProvider)。
 // 0.7.2 / 0.7.3 只能等用户下次断开时才换掉;现在 Enable 在一个事务里把过滤器换到第二代名下,
@@ -192,9 +197,16 @@ func ensureBase(session uintptr) error {
 //	15 放行本服务      14 放行回环、隧道地址      13 拦 DNS(53 / 853)、UPnP / NAT-PMP(1900 / 5351 / 5350)、v6 假地址段
 //	12 局域网、DHCP、邻居发现、热点(本机当 DHCP 服务端 / DNS 代理)      0 其余全拦
 //
+// 规则模式(只有运行期那组)多几档,DNS、UPnP 也挪下去了,见 rules_direct.go。
+//
 // 拦 DNS 必须压在局域网放行上面(见 blockDNS),又必须在隧道地址、回环、本服务下面 —— 所以隧道地址和回环
 // 从 12 / 13 提到了 14。只影响 DNS 的先后,别的流量这几条规则的结果不变。拦 UPnP / NAT-PMP 同理(见 blockUPnP)。
 func installSet(session uintptr, spec Spec, withSelf, withForward bool) error {
+	rule := spec.Rule && withSelf // 规则模式那几条只进运行期那组:开机那几秒网络都还没起来,不用放行直连
+	leak := uint8(13)
+	if rule {
+		leak = 9 // 规则模式下 DNS、UPnP 不压在放行上面(见 rules_direct.go)
+	}
 	if withSelf {
 		if err := permitSelf(session, base, 15, spec.SelfPath); err != nil {
 			return err
@@ -206,10 +218,10 @@ func installSet(session uintptr, spec Spec, withSelf, withForward bool) error {
 	if err := permitTunAddress(session, base, 14, spec.Tun4, spec.Tun6); err != nil {
 		return err
 	}
-	if err := blockDNS(session, base, 13); err != nil {
+	if err := blockDNS(session, base, leak); err != nil {
 		return err
 	}
-	if err := blockUPnP(session, base, 13); err != nil {
+	if err := blockUPnP(session, base, leak); err != nil {
 		return err
 	}
 	if err := blockFakeIP6(session, base, 13); err != nil {
@@ -232,6 +244,17 @@ func installSet(session uintptr, spec Spec, withSelf, withForward bool) error {
 	if err := permitHotspot(session, base, 12); err != nil {
 		return err
 	}
+	if rule {
+		if err := blockTunnelPorts(session, base, 11, spec.TunnelPorts); err != nil {
+			return err
+		}
+		if err := permitDirect(session, base, 10, spec.Direct, cFWPM_CONDITION_IP_REMOTE_ADDRESS, cFWPM_LAYER_ALE_AUTH_CONNECT_V4, cFWPM_LAYER_ALE_AUTH_CONNECT_V6, directPermitName4, directPermitName6); err != nil {
+			return err
+		}
+		if err := permitInbound(session, base, 10); err != nil {
+			return err
+		}
+	}
 	if withForward {
 		if err := installForward(session, spec); err != nil {
 			return err
@@ -249,6 +272,11 @@ func installForward(session uintptr, spec Spec) error {
 			return err
 		}
 	}
+	if spec.Rule && curFlags&cFWPM_FILTER_FLAG_PERSISTENT != 0 {
+		if err := permitDirect(session, base, 10, spec.Direct, cFWPM_CONDITION_IP_DESTINATION_ADDRESS, cFWPM_LAYER_IPFORWARD_V4, cFWPM_LAYER_IPFORWARD_V6, forwardPermitName, forwardPermitName); err != nil {
+			return err
+		}
+	}
 	return blockForward(session, base, 0)
 }
 
@@ -259,7 +287,7 @@ func installForward(session uintptr, spec Spec) error {
 //
 // 开机那两组(BOOTTIME)只覆盖"内核网络起来到 BFE 启动"那几秒,装不上不等于此刻在漏。
 // 把它们并进同一个事务、失败即整体回滚(m29 的 f183df1 就是这么改的),等于让一个只影响开机
-// 几秒的问题把用户整个挡在门外 —— 而用户挡不住就会去关掉「全局禁直连」,反倒更不私密。
+// 几秒的问题把用户整个挡在门外 —— 而用户挡不住就会去关掉「防流量逃逸」,反倒更不私密。
 // 所以各自一个事务,失败记成警告,由界面与日志如实报出来。
 func Enable(spec Spec) (warn string, err error) {
 	mu.Lock()
@@ -281,7 +309,7 @@ func Enable(spec Spec) (warn string, err error) {
 		curFlags = cFWPM_FILTER_FLAG_PERSISTENT
 		return installSet(s, spec, true, true)
 	}); err != nil {
-		return "", fmt.Errorf("全局禁直连过滤器事务回滚,保留旧保护: %w", err)
+		return "", fmt.Errorf("防流量逃逸过滤器事务回滚,保留旧保护: %w", err)
 	}
 	legacyWarn := dropLegacyBase(s)
 	if err := runTransaction(s, func(s uintptr) error {

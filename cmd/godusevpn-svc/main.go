@@ -118,7 +118,7 @@ func main() {
 			fail(errors.New("停止服务以清理隐私保护失败:服务迟迟没停下来"))
 		}
 		if err := netmode.ClearGuard(); err != nil {
-			fail(fmt.Errorf("撤销全局禁直连失败,未执行卸载: %w", err))
+			fail(fmt.Errorf("撤销防流量逃逸失败,未执行卸载: %w", err))
 		}
 		// 网卡 IPv6 没还原**不能**挡住卸载。它和闸不是一回事:闸还在等于机器断网、删掉工具就锁死,
 		// 所以上面那道门必须守住;而网卡 IPv6 关着顶多是某几张网卡没有 v6,网照常能上。

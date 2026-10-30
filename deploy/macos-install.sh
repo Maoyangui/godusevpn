@@ -58,7 +58,7 @@ if [ "$PKGARCH" != "$ARCH" ]; then
 fi
 
 # 先停旧服务再换文件:升级不能走 uninstall,那是用户明确"卸载"语义,
-# 会撤持久禁直连闸并恢复网卡 IPv6,在替换文件期间制造直连泄漏窗口。
+# 会撤持久防逃逸闸并恢复网卡 IPv6,在替换文件期间制造直连泄漏窗口。
 # macOS 这边 Stop() 是先 needRoot 再 launchctl bootout:作业正在退出、或者 launchd 拒绝时会返回非零。
 # 这里是 set -e —— m29 去掉 || true 之后,这一下就能让整个升级脚本无声退出,
 # 用户看到的只是"跑完了但版本没变"。(m28 这一行本来是 uninstall,不是 stop。)

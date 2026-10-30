@@ -59,7 +59,7 @@ type StateView struct {
 	ExitRegion string         `json:"exitRegion,omitempty"` // 出口所在一级行政区
 	ExitISP    string         `json:"exitIsp,omitempty"`    // 出口那条线路的运营商 / 机房
 	Uptime     int64          `json:"uptime"`
-	Guard      string         `json:"guard,omitempty"`      // 全局禁直连的闸:on = 开着;空 = 没开(开关关了、不是全局模式、或没在连)
+	Guard      string         `json:"guard,omitempty"`      // 防流量逃逸的闸:on = 开着;空 = 没开(开关关了、不是全局模式、或没在连)
 	GuardError string         `json:"guardError,omitempty"` // 闸该开却没开成(或隧道网卡放行失败)的原因
 	GuardNote  string         `json:"guardNote,omitempty"`  // 闸开着,但平台这一层保护不完整(Android 没开 lockdown、Windows 开机那组没装全)
 	NICLost    string         `json:"nicLost,omitempty"`    // 有几张网卡动手前的 IPv6 状态丢了、可能还关着;用户点"知道了"之前一直带着

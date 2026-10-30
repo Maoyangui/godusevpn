@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -78,7 +79,7 @@ type Daemon struct {
 	unsupported                map[string]skippedNode      // 最近一次备配置时内核建不起来、被剔掉的节点(tag → 原因与当时的出站)
 	running                    *profile.Profile            // 正在跑的内核是按哪份订阅生成的;刷新后拿它和缓存比,决定动不动隧道
 	prepared                   *profile.Profile            // prepare 刚按它生成了配置、内核还没起:start 成功后转成 running
-	guardOn                    bool                        // 「全局禁直连」的闸此刻开着
+	guardOn                    bool                        // 「防流量逃逸」的闸此刻开着
 	guardArming                bool                        // 正在装闸(applyGuard 取消直连动作起到装完为止):直连动作按"闸开着"处理
 	// tunUpPending 隧道网卡的转发层放行没成功(网卡还没注册好之类),下一次同步再试
 	tunUpPending atomic.Bool
@@ -102,6 +103,11 @@ type Daemon struct {
 	preparedClashPort int
 	clashPort         atomic.Int32
 	guardMu           sync.Mutex // syncGuard 整段串行:判断 + 开 / 撤要一气呵成
+
+	// 规则模式闸的放行段:折算结果按输入指纹记着,规格每轮同步都要比一次(见 fillRuleGuard)
+	ruleGuardMu   sync.Mutex
+	ruleGuardKey  string
+	ruleGuardMemo netmode.GuardSpec
 	// guardHold 用于“放宽隐私设置”的重启事务:新配置验证并启动成功前，旧闸不能撤。
 	// 与 nicHold 一样由 d.mu 保护。
 	guardHold    bool
@@ -140,7 +146,7 @@ type persisted struct {
 type Options struct {
 	Platform adapter.PlatformInterface // Android:TUN、网络接口、连接归属由宿主提供
 	NoListen bool                      // 不开本机控制口(Android 只在进程内 Dispatch)
-	// ReleaseTun Android:「全局禁直连」撤闸时把留着的 VPN 接口关掉(内核没在跑时它是个黑洞);别的平台为 nil
+	// ReleaseTun Android:「防流量逃逸」撤闸时把留着的 VPN 接口关掉(内核没在跑时它是个黑洞);别的平台为 nil
 	ReleaseTun func()
 }
 
@@ -180,7 +186,7 @@ func NewWithOptions(o Options) (*Daemon, error) {
 	s, err := settings.Load(paths.Settings())
 	d.settingsOK = err == nil
 	if err != nil {
-		// 设置决定「全局禁直连」与网卡 IPv6 策略,损坏 / 不可读时确实不能拿默认值去覆盖并撤保护。
+		// 设置决定「防流量逃逸」与网卡 IPv6 策略,损坏 / 不可读时确实不能拿默认值去覆盖并撤保护。
 		// 但 m29 的做法是整个服务拒绝启动 —— 那把用户关在了门外:Windows 上托盘只剩一句"服务未运行",
 		// Android 上开机 / 升级广播直接崩进程,而「恢复网络」的离线兜底同样依赖 settings.Load,闸也解不掉。
 		// 改成:照常起来(settings.Load 失败时返回的就是默认值),但把 settingsOK 记成 false ——
@@ -212,7 +218,7 @@ func NewWithOptions(o Options) (*Daemon, error) {
 			d.logf("上次 DNS/路由保护尚未成功恢复,保留恢复依据并继续重试: %v", err)
 		}
 	}
-	// 网卡上被停用的 IPv6 不在这里无条件还原:它和「全局禁直连」的闸一样是持久的,上次连着关的机就该一直关着
+	// 网卡上被停用的 IPv6 不在这里无条件还原:它和「防流量逃逸」的闸一样是持久的,上次连着关的机就该一直关着
 	// (见 reconcileNICIPv6)。在这儿还原的话,开机到服务重新关上它之间,公网 v6 地址就白白露了几十秒。
 	b := make([]byte, 16)
 	_, _ = rand.Read(b)
@@ -601,7 +607,7 @@ func (d *Daemon) noteFetchErr(id string, err error) {
 
 // fetchProfile 拉订阅:内核在跑时先经当前代理;失败就经 auto 组再试三次;auto 也不行走直连。
 // 这条回退链只用于刷新订阅,不影响任何其它流量,也不改用户选中的节点。内核没跑时直接用系统网络
-// (禁直连下域名改经 DoH 解析,见 directHTTP)。
+// (防逃逸下域名改经 DoH 解析,见 directHTTP)。
 // 订阅无效 / 到期这类错误不换路径,直接返回。
 func (d *Daemon) fetchProfile(ctx context.Context, url string) (*profile.Profile, error) {
 	if !d.core.Running() {
@@ -730,7 +736,7 @@ func (d *Daemon) prepare(ctx context.Context) ([]byte, error) {
 		return nil, err
 	}
 	if err := d.guardReady(); err != nil {
-		d.logf("全局禁直连未就绪,隧道照常建立(不建只会让流量全部直连),连上后继续重装: %v", err)
+		d.logf("防流量逃逸未就绪,隧道照常建立(不建只会让流量全部直连),连上后继续重装: %v", err)
 	}
 	a, p := d.activeProfile()
 	if a == nil {
@@ -1033,13 +1039,13 @@ func (d *Daemon) restart() error {
 	return d.machine.Restart()
 }
 
-// restartForPrivacySettings 用新设置重建数据面。放宽全局禁直连时，旧闸在新配置
+// restartForPrivacySettings 用新设置重建数据面。放宽防流量逃逸时，旧闸在新配置
 // 验证并成功启动前始终保留；失败则恢复旧设置和旧闸，避免出现“设置已切换但旧数据面
 // 没有对应保护”的窗口。
 // privacyRelaxes 从 prev 到 next 是不是在**放宽**保护。
 //
 // 方向是这里唯一要紧的事。收紧失败可以整份回滚 —— 用户没拿到更松的配置,不吃亏。
-// 放宽失败要是也回滚,用户就再也关不掉「全局禁直连」了 —— 而他去关它,十有八九正是因为
+// 放宽失败要是也回滚,用户就再也关不掉「防流量逃逸」了 —— 而他去关它,十有八九正是因为
 // 此刻连不上、想把网先拿回来。m29 让两个方向都必须"重启成功"才算数,于是节点一连不上,
 // 逃生口自己就锁死了:关不掉开关 → 闸不撤 → 没网 → 还是关不掉。
 func privacyRelaxes(prev, next settings.Settings) bool {
@@ -1047,6 +1053,8 @@ func privacyRelaxes(prev, next settings.Settings) bool {
 	case prev.NoDirect && !next.NoDirect:
 		return true
 	case prev.Mode == settings.ModeGlobal && next.Mode != settings.ModeGlobal:
+		return true
+	case prev.GuardOn() && !next.GuardOn():
 		return true
 	case !prev.IPv6 && next.IPv6:
 		return true
@@ -1059,11 +1067,12 @@ func privacyRelaxes(prev, next settings.Settings) bool {
 }
 
 // needsPrivacyRebuild 运行中改了设置要不要整份重建(走 restartForPrivacySettings)。
-// 严格全局(禁直连 + 全局)的边界决定密封 DNS 与闸,跨过就必须整份重建。没跨过的切模式还要看 modeSwitchIsLive:
+// 严格全局(防逃逸 + 全局)的边界决定密封 DNS,跨过就必须整份重建。规则模式下开关这个开关只动防火墙、配置一字不变,不用重连。
+// 没跨过的切模式还要看 modeSwitchIsLive:
 // 新旧配置只差 default_mode 才经 Clash API 就地切、不断隧道,否则照样重建。
 func needsPrivacyRebuild(prev, next settings.Settings) bool {
 	strict := func(s settings.Settings) bool { return s.NoDirect && s.Mode == settings.ModeGlobal }
-	return strict(prev) != strict(next) || prev.NoDirect != next.NoDirect || prev.IPv6 != next.IPv6 ||
+	return strict(prev) != strict(next) || prev.IPv6 != next.IPv6 ||
 		prev.DisableNICIPv6 != next.DisableNICIPv6 || prev.TUN != next.TUN
 }
 
@@ -1072,7 +1081,13 @@ func needsPrivacyRebuild(prev, next settings.Settings) bool {
 // "没在连"去撤闸、还原 IPv6 —— 而用户只是改了一项和保护无关的设置。放宽只认改了这几项。
 func protectionChanged(prev, next settings.Settings) bool {
 	return prev.Mode != next.Mode || prev.NoDirect != next.NoDirect || prev.LANBypass != next.LANBypass ||
-		prev.NetMode != next.NetMode || prev.TUN != next.TUN || prev.IPv6 != next.IPv6 || prev.DisableNICIPv6 != next.DisableNICIPv6
+		prev.NetMode != next.NetMode || prev.TUN != next.TUN || prev.IPv6 != next.IPv6 || prev.DisableNICIPv6 != next.DisableNICIPv6 ||
+		ruleGuardChanged(prev, next)
+}
+
+// ruleGuardChanged 规则模式闸照着执行的规则变了:放行段要跟着变。
+func ruleGuardChanged(prev, next settings.Settings) bool {
+	return next.RuleGuard() && (prev.DefaultRules != next.DefaultRules || !reflect.DeepEqual(prev.RuleGroups, next.RuleGroups) || !slices.Equal(prev.Devices, next.Devices))
 }
 
 // modeSwitchIsLive 新旧设置生成的配置除了 default_mode 是否一字不差:一样才能经 Clash API 就地切模式。
@@ -1129,7 +1144,7 @@ func (d *Daemon) switchModeLive(mode string) error {
 func (d *Daemon) restartForPrivacySettings(prev settings.Settings) error {
 	next := d.getSettings()
 	relax := privacyRelaxes(prev, next)
-	hold := prev.NoDirect && prev.Mode == settings.ModeGlobal && d.machine.Wanted()
+	hold := prev.GuardOn() && d.machine.Wanted()
 	nicHold := wantNICOff(prev) && d.machine.Wanted()
 	d.mu.Lock()
 	d.guardHold, d.nicHold = hold, nicHold
@@ -1157,7 +1172,7 @@ func (d *Daemon) restartForPrivacySettings(prev settings.Settings) error {
 	}
 	// 走到这里事务就结束了:**先**放开 hold,再同步。上一版把放开挪进了 defer,于是下面这两次同步
 	// 是在 hold 仍为 true 时跑的 —— syncGuard 的 hold 分支规格没变就直接返回,放宽方向(全局→规则、
-	// 关掉禁直连)闸根本撤不掉,规则模式下等于断网,直到用户点断开。defer 只兜早返回的路径。
+	// 关掉防逃逸)闸根本撤不掉,规则模式下等于断网,直到用户点断开。defer 只兜早返回的路径。
 	d.mu.Lock()
 	d.guardHold, d.nicHold = false, false
 	d.mu.Unlock()
@@ -1187,7 +1202,7 @@ func wantNICOff(s settings.Settings) bool {
 	return netmode.NICIPv6Manageable() && s.TUN && !s.IPv6 && s.DisableNICIPv6
 }
 
-// nicIPv6Wanted 网卡的 IPv6 此刻该不该关着。**和「全局禁直连」的闸同一套判断**:设置要求关、且用户想连着
+// nicIPv6Wanted 网卡的 IPv6 此刻该不该关着。**和「防流量逃逸」的闸同一套判断**:设置要求关、且用户想连着
 // (没点断开)。内核停了、崩了在重试、切订阅在重连、服务被杀、关机重启,只要这两条还成立就得一直关着 ——
 // 挡数据包挡不住"程序枚举网卡读走地址再报出去",地址一旦冒出来,哪怕只有几十秒也够被读走留到以后用。
 func (d *Daemon) nicIPv6Wanted() bool {
@@ -1425,7 +1440,7 @@ func nicLeakMessage(names []string) string {
 // privacyChecks 决定启动前要核查哪些闸相关的不变量。
 //
 // installable=false 的平台(Android:闸就是宿主 VpnService 的接口,由系统持有)没有可核查的对象;
-// 硬要核查只会把连接整个挡死 —— 而用户挡不住就会去关掉「全局禁直连」,反倒更不私密。那种平台上
+// 硬要核查只会把连接整个挡死 —— 而用户挡不住就会去关掉「防流量逃逸」,反倒更不私密。那种平台上
 // 跨进程 / 重启的覆盖靠系统的 Always-on + lockdown,状态由 netmode.GuardWarning 如实报出来。
 // boot 只在平台真的有"守护进程之外也在"的闸时才查(目前只有 Windows 的 WFP 持久 + 开机过滤器)。
 func privacyChecks(installable, persistent bool) (guard, boot bool) {
@@ -1444,18 +1459,18 @@ func (d *Daemon) ensurePrivacyReady() error {
 //
 // 这一类**不挡**数据面启动:闸装不上时拒绝起隧道,等于既没闸也没隧道,全部流量直连 —— 起着
 // strict_route 的隧道只会让直连更少。闸已在而查不清时,起不起隧道都不漏,不起只是白断网。
-// 所以 prepare / start 只把它记下来,隧道照常起,由 health 报 Degraded 并原地重装(界面标「禁直连未生效」)。
+// 所以 prepare / start 只把它记下来,隧道照常起,由 health 报 Degraded 并原地重装(界面标「防逃逸未生效」)。
 func (d *Daemon) guardReady() error {
 	s := d.getSettings()
 	checkGuard, checkBoot := privacyChecks(netmode.GuardInstallable(), netmode.GuardPersistentSupported())
-	if s.NoDirect && s.Mode == settings.ModeGlobal && d.machine.Wanted() && checkGuard {
+	if s.GuardOn() && d.machine.Wanted() && checkGuard {
 		if checkBoot {
 			if ready, err := netmode.GuardPersistentReady(); err != nil {
-				return state.Errf(state.CodePrivacyGuard, "无法确认持久全局禁直连保护: %v", err)
+				return state.Errf(state.CodePrivacyGuard, "无法确认持久防流量逃逸保护: %v", err)
 			} else if !ready {
 				// 查的是运行期那组(守护进程之外也在的那道闸)。开机那几秒的覆盖不在这条里 ——
 				// 它装不上只经 GuardWarning 告警,不挡连接。
-				return state.Errf(state.CodePrivacyGuard, "全局禁直连的持久保护未完整就绪,拒绝启动数据面")
+				return state.Errf(state.CodePrivacyGuard, "防流量逃逸的持久保护未完整就绪,拒绝启动数据面")
 			}
 		}
 		d.mu.Lock()
@@ -1465,19 +1480,19 @@ func (d *Daemon) guardReady() error {
 			if guardErr == "" {
 				guardErr = "闸未安装"
 			}
-			return state.Errf(state.CodePrivacyGuard, "全局禁直连未就绪: %s", guardErr)
+			return state.Errf(state.CodePrivacyGuard, "防流量逃逸未就绪: %s", guardErr)
 		}
 		d.mu.Lock()
 		applied := d.guardApplied
 		d.mu.Unlock()
 		if applied != d.guardSpec() {
-			return state.Errf(state.CodePrivacyGuard, "全局禁直连闸规格未同步")
+			return state.Errf(state.CodePrivacyGuard, "防流量逃逸闸规格未同步")
 		}
 		if n, err := netmode.GuardStatus(); err != nil {
-			return state.Errf(state.CodePrivacyGuard, "无法确认全局禁直连状态: %v", err)
+			return state.Errf(state.CodePrivacyGuard, "无法确认防流量逃逸状态: %v", err)
 		} else if n == 0 {
 			d.setGuard(false, "闸状态为空")
-			return state.Errf(state.CodePrivacyGuard, "全局禁直连闸未安装")
+			return state.Errf(state.CodePrivacyGuard, "防流量逃逸闸未安装")
 		}
 	}
 	return nil
@@ -1872,7 +1887,7 @@ func (d *Daemon) maybeRefresh(ctx context.Context) {
 //
 // 用域名写的节点,在隧道里是靠嗅探到的 SNI 命中直连规则的;不带 TLS 的协议嗅不出域名,那时就只能按地址认。
 // 解析不出来不算错(退回只按域名匹配),所以整体给一个短超时,不让它拖慢连接。
-// lookup 是解析函数(见 bootResolver:禁直连下只用加密 DoH);为 nil 表示这一轮不解析。
+// lookup 是解析函数(见 bootResolver:防逃逸下只用加密 DoH);为 nil 表示这一轮不解析。
 func resolveNodeHosts(ctx context.Context, p *profile.Profile, lookup func(context.Context, string) ([]string, error)) map[string][]string {
 	if p == nil || lookup == nil {
 		return nil
@@ -2212,14 +2227,14 @@ func (d *Daemon) registerHandlers() {
 			in, _ := d.splitByCore(p)
 			res = d.core.ProbeRunning(ctx, in.Tags, builder.TestURL, set)
 		} else {
-			// 未连接:直连量到节点服务器的往返。但「全局禁直连」的闸还开着的时候不做 —— 那说明用户想连着、
+			// 未连接:直连量到节点服务器的往返。但「防流量逃逸」的闸还开着的时候不做 —— 那说明用户想连着、
 			// 内核只是暂时没起来(在重启 / 在退避),这时从本机直接发 DNS 查询、ICMP、TCP 握手出去,
 			// 正是闸要挡的那种东西;闸只按进程放行本服务,拦不住自己。等隧道起来经出站测,或者用户断开后再测。
 			// 先登记、再判闸:装闸前(applyGuard 开头)会同步取消登记过的,顺序反过来就有一个空当
 			release := d.holdDirect(cancel)
 			defer release()
 			if d.guardArmed() {
-				return nil, errors.New("全局禁直连的闸还开着、隧道还没起来:这时候不做直连测速(会从本机直接发探测包)。等连上后再测,或先断开连接")
+				return nil, errors.New("防流量逃逸的闸还开着、隧道还没起来:这时候不做直连测速(会从本机直接发探测包)。等连上后再测,或先断开连接")
 			}
 			// 测速途中用户点了连接:装闸前就被取消(holdDirect),剩下的探测一律不再发 —— 它们都从本机直连出去
 			// (系统解析、ICMP、TCP、临时实例)。cancelOnGuard 再兜一层。
@@ -2618,7 +2633,7 @@ func (d *Daemon) registerHandlers() {
 				go d.refreshExit(d.beginExit(d.currentNode()))
 			}
 		}
-		// 跨过严格全局边界(禁直连 + 全局)、或动了 IPv6 / TUN / 禁直连开关,会改变密封 DNS 与闸的安全边界,
+		// 跨过严格全局边界(防逃逸 + 全局)、或动了 IPv6 / TUN / 防逃逸开关,会改变密封 DNS 与闸的安全边界,
 		// 运行中必须整份重建;边界没变的切模式在下面就地切。
 		if d.core.Running() && needsPrivacyRebuild(prev, next) {
 			if err := d.restartForPrivacySettings(prev); err != nil {
@@ -2643,7 +2658,7 @@ func (d *Daemon) registerHandlers() {
 			}
 		}
 		if d.core.Running() {
-			live := prev // 模式、节点、禁直连开关、定时测速间隔是运行时可改的,别的都要重新生成配置
+			live := prev // 模式、节点、防逃逸开关、定时测速间隔是运行时可改的,别的都要重新生成配置
 			live.Mode, live.Selected, live.NoDirect, live.ProbeMinutes = next.Mode, next.Selected, next.NoDirect, next.ProbeMinutes
 			// 这几项都不进 sing-box 的配置:面板监听地址与密码归内置 HTTP 面板管,日志保留天数归滚动器管,
 			// 内核日志落不落盘归 corePrintf 管,查不查出口归 refreshExit 管,订阅刷新间隔归 Run 的循环管 —— 改它们不该让隧道断一下

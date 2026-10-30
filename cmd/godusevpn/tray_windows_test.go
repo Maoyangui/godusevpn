@@ -88,7 +88,7 @@ func waitFor(t *testing.T, d time.Duration, cond func() bool, msg string) {
 }
 
 // 托盘「恢复网络」和开始菜单快捷方式走同一条路:提权跑 guard clear --popup(guardfix.Clear)。0.7.5 服务活着时
-// 只看守护进程内存里的闸状态、只关「全局禁直连」:设置文件读不出来时它报"没开"而过滤器都在,点了什么都不做也不说;
+// 只看守护进程内存里的闸状态、只关「防流量逃逸」:设置文件读不出来时它报"没开"而过滤器都在,点了什么都不做也不说;
 // 网卡 IPv6 也不还原(审计 G057)。只看源码,不弹 UAC。
 func TestTrayRestoreNetworkUsesGuardClear(t *testing.T) {
 	b, err := os.ReadFile("tray_windows.go")

@@ -76,7 +76,7 @@ func NewEngine(dataDir, cacheDir string, host Host, listener EventListener) (*En
 	if err != nil {
 		return nil, err
 	}
-	p.SetKeepTun(d.GuardWanted) // 「全局禁直连」开着时内核重启不关 VPN 接口,接口本身就是闸
+	p.SetKeepTun(d.GuardWanted) // 「防流量逃逸」开着时内核重启不关 VPN 接口,接口本身就是闸
 	ui := uiapi.New(d, uiapi.Options{
 		Platform:  "android",
 		PrefsPath: filepath.Join(dataDir, "conf", "ui.json"),

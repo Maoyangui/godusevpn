@@ -54,7 +54,7 @@ flag-icons —— web/dist/flags/ 下的各地区旗帜(取其 flags/1x1 方形�
 
 ---
 
-wireguard-windows —— internal/netmode/wfp/ 下的 Windows 过滤平台(WFP)代码改自它的 tunnel/firewall,用来做「全局禁直连」的闸
+wireguard-windows —— internal/netmode/wfp/ 下的 Windows 过滤平台(WFP)代码改自它的 tunnel/firewall,用来做「防流量逃逸」的闸
   https://git.zx2c4.com/wireguard-windows
   MIT License
 

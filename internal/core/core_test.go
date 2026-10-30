@@ -25,7 +25,7 @@ func TestBuiltConfigPassesDryRun(t *testing.T) {
 		s.IPv6, s.AdBlock, s.TUNStack, s.RemoteDNS, s.LocalDNS = true, true, "gvisor", "dns.google", "system"
 		return s
 	}(), func() settings.Settings {
-		// 全局禁直连 + 远程 DNS 是域名:它的域名经代理的 remote-boot 解析(builder),内核要认这份配置
+		// 防流量逃逸 + 远程 DNS 是域名:它的域名经代理的 remote-boot 解析(builder),内核要认这份配置
 		s := settings.Default()
 		s.Mode, s.NoDirect, s.RemoteDNS, s.LocalDNS = settings.ModeGlobal, true, "dns.google", "system"
 		s.BypassApps = []string{"steam.exe"} // 严格全局下不生效(builder 会摘掉)

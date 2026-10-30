@@ -76,6 +76,30 @@ func TestGuardRulesBlockUPnPBeforeLAN(t *testing.T) {
 }
 
 // pf 没开、或主规则集不再挂 com.apple 锚点时,锚点里的规则不被评估:闸必须按"没开"算,守护进程才会重装并告警。
+// 规则模式:表写在最前面,放行段在局域网后面、最后一条前面;不拦 DNS / UPnP;入站建状态。
+func TestGuardRulesRuleMode(t *testing.T) {
+	r := guardRules(GuardSpec{LAN: true, Rule: true, TunAddr4: "172.19.0.1", Direct: "1.0.1.0/24,2400:3200::/32", TunnelPorts: "8443,9000-9100"})
+	if !strings.HasPrefix(r, "table <godusevpn_direct> const { 1.0.1.0/24, 2400:3200::/32 }\n") {
+		t.Fatalf("表要写在最前面:\n%s", r)
+	}
+	for _, want := range []string{"pass in quick all\n", "port { 8443, 9000:9100 }", "pass out quick to <godusevpn_direct> no state\n"} {
+		if !strings.Contains(r, want) {
+			t.Fatalf("少了 %q:\n%s", want, r)
+		}
+	}
+	if strings.Contains(r, dnsBlockRule) || strings.Contains(r, upnpBlockRule) {
+		t.Fatalf("规则模式不该拦 DNS / UPnP:\n%s", r)
+	}
+	lan, ports, direct, last := strings.Index(r, "10.0.0.0/8"), strings.Index(r, "port { 8443"), strings.Index(r, "pass out quick to <"), strings.Index(r, "block drop out quick all")
+	if !(lan < ports && ports < direct && direct < last) {
+		t.Fatalf("顺序不对:\n%s", r)
+	}
+	g := guardRules(GuardSpec{LAN: true, TunAddr4: "172.19.0.1"})
+	if strings.Contains(g, "godusevpn_direct") || strings.Contains(g, "pass in") || !strings.Contains(g, dnsBlockRule) {
+		t.Fatalf("全局模式变了:\n%s", g)
+	}
+}
+
 func TestPFStatusParsing(t *testing.T) {
 	if !pfInfoEnabled("Status: Enabled for 0 days 00:01:02           Debug: Urgent\n") || pfInfoEnabled("Status: Disabled                              Debug: Urgent\n") {
 		t.Fatal("pfctl -s info 的开关状态认错了")

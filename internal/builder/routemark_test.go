@@ -7,7 +7,7 @@ import (
 	"github.com/Maoyangui/godusevpn/internal/settings"
 )
 
-// Linux 上全局禁直连的闸按标记放行本服务(不再放行整个 root):内核的出站必须带 RouteMark,
+// Linux 上防流量逃逸的闸按标记放行本服务(不再放行整个 root):内核的出站必须带 RouteMark,
 // 否则闸一开,节点连接自己就被拦死。网关模式开着 TUN 时 sing-box 不许同时设 default_mark(和 auto_redirect 冲突,
 // 内核起不来),那时出站带的是 auto_redirect 的标记,闸另外认它。其它平台 sing-box 不认这个字段。
 func TestLinuxRouteMark(t *testing.T) {

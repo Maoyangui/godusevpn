@@ -192,7 +192,7 @@ func TestStateViewTunnel(t *testing.T) {
 	}
 }
 
-// 未连接时的直连测速会从本机直接发 DNS 查询、ICMP、TCP 握手 —— 正是「全局禁直连」的闸要挡的东西,
+// 未连接时的直连测速会从本机直接发 DNS 查询、ICMP、TCP 握手 —— 正是「防流量逃逸」的闸要挡的东西,
 // 而闸只按进程放行本服务,拦不住自己。所以闸开着、内核又没跑(重启中 / 退避中)的时候,MProbeNodes 必须拒绝,
 // 且根本不能走到 probeDirect。
 func TestProbeNodesGate(t *testing.T) {
@@ -240,8 +240,8 @@ func TestProbeNodesGate(t *testing.T) {
 		if err == nil {
 			t.Fatalf("闸开着、内核没跑,却做了直连测速:%v", res)
 		}
-		if !strings.Contains(err.Error(), "禁直连") {
-			t.Fatalf("拒绝的理由要说清是禁直连的闸在挡,得: %v", err)
+		if !strings.Contains(err.Error(), "防逃逸") {
+			t.Fatalf("拒绝的理由要说清是防逃逸的闸在挡,得: %v", err)
 		}
 		if err.Error() == "服务内部错误" {
 			t.Fatalf("处理器 panic 了,被控制口兜住:%v", err)
@@ -278,7 +278,7 @@ func TestProbeNodesGate(t *testing.T) {
 	})
 }
 
-// 隧道起来之前解析节点域名用哪条路:禁直连 + 全局模式下,只允许按地址连的 DoH,
+// 隧道起来之前解析节点域名用哪条路:防逃逸 + 全局模式下,只允许按地址连的 DoH,
 // 「本地 DNS」是 system 或域名时干脆不解析(明文系统解析一个包都不该发);其它模式才退回系统解析器。
 // 只看给不给解析函数,不调用它 —— 调了就真的去联网了。
 func TestBootResolver(t *testing.T) {
@@ -293,12 +293,12 @@ func TestBootResolver(t *testing.T) {
 		want bool // 要不要给解析函数
 		why  string
 	}{
-		{"禁直连 + 全局 + system → 不解析", func(s *settings.Settings) { s.LocalDNS = "system" }, false, "明文系统解析在禁直连下一个包都不该发"},
-		{"禁直连 + 全局 + DoH 地址 → 解析", func(s *settings.Settings) { s.LocalDNS = "223.5.5.5" }, true, "按地址连的 DoH 是唯一允许的那条路"},
-		{"禁直连 + 全局 + DoH 是域名 → 不解析", func(s *settings.Settings) { s.LocalDNS = "dns.alidns.com" }, false, "解 DoH 自己的域名又得先走系统解析器"},
+		{"防逃逸 + 全局 + system → 不解析", func(s *settings.Settings) { s.LocalDNS = "system" }, false, "明文系统解析在防逃逸下一个包都不该发"},
+		{"防逃逸 + 全局 + DoH 地址 → 解析", func(s *settings.Settings) { s.LocalDNS = "223.5.5.5" }, true, "按地址连的 DoH 是唯一允许的那条路"},
+		{"防逃逸 + 全局 + DoH 是域名 → 不解析", func(s *settings.Settings) { s.LocalDNS = "dns.alidns.com" }, false, "解 DoH 自己的域名又得先走系统解析器"},
 		{"规则模式 + system → 解析", func(s *settings.Settings) { s.Mode, s.LocalDNS = settings.ModeRule, "system" }, true, "闸没开的模式退回系统解析器"},
 		{"直连模式 + system → 解析", func(s *settings.Settings) { s.Mode, s.LocalDNS = settings.ModeDirect, "system" }, true, "闸没开的模式退回系统解析器"},
-		{"禁直连关着 + 全局 + system → 解析", func(s *settings.Settings) { s.NoDirect, s.LocalDNS = false, "system" }, true, "开关关了就没有闸"},
+		{"防逃逸关着 + 全局 + system → 解析", func(s *settings.Settings) { s.NoDirect, s.LocalDNS = false, "system" }, true, "开关关了就没有闸"},
 		{"规则模式 + DoH 地址 → 解析", func(s *settings.Settings) { s.Mode, s.LocalDNS = settings.ModeRule, "1.1.1.1" }, true, ""},
 		{"规则模式 + DoH 是域名 → 解析", func(s *settings.Settings) { s.Mode, s.LocalDNS = settings.ModeRule, "dns.alidns.com" }, true, "闸没开,退回系统解析器"},
 	}

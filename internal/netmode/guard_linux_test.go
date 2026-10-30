@@ -101,6 +101,53 @@ func TestGuardForwardChain(t *testing.T) {
 }
 
 // 没装 nft 时 exec 返回 ErrNotFound、输出为空:要当成"没有我们的表",而不是查询失败。
+// 规则模式:放行段在局域网后面、最后的 drop 前面;不拦 DNS / UPnP;入站回包全放;v6 假地址段照拦。
+func TestGuardRuleMode(t *testing.T) {
+	r := guardRuleset(GuardSpec{TunName: "tun0", LAN: true, Rule: true, Direct: "1.0.1.0/24,223.5.5.0/24,2400:3200::/32", TunnelPorts: "8443,9000-9100"}, true)
+	for _, want := range []string{
+		"set direct4 {", "elements = { 1.0.1.0/24, 223.5.5.0/24 }", "set direct6 {", "elements = { 2400:3200::/32 }",
+		"ct direction reply accept", "ip daddr @direct4 accept", "ip6 daddr @direct6 accept",
+		"tcp dport { 8443, 9000-9100 } drop", "udp dport { 8443, 9000-9100 } drop",
+	} {
+		if !strings.Contains(r, want) {
+			t.Fatalf("少了 %q:\n%s", want, r)
+		}
+	}
+	for _, gone := range []string{"dport { 53, 853 } drop", "dport { 1900, 5351 } drop", "meta skuid 0 ct direction reply accept"} {
+		if strings.Contains(r, gone) {
+			t.Fatalf("规则模式不该有 %q:\n%s", gone, r)
+		}
+	}
+	out := r[strings.Index(r, "chain output"):strings.Index(r, "chain forward")]
+	fake, lan, ports, direct, last := strings.Index(out, builder.FakeIP6), strings.Index(out, "10.0.0.0/8"), strings.Index(out, "tcp dport { 8443"), strings.Index(out, "@direct4"), strings.LastIndex(out, "drop")
+	if !(fake < lan && lan < ports && ports < direct && direct < last) {
+		t.Fatalf("顺序不对:假地址 %d 局域网 %d 端口 %d 放行 %d 兜底 %d\n%s", fake, lan, ports, direct, last, out)
+	}
+	// 没有放行段时不引用不存在的集合
+	r = guardRuleset(GuardSpec{TunName: "tun0", Rule: true}, true)
+	if strings.Contains(r, "@direct") || strings.Contains(r, "set direct") {
+		t.Fatalf("没有放行段不该有集合:\n%s", r)
+	}
+	// 全局模式一点不变
+	g := guardRuleset(GuardSpec{TunName: "tun0", LAN: true}, true)
+	if strings.Contains(g, "direct4") || !strings.Contains(g, "dport { 53, 853 } drop") || !strings.Contains(g, "meta skuid 0 ct direction reply accept") {
+		t.Fatalf("全局模式变了:\n%s", g)
+	}
+}
+
+// 网关设备策略只进转发链,排在放行段前面。
+func TestGuardRuleModeDevices(t *testing.T) {
+	r := guardRuleset(GuardSpec{TunName: "tun0", Gateway: true, Rule: true, Direct: "1.0.1.0/24", DevBlock: "aa:bb:cc:dd:ee:01", DevDirect: "aa:bb:cc:dd:ee:02,192.168.1.9"}, true)
+	out, fwd := r[strings.Index(r, "chain output"):strings.Index(r, "chain forward")], r[strings.Index(r, "chain forward"):]
+	if strings.Contains(out, "ether saddr") {
+		t.Fatalf("输出链不该看设备:\n%s", out)
+	}
+	block, direct, ipd, set := strings.Index(fwd, "ether saddr { aa:bb:cc:dd:ee:01 } drop"), strings.Index(fwd, "ether saddr { aa:bb:cc:dd:ee:02 } accept"), strings.Index(fwd, "ip saddr { 192.168.1.9 } accept"), strings.Index(fwd, "@direct4")
+	if block < 0 || direct < 0 || ipd < 0 || !(block < direct && direct < set && ipd < set) {
+		t.Fatalf("转发链不对:\n%s", fwd)
+	}
+}
+
 func TestNftMissingBinary(t *testing.T) {
 	out, err := exec.Command("godusevpn-no-such-nft-binary").CombinedOutput()
 	if !nftMissing(out, err) {
