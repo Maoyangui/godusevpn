@@ -178,10 +178,62 @@ func eachLine(rd io.Reader, changes func(string) bool) bool {
 // mayLeak 老日志里泄露的只有地址(url.Error 的文本);没有 :// 也没有 /sub/ 的行不用过正则。
 func mayLeak(l string) bool { return strings.Contains(l, "://") || strings.Contains(l, "/sub/") }
 
+// Line 带时间与级别的一行(不含换行)。
+func Line(level, format string, a ...any) string {
+	return time.Now().Format(stamp) + " " + level + " " + fmt.Sprintf(format, a...)
+}
+
 // Printf 带时间与级别的一行。
 func (r *Rotator) Printf(level, format string, a ...any) {
-	msg := fmt.Sprintf(format, a...)
-	_, _ = r.Write([]byte(time.Now().Format(stamp) + " " + level + " " + msg + "\n"))
+	_, _ = r.Write([]byte(Line(level, format, a...) + "\n"))
+}
+
+// Filter 把现有的几份逐行过一遍:keep 返回 false 的行删掉,返回的文本替换原行。没有要改的就不重写;
+// 修改时间照旧,免得按时间清理的旧文件又多留几天。开着的文件先关上,下次写入时重新打开。
+func (r *Rotator) Filter(keep func(line string) (string, bool)) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.f != nil {
+		r.f.Close()
+		r.f = nil
+	}
+	for i := 0; i <= r.keep; i++ {
+		p := r.path
+		if i > 0 {
+			p += "." + strconv.Itoa(i)
+		}
+		filterFile(p, keep)
+	}
+}
+
+func filterFile(path string, keep func(string) (string, bool)) {
+	st, err := os.Stat(path)
+	if err != nil {
+		return
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	var out bytes.Buffer
+	for _, l := range strings.SplitAfter(string(b), "\n") {
+		if l == "" {
+			continue
+		}
+		if kept, ok := keep(strings.TrimRight(l, "\r\n")); ok {
+			out.WriteString(kept)
+			out.WriteByte('\n')
+		}
+	}
+	if bytes.Equal(out.Bytes(), b) {
+		return
+	}
+	tmp := path + ".tmp"
+	if os.WriteFile(tmp, out.Bytes(), 0o600) != nil || os.Rename(tmp, path) != nil {
+		os.Remove(tmp)
+		return
+	}
+	_ = os.Chtimes(path, st.ModTime(), st.ModTime())
 }
 
 func (r *Rotator) Close() error {

@@ -36,7 +36,7 @@ func diagDaemon(t *testing.T) *Daemon {
 	d.setProfileCache("a", &profile.Profile{URL: s.Profiles[0].URL, Title: "alice", FetchedAt: time.Now().Unix(), Tags: []string{"HK"},
 		Outbounds: []json.RawMessage{json.RawMessage(`{"type":"socks","tag":"HK","server":"1.2.3.4","server_port":1080,"username":"alice","password":"S5PW"}`)}})
 	d.logf("订阅经 proxy 拉取失败: %s", `拉取订阅失败: Get "https://panel.example:2056/sub/alice?format=json": timeout`)
-	d.coreLog.Printf("INFO", "dns: lookup succeed for www.visited-site.com: 142.250.72.4")
+	d.corePrintf("INFO", "%s", "dns: lookup succeed for www.visited-site.com: 142.250.72.4")
 	return d
 }
 

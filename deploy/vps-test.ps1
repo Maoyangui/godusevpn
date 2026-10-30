@@ -91,6 +91,9 @@ function Dump-Evidence() {
       Crash-Heads $p
     }
   }
+  # 内核日志默认不全落盘,上面读文件只有警告和错误;服务还活着就从内存再取一份
+  Write-Host "== 内核日志(内存,最近 80 行)" -ForegroundColor Cyan
+  & $cli logs 80 core 2>&1 | Out-Host
   Write-Host "== 服务管理器事件(本次验收期间)" -ForegroundColor Cyan
   try {
     Get-WinEvent -FilterHashtable @{ LogName = 'System'; ProviderName = 'Service Control Manager'; StartTime = $script:t0 } -ErrorAction Stop |

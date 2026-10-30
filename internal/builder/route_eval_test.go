@@ -3,6 +3,7 @@ package builder
 import (
 	"context"
 	"encoding/json"
+	"net"
 	"net/netip"
 	"strings"
 	"testing"
@@ -32,6 +33,7 @@ type conn struct {
 	dst     string   // IP 字面量或域名(fake-ip 还原出来的那种)
 	port    uint16   // 默认 443
 	src     string   // 来源地址(网关模式的设备);空 = 本机
+	mac     string   // 来源 MAC(内核从邻居表查到的);空 = 查不到
 	proc    string   // 发起进程的完整路径(桌面)
 	answers []string // 目的地是域名时 resolve 拿到的地址
 }
@@ -71,6 +73,13 @@ func routeV(t *testing.T, c cfg, mode string, cn conn) verdict {
 	}
 	if cn.src != "" {
 		md.Source = M.SocksaddrFrom(netip.MustParseAddr(cn.src), 50000)
+	}
+	if cn.mac != "" {
+		hw, err := net.ParseMAC(cn.mac)
+		if err != nil {
+			t.Fatal(err)
+		}
+		md.SourceMACAddress = hw
 	}
 	if cn.proc != "" {
 		md.ProcessInfo = &adapter.ConnectionOwner{ProcessPath: cn.proc}

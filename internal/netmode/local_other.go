@@ -10,3 +10,4 @@ func RefreshProtect() (bool, error)       { return false, nil }
 func Protected() bool                     { return false }
 func ApplyGateway(string, []string) error { return nil } // 网关模式只在 Linux 软路由上有
 func ClearGateway()                       {}
+func RestoreForward()                     {}

@@ -50,6 +50,6 @@ TUN 只代理本机流量,与 Windows 相同。
 sh deploy/linux-test.sh <订阅地址>
 ```
 
-检查项与 Windows 那份相同。网关模式在 Docker 里的 OpenWrt 23.05 + 一台 LAN 容器上验证过(设备被代理、fake-ip、IPv6 屏蔽、三种设备策略)。
+检查项与 Windows 那份相同。网关模式在 Docker 里验证过 OpenWrt 23.05、Ubuntu 双网口、Ubuntu 单网口旁路由三种摆法(设备被代理、fake-ip、IPv6 屏蔽、三种设备策略、设备换 IP 策略跟着)。
 
 相关:[[网关模式]] · [[命令行]] · [[设置项与文件位置]]

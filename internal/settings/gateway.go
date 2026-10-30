@@ -10,7 +10,7 @@ import (
 //
 //	NetMode    local(默认,只代理本机)| gateway(网关)
 //	LANSubnets 保留字段,没有接线(界面已不给填);只为老设置文件照样读得进来。将来要用也只能收窄,不能扩大直连
-//	Devices    局域网设备策略:按 MAC 记,按最近一次看到的 IP 生效(离线期间这个 IP 分给了别的设备,别的设备也套用);mode 为空 = 跟随规则,proxy / direct / reject = 强制
+//	Devices    局域网设备策略:按 MAC 记、按 MAC 生效(设备换 IP 照样跟着,IP 分给别的设备也不会错套);mode 为空 = 跟随规则,proxy / direct / reject = 强制
 const (
 	NetLocal   = "local"
 	NetGateway = "gateway"
@@ -20,7 +20,7 @@ type Device struct {
 	ID   string `json:"id"`
 	Name string `json:"name"`
 	MAC  string `json:"mac"`
-	IP   string `json:"ip,omitempty"` // 最近一次看到的 IP(MAC 为空时按这个匹配)
+	IP   string `json:"ip,omitempty"` // 保存时看到的 IP,设备离线时给界面显示用(只有 MAC 为空时才按这个匹配)
 	Mode string `json:"mode"`         // "" | proxy | direct | reject
 }
 

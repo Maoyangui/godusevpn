@@ -40,7 +40,7 @@ m-ui 面板的多平台客户端:内嵌 sing-box,TUN 模式,规则 / 全局 / �
 | `godusevpn-cli.exe` | 当前用户 | 排障与脚本:状态、连接、模式、节点、订阅、日志、诊断 |
 
 服务与客户端之间走命名管道 `\.\pipe\godusevpn`,一行一个 JSON;服务的访问控制允许普通用户查询、启动和停止它,托盘"退出"因此不用提权。数据在 `%ProgramData%\godusevpn\`:
-`settings.json`(设置)、`profiles\<id>.json`(各订阅缓存)、`config.json`(最近生成的配置)、`config.last-good.json`(最近一次成功启动的配置)、`cache.db`(fake-ip 与节点选择)、`rulesets\`(本地规则集)、`logs\`、`diag\`(诊断包)。客户端自己的偏好(语言、外观)在 `%APPDATA%\godusevpn\ui.json`。
+`settings.json`(设置)、`profiles\<id>.json`(各订阅缓存)、`config.json`(最近生成的配置)、`config.last-good.json`(最近一次成功启动的配置)、`cache.db`(fake-ip 与节点选择,断开十几分钟后自动删)、`rulesets\`(本地规则集)、`logs\`、`diag\`(诊断包)。客户端自己的偏好(语言、外观)在 `%APPDATA%\godusevpn\ui.json`。
 
 ## 构建
 
@@ -108,6 +108,8 @@ CGO_ENABLED=1 CGO_LDFLAGS="-framework UniformTypeIdentifiers" go build -tags des
 - **按进程直连**:设置 → 分流,每行一个 exe 名(如 `steam.exe`),这些程序的流量不走代理。「全局禁直连」生效时(全局模式)不生效,这些程序也走隧道。
 - **升级**:客户端每小时自己查一次新版本,有新版本时首页顶栏「佛跳墙」旁亮一个红色 **NEW**(侧栏「关于」也带 NEW),点它直达升级;也可以 关于 → 检查更新 → 升级并重启。只替换程序,设置与订阅都保留。
 - **日志保留**:默认 7 天,超过的滚动日志与诊断包自动删除;设置 → 日志里可改,0 = 一直保留。
+- **访问记录不落盘**:内核日志里每条连接的目标默认只留在内存里,服务重启就没了;磁盘上只有打了码的警告和错误。排障要长期保留时到设置 → 日志打开「内核日志写入磁盘」。fake-ip 对照表(`cache.db`)断开十几分钟后自动删。
+- **出口查询可关**:首页的出口地址是连上后经节点问第三方网站查到的,不想要就到设置 → 隐私关掉。
 
 ## macOS
 
@@ -149,8 +151,8 @@ curl -fsSL https://raw.githubusercontent.com/Maoyangui/godusevpn/master/deploy/i
 - 数据布局与 Windows 一致:设置在 `/etc/godusevpn/`,缓存、规则集、日志在 `/var/lib/godusevpn/`(梅林等 Entware 环境在 `/opt/etc` 与 `/opt/var/lib` 下)。
 - 自启按初始化系统落地:systemd 单元、OpenWrt 的 procd 脚本、Entware 的 init.d 脚本;`godusevpn install | uninstall | start | stop | status`。
 - 本机模式(默认):TUN 只代理本机流量,与 Windows 相同;外部连进来的连接(SSH、面板)由连接跟踪认出来,回包走原来的路由,远程 SSH 不会被切断;只绑物理网卡地址往外连的(WebRTC)照样走隧道。
-- 网关模式(OpenWrt / iStoreOS 等软路由):设置 → 网络 → 网络模式选"网关"(或 `godusevpn settings netMode=gateway`),局域网设备把网关和 DNS 指向这台机器即被代理,设备的 DNS 查询由内核接管(fake-ip、防泄漏)。菜单里多出"设备"页:自动发现在线设备(DHCP 租约 + 邻居表),每台可设跟随规则 / 强制代理 / 直连 / 拒绝上网,按 MAC 记住;命令行 `godusevpn devices`、`godusevpn device <MAC> <follow|proxy|direct|reject> [名字]`。需要内核带 nftables(OpenWrt 22.03 起的 fw4 都有)。「全局禁直连」生效时(全局模式),设备的「直连」不生效,照样走隧道。
-- 验收脚本 `deploy/linux-test.sh`,与 Windows 的检查项相同;网关模式在 Docker 里的 OpenWrt 23.05 + 一台 LAN 容器上验证过(设备被代理、fake-ip、IPv6 屏蔽、三种设备策略)。
+- 网关模式(OpenWrt / iStoreOS 等软路由):设置 → 网络 → 网络模式选"网关"(或 `godusevpn settings netMode=gateway`),局域网设备把网关和 DNS 指向这台机器即被代理,设备的 DNS 查询由内核接管(fake-ip、防泄漏)。菜单里多出"设备"页:自动发现在线设备(DHCP 租约 + 邻居表),每台可设跟随规则 / 强制代理 / 直连 / 拒绝上网,按 MAC 记住也按 MAC 生效(换 IP 不用重启内核,旧 IP 分给别人不会错套,IPv6 地址也算);命令行 `godusevpn devices`、`godusevpn device <MAC> <follow|proxy|direct|reject> [名字]`。单网口旁路由同样能用;普通 Linux 连接时自动开 IP 转发、断开关回去。需要内核带 nftables(OpenWrt 22.03 起的 fw4 都有)。「全局禁直连」生效时(全局模式),设备的「直连」不生效,照样走隧道。
+- 验收脚本 `deploy/linux-test.sh`,与 Windows 的检查项相同;网关模式在 Docker 里验证过 OpenWrt 23.05、Ubuntu 双网口、Ubuntu 单网口旁路由三种摆法(设备被代理、fake-ip、IPv6 屏蔽、三种设备策略、设备换 IP 策略跟着)。
 
 ## Android(手机 / 电视)
 

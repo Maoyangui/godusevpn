@@ -32,6 +32,7 @@ import (
 	"github.com/Maoyangui/godusevpn/internal/netmode"
 	"github.com/Maoyangui/godusevpn/internal/paths"
 	"github.com/Maoyangui/godusevpn/internal/profile"
+	"github.com/Maoyangui/godusevpn/internal/redact"
 	"github.com/Maoyangui/godusevpn/internal/ruleset"
 	"github.com/Maoyangui/godusevpn/internal/settings"
 	"github.com/Maoyangui/godusevpn/internal/state"
@@ -43,6 +44,8 @@ type Daemon struct {
 	mu                sync.Mutex
 	log               *logx.Rotator
 	coreLog           *logx.Rotator
+	coreRing          logx.Ring    // 内核日志的内存副本(见 corePrintf)
+	coreDisk          atomic.Bool  // 内核日志写全到磁盘(设置 coreLogDisk)
 	coreLevel         atomic.Int32 // 内核日志记到哪一级(core.Writer 按它过滤)
 	nicOff            atomic.Bool  // 各网卡的 IPv6 绑定已由我们停掉、还没还原(和闸一样,跨内核重启 / 服务重启一直有效)
 	nicDisablePending atomic.Bool  // partial disable must be retried even before a public address appears
@@ -170,7 +173,7 @@ func NewWithOptions(o Options) (*Daemon, error) {
 		d.logf("数据目录权限没收紧(里面有节点凭据,建议用管理员身份装一次): %v", err)
 	}
 	d.coreLevel.Store(core.LevelOf(d.settings.LogLevel))
-	d.core = core.New(core.Writer{Printf: d.coreLog.Printf, Level: &d.coreLevel})
+	d.core = core.New(core.Writer{Printf: d.corePrintf, Level: &d.coreLevel})
 	if o.Platform != nil {
 		d.core.SetPlatform(o.Platform)
 	}
@@ -189,6 +192,7 @@ func NewWithOptions(o Options) (*Daemon, error) {
 	d.settingsGeneration = 1
 	d.persistedOK = true
 	d.applyLogRetention()
+	d.initCoreLog(s.CoreLogDisk)
 	d.loadProfileCaches()
 	// 上次异常退出可能留下改过的系统设置(macOS 接管的系统 DNS、Linux 加的策略路由)。
 	// 但严格全局模式的连接意愿仍在时，DNS 备份属于隐私保护的一部分，不能在闸重建
@@ -197,6 +201,12 @@ func NewWithOptions(o Options) (*Daemon, error) {
 	persistedTrusted := d.persistedStateOK()
 	strictPending := persistedTrusted && prev.Wanted && s.TUN && s.NoDirect && s.Mode == settings.ModeGlobal
 	d.bootWanted.Store(persistedTrusted && prev.Wanted && d.settingsTrusted())
+	if persistedTrusted {
+		d.purgeCoreCache(!prev.Wanted) // 上次不是连着关的,缓存早该删了;连着关的看它闲置了多久
+	}
+	if persistedTrusted && d.settingsTrusted() && !(prev.Wanted && s.TUN && s.NetMode == settings.NetGateway) {
+		netmode.RestoreForward() // 上次没走到 stop 就没了(崩溃、被杀),而现在已经不该开着
+	}
 	if persistedTrusted && !strictPending && d.settingsTrusted() {
 		if err := netmode.UnprotectChecked(); err != nil {
 			d.logf("上次 DNS/路由保护尚未成功恢复,保留恢复依据并继续重试: %v", err)
@@ -319,7 +329,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 			return nil
 		case <-t.C:
 			d.maybeRefresh(ctx)
-			d.deviceRescan()
+			d.tickCoreCache()
 			if time.Since(lastPrune) > 6*time.Hour {
 				lastPrune = time.Now()
 				d.applyLogRetention()
@@ -472,6 +482,81 @@ func (d *Daemon) preparedMatchesCurrent(cfg []byte) error {
 }
 
 // applyLogRetention 把"日志保留天数"套到两份日志上,并顺手清一次旧文件(滚动出去的日志与诊断包)。
+// corePrintf 内核日志的去向。内核在 info 级给每条连接记一行目标(访问过的域名、公网地址),合起来就是一份浏览记录,
+// 所以默认只放内存:日志页、命令行、诊断包都看得到,进程一退就没了。警告和错误照旧落盘(崩了、起不来之后还有东西可查),
+// 但其中的目标打码 —— 连接失败的错误里也带着域名。要长期留着排障就打开设置里的「内核日志写入磁盘」。
+func (d *Daemon) corePrintf(level, format string, a ...any) {
+	line := logx.Line(level, format, a...)
+	d.coreRing.Add(redact.Text(line))
+	if d.coreDisk.Load() {
+		_, _ = d.coreLog.Write([]byte(line + "\n"))
+	} else if kept, ok := coreDiskLine(line); ok {
+		_, _ = d.coreLog.Write([]byte(kept + "\n"))
+	}
+}
+
+// coreDiskLine 没开「写入磁盘」时,一行内核日志留在磁盘上的样子。
+func coreDiskLine(line string) (string, bool) {
+	if !logx.Serious(logx.LevelOf(line)) {
+		return "", false
+	}
+	return redact.Destinations(line), true
+}
+
+// initCoreLog 服务启动时对齐内核日志:老版本(或关掉开关之前)写下的完整日志按现在的规矩过一遍。
+// 设置读不出来时不动,那时的"默认关"不是用户的意思。
+func (d *Daemon) initCoreLog(disk bool) {
+	d.coreDisk.Store(disk)
+	if disk {
+		return
+	}
+	if d.settingsOK {
+		d.coreLog.Filter(coreDiskLine)
+	}
+	for _, l := range logx.Tail(d.coreLog.Path(), 200) { // 重启之后日志页不至于一片空白
+		d.coreRing.Add(l)
+	}
+}
+
+// coreTail 最近 n 行内核日志。开着写入磁盘、内存里又不够时(服务刚重启)才读文件。
+func (d *Daemon) coreTail(n int) []string {
+	lines := d.coreRing.Tail(n)
+	if len(lines) >= n || !d.coreDisk.Load() {
+		return lines
+	}
+	return logx.Tail(d.coreLog.Path(), n)
+}
+
+// coreCacheIdle 内核缓存多久没动过算没用了:假地址的 DNS 有效期是 10 分钟,再久客户端手里也不会还留着。
+const coreCacheIdle = 15 * time.Minute
+
+// purgeCoreCache 删内核缓存(cache.db)。里面的 fake-ip 对照表是"访问过的域名 ↔ 假地址",隧道断了还留着就是一份浏览记录;
+// 选中的节点和模式设置里也有,连接前 PresetCache 会重建。
+// 断开后不马上删:系统和浏览器的 DNS 缓存里还有假地址,很快又连上时对照表要对得上,否则同一个假地址分给了别的域名,就连错网站。
+// force = 不用等闲置(服务刚起、上次不是连着关的)。
+func (d *Daemon) purgeCoreCache(force bool) {
+	path := builder.CachePath(paths.DataDir())
+	st, err := os.Stat(path)
+	if err != nil || (!force && time.Since(st.ModTime()) < coreCacheIdle) {
+		return
+	}
+	if err := os.Remove(path); err != nil {
+		d.logf("内核缓存没删掉,过一会儿再试: %v", err)
+	}
+}
+
+// tickCoreCache 断开之后定时看一眼:不想连、内核也没在跑,闲置够久就删。
+// 和连接操作错开:连接正在进行时内核还没起来,缓存却已经被 PresetCache 打开了。
+func (d *Daemon) tickCoreCache() {
+	if !d.connOpMu.TryLock() {
+		return
+	}
+	defer d.connOpMu.Unlock()
+	if !d.core.Running() && !d.wantConnected() {
+		d.purgeCoreCache(false)
+	}
+}
+
 func (d *Daemon) applyLogRetention() {
 	age := time.Duration(d.getSettings().LogDays) * 24 * time.Hour
 	d.log.SetMaxAge(age)
@@ -666,9 +751,6 @@ func (d *Daemon) prepare(ctx context.Context) ([]byte, error) {
 	} else if stale {
 		d.logf("订阅缓存已过期:严格全局下先用缓存连上,再经代理刷新(当前代理 → auto → 最后才直连)")
 	}
-	if s.NetMode == settings.NetGateway {
-		d.resolveDeviceIPs(&s) // 设备策略按当前 IP 生效
-	}
 	clashPort := d.pickClashPort(s.ClashPort)
 	cfg, rep, skipped, err := buildValid(d.core, builder.Input{Profile: p, Settings: s, DataDir: paths.DataDir(), ClashSecret: d.secret, RuleSetDir: paths.RuleSets(),
 		ClashPort: clashPort, NodeIPs: resolveNodeHosts(ctx, p, d.bootResolver(s)), SelfProcess: selfProcess()})
@@ -854,7 +936,7 @@ func (d *Daemon) start(cfg []byte) error {
 	if s.TUN {
 		if s.NetMode == settings.NetGateway {
 			if err := netmode.ApplyGateway(builder.TunName, lanInterfaces()); err != nil {
-				d.logf("网关模式的 DNS 劫持规则失败(局域网设备的 DNS 不会被接管): %v", err)
+				d.logf("网关模式没准备好(局域网设备的 UDP 可能不通): %v", err)
 			}
 		}
 	}
@@ -887,6 +969,10 @@ func (d *Daemon) stop() error {
 		}
 	}
 	netmode.ClearGateway()
+	// 重连、崩了在重试、服务重启都还"想连着",转发留着;真不想连了(或不是网关模式了)才关回去
+	if d.persistedStateOK() && !(persisted.Wanted && s.TUN && s.NetMode == settings.NetGateway) {
+		netmode.RestoreForward()
+	}
 	return err
 }
 
@@ -1668,6 +1754,9 @@ func (d *Daemon) beginExit(node string) uint64 {
 
 // refreshExit 查一次出口;只有代数还是 gen(中途没换节点、没断开)才把结果写进去。
 func (d *Daemon) refreshExit(gen uint64) {
+	if d.getSettings().NoExitLookup {
+		return // 用户不想让第三方网站看到这次查询
+	}
 	c, err := d.core.HTTPClient("proxy", 10*time.Second)
 	if err != nil {
 		return
@@ -2516,6 +2605,19 @@ func (d *Daemon) registerHandlers() {
 		if err := d.setSettings(next); err != nil {
 			return nil, err
 		}
+		if prev.CoreLogDisk != next.CoreLogDisk {
+			d.coreDisk.Store(next.CoreLogDisk)
+			if !next.CoreLogDisk {
+				d.coreLog.Filter(coreDiskLine) // 关掉就是不想留了:已经写下的也按新规矩过一遍
+			}
+		}
+		if prev.NoExitLookup != next.NoExitLookup {
+			if next.NoExitLookup {
+				d.clearExit()
+			} else if d.core.Running() {
+				go d.refreshExit(d.beginExit(d.currentNode()))
+			}
+		}
 		// 跨过严格全局边界(禁直连 + 全局)、或动了 IPv6 / TUN / 禁直连开关,会改变密封 DNS 与闸的安全边界,
 		// 运行中必须整份重建;边界没变的切模式在下面就地切。
 		if d.core.Running() && needsPrivacyRebuild(prev, next) {
@@ -2543,9 +2645,10 @@ func (d *Daemon) registerHandlers() {
 		if d.core.Running() {
 			live := prev // 模式、节点、禁直连开关、定时测速间隔是运行时可改的,别的都要重新生成配置
 			live.Mode, live.Selected, live.NoDirect, live.ProbeMinutes = next.Mode, next.Selected, next.NoDirect, next.ProbeMinutes
-			// 这四项都不进 sing-box 的配置:面板监听地址与密码归内置 HTTP 面板管,
-			// 日志保留天数归滚动器管,订阅刷新间隔归 Run 的循环管 —— 改它们不该让隧道断一下
+			// 这几项都不进 sing-box 的配置:面板监听地址与密码归内置 HTTP 面板管,日志保留天数归滚动器管,
+			// 内核日志落不落盘归 corePrintf 管,查不查出口归 refreshExit 管,订阅刷新间隔归 Run 的循环管 —— 改它们不该让隧道断一下
 			live.WebListen, live.WebPassword, live.LogDays, live.UpdateHours = next.WebListen, next.WebPassword, next.LogDays, next.UpdateHours
+			live.CoreLogDisk, live.NoExitLookup = next.CoreLogDisk, next.NoExitLookup
 			if !reflect.DeepEqual(live, next) {
 				if err := d.restart(); err != nil {
 					return nil, &ipc.CallError{Code: state.CodeOf(err), Msg: "新设置的配置生成失败,保持当前连接: " + err.Error()}
@@ -2593,11 +2696,10 @@ func (d *Daemon) registerHandlers() {
 		if in.Lines <= 0 || in.Lines > 2000 {
 			in.Lines = 200
 		}
-		path := d.log.Path()
 		if in.Core {
-			path = d.coreLog.Path()
+			return d.coreTail(in.Lines), nil
 		}
-		return logx.Tail(path, in.Lines), nil
+		return logx.Tail(d.log.Path(), in.Lines), nil
 	})
 	h(ipc.MDiagnose, func(json.RawMessage) (any, error) { return d.diagnose() })
 }

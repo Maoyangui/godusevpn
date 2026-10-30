@@ -134,6 +134,7 @@ func main() {
 		if err := netmode.UnprotectChecked(); err != nil {
 			fmt.Println("注意:系统 DNS / 路由没能还原:", err)
 		}
+		netmode.RestoreForward() // 停服务不算断开,网关模式打开的 IP 转发这里关回去
 		if err := svc.Uninstall(); err != nil {
 			fail(err)
 		}

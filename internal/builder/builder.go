@@ -319,32 +319,46 @@ func buildConfig(in Input, rep *Report) ([]byte, error) {
 		r["outbound"] = "direct"
 		rules = append(rules, r) // 指定进程 / 应用直连,放在最前
 	}
-	// 局域网设备策略(网关模式):按来源 IP 强制直连 / 拒绝 / 代理,放在模式分支之前,任何模式下都成立
+	// 局域网设备策略(网关模式):强制直连 / 拒绝 / 代理,放在模式分支之前,任何模式下都成立。
+	// 按 MAC 匹配:内核用路由器的邻居表把来源地址对到 MAC(有规则用到 MAC 它就自己开这个查询),设备换 IP 不用重新生成配置、
+	// 不用断别人的连接,旧 IP 分给别的设备也不会错套,设备的每个地址(含 IPv6)都算数。
+	// 只记了 IP 没有 MAC 的(手改设置文件才有)才按来源地址。两个字段写在一条规则里是"且",所以分开写。
 	if s.NetMode == settings.NetGateway {
-		byMode := map[string][]string{}
-		for _, d := range s.Devices {
-			if d.Mode == "" || d.IP == "" {
-				continue
+		byMode := map[string]map[string][]string{}
+		add := func(mode, key, val string) {
+			if byMode[mode] == nil {
+				byMode[mode] = map[string][]string{}
 			}
-			byMode[d.Mode] = append(byMode[d.Mode], d.IP+cidrSuffix(d.IP))
+			byMode[mode][key] = append(byMode[mode][key], val)
+		}
+		for _, d := range s.Devices {
+			switch {
+			case d.Mode == "":
+			case d.MAC != "":
+				add(d.Mode, "source_mac_address", d.MAC)
+			case d.IP != "":
+				add(d.Mode, "source_ip_cidr", d.IP+cidrSuffix(d.IP))
+			}
 		}
 		for _, mode := range []string{"reject", "direct", "proxy"} {
 			if mode == "direct" && sealed {
 				continue // 严格全局下设备的"直连"不生效(见上)
 			}
-			ips := byMode[mode]
-			switch {
-			case len(ips) == 0:
-			case mode == "reject":
-				rules = append(rules, obj("source_ip_cidr", ips, "action", "reject"))
-			case mode == "proxy" && !s.IPv6:
-				// 强制代理的设备不走下面那条通用的 resolve(那条要按 DNS 规则走,规则模式下国内域名会交给直连的本地 DNS):
-				// 这里先经远程 DNS(经代理)按 ipv4_only 解析,再交给代理 —— 否则节点拿到域名自己解析,解析出 AAAA 就走 IPv6 出去
-				rules = append(rules,
-					obj("source_ip_cidr", ips, "action", "resolve", "server", "remote", "strategy", "ipv4_only"),
-					obj("source_ip_cidr", ips, "outbound", mode))
-			default:
-				rules = append(rules, obj("source_ip_cidr", ips, "outbound", mode))
+			for _, key := range []string{"source_mac_address", "source_ip_cidr"} {
+				who := byMode[mode][key]
+				switch {
+				case len(who) == 0:
+				case mode == "reject":
+					rules = append(rules, obj(key, who, "action", "reject"))
+				case mode == "proxy" && !s.IPv6:
+					// 强制代理的设备不走下面那条通用的 resolve(那条要按 DNS 规则走,规则模式下国内域名会交给直连的本地 DNS):
+					// 这里先经远程 DNS(经代理)按 ipv4_only 解析,再交给代理 —— 否则节点拿到域名自己解析,解析出 AAAA 就走 IPv6 出去
+					rules = append(rules,
+						obj(key, who, "action", "resolve", "server", "remote", "strategy", "ipv4_only"),
+						obj(key, who, "outbound", mode))
+				default:
+					rules = append(rules, obj(key, who, "outbound", mode))
+				}
 			}
 		}
 	}

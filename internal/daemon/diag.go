@@ -67,10 +67,12 @@ func (d *Daemon) diagnose() (any, error) {
 	info := d.diagInfo()
 	info["dataDir"] = paths.DataDir()
 	info["serviceLog"] = logx.Tail(d.log.Path(), 100)
-	core := logx.Tail(d.coreLog.Path(), 100)
+	core := d.coreTail(100)
+	out := make([]string, len(core)) // coreTail 可能和内存日志共用切片,不能就地改
 	for i, l := range core {
-		core[i] = redact.Destinations(l) // 访问过的域名与公网地址合起来就是浏览记录
+		out[i] = redact.Destinations(l) // 访问过的域名与公网地址合起来就是浏览记录
 	}
+	core = out
 	info["coreLog"] = core
 	return diagTree(d.diagMasker(), info)
 }
@@ -112,7 +114,7 @@ func (d *Daemon) exportDiag() (string, error) {
 		}
 	}
 	add("service.log", strings.Join(logx.Tail(d.log.Path(), 500), "\n"))
-	add("core.log", redact.Destinations(strings.Join(logx.Tail(d.coreLog.Path(), 500), "\n")))
+	add("core.log", redact.Destinations(strings.Join(d.coreTail(500), "\n")))
 	// 崩溃记录(Windows 服务 / Linux / macOS 的 CaptureCrashes,Android 上 Go / Kotlin 侧)。.1 是启动时超过 1MB
 	// 挪走的那份 —— 轮转恰恰发生在一次崩溃把文件推过 1MB 之后,现场在那里。
 	for _, name := range []string{"crash.log", "crash.log.1"} {

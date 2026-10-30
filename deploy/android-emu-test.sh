@@ -81,5 +81,5 @@ if [ -n "$EMU_FULL" ]; then
   echo "-- 通知(应为空):"; a shell dumpsys notification 2>/dev/null | grep -c "pkg=$PKG"
 fi
 echo "-- dumpsys:"; a shell dumpsys connectivity | grep -i "vpn\|tun0" | grep -v "NetworkAgentInfo\|NetworkRequest" | head -4
-echo "-- 内核日志(非 TRACE 尾部):"; a shell "run-as $PKG sh -c 'tail -40 files/data/logs/core.log'" | tr -d '\r' | grep -v TRACE | tail -12
+echo "-- 内核日志里的警告与错误(其余只在内存,见日志页):"; a shell "run-as $PKG sh -c 'tail -40 files/data/logs/core.log'" | tr -d '\r' | tail -12
 echo "-- logcat(引擎 / 崩溃):"; a logcat -d -s godusevpn:* AndroidRuntime:E | tail -20

@@ -322,3 +322,6 @@ func flushDNS() {
 func ApplyGateway(string, []string) error { return nil }
 
 func ClearGateway() {}
+
+// RestoreForward 同上。
+func RestoreForward() {}

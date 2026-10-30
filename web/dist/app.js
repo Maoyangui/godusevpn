@@ -1053,6 +1053,7 @@ async function renderSettings(el) {
     ${group(t('set.g.privacy'), `
       ${sw('f-ipv6', t('set.ipv6'), s.ipv6, t('set.ipv6Help'))}
       ${sw('f-nodirect', t('set.noDirect'), s.noDirect, t(state.platform === 'android' ? 'set.noDirectHelpAndroid' : 'set.noDirectHelp') + (state.platform === 'darwin' ? t('set.noDirectMacNote') : ''))}
+      ${sw('f-exitlookup', t('set.exitLookup'), !s.noExitLookup, t('set.exitLookupHelp'))}
       ${state.platform === 'android' ? `<div class="srow"><div class="lbl">${t('set.vpnAlways')}<div>${t('set.vpnAlwaysHelp')}</div></div><button class="btn sm" id="f-vpnalways">${t('set.vpnAlwaysOpen')}</button></div>` : ''}
       ${state.platform === 'android' ? '' : `<div class="srow"><div class="lbl">${t('set.nicv6')} <span class="tag warn">${t('set.nicv6Tag')}</span><div>${t('set.nicv6Help')}</div></div><label class="switch"><input type="checkbox" id="f-nicv6" ${s.disableNicIpv6 ? 'checked' : ''}></label></div>`}
     `)}
@@ -1073,6 +1074,7 @@ async function renderSettings(el) {
     ${group(t('set.g.logs'), `
       ${sel('f-log', t('set.logLevel'), s.logLevel, [['debug', 'debug'], ['info', 'info'], ['warn', 'warn'], ['error', 'error']])}
       ${num('f-logdays', t('set.logDays'), (s.logDays === null || s.logDays === undefined ? 7 : s.logDays), t('set.logDaysHelp'))}
+      ${sw('f-coredisk', t('set.coreDisk'), s.coreLogDisk, t('set.coreDiskHelp'))}
     `)}
     ${group(t('set.g.app'), `
       ${state.platform === 'android' ? `<div class="srow"><div class="lbl">${t('set.autostart')}<div>${t('set.autostartAndroidHelp')}</div></div></div>` : sw('f-autostart', t(state.platform === 'linux' ? 'set.autostartLinux' : 'set.autostart'), auto, t(state.platform === 'linux' ? 'set.autostartLinuxHelp' : 'set.autostartHelp'))}
@@ -1106,7 +1108,7 @@ async function renderSettings(el) {
     const n = { ...s, tun: $('#f-tun').checked, tunStack: $('#f-stack').value, strictRoute: $('#f-strict').checked, lanBypass: $('#f-lan').checked,
       mixedPort: Number($('#f-mixed').value), probeMinutes: Number($('#f-probe').value), updateHours: Number($('#f-update').value),
       remoteDns: $('#f-rdns').value.trim(), localDns: $('#f-ldns').value.trim(), fakeIp: $('#f-fakeip').checked, ipv6: $('#f-ipv6').checked, noDirect: $('#f-nodirect').checked, disableNicIpv6: $('#f-nicv6') ? $('#f-nicv6').checked : s.disableNicIpv6, adBlock: $('#f-ad').checked,
-      bypassApps: $('#f-bypass').value.split(/\r?\n/).map(x => x.trim()).filter(Boolean), logLevel: $('#f-log').value, logDays: Number($('#f-logdays').value) };
+      bypassApps: $('#f-bypass').value.split(/\r?\n/).map(x => x.trim()).filter(Boolean), logLevel: $('#f-log').value, logDays: Number($('#f-logdays').value), coreLogDisk: $('#f-coredisk').checked, noExitLookup: !$('#f-exitlookup').checked };
     if ($('#f-netmode')) { n.netMode = $('#f-netmode').value; n.webListen = $('#f-weblisten').value.trim(); }
     try { s = await App().SaveSettings(n); dirty(false); toast(t('set.saved'), 'ok'); } catch (e) { toast(errText(e), 'err'); }
   });
@@ -1476,6 +1478,7 @@ function renderLogs(el) {
       <button class="btn" id="log-copy">${t('logs.copy')}</button>
       <button class="btn primary" id="diag">${t('logs.diag')}</button>
     </div>
+    <p class="pagehint center" id="log-memnote" hidden>${t('logs.memNote')}</p>
     <p class="pagehint center">${t('logs.diagNote')}</p>`;
   // 内核日志的分类筛选(全部 / 走隧道 / 直连 / 拦截 / DNS)与"只看这一条连接"
   let cat = '', conn = '';
@@ -1483,6 +1486,7 @@ function renderLogs(el) {
   const drawCats = (counts) => {
     const box = $('#log-cats'); if (!box) return;
     box.hidden = !core;
+    const memNote = $('#log-memnote'); if (memNote) memNote.hidden = !core;
     if (!core) return;
     const html = CATS.map(c => `<button class="chip ${c === cat && !conn ? 'on' : ''}" data-cat="${c}">${t(c ? 'logs.cat.' + c : 'logs.cat.all')}${c && counts[c] ? ` <em>${counts[c]}</em>` : ''}</button>`).join('')
       + (conn ? `<button class="chip on" data-cat="${cat}">${esc(t('logs.connOnly', { id: '#' + conn.slice(-4) }))} ✕</button>` : '');

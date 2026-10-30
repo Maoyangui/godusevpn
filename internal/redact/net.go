@@ -118,8 +118,16 @@ func mustCIDR(s string) *net.IPNet {
 // "连没连上、走哪个出站、卡在哪一步"不受影响。日志文件本身不动(日志目录只有控制用户读得到)。
 var domainName = regexp.MustCompile(`(?i)(?:[a-z0-9_](?:[a-z0-9_-]*[a-z0-9])?\.)+[a-z]{2,63}\.?`)
 
+// 网关模式下内核每条连接都记一句 "found neighbor: <MAC>, hostname: <名字>":局域网里有哪些设备,也不该发给别人。
+var (
+	macAddress   = regexp.MustCompile(`(?i)\b[0-9a-f]{2}(?::[0-9a-f]{2}){5}\b`)
+	neighborName = regexp.MustCompile(`hostname: \S+`)
+)
+
 // Destinations 打码内核日志里的访问目标。
 func Destinations(s string) string {
+	s = macAddress.ReplaceAllString(s, "**:**:**:**:**:**")
+	s = neighborName.ReplaceAllString(s, "hostname: ***")
 	s = replaceBounded(s, domainName, hostEdge, maskDomain)
 	return netIdentity(s, "")
 }

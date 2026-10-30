@@ -56,6 +56,8 @@ type Settings struct {
 	ProbeMinutes   int      `json:"probeMinutes"` // 定时测速:auto 组每隔多少分钟测一轮全部节点(1 到 60)
 	LogLevel       string   `json:"logLevel"`     // debug | info | warn | error
 	LogDays        int      `json:"logDays"`      // 日志保留天数,超过自动删除;0 = 一直保留
+	CoreLogDisk    bool     `json:"coreLogDisk"`  // 内核日志写全到磁盘(默认关:连接目标只留在内存里,磁盘上只有打了码的警告和错误)
+	NoExitLookup   bool     `json:"noExitLookup"` // 不查出口地址(默认查:连上后经节点问第三方网站一次,首页显示出口)
 	WebListen      string   `json:"webListen"`    // Web 面板监听地址(Linux),如 127.0.0.1:9800 / 0.0.0.0:9800;空 = 不开面板
 	WebPassword    string   `json:"webPassword"`  // 面板密码的加盐哈希(salt$sha256);空 = 无密码,此时面板不给用
 	NetMode        string   `json:"netMode"`      // local | gateway(Linux 软路由:代理经本机转发的局域网流量),见 gateway.go
