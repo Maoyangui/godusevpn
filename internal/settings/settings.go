@@ -15,7 +15,7 @@ import (
 	"time"
 )
 
-const Schema = 5
+const Schema = 4
 
 // DefaultProbeMinutes 自动选择多久真连一轮全部节点。当前节点通不通另有健康检查盯着,这一轮只是为了换到更快的,不用太勤。
 const DefaultProbeMinutes = 10
@@ -59,6 +59,7 @@ type Settings struct {
 	AdBlock        bool     `json:"adBlock"`
 	UpdateHours    int      `json:"updateHours"`    // 订阅刷新间隔(小时)
 	ProbeMinutes   int      `json:"probeMinutes"`   // 定时测速:auto 组每隔多少分钟测一轮全部节点(1 到 60)
+	ProbeMoved     bool     `json:"probeMoved"`     // 原来的默认值 3 分钟已经迁到新默认(只迁一次,见 migrate)
 	LogLevel       string   `json:"logLevel"`       // debug | info | warn | error
 	LogDays        int      `json:"logDays"`        // 日志保留天数,超过自动删除;0 = 一直保留
 	CoreLogDisk    bool     `json:"coreLogDisk"`    // 内核日志写全到磁盘(默认关:连接目标只留在内存里,磁盘上只有打了码的警告和错误)
@@ -82,7 +83,7 @@ type Settings struct {
 // Default 出厂默认:TUN + 规则模式 + DoH + fake-ip + 禁 IPv6。
 func Default() Settings {
 	return Settings{
-		Schema: Schema, Mode: ModeRule, TUN: true, DisableNICIPv6: true, TUNStack: "mixed", StrictRoute: true, NoDirect: true, LANBypass: true,
+		Schema: Schema, ProbeMoved: true, Mode: ModeRule, TUN: true, DisableNICIPv6: true, TUNStack: "mixed", StrictRoute: true, NoDirect: true, LANBypass: true,
 		MixedPort: 2080, RemoteDNS: "1.1.1.1", LocalDNS: "223.5.5.5", FakeIP: true, IPv6: false,
 		UpdateHours: 6, ProbeMinutes: DefaultProbeMinutes, LogLevel: "info", LogDays: 7, ClashPort: 9090, WebListen: defaultWebListen(),
 		NetMode: NetLocal, DefaultRules: FactoryDefaultRules(),
@@ -106,6 +107,7 @@ func Load(path string) (Settings, error) {
 		}
 		return s, err
 	}
+	s.ProbeMoved = false // 老文件没有这个键,读出来得是 false 才会迁
 	if err := json.Unmarshal(b, &s); err != nil {
 		return Default(), fmt.Errorf("设置文件损坏: %w", err)
 	}
@@ -147,8 +149,11 @@ func (s *Settings) migrate() {
 	if s.Schema < 4 {
 		s.NoDirect = true // 同上:防流量逃逸默认开
 	}
-	if s.Schema < 5 && s.ProbeMinutes == 3 {
-		s.ProbeMinutes = DefaultProbeMinutes // 3 是原来的默认值,跟着新默认走;自己改过的不动
+	if !s.ProbeMoved {
+		if s.ProbeMinutes == 3 {
+			s.ProbeMinutes = DefaultProbeMinutes // 3 是原来的默认值,跟着新默认走;自己改过的不动
+		}
+		s.ProbeMoved = true
 	}
 	s.Schema = Schema
 }

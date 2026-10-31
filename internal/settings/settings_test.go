@@ -162,13 +162,40 @@ func TestPreserve(t *testing.T) {
 	}
 }
 
-// 原来的默认值 3 分钟跟着新默认走;自己改过的不动。
+// 原来的默认值 3 分钟跟着新默认走,只迁一次:迁过之后再自己设成 3 就是 3。
 func TestMigrateProbeMinutes(t *testing.T) {
-	for _, c := range []struct{ schema, in, want int }{{4, 3, DefaultProbeMinutes}, {4, 7, 7}, {5, 3, 3}, {4, 0, DefaultProbeMinutes}} {
-		s := Settings{Schema: c.schema, ProbeMinutes: c.in}
-		s.migrate()
-		if s.ProbeMinutes != c.want {
-			t.Fatalf("schema %d 值 %d:得 %d", c.schema, c.in, s.ProbeMinutes)
+	load := func(body string) Settings {
+		t.Helper()
+		p := filepath.Join(t.TempDir(), "settings.json")
+		if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
 		}
+		s, err := Load(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return s
+	}
+	for _, c := range []struct {
+		body string
+		want int
+	}{
+		{`{"schema":4,"probeMinutes":3,"mode":"rule"}`, DefaultProbeMinutes},
+		{`{"schema":4,"probeMinutes":7,"mode":"rule"}`, 7},
+		{`{"schema":4,"probeMinutes":3,"probeMoved":true,"mode":"rule"}`, 3},
+		{`{"schema":4,"mode":"rule"}`, DefaultProbeMinutes},
+	} {
+		s := load(c.body)
+		if s.ProbeMinutes != c.want || !s.ProbeMoved {
+			t.Fatalf("%s:得 %d,迁过标记 %v", c.body, s.ProbeMinutes, s.ProbeMoved)
+		}
+	}
+}
+
+// 旧版读到比自己新的 schema 会拒绝启动(Load),用户退回旧版服务就起不来。加字段不用升 schema:
+// 旧版会忽略不认识的键;一次性的迁移用单独的标记,像 ProbeMoved 那样。真要升,先想清楚退回旧版怎么办。
+func TestSchemaStaysReadableByOldClients(t *testing.T) {
+	if Schema != 4 {
+		t.Fatalf("schema 变成了 %d,v0.7.1 到 v0.7.15 都读不了这份设置", Schema)
 	}
 }

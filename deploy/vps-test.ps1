@@ -16,6 +16,11 @@ $OutputEncoding = [System.Text.Encoding]::UTF8
 chcp 65001 | Out-Null
 $svc = Join-Path $Bin "godusevpn-svc.exe"
 $cli = Join-Path $Bin "godusevpn-cli.exe"
+# 把 JSON 当一个参数传给命令行:Windows PowerShell 5.1 会吃掉引号,要写成 \";pwsh 7.3 起自己转义,再写 \" 就多一层,CLI 解析失败
+function Set-JsonSetting($kv) {
+  if ((Test-Path variable:PSNativeCommandArgumentPassing) -and $PSNativeCommandArgumentPassing -ne 'Legacy') { & $cli settings $kv 2>&1 | Out-Null }
+  else { & $cli settings ($kv -replace '"', '\"') 2>&1 | Out-Null }
+}
 $fail = 0
 function Check($name, $ok, $detail) {
   if ($ok) { Write-Host ("[PASS] {0}  {1}" -f $name, $detail) -ForegroundColor Green }
@@ -408,10 +413,10 @@ if ($script:directOK) {
   $script:svcEventsSince = Get-Date
 }
 # 规则组走命令行改:防火墙当场跟着变
-& $cli settings 'ruleGroups=[{\"id\":\"t1\",\"name\":\"t1\",\"enabled\":true,\"outbound\":\"direct\",\"rules\":[{\"type\":\"ip_cidr\",\"value\":\"1.1.1.1/32\"}]}]' 2>&1 | Out-Null
+Set-JsonSetting 'ruleGroups=[{"id":"t1","name":"t1","enabled":true,"outbound":"direct","rules":[{"type":"ip_cidr","value":"1.1.1.1/32"}]}]'
 Start-Sleep -Seconds 3
 if ($script:directOK) { $a = Nic-Http $fnUrl; Check "加直连 IP 规则:防火墙当场放行" ($a -match '^[234]') "http=$a" }
-& $cli settings 'ruleGroups=[{\"id\":\"t2\",\"name\":\"t2\",\"enabled\":true,\"outbound\":\"proxy\",\"rules\":[{\"type\":\"ip_cidr\",\"value\":\"223.5.5.0/24\"},{\"type\":\"port\",\"value\":\"8443\"},{\"type\":\"port\",\"value\":\"9000-9100\"}]}]' 2>&1 | Out-Null
+Set-JsonSetting 'ruleGroups=[{"id":"t2","name":"t2","enabled":true,"outbound":"proxy","rules":[{"type":"ip_cidr","value":"223.5.5.0/24"},{"type":"port","value":"8443"},{"type":"port","value":"9000-9100"}]}]'
 Start-Sleep -Seconds 3
 if ($script:directOK) { $a = Nic-Http $cnUrl; Check "排前面的走隧道规则盖过国内直连" ($a -notmatch '^[234]') "http=$a" }
 $null = Get-WfpProviders

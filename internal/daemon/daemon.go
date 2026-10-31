@@ -2699,6 +2699,7 @@ func (d *Daemon) registerHandlers() {
 		}
 		prev := d.getSettings()
 		next.Schema = settings.Schema
+		next.ProbeMoved = true                                                // 用户这次保存的就是他要的间隔
 		next.Profiles, next.ActiveProfile = prev.Profiles, prev.ActiveProfile // 订阅另有接口管,这里不动
 		if err := d.setSettings(next); err != nil {
 			return nil, err
