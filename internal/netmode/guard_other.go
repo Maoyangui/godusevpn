@@ -5,6 +5,16 @@ package netmode
 // 非 Android 的其它平台没有实现系统级持久闸。不能把普通进程内 TUN
 // 误报成可覆盖崩溃/重启的隐私保护。
 func ApplyGuard(GuardSpec) error { return nil }
+
+// SealTunDNS 只有 Linux 要做:这个平台的系统 DNS 另有接管(见 Protect / strict_route)。
+func SealTunDNS(string) error { return nil }
+
+// UnsealTunDNS 见 SealTunDNS。
+func UnsealTunDNS() {}
+
+// LANResolvers 只有 Linux 用得上。
+func LANResolvers() []string { return nil }
+
 func GuardTunUp(GuardSpec) error { return nil }
 func GuardTunDown() error        { return nil }
 func ClearGuard() error          { return nil }

@@ -40,6 +40,7 @@ type Profile struct {
 	Outbounds []json.RawMessage `json:"outbounds"` // 清洗后的节点出站
 	Tags      []string          `json:"tags"`
 	Usage     Usage             `json:"usage"`
+	Manual    bool              `json:"manual,omitempty"` // 手动添加的节点,不用刷新
 }
 
 // 这些 tag 是客户端自己用的,节点不能撞;这些类型不是节点,直接丢
@@ -278,6 +279,9 @@ func (p *Profile) Save(path string) error {
 
 // Stale 距上次拉取是否超过 every。
 func (p *Profile) Stale(every time.Duration) bool {
+	if p != nil && p.Manual {
+		return false
+	}
 	return p == nil || time.Since(time.Unix(p.FetchedAt, 0)) > every
 }
 

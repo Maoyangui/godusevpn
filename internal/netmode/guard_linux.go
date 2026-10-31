@@ -8,7 +8,9 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -64,6 +66,14 @@ func guardRuleset(spec GuardSpec, dns bool) string {
 		fmt.Fprintf(&b, "\t\toifname %q accept\n", spec.TunName) // 经隧道出去的流量(按名字比,网卡还没建也认)
 	}
 	fmt.Fprintf(&b, "\t\tmeta mark %s accept\n", selfMarks(spec)) // 本服务:节点连接、订阅刷新的回退直连、DoH
+	if spec.Gateway {
+		// 网关模式下路由器自己发的包是出来之后才被 sing-tun 改道的:UDP、ICMP 打标记走隧道,TCP 改发给本机的转发端口,
+		// TCP 的 DNS 改发给隧道里的地址。这条链看到的网卡还是改道前的物理网卡,按网卡名放行不了,路由器自己就上不了网。
+		// 打了标记的包要是其实没进隧道,由下面的 postrouting 链拦(那里看到的才是真正出去的网卡)。
+		fmt.Fprintf(&b, "\t\tmeta mark 0x%x accept\n", tun.DefaultAutoRedirectInputMark)
+		b.WriteString("\t\tip daddr 127.0.0.0/8 accept\n\t\tip6 daddr ::1 accept\n")
+		fmt.Fprintf(&b, "\t\tip daddr %s accept\n\t\tip6 daddr %s accept\n", builder.TunAddr4, builder.TunAddr6)
+	}
 	if spec.Rule {
 		b.WriteString("\t\tct direction reply accept\n") // 规则模式不拦入站:规则管的是本机去哪儿,不是谁连进来
 	} else {
@@ -71,7 +81,7 @@ func guardRuleset(spec GuardSpec, dns bool) string {
 	}
 	b.WriteString("\t\tmeta skuid 0 udp sport 68 udp dport 67 accept\n") // 系统 DHCP 客户端的单播续租
 	if spec.Rule {
-		b.WriteString(fakeDrop) // 规则模式不拦 DNS 和 UPnP:物理网卡上的 DNS 通常是路由器或运营商,拦了直连的网站就解析不了;发往放行段以外的照样落到最后的 drop
+		b.WriteString(fakeDrop) // 规则模式不拦 DNS 和 UPnP:隧道一断,直连的网站还要解析(见 ruleAllow)
 	} else {
 		blockLeaks(&b, dns)
 	}
@@ -104,6 +114,13 @@ func guardRuleset(spec GuardSpec, dns bool) string {
 	}
 	ruleAllow(&b, spec, true)
 	b.WriteString("\t\tdrop\n\t}\n")
+	if spec.Gateway && spec.TunName != "" {
+		// 内核刚被杀的那一小会儿:sing-tun 的规则还在、隧道网卡已经没了,打了标记的包查不到隧道的路由,会从物理网卡出去
+		b.WriteString("\tchain postrouting {\n\t\ttype filter hook postrouting priority filter; policy accept;\n")
+		fmt.Fprintf(&b, "\t\tmeta mark 0x%x oifname != %q drop\n", tun.DefaultAutoRedirectInputMark, spec.TunName)
+		fmt.Fprintf(&b, "\t\tip daddr %s oifname != %q drop\n", builder.TunAddr4, spec.TunName)
+		b.WriteString("\t}\n")
+	}
 	b.WriteString("}\n")
 	return b.String()
 }
@@ -122,6 +139,15 @@ func ruleAllow(b *strings.Builder, spec GuardSpec, forward bool) {
 		list := strings.Join(ports, ", ")
 		fmt.Fprintf(b, "\t\ttcp dport { %s } drop\n\t\tudp dport { %s } drop\n", list, list)
 	}
+	// systemd-resolved 把名字以网卡搜索域结尾的查询绑在物理网卡上发,不进隧道:查不到的域名、只查 IPv6 时,系统会再试
+	// 「www.x.com.<搜索域>」,这个名字就明文发给了网卡配的解析器。这里丢掉它的 UDP,它会立刻改走 TCP,TCP 不绑网卡:
+	// 隧道在时进隧道由内核回答(DNS 的策略路由),隧道不在时由下面那条放行、发给网卡配的解析器。局域网里的解析器在上面就放行了,
+	// nas.lan 这种名字本来就该问它。网关模式不管:路由器自己的解析另有一条路。
+	if uid := resolvedUID(); uid >= 0 && !forward && !spec.Gateway {
+		fmt.Fprintf(b, "\t\tmeta skuid %d udp dport 53 drop\n", uid)
+	}
+	// DNS 不看目的地址:系统配的解析器不一定在放行段里(8.8.8.8、云厂商的解析器),拦了隧道一断直连的网站就解析不了。
+	b.WriteString("\t\ttcp dport 53 accept\n\t\tudp dport 53 accept\n")
 	v4, v6 := spec.directFamilies()
 	if len(v4) > 0 {
 		b.WriteString("\t\tip daddr @direct4 accept\n")
@@ -129,6 +155,19 @@ func ruleAllow(b *strings.Builder, spec GuardSpec, forward bool) {
 	if len(v6) > 0 {
 		b.WriteString("\t\tip6 daddr @direct6 accept\n")
 	}
+}
+
+// resolvedUID systemd-resolved 的用户;没有这个用户返回 -1。写进规则的是数字:nft 遇到不存在的用户名整段规则都加载不了。
+var resolvedUID = func() int {
+	u, err := user.Lookup("systemd-resolve")
+	if err != nil {
+		return -1
+	}
+	id, err := strconv.Atoi(u.Uid)
+	if err != nil {
+		return -1
+	}
+	return id
 }
 
 // deviceMatch 按来源匹配设备:有 MAC 按 MAC,手改设置文件才有的只有 IP 的按 IP。
@@ -181,10 +220,11 @@ var fakeDrop = "\t\tip6 daddr " + builder.FakeIP6 + " drop\n"
 func ApplyGuard(spec GuardSpec) error {
 	nftMu.Lock()
 	defer nftMu.Unlock()
-	// 规则模式不把 DNS 接进隧道:本地 DNS 填 system(或 DoH 填域名)时内核自己要问系统解析器,接进隧道就绕回自己;
-	// 全局模式那边有密封 DNS 兜着,规则模式没有。和以前一样:问路由器的直接问。从全局切过来时把策略路由撤掉。
+	// 规则模式同样把 DNS 接进隧道:「局域网直通」把私网段排除在隧道外,resolv.conf 写路由器的系统,连着时所有域名都明文问路由器。
+	// 内核自己问系统解析器(本地 DNS 填 system)时套接字绑着物理网卡,表里那条按隧道网卡走的路由对它不生效,不会绕回自己。
+	// 网关模式不用:路由器自己的解析由 auto_redirect 接住。
 	dns, why := false, ""
-	if spec.Rule {
+	if spec.Rule && spec.Gateway {
 		unsealDNS()
 	} else {
 		dns, why = sealDNS()
@@ -412,6 +452,59 @@ func routeDNSToTun(tunName string) error {
 	}
 	_ = netlink.RouteReplace(&netlink.Route{LinkIndex: idx, Dst: &net.IPNet{IP: net.IPv6zero, Mask: net.CIDRMask(0, 128)}, Table: dnsTable})
 	return nil
+}
+
+// SealTunDNS 连着时把 53 端口接进隧道,和闸无关:没开防流量逃逸也一样,连着的时候 DNS 不该直接问路由器。
+// 路由跟着隧道网卡走,网卡一没表就空了,DNS 落回主表,所以崩溃时留下这条规则也不碍事。
+func SealTunDNS(tunName string) error {
+	nftMu.Lock()
+	dns, why := sealDNS()
+	if dns {
+		dnsSealed = true
+	}
+	nftMu.Unlock()
+	if !dns {
+		return errors.New(why)
+	}
+	return routeDNSToTun(tunName)
+}
+
+// UnsealTunDNS 撤掉 SealTunDNS 装的。闸还在就不动:那边的规格管着它。
+func UnsealTunDNS() {
+	if n, err := GuardStatus(); err != nil || n > 0 {
+		return
+	}
+	nftMu.Lock()
+	defer nftMu.Unlock()
+	unsealDNS()
+	dnsSealed = false
+}
+
+// LANResolvers 系统配的解析器里在局域网内的那些(通常是路由器),内核拿它们回答 nas.lan 这种局域网名字。
+// 有 systemd-resolved 时 /etc/resolv.conf 只写着 127.0.0.53,真正的上游在 /run/systemd/resolve/resolv.conf。
+func LANResolvers() []string {
+	for _, p := range []string{"/run/systemd/resolve/resolv.conf", "/etc/resolv.conf"} {
+		if b, err := os.ReadFile(p); err == nil {
+			if out := lanResolvers(string(b)); len(out) > 0 {
+				return out
+			}
+		}
+	}
+	return nil
+}
+
+func lanResolvers(conf string) []string {
+	var out []string
+	for _, line := range strings.Split(conf, "\n") {
+		f := strings.Fields(line)
+		if len(f) < 2 || f[0] != "nameserver" {
+			continue
+		}
+		if ip := net.ParseIP(f[1]); ip != nil && ip.To4() != nil && ip.IsPrivate() {
+			out = append(out, f[1])
+		}
+	}
+	return out
 }
 
 // GuardWarning 闸装上了、但没做全的那部分(目前只有"DNS 接不进隧道所以没拦")。

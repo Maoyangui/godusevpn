@@ -83,3 +83,13 @@ func TestPasswordLoginStillWorks(t *testing.T) {
 		t.Fatalf("登录后应当能用:%d %s", rec.Code, rec.Body.String())
 	}
 }
+
+// 面板默认只给本机和局域网;回应里不写产品名。
+func TestLocalClient(t *testing.T) {
+	for host, want := range map[string]bool{"127.0.0.1": true, "::1": true, "192.168.1.9": true, "10.1.2.3": true, "172.16.0.1": true, "100.64.1.1": true, "fe80::1": true, "fd00::1": true,
+		"8.8.8.8": false, "20.44.159.84": false, "2001:4860:4860::8888": false, "not-an-ip": false} {
+		if got := localClient(host); got != want {
+			t.Fatalf("%s: 得 %v", host, got)
+		}
+	}
+}

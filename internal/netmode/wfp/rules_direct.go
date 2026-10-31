@@ -27,6 +27,7 @@ const (
 	forwardPermitName = "Permit forward by direct rules"
 	inboundPermitName = "Permit inbound (rule mode)"
 	tunnelPortsName   = "Block tunnel ports"
+	ruleDNSName       = "Permit DNS (rule mode)"
 
 	// directBatch 一条过滤器里放多少个地址条件(同一字段的几个条件之间是"或")。国内地址段有几千个,一段一条的话
 	// 持久存储和枚举都很重;只在建连接时判一次(转发层例外,但隧道在的时候它排不到这里)。
@@ -129,6 +130,30 @@ func permitInbound(session uintptr, baseObjects *baseObjects, weight uint8) erro
 	defer pin.Unpin()
 	for _, layer := range []windows.GUID{cFWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V4, cFWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V6} {
 		if err := addConditionFilter(session, baseObjects, weight, layer, inboundPermitName, nil, cFWP_ACTION_PERMIT, curFlags, &pin); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// permitRuleDNS 规则模式放行 53 端口,不看目的地址:系统配的解析器不一定在放行段里(8.8.8.8、云厂商的解析器),
+// 拦了隧道一断直连的网站就解析不了。(TCP 或 UDP)且端口 53。
+func permitRuleDNS(session uintptr, baseObjects *baseObjects, weight uint8) error {
+	var pin runtime.Pinner
+	defer pin.Unpin()
+	conds := make([]wtFwpmFilterCondition0, 0, 3)
+	for _, proto := range []wtIPProto{cIPPROTO_TCP, cIPPROTO_UDP} {
+		c := wtFwpmFilterCondition0{fieldKey: cFWPM_CONDITION_IP_PROTOCOL, matchType: cFWP_MATCH_EQUAL}
+		c.conditionValue._type = cFWP_UINT8
+		c.conditionValue.value = uintptr(proto)
+		conds = append(conds, c)
+	}
+	port := wtFwpmFilterCondition0{fieldKey: cFWPM_CONDITION_IP_REMOTE_PORT, matchType: cFWP_MATCH_EQUAL}
+	port.conditionValue._type = cFWP_UINT16
+	port.conditionValue.value = uintptr(53)
+	conds = append(conds, port)
+	for _, layer := range []windows.GUID{cFWPM_LAYER_ALE_AUTH_CONNECT_V4, cFWPM_LAYER_ALE_AUTH_CONNECT_V6} {
+		if err := addConditionFilter(session, baseObjects, weight, layer, ruleDNSName, conds, cFWP_ACTION_PERMIT, curFlags, &pin); err != nil {
 			return err
 		}
 	}

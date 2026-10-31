@@ -15,7 +15,10 @@ import (
 	"time"
 )
 
-const Schema = 4
+const Schema = 5
+
+// DefaultProbeMinutes 自动选择多久真连一轮全部节点。当前节点通不通另有健康检查盯着,这一轮只是为了换到更快的,不用太勤。
+const DefaultProbeMinutes = 10
 
 const (
 	ModeRule   = "rule"
@@ -28,6 +31,8 @@ type Profile struct {
 	ID   string `json:"id"`
 	Name string `json:"name"`
 	URL  string `json:"url"`
+	// Manual 手动添加的节点:没有地址,不拉取,节点存在这条订阅的缓存里(见 daemon/manual.go)。
+	Manual bool `json:"manual,omitempty"`
 }
 
 type Settings struct {
@@ -52,19 +57,20 @@ type Settings struct {
 	// 只挡数据包挡不住这一条:运营商给的公网 IPv6 地址就配在网卡上,程序枚举一遍网卡就能读走再报出去。
 	DisableNICIPv6 bool     `json:"disableNicIpv6"`
 	AdBlock        bool     `json:"adBlock"`
-	UpdateHours    int      `json:"updateHours"`  // 订阅刷新间隔(小时)
-	ProbeMinutes   int      `json:"probeMinutes"` // 定时测速:auto 组每隔多少分钟测一轮全部节点(1 到 60)
-	LogLevel       string   `json:"logLevel"`     // debug | info | warn | error
-	LogDays        int      `json:"logDays"`      // 日志保留天数,超过自动删除;0 = 一直保留
-	CoreLogDisk    bool     `json:"coreLogDisk"`  // 内核日志写全到磁盘(默认关:连接目标只留在内存里,磁盘上只有打了码的警告和错误)
-	NoExitLookup   bool     `json:"noExitLookup"` // 不查出口地址(默认查:连上后经节点问第三方网站一次,首页显示出口)
-	WebListen      string   `json:"webListen"`    // Web 面板监听地址(Linux),如 127.0.0.1:9800 / 0.0.0.0:9800;空 = 不开面板
-	WebPassword    string   `json:"webPassword"`  // 面板密码的加盐哈希(salt$sha256);空 = 无密码,此时面板不给用
-	NetMode        string   `json:"netMode"`      // local | gateway(Linux 软路由:代理经本机转发的局域网流量),见 gateway.go
-	LANSubnets     []string `json:"lanSubnets"`   // 保留字段,没有接线(见 gateway.go)
-	Devices        []Device `json:"devices"`      // 局域网设备策略
-	ClashPort      int      `json:"clashPort"`    // 内核 Clash API 端口(只监听回环)
-	Selected       string   `json:"selected"`     // proxy 组当前选中的节点;空 = auto
+	UpdateHours    int      `json:"updateHours"`    // 订阅刷新间隔(小时)
+	ProbeMinutes   int      `json:"probeMinutes"`   // 定时测速:auto 组每隔多少分钟测一轮全部节点(1 到 60)
+	LogLevel       string   `json:"logLevel"`       // debug | info | warn | error
+	LogDays        int      `json:"logDays"`        // 日志保留天数,超过自动删除;0 = 一直保留
+	CoreLogDisk    bool     `json:"coreLogDisk"`    // 内核日志写全到磁盘(默认关:连接目标只留在内存里,磁盘上只有打了码的警告和错误)
+	NoExitLookup   bool     `json:"noExitLookup"`   // 不查出口地址(默认查:连上后经节点问第三方网站一次,首页显示出口)
+	WebAllowPublic bool     `json:"webAllowPublic"` // 允许从公网打开面板(默认只给本机和局域网:面板是明文 HTTP)
+	WebListen      string   `json:"webListen"`      // Web 面板监听地址(Linux),如 127.0.0.1:9800 / 0.0.0.0:9800;空 = 不开面板
+	WebPassword    string   `json:"webPassword"`    // 面板密码的加盐哈希(salt$sha256);空 = 无密码,此时面板不给用
+	NetMode        string   `json:"netMode"`        // local | gateway(Linux 软路由:代理经本机转发的局域网流量),见 gateway.go
+	LANSubnets     []string `json:"lanSubnets"`     // 保留字段,没有接线(见 gateway.go)
+	Devices        []Device `json:"devices"`        // 局域网设备策略
+	ClashPort      int      `json:"clashPort"`      // 内核 Clash API 端口(只监听回环)
+	Selected       string   `json:"selected"`       // proxy 组当前选中的节点;空 = auto
 	// BypassApps 这些进程(如 steam.exe)的流量不走代理,直连出去;按进程名匹配,不分大小写
 	BypassApps []string `json:"bypassApps"`
 	// RuleGroups 用户自定义规则组,按顺序匹配,排在内置默认规则之前(见 rules.go)
@@ -78,7 +84,7 @@ func Default() Settings {
 	return Settings{
 		Schema: Schema, Mode: ModeRule, TUN: true, DisableNICIPv6: true, TUNStack: "mixed", StrictRoute: true, NoDirect: true, LANBypass: true,
 		MixedPort: 2080, RemoteDNS: "1.1.1.1", LocalDNS: "223.5.5.5", FakeIP: true, IPv6: false,
-		UpdateHours: 6, ProbeMinutes: 3, LogLevel: "info", LogDays: 7, ClashPort: 9090, WebListen: defaultWebListen(),
+		UpdateHours: 6, ProbeMinutes: DefaultProbeMinutes, LogLevel: "info", LogDays: 7, ClashPort: 9090, WebListen: defaultWebListen(),
 		NetMode: NetLocal, DefaultRules: FactoryDefaultRules(),
 	}
 }
@@ -132,7 +138,7 @@ func (s *Settings) migrate() {
 	}
 	s.ProfileURL = ""
 	if s.ProbeMinutes == 0 {
-		s.ProbeMinutes = 3
+		s.ProbeMinutes = DefaultProbeMinutes
 	}
 	s.DefaultRules.normalize() // 老设置文件里没有这一段
 	if s.Schema < 3 {
@@ -140,6 +146,9 @@ func (s *Settings) migrate() {
 	}
 	if s.Schema < 4 {
 		s.NoDirect = true // 同上:防流量逃逸默认开
+	}
+	if s.Schema < 5 && s.ProbeMinutes == 3 {
+		s.ProbeMinutes = DefaultProbeMinutes // 3 是原来的默认值,跟着新默认走;自己改过的不动
 	}
 	s.Schema = Schema
 }
@@ -254,7 +263,7 @@ func (s *Settings) Validate() error {
 			return errors.New("订阅 id 重复或为空")
 		}
 		seen[p.ID] = true
-		if !ValidURL(p.URL) {
+		if !p.Manual && !ValidURL(p.URL) {
 			return fmt.Errorf("订阅「%s」的地址必须以 http:// 或 https:// 开头", p.Name)
 		}
 		if p.Name == "" {

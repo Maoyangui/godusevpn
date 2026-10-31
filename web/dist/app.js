@@ -206,9 +206,9 @@ const ICON = {
 };
 const MENU = ['settings', 'profiles', 'rules', 'devices', 'conns', 'logs', 'about'];
 const menuItems = () => MENU.filter(m => m !== 'devices' || (state && state.platform === 'linux')); // 设备页只有 Linux 软路由有
-const PAGES = { onboard: renderOnboard, home: renderHome, settings: renderSettings, profiles: renderProfiles, rules: renderRules, ruleEdit: renderRuleEdit, devices: renderDevices, conns: renderConns, logs: renderLogs, about: renderAbout };
-const TITLES = { settings: 'set.title', profiles: 'prof.title', rules: 'rules.title', ruleEdit: 'rules.edit', devices: 'dev.title', conns: 'conns.title', logs: 'logs.title', about: 'about.title' };
-const BACK = { ruleEdit: 'rules' }; // 返回键去哪(默认回首页)
+const PAGES = { onboard: renderOnboard, home: renderHome, settings: renderSettings, profiles: renderProfiles, rules: renderRules, ruleEdit: renderRuleEdit, manual: renderManual, nodeEdit: renderNodeEdit, devices: renderDevices, conns: renderConns, logs: renderLogs, about: renderAbout };
+const TITLES = { settings: 'set.title', profiles: 'prof.title', rules: 'rules.title', ruleEdit: 'rules.edit', manual: 'mn.title', nodeEdit: 'mn.add', devices: 'dev.title', conns: 'conns.title', logs: 'logs.title', about: 'about.title' };
+const BACK = { ruleEdit: 'rules', manual: 'profiles', nodeEdit: 'manual' }; // 返回键去哪(默认回首页);nodeEdit 看从哪进来的
 // 重绘会把焦点所在的元素换掉(遥控器上焦点就没了):画之前记下 data-* 键,画完再落回同一项
 function focusKey(container, attr) {
   const c = document.activeElement, el = c && container && container.contains(c) ? c.closest('[' + attr + ']') : null;
@@ -322,10 +322,10 @@ function nav(name, arg) {
   view = name;
   clearInterval(pageTimer); pageTimer = null;
   const el = document.createElement('div');
-  el.className = 'view ' + name + (name === 'settings' || name === 'ruleEdit' ? ' has-bar' : ''); // 页名当类名用;带保存栏的页内容不够高时保存栏也贴底
+  el.className = 'view ' + name + (name === 'settings' || name === 'ruleEdit' || name === 'nodeEdit' ? ' has-bar' : ''); // 页名当类名用;带保存栏的页内容不够高时保存栏也贴底
   stage.appendChild(el);
   PAGES[name](el, arg);
-  setTop(name === 'home' || name === 'onboard' ? t('app.name') : t(TITLES[name]), name !== 'home' && name !== 'onboard');
+  setTop(name === 'home' || name === 'onboard' ? t('app.name') : t(name === 'nodeEdit' && arg ? 'mn.edit' : TITLES[name]), name !== 'home' && name !== 'onboard');
   tvFocus();
 }
 function navHome() { nav(state && state.view.profiles && state.view.profiles.length ? 'home' : 'onboard'); }
@@ -337,8 +337,10 @@ function renderOnboard(el) {
     <h1>${t('onboard.title')}</h1>
     <p>${t('onboard.desc')}</p>
     <div class="field with-btn"><input type="url" id="ob-url" placeholder="${t('onboard.url')}" spellcheck="false" autofocus><button class="btn sm ghost" id="ob-paste">${t('common.paste')}</button></div>
+    <div class="help warn http-warn" id="ob-http" hidden>${t('prof.httpWarn')}</div>
     <input type="hidden" id="ob-name">
     <button class="btn primary block" id="ob-go">${t('onboard.go')}</button>
+    <button class="altlink" id="ob-manual">${t('mn.entry')}<svg viewBox="0 0 24 24"><path d="M9 6l6 6-6 6"/></svg></button>
     <div id="ob-err" class="small" style="color:var(--danger);min-height:18px"></div>
     <div class="or"><span></span><em>${t('onboard.or')}</em><span></span></div>
     <div class="tipcard">
@@ -369,8 +371,10 @@ function renderOnboard(el) {
     }
   };
   $('#ob-go').addEventListener('click', submit);
-  $('#ob-paste').addEventListener('click', () => pasteInto('#ob-url'));
+  $('#ob-manual').addEventListener('click', () => openNodeEdit('onboard'));
+  $('#ob-paste').addEventListener('click', async () => { await pasteInto('#ob-url'); $('#ob-http').hidden = !isPlainHTTP($('#ob-url').value); });
   $('#ob-url').addEventListener('keydown', e => { if (e.key === 'Enter') submit(); });
+  $('#ob-url').addEventListener('input', () => { $('#ob-http').hidden = !isPlainHTTP($('#ob-url').value); });
   setTimeout(() => $('#ob-url').focus(), 120);
 }
 // svcBanner 服务连不上时的横幅。"账户没权限"和"服务没在跑"是两回事:前者服务好好的,只是这个账户
@@ -764,8 +768,8 @@ function drawProfiles(list) {
   const body = $('#sheet-body');
   const keep = focusKey(body, 'data-id');
   body.innerHTML = list.length ? `<div class="list">${list.map(p => `<div class="item ${p.active ? 'current' : ''}" data-id="${esc(p.id)}"><span class="check"></span>
-    <div class="name"><b>${esc(p.name)}</b><span>${esc(profileLine(p))}${p.fetchedAt ? ' · ' + esc(t('prof.updated', { t: fmtTime(p.fetchedAt) })) : ''}${p.error ? ' · <span style="color:var(--danger)">' + esc(p.error) + '</span>' : ''}</span></div>
-    <button class="icon-btn xs muted" data-refresh="${esc(p.id)}" title="${t('prof.refresh')}">${ICON_REFRESH}</button></div>`).join('')}</div>` : `<div class="empty">${t('prof.empty')}</div>`;
+    <div class="name"><b>${esc(p.name)}</b><span>${esc(profileLine(p))}${p.fetchedAt && !p.manual ? ' · ' + esc(t('prof.updated', { t: fmtTime(p.fetchedAt) })) : ''}${p.error ? ' · <span style="color:var(--danger)">' + esc(p.error) + '</span>' : ''}</span></div>
+    ${p.manual ? '' : `<button class="icon-btn xs muted" data-refresh="${esc(p.id)}" title="${t('prof.refresh')}">${ICON_REFRESH}</button>`}</div>`).join('')}</div>` : `<div class="empty">${t('prof.empty')}</div>`;
   body.querySelectorAll('.item').forEach(it => it.addEventListener('click', async () => {
     try { await App().SelectProfile(it.dataset.id); closeSheet(); } catch (e) { toast(errText(e), 'err'); }
   }));
@@ -895,8 +899,12 @@ function patchNodes(nodes, max, testing) {
   return true;
 }
 
+let nodeTestAt = 0;
 async function testNodes(force) {
   if (nodeTesting && !force) return;
+  // 打开列表时的自动测速五分钟最多一次:每打开一回就把所有节点连一遍没必要,数字也变不了多少。点「重新测速」不受限
+  if (!force && Date.now() - nodeTestAt < 300000) return;
+  nodeTestAt = Date.now();
   nodeTesting = true;
   const act = $('#sheet-action');
   if (act) { act.disabled = true; act.textContent = t('sheet.testing'); }
@@ -936,29 +944,36 @@ function regionCount(p) {
   for (const n of p.tags || []) { const c = geoCode(n); if (c) set.add(c); }
   return set.size;
 }
+// 明文 http 的订阅地址:拉取时节点密码都是明文,路上看得到。面板没配证书时给的就是这种,所以只提示,不拦
+const isPlainHTTP = u => /^http:\/\//i.test(String(u || '').trim());
+const httpTag = p => (!p.manual && isPlainHTTP(p.url) ? `<span class="tag warn" title="${esc(t('prof.httpWarn'))}">${t('prof.httpTag')}</span>` : '');
 function renderProfiles(el, editId) {
   el.innerHTML = `<div id="prof-form"></div><div id="prof-list"></div>
     <button class="addcard" id="prof-add">
       <span class="addic"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></span>
       <span class="addtxt"><b>${t('prof.add')}</b><span>${t('prof.addHint')}</span></span>
-    </button>`;
+    </button>
+    <button class="altlink" id="prof-manual">${t('mn.entry')}<svg viewBox="0 0 24 24"><path d="M9 6l6 6-6 6"/></svg></button>`;
   const showForm = (p) => {
     $('#prof-form').innerHTML = `<div class="card"><div class="field"><label>${t('prof.name')}</label><input type="text" id="pf-name" value="${esc(p ? p.name : '')}"></div>
-      <div class="field with-btn"><label>${t('prof.url')}</label><input type="url" id="pf-url" spellcheck="false" value="${esc(p ? p.url : '')}"><button class="btn sm ghost" id="pf-paste">${t('common.paste')}</button></div>
+      ${p && p.manual ? '' : `<div class="field with-btn"><label>${t('prof.url')}</label><input type="url" id="pf-url" spellcheck="false" value="${esc(p ? p.url : '')}"><button class="btn sm ghost" id="pf-paste">${t('common.paste')}</button></div><div class="help warn http-warn" id="pf-http" ${p && isPlainHTTP(p.url) ? '' : 'hidden'}>${t('prof.httpWarn')}</div>`}
       <div class="row"><button class="btn primary" id="pf-save">${t('prof.save')}</button><button class="btn" id="pf-cancel">${t('prof.cancel')}</button><span id="pf-busy"></span></div></div>`;
     $('#pf-cancel').addEventListener('click', () => { $('#prof-form').innerHTML = ''; });
-    $('#pf-paste').addEventListener('click', () => pasteInto('#pf-url'));
+    const httpHint = () => { if ($('#pf-http')) $('#pf-http').hidden = !isPlainHTTP($('#pf-url').value); };
+    if ($('#pf-paste')) $('#pf-paste').addEventListener('click', async () => { await pasteInto('#pf-url'); httpHint(); });
+    if ($('#pf-url')) $('#pf-url').addEventListener('input', httpHint);
     $('#pf-save').addEventListener('click', async () => {
       const b = $('#pf-save'); b.disabled = true; $('#pf-busy').innerHTML = '<span class="spinner"></span>';
       try {
-        if (p && p.id) await App().UpdateProfile(p.id, $('#pf-name').value, $('#pf-url').value); else await App().AddProfile($('#pf-name').value, $('#pf-url').value);
+        if (p && p.id) await App().UpdateProfile(p.id, $('#pf-name').value, $('#pf-url') ? $('#pf-url').value : ''); else await App().AddProfile($('#pf-name').value, $('#pf-url').value);
         toast(t(p && p.id ? 'prof.saved' : 'prof.added'), 'ok'); $('#prof-form').innerHTML = ''; await load();
       } catch (e) { toast(errText(e), 'err'); }
-      b.disabled = false; $('#pf-busy').innerHTML = '';
+      b.disabled = false; if ($('#pf-busy')) $('#pf-busy').innerHTML = '';
     });
-    setTimeout(() => $(p && p.id ? '#pf-name' : '#pf-url').focus(), 80);
+    setTimeout(() => { const box = $(p && p.id ? '#pf-name' : '#pf-url'); if (box) box.focus(); }, 80);
   };
   $('#prof-add').addEventListener('click', () => showForm(null));
+  $('#prof-manual').addEventListener('click', () => openNodeEdit('profiles'));
 
   // 续费按钮:面板给了地址才画,没给就什么都不显示 —— 画一个点不出东西的按钮更糟。
   // 已到期、到期不到七天或流量用掉九成时换成橙色并写明状态,该催的时候才催。
@@ -973,11 +988,19 @@ function renderProfiles(el, editId) {
   };
   // 当前这条摊开成一张大卡(用量条、节点数、到期、三个动作),其余的收成一列小卡
   const bigCard = p => {
+    if (p.manual) return `<div class="profcard">
+      <div class="pc-top"><span class="dot on"></span><b>${esc(p.name)}</b><span class="pc-ago">${t('mn.tag')}</span></div>
+      <div class="pc-meta"><span>${t('prof.nodes', { n: p.nodeCount })}${regionCount(p) ? ' · ' + t('prof.regions', { n: regionCount(p) }) : ''}</span></div>
+      <div class="pc-act">
+        <button class="btn sm" data-act="nodes" data-id="${esc(p.id)}">${t('mn.manage')}</button>
+        <button class="btn sm" data-act="edit" data-id="${esc(p.id)}">${t('mn.rename')}</button>
+        <button class="btn sm icon danger" data-act="del" data-id="${esc(p.id)}" data-name="${esc(p.name)}" data-manual="${p.nodeCount}" title="${t('prof.del')}"><svg viewBox="0 0 24 24"><path d="M4 7h16M9 7V5h6v2M6 7l1 13h10l1-13"/></svg></button>
+      </div></div>`;
     const u = p.usage || {}, used = (u.upload || 0) + (u.download || 0);
     const pct = u.total ? Math.min(100, used / u.total * 100) : 0;
     const regions = regionCount(p);
     return `<div class="profcard">
-      <div class="pc-top"><span class="dot ${p.error ? 'err' : 'on'}"></span><b>${esc(p.name)}</b><span class="pc-ago">${esc(fmtAgo(p.fetchedAt))}</span></div>
+      <div class="pc-top"><span class="dot ${p.error ? 'err' : 'on'}"></span><b>${esc(p.name)}</b>${httpTag(p)}<span class="pc-ago">${esc(fmtAgo(p.fetchedAt))}</span></div>
       <div class="pc-use"><b>${esc(fmtBytes(used))}</b><span>${u.total ? t('prof.usedOf', { t: fmtBytes(u.total) }) : t('prof.usedFree')}</span>${renewBtn(p, 'lg')}</div>
       <div class="pc-bar"><i style="width:${u.total ? pct.toFixed(1) : 0}%"></i></div>
       <div class="pc-meta">
@@ -994,17 +1017,18 @@ function renderProfiles(el, editId) {
   // 其余订阅也是完整一张小卡:点整行切换过去,底下四个动作一个不少
   // (改版时这里一度只剩刷新,编辑和删除没了路径)
   const miniCard = p => `<div class="profmini">
-    <div class="pm-top" data-act="use" data-id="${esc(p.id)}"><span class="check"></span><b>${esc(p.name)}</b></div>
-    <div class="pm-meta"><span>${p.error ? `<em class="bad">${esc(p.error)}</em>` : t('prof.nodes', { n: p.nodeCount }) + ' · ' + esc(fmtAgo(p.fetchedAt))}</span>${renewBtn(p, 'sm')}</div>
+    <div class="pm-top" data-act="use" data-id="${esc(p.id)}"><span class="check"></span><b>${esc(p.name)}</b>${httpTag(p)}</div>
+    <div class="pm-meta"><span>${p.error ? `<em class="bad">${esc(p.error)}</em>` : t('prof.nodes', { n: p.nodeCount }) + ' · ' + (p.manual ? t('mn.tag') : esc(fmtAgo(p.fetchedAt)))}</span>${renewBtn(p, 'sm')}</div>
     <div class="pm-act">
       <button class="btn sm" data-act="use" data-id="${esc(p.id)}">${t('prof.use')}</button>
-      <button class="btn sm" data-act="refresh" data-id="${esc(p.id)}">${t('prof.refresh')}</button>
-      <button class="btn sm" data-act="edit" data-id="${esc(p.id)}">${t('prof.edit')}</button>
-      <button class="btn sm icon danger" data-act="del" data-id="${esc(p.id)}" data-name="${esc(p.name)}" title="${t('prof.del')}"><svg viewBox="0 0 24 24"><path d="M4 7h16M9 7V5h6v2M6 7l1 13h10l1-13"/></svg></button>
+      ${p.manual ? `<button class="btn sm" data-act="nodes" data-id="${esc(p.id)}">${t('mn.manage')}</button>` : `<button class="btn sm" data-act="refresh" data-id="${esc(p.id)}">${t('prof.refresh')}</button>`}
+      <button class="btn sm" data-act="edit" data-id="${esc(p.id)}">${t(p.manual ? 'mn.rename' : 'prof.edit')}</button>
+      <button class="btn sm icon danger" data-act="del" data-id="${esc(p.id)}" data-name="${esc(p.name)}" ${p.manual ? `data-manual="${p.nodeCount}"` : ''} title="${t('prof.del')}"><svg viewBox="0 0 24 24"><path d="M4 7h16M9 7V5h6v2M6 7l1 13h10l1-13"/></svg></button>
     </div></div>`;
   const load = async () => {
     let list = [];
-    try { list = await App().GetProfiles() || []; } catch (e) { $('#prof-list').innerHTML = `<div class="empty">${esc(errText(e))}</div>`; return; }
+    try { list = await App().GetProfiles() || []; } catch (e) { if ($('#prof-list')) $('#prof-list').innerHTML = `<div class="empty">${esc(errText(e))}</div>`; return; }
+    if (!$('#prof-list')) return; // 等结果的时候已经离开了这一页
     if (!list.length) { $('#prof-list').innerHTML = `<div class="empty">${t('prof.empty')}</div>`; return; }
     const cur = list.find(p => p.active) || list[0], rest = list.filter(p => p !== cur);
     $('#prof-list').innerHTML = bigCard(cur)
@@ -1014,16 +1038,328 @@ function renderProfiles(el, editId) {
       const id = b.dataset.id, act = b.dataset.act;
       try {
         if (act === 'renew') { openExternal((list.find(x => x.id === id) || {}).webPage); return; }
+        if (act === 'nodes') { nav('manual'); return; }
         if (act === 'use') { await App().SelectProfile(id); }
         else if (act === 'refresh') { b.disabled = true; b.classList.add('busy'); await refreshProfileBg(id); toast(t('prof.refreshed'), 'ok'); }
         else if (act === 'edit') { showForm(list.find(x => x.id === id)); return; }
-        else if (act === 'del') { if (!await askConfirm(t('prof.delConfirm', { n: b.dataset.name }), { ok: t('prof.del') })) return; await App().RemoveProfile(id); toast(t('prof.deleted'), 'ok'); }
+        else if (act === 'del') { if (!await askConfirm(b.dataset.manual ? t('mn.delAll', { n: b.dataset.name, c: b.dataset.manual }) : t('prof.delConfirm', { n: b.dataset.name }), { ok: t('prof.del') })) return; await App().RemoveProfile(id); toast(t('prof.deleted'), 'ok'); }
       } catch (err) { toast(errText(err), 'err'); }
       await load();
     }));
   };
   load();
   if (editId) showForm({ id: '', name: '', url: editId });
+}
+
+// ---- 手动节点 ----
+// 节点放在一条特殊的订阅里(p.manual):节点列表、切换、测速、规则都照旧走,这里只管增删改。
+const NODE_TYPES = [['vless', 'VLESS'], ['vmess', 'VMess'], ['trojan', 'Trojan'], ['shadowsocks', 'Shadowsocks'], ['hysteria2', 'Hysteria2'], ['tuic', 'TUIC'], ['anytls', 'AnyTLS'], ['socks', 'SOCKS5'], ['http', 'HTTP']];
+const nodeTypeName = ty => (NODE_TYPES.find(x => x[0] === ty) || [ty, ty])[1];
+// port 默认端口;sec 能选的安全层(第一个是默认,只有一个就不用选);tr 能不能换传输方式
+const NODE_SPEC = {
+  vless: { port: 443, sec: ['tls', 'reality', 'none'], tr: true },
+  vmess: { port: 443, sec: ['none', 'tls'], tr: true },
+  trojan: { port: 443, sec: ['tls'], tr: true },
+  shadowsocks: { port: 8388, sec: [] },
+  hysteria2: { port: 443, sec: ['tls'] },
+  tuic: { port: 443, sec: ['tls'] },
+  anytls: { port: 443, sec: ['tls'] },
+  socks: { port: 1080, sec: [] },
+  http: { port: 8080, sec: ['none', 'tls'] },
+};
+const SS_METHODS = ['2022-blake3-aes-128-gcm', '2022-blake3-aes-256-gcm', '2022-blake3-chacha20-poly1305', 'aes-128-gcm', 'aes-192-gcm', 'aes-256-gcm', 'chacha20-ietf-poly1305', 'xchacha20-ietf-poly1305', 'none'];
+const VMESS_SECURITY = ['auto', 'none', 'zero', 'aes-128-gcm', 'chacha20-poly1305'];
+const UTLS_FP = ['chrome', 'firefox', 'safari', 'edge', 'ios', 'android', 'random'];
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const nodeList = s => String(s || '').split(/[,,\s]+/).map(x => x.trim()).filter(Boolean);
+// nodeToForm 节点 → 表单里的一份平铺的值(都是字符串,开关是布尔)。换协议时共用的项(密码、地址)不丢。
+function nodeToForm(n) {
+  const tls = n.tls || {}, r = tls.reality || {}, tr = n.transport || {}, obfs = n.obfs || {};
+  const str = v => (v === undefined || v === null ? '' : String(v));
+  return { type: n.type, tag: str(n.tag), server: str(n.server), port: str(n.server_port), uuid: str(n.uuid), password: str(n.password), username: str(n.username),
+    method: str(n.method) || SS_METHODS[0], flow: str(n.flow), security: str(n.security) || 'auto', alterId: n.alter_id ? str(n.alter_id) : '',
+    cc: str(n.congestion_control) || 'cubic', udpMode: str(n.udp_relay_mode) || 'native', zeroRtt: !!n.zero_rtt_handshake,
+    obfs: str(obfs.password), ports: (n.server_ports || []).join(',').replace(/:/g, '-'), up: n.up_mbps ? str(n.up_mbps) : '', down: n.down_mbps ? str(n.down_mbps) : '',
+    plugin: str(n.plugin), pluginOpts: str(n.plugin_opts),
+    sec: !tls.enabled ? 'none' : r.enabled ? 'reality' : 'tls', sni: str(tls.server_name), insecure: !!tls.insecure, alpn: (tls.alpn || []).join(','), fp: tls.utls && tls.utls.fingerprint ? tls.utls.fingerprint : '', pbk: str(r.public_key), sid: str(r.short_id),
+    net: str(tr.type) || 'tcp', path: str(tr.path), service: str(tr.service_name), host: tr.headers && tr.headers.Host ? str(tr.headers.Host) : Array.isArray(tr.host) ? tr.host.join(',') : str(tr.host) };
+}
+// formToNode 表单 → 节点。编辑时在原节点上改(链接带来的、表单上没有的字段不丢),协议换了才从头开始。
+function formToNode(f, base) {
+  const n = base && base.type === f.type ? JSON.parse(JSON.stringify(base)) : {}, spec = NODE_SPEC[f.type];
+  const set = (o, k, v) => { if (v === '' || v === undefined || v === false) delete o[k]; else o[k] = v; };
+  const has = (...types) => types.includes(f.type);
+  n.type = f.type; set(n, 'tag', f.tag.trim()); n.server = f.server.trim(); n.server_port = Number(f.port);
+  set(n, 'uuid', has('vless', 'vmess', 'tuic') ? f.uuid.trim() : '');
+  set(n, 'password', has('trojan', 'shadowsocks', 'hysteria2', 'tuic', 'anytls', 'socks', 'http') ? f.password.trim() : '');
+  set(n, 'username', has('socks', 'http') ? f.username.trim() : '');
+  set(n, 'method', has('shadowsocks') ? f.method : '');
+  set(n, 'plugin', has('shadowsocks') ? f.plugin : ''); set(n, 'plugin_opts', has('shadowsocks') && f.plugin ? f.pluginOpts.trim() : '');
+  set(n, 'security', has('vmess') ? f.security : ''); set(n, 'alter_id', has('vmess') && Number(f.alterId) > 0 ? Number(f.alterId) : '');
+  set(n, 'flow', has('vless') && f.sec !== 'none' && f.net === 'tcp' ? f.flow : '');
+  set(n, 'congestion_control', has('tuic') ? f.cc : ''); set(n, 'udp_relay_mode', has('tuic') ? f.udpMode : ''); set(n, 'zero_rtt_handshake', has('tuic') && f.zeroRtt);
+  set(n, 'obfs', has('hysteria2') && f.obfs.trim() ? { type: 'salamander', password: f.obfs.trim() } : '');
+  set(n, 'server_ports', has('hysteria2') && f.ports.trim() ? nodeList(f.ports).map(x => x.replace('-', ':')) : '');
+  set(n, 'up_mbps', has('hysteria2') && Number(f.up) > 0 ? Number(f.up) : ''); set(n, 'down_mbps', has('hysteria2') && Number(f.down) > 0 ? Number(f.down) : '');
+  if (spec.sec.length && f.sec !== 'none') {
+    const o = n.tls || {};
+    o.enabled = true; set(o, 'server_name', f.sni.trim()); set(o, 'insecure', f.sec === 'tls' && f.insecure);
+    set(o, 'alpn', nodeList(f.alpn).length ? nodeList(f.alpn) : '');
+    set(o, 'utls', f.fp && !has('hysteria2', 'tuic') ? { enabled: true, fingerprint: f.fp } : '');
+    set(o, 'reality', f.sec === 'reality' ? { enabled: true, public_key: f.pbk.trim(), short_id: f.sid.trim() } : '');
+    n.tls = o;
+  } else delete n.tls;
+  if (spec.tr && f.net !== 'tcp') {
+    const o = n.transport && n.transport.type === f.net ? n.transport : { type: f.net }, host = f.host.trim(), path = f.path.trim() || '/';
+    if (f.net === 'grpc') set(o, 'service_name', f.service.trim());
+    else if (f.net === 'ws') { o.path = path; set(o, 'headers', host ? { Host: host } : ''); }
+    else if (f.net === 'httpupgrade') { o.path = path; set(o, 'host', host); }
+    else { o.path = path; set(o, 'host', host ? nodeList(host) : ''); }
+    n.transport = o;
+  } else delete n.transport;
+  if (has('socks')) n.version = '5';
+  return n;
+}
+// nodeProblems 填得不对的项:键 → 提示。服务端还会再查一遍(内核干跑),这里只为了就地标出来。
+function nodeProblems(f) {
+  const bad = {}, need = (k, m) => { if (!String(f[k]).trim()) bad[k] = t('mn.err.' + m); };
+  if (!/^[^\s/?#@]+$/.test(f.server.trim())) bad.server = t('mn.err.server');
+  const port = Number(f.port);
+  if (!/^\d+$/.test(f.port.trim()) || port < 1 || port > 65535) bad.port = t('mn.err.port');
+  if (['vless', 'vmess', 'tuic'].includes(f.type)) need('uuid', 'uuid');
+  if (['trojan', 'shadowsocks', 'hysteria2', 'anytls'].includes(f.type)) need('password', 'password');
+  if (f.sec === 'reality' && NODE_SPEC[f.type].sec.includes('reality')) { need('sni', 'sni'); need('pbk', 'pbk'); }
+  if (f.type === 'hysteria2' && f.ports.trim() && !/^\d+([-:]\d+)?(\s*,\s*\d+([-:]\d+)?)*$/.test(f.ports.trim())) bad.ports = t('mn.err.ports');
+  return bad;
+}
+const nodeErrText = e => {
+  const m = String((e && e.message) || e || '').match(/^E_NODE_([A-Z]+):/);
+  if (m && m[1] !== 'INVALID') { const k = 'mn.err.' + m[1].toLowerCase(), s = t(k); if (s !== k) return s; }
+  return errText(e);
+};
+const hostPortText = n => (String(n.server).includes(':') ? '[' + n.server + ']' : n.server) + ':' + n.server_port;
+function openNodeEdit(from, tag) { BACK.nodeEdit = from; nav('nodeEdit', tag); }
+
+async function renderManual(el) {
+  el.innerHTML = `<div id="mn-use"></div><div id="mn-list"><div class="empty"><span class="spinner"></span></div></div>
+    <button class="addcard" id="mn-add">
+      <span class="addic"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></span>
+      <span class="addtxt"><b>${t('mn.add')}</b><span>${t('mn.addHint')}</span></span>
+    </button>`;
+  $('#mn-add').addEventListener('click', () => openNodeEdit('manual'));
+  const load = async () => {
+    let m, list;
+    try { m = await App().GetManualNodes(); list = await App().GetProfiles() || []; } catch (e) { if ($('#mn-list')) $('#mn-list').innerHTML = `<div class="empty">${esc(errText(e))}</div>`; return; }
+    if (view !== 'manual' || !$('#mn-list')) return;
+    const nodes = m.nodes || [], me = list.find(p => p.id === m.id), cur = list.find(p => p.active);
+    // 手动节点不是当前订阅时节点选不到,这里说一声并给个入口:别让人以为白添加了
+    $('#mn-use').innerHTML = me && !me.active && cur ? `<div class="sechead row"><span class="grow">${esc(t('mn.inUse', { n: cur.name }))}</span><button class="btn sm" id="mn-switch">${t('mn.use')}</button></div>` : '';
+    const sw = $('#mn-switch');
+    if (sw) sw.addEventListener('click', async () => {
+      sw.disabled = true;
+      try { await App().SelectProfile(me.id); state = await App().GetState(); toast(t('mn.useDone'), 'ok'); } catch (e) { toast(errText(e), 'err'); }
+      await load();
+    });
+    $('#mn-list').innerHTML = nodes.length ? `<div class="list">${nodes.map((n, i) => `<div class="item nrow" data-i="${i}">
+      <div class="name"><b class="sel">${esc(n.tag)}</b><span>${esc(nodeTypeName(n.type))} · ${esc(hostPortText(n))}</span></div>
+      <button class="icon-btn xs muted" data-act="edit" title="${t('prof.edit')}"><svg viewBox="0 0 24 24"><path d="M4 20h4l10-10-4-4L4 16z"/><path d="M12 6l4 4"/></svg></button>
+      <button class="icon-btn xs muted" data-act="del" title="${t('prof.del')}"><svg viewBox="0 0 24 24"><path d="M4 7h16M9 7V5h6v2M6 7l1 13h10l1-13"/></svg></button>
+    </div>`).join('')}</div>` : `<div class="empty">${t('mn.empty')}</div>`;
+    $('#mn-list').querySelectorAll('.nrow').forEach(row => {
+      const n = nodes[Number(row.dataset.i)];
+      row.addEventListener('click', () => openNodeEdit('manual', n.tag));
+      row.querySelector('[data-act=edit]').addEventListener('click', e => { e.stopPropagation(); openNodeEdit('manual', n.tag); });
+      row.querySelector('[data-act=del]').addEventListener('click', async e => {
+        e.stopPropagation();
+        const last = nodes.length === 1;
+        if (!await askConfirm(t(last ? 'mn.delLast' : 'mn.delConfirm', { n: n.tag }), { ok: t('prof.del') })) return;
+        try {
+          await App().RemoveManualNode(n.tag);
+          state = await App().GetState();
+          toast(t('mn.deleted'), 'ok');
+          if (last) { if (state.view.profiles && state.view.profiles.length) nav('profiles'); else navHome(); return; }
+        } catch (err) { toast(nodeErrText(err), 'err'); }
+        await load();
+      });
+    });
+  };
+  load();
+}
+
+async function renderNodeEdit(el, tag) {
+  let base = null;
+  if (tag) {
+    try { base = ((await App().GetManualNodes()).nodes || []).find(n => n.tag === tag) || null; } catch (e) { el.innerHTML = `<div class="empty">${esc(errText(e))}</div>`; return; }
+    if (view !== 'nodeEdit') return;
+    if (!base) { el.innerHTML = `<div class="empty">${t('mn.err.gone')}</div>`; return; }
+  }
+  const f = nodeToForm(base || { type: 'vless', server_port: 443, tls: { enabled: true } });
+  let multi = null; // 粘贴了多条:直接整批添加,不走表单
+  const val = k => esc(f[k] === undefined ? '' : f[k]);
+  const input = (k, label, o = {}) => `<div class="field ${o.cls || ''}" data-k="${k}"><label for="nf-${k}">${label}${o.opt ? `<em>${t('mn.optional')}</em>` : ''}</label><input type="text" id="nf-${k}" data-f="${k}" value="${val(k)}" placeholder="${esc(o.ph || '')}" spellcheck="false" autocomplete="off" autocapitalize="off"${o.num ? ' inputmode="numeric"' : ''}><span class="help err" hidden></span>${o.help ? `<span class="help">${o.help}</span>` : ''}</div>`;
+  const pick = (k, label, opts, o = {}) => `<div class="field ${o.cls || ''}" data-k="${k}"><label for="nf-${k}">${label}</label><select id="nf-${k}" data-f="${k}">${opts.map(x => `<option value="${esc(x[0])}" ${x[0] === f[k] ? 'selected' : ''}>${esc(x[1])}</option>`).join('')}</select></div>`;
+  const rowPick = (k, label, opts) => `<div class="srow"><div class="lbl">${label}</div><select id="nf-${k}" data-f="${k}">${opts.map(x => `<option value="${esc(x[0])}" ${x[0] === f[k] ? 'selected' : ''}>${esc(x[1])}</option>`).join('')}</select></div>`;
+  const toggle = (k, label, help) => `<div class="srow"><div class="lbl">${label}${help ? `<div>${help}</div>` : ''}</div><label class="switch"><input type="checkbox" id="nf-${k}" data-f="${k}" ${f[k] ? 'checked' : ''}></label></div>`;
+  const same = list => list.map(x => [x, x]);
+  const withCur = (list, cur) => (cur && !list.includes(cur) ? [cur].concat(list) : list);
+  const sync = () => el.querySelectorAll('#nf-form [data-f]').forEach(x => { f[x.dataset.f] = x.type === 'checkbox' ? x.checked : x.value; });
+  // 协议各自要填的项
+  const credFields = () => {
+    const uuid = input('uuid', 'UUID', { ph: 'xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx' }), pw = opt => input('password', t('mn.password'), { opt });
+    switch (f.type) {
+      case 'vless': return uuid + (f.sec !== 'none' && f.net === 'tcp' ? pick('flow', t('mn.flow'), [['', t('mn.none')], ['xtls-rprx-vision', 'xtls-rprx-vision']]) : '');
+      case 'vmess': return uuid + pick('security', t('mn.method'), same(withCur(VMESS_SECURITY, f.security)));
+      case 'shadowsocks': return pick('method', t('mn.method'), same(withCur(SS_METHODS, f.method))) + pw(false);
+      case 'tuic': return uuid + pw(true);
+      case 'socks': case 'http': return `<div class="frow">${input('username', t('mn.username'), { opt: true })}${pw(true)}</div>`;
+      default: return pw(false);
+    }
+  };
+  const securityCard = spec => {
+    if (!spec.sec.length) return '';
+    return `<div class="card nf">${spec.sec.length > 1 ? rowPick('sec', t('mn.sec'), spec.sec.map(s => [s, t('mn.sec.' + s)])) : `<h3>TLS</h3>`}
+      ${f.sec === 'none' ? '' : f.sec === 'reality' ? input('sni', 'SNI', { ph: 'www.example.com' }) : input('sni', 'SNI', { opt: true, ph: t('mn.sniPh') })}
+      ${f.sec === 'reality' ? input('pbk', t('mn.pbk')) + input('sid', 'Short ID', { opt: true }) : ''}
+      ${f.sec === 'tls' ? toggle('insecure', t('mn.insecure'), t('mn.insecureHelp')) : ''}</div>`;
+  };
+  const transportCard = spec => {
+    if (!spec.tr) return '';
+    const hostF = input('host', 'Host', { opt: true }), pathF = input('path', t('mn.path'), { opt: true, ph: '/' });
+    return `<div class="card nf">${rowPick('net', t('mn.net'), [['tcp', 'TCP'], ['ws', 'WebSocket'], ['grpc', 'gRPC'], ['httpupgrade', 'HTTPUpgrade'], ['http', 'HTTP/2']])}
+      ${f.net === 'grpc' ? input('service', t('mn.service'), { opt: true }) : f.net === 'tcp' ? '' : `<div class="frow">${pathF}${hostF}</div>`}</div>`;
+  };
+  // 不常用的收起来;有值的话(比如链接带来的)默认展开,藏着改不到才坑人
+  const advFields = spec => {
+    const a = [], quic = f.type === 'hysteria2' || f.type === 'tuic';
+    if (spec.sec.length && f.sec !== 'none') {
+      const fps = (f.sec === 'reality' ? [] : [['', t('mn.fpNone')]]).concat(same(withCur(UTLS_FP, f.fp)));
+      const alpn = input('alpn', 'ALPN', { opt: true, ph: quic ? 'h3' : 'h2,http/1.1' });
+      a.push(quic ? alpn : `<div class="frow">${alpn}${pick('fp', t('mn.fp'), fps)}</div>`);
+    }
+    if (f.type === 'hysteria2') a.push(input('obfs', t('mn.obfs'), { opt: true }), input('ports', t('mn.ports'), { opt: true, ph: '20000-30000' }), `<div class="frow">${input('up', t('mn.up'), { opt: true, num: true })}${input('down', t('mn.down'), { opt: true, num: true })}</div>`);
+    if (f.type === 'tuic') a.push(`<div class="frow">${pick('cc', t('mn.cc'), [['cubic', 'cubic'], ['new_reno', 'new_reno'], ['bbr', 'bbr']])}${pick('udpMode', t('mn.udp'), [['native', 'native'], ['quic', 'quic']])}</div>`, toggle('zeroRtt', t('mn.zeroRtt'), t('mn.zeroRttHelp')));
+    if (f.type === 'vmess') a.push(input('alterId', 'Alter ID', { opt: true, num: true, ph: '0' }));
+    if (f.type === 'shadowsocks') a.push(pick('plugin', t('mn.plugin'), [['', t('mn.none')]].concat(same(withCur(['obfs-local', 'v2ray-plugin'], f.plugin)))), f.plugin ? input('pluginOpts', t('mn.pluginOpts'), { opt: true }) : '');
+    return a.join('');
+  };
+  const advHasValue = () => {
+    const quic = f.type === 'hysteria2' || f.type === 'tuic';
+    return !!((f.alpn && f.alpn !== (quic ? 'h3' : '')) || (f.fp && !quic && !(f.sec === 'reality' && f.fp === 'chrome')) || (f.type === 'hysteria2' && (f.obfs || f.ports || f.up || f.down))
+      || (f.type === 'tuic' && (f.cc !== 'cubic' || f.udpMode !== 'native' || f.zeroRtt)) || (f.type === 'vmess' && Number(f.alterId) > 0) || (f.type === 'shadowsocks' && f.plugin));
+  };
+  let more = advHasValue();
+  const uuidHint = () => {
+    const c = el.querySelector('.field[data-k="uuid"]'); if (!c) return;
+    const v = $('#nf-uuid').value.trim(), warn = !!v && !UUID_RE.test(v);
+    let h = c.querySelector('.warn');
+    if (warn && !h) { h = document.createElement('span'); h.className = 'help warn'; h.textContent = t('mn.uuidHint'); c.appendChild(h); }
+    if (!warn && h) h.remove();
+  };
+  const draw = () => {
+    const spec = NODE_SPEC[f.type], adv = advFields(spec), focused = document.activeElement && document.activeElement.id;
+    $('#nf-form').innerHTML = `<div class="card nf">
+        <div class="frow">${pick('type', t('mn.type'), NODE_TYPES, { cls: 'f-type' })}${input('tag', t('mn.name'), { opt: true, ph: t('mn.namePh') })}</div>
+        <div class="frow">${input('server', t('mn.server'), { ph: 'example.com' })}${input('port', t('mn.port'), { cls: 'f-port', num: true })}</div>
+        ${credFields()}
+      </div>
+      ${securityCard(spec)}${transportCard(spec)}
+      ${adv ? `<button class="morelink" id="nf-more">${t(more ? 'mn.less' : 'mn.more')}<svg viewBox="0 0 24 24"><path d="${more ? 'M6 15l6-6 6 6' : 'M6 9l6 6 6-6'}"/></svg></button><div class="card nf nf-adv" ${more ? '' : 'hidden'}>${adv}</div>` : ''}`;
+    const redraw = apply => e => { sync(); apply(e.target.value); draw(); };
+    $('#nf-type').addEventListener('change', e => {
+      const prev = NODE_SPEC[f.type];
+      sync();
+      const next = NODE_SPEC[f.type]; // sync 已经把新协议读进来了;安全层回到这个协议的默认,别把上一个协议的 TLS 带到 HTTP 上
+      f.sec = next.sec.length ? next.sec[0] : 'none';
+      if (!next.tr) f.net = 'tcp';
+      if (!f.port.trim() || Number(f.port) === (e.target.dataset.port ? Number(e.target.dataset.port) : prev.port)) f.port = String(next.port);
+      if (f.sec === 'reality' && !f.fp) f.fp = 'chrome';
+      more = more || advHasValue();
+      draw();
+    });
+    $('#nf-type').dataset.port = String(spec.port);
+    if ($('#nf-sec')) $('#nf-sec').addEventListener('change', redraw(v => { if (v === 'reality' && !f.fp) f.fp = 'chrome'; }));
+    if ($('#nf-net')) $('#nf-net').addEventListener('change', redraw(() => {}));
+    if ($('#nf-plugin')) $('#nf-plugin').addEventListener('change', redraw(() => {}));
+    if ($('#nf-more')) $('#nf-more').addEventListener('click', () => { sync(); more = !more; draw(); });
+    el.querySelectorAll('#nf-form [data-f]').forEach(x => x.addEventListener('input', () => {
+      const c = x.closest('.field');
+      if (c && c.classList.contains('bad')) { c.classList.remove('bad'); const m = c.querySelector('.err'); if (m) m.hidden = true; }
+    }));
+    if ($('#nf-uuid')) { $('#nf-uuid').addEventListener('input', uuidHint); uuidHint(); }
+    if (focused && $('#' + focused)) $('#' + focused).focus(); // 换协议整块重画,焦点留在原来那一项(遥控器上丢了就找不回来)
+  };
+  const check = () => {
+    const bad = nodeProblems(f), keys = Object.keys(bad);
+    if (keys.includes('ports') && !more) { more = true; draw(); }
+    keys.forEach(k => {
+      const c = el.querySelector(`.field[data-k="${k}"]`); if (!c) return;
+      c.classList.add('bad');
+      const m = c.querySelector('.err'); if (m) { m.textContent = bad[k]; m.hidden = false; }
+    });
+    const first = el.querySelector('#nf-form .field.bad input, #nf-form .field.bad select');
+    if (first) first.focus();
+    return !keys.length;
+  };
+  const saveLabel = () => { const b = $('#nf-save'); if (b) b.textContent = multi ? t('mn.saveN', { n: multi.length }) : t('mn.saveOne'); };
+  const save = async () => {
+    let nodes;
+    if (multi) nodes = multi;
+    else { sync(); if (!check()) return; nodes = [formToNode(f, base)]; }
+    const b = $('#nf-save'); b.disabled = true;
+    try {
+      const manualCount = list => ((list || []).find(p => p.manual) || { nodeCount: 0 }).nodeCount;
+      const before = manualCount(state.view.profiles);
+      const after = manualCount(await App().SaveManualNodes(nodes, tag || '', t('mn.defaultName')));
+      state = await App().GetState();
+      toast(tag ? t('mn.saved') : t('mn.added', { n: after - before }), 'ok');
+      if (BACK.nodeEdit === 'onboard') navHome(); else nav('manual');
+    } catch (e) { toast(nodeErrText(e), 'err'); b.disabled = false; }
+  };
+  el.innerHTML = `${tag ? '' : `<div class="card nf">
+      <div class="field with-btn nf-paste"><label for="nf-links">${t('mn.pasteLabel')}</label><textarea id="nf-links" rows="2" spellcheck="false" autocomplete="off" placeholder="vless://… trojan://… hysteria2://…"></textarea><button class="btn sm ghost" id="nf-pastebtn">${t('common.paste')}</button></div>
+      <div class="help nf-help" id="nf-help">${t('mn.pasteHelp')}</div>
+      <div id="nf-parsed"></div>
+    </div>
+    <div class="or" id="nf-or"><span></span><em>${t('mn.orFill')}</em><span></span></div>`}
+    <div id="nf-form"></div>
+    <div class="savebar dirty"><div class="note">${t('mn.note')}</div><button class="btn primary" id="nf-save"></button></div>`;
+  draw();
+  saveLabel();
+  $('#nf-save').addEventListener('click', save);
+  $('#nf-form').addEventListener('keydown', e => { if (e.key === 'Enter' && e.target.tagName === 'INPUT' && e.target.type === 'text') { e.preventDefault(); save(); } });
+  if (!tag) {
+    let seq = 0, timer = null;
+    const showForm = on => { $('#nf-form').style.display = on ? '' : 'none'; $('#nf-or').style.display = on ? '' : 'none'; };
+    const parse = async () => {
+      const text = $('#nf-links').value, me = ++seq, box = $('#nf-parsed');
+      if (!text.trim()) { multi = null; box.innerHTML = ''; $('#nf-help').hidden = false; showForm(true); saveLabel(); return; }
+      let r;
+      try { r = await App().ParseNodeLinks(text); } catch (e) { if (me === seq) box.innerHTML = `<div class="nf-res bad">${esc(errText(e))}</div>`; return; }
+      if (me !== seq || view !== 'nodeEdit') return; // 后面又改过了,这次的结果作废
+      const nodes = r.nodes || [], errs = r.errors || [];
+      const errLine = x => esc(t('mn.lineErr', { n: x.line, m: t('mn.err.' + x.code) === 'mn.err.' + x.code ? x.msg : t('mn.err.' + x.code) }));
+      const asSub = errs.length === 1 && !nodes.length && errs[0].code === 'subscription';
+      let html = '';
+      if (nodes.length === 1) html += `<div class="nf-res ok">${t('mn.filled')}</div>`;
+      if (nodes.length > 1) html += `<div class="nf-res ok">${t('mn.found', { n: nodes.length })}</div><div class="conds nf-list">${nodes.map(n => `<div class="cond"><span class="tag">${esc(nodeTypeName(n.type))}</span><span class="val sel">${esc(n.tag)}</span></div>`).join('')}</div>`;
+      if (errs.length) html += `<div class="nf-res bad">${errs.length === 1 && text.trim().indexOf('\n') < 0 ? esc(t('mn.err.' + errs[0].code) === 'mn.err.' + errs[0].code ? errs[0].msg : t('mn.err.' + errs[0].code)) : errs.map(errLine).join('<br>')}</div>`;
+      if (asSub) html += `<button class="linkbtn" id="nf-assub">${t('mn.asSub')}</button>`;
+      box.innerHTML = html;
+      $('#nf-help').hidden = !!html;
+      if (asSub) $('#nf-assub').addEventListener('click', () => nav('profiles', text.trim()));
+      multi = nodes.length > 1 ? nodes : null;
+      showForm(!multi);
+      if (nodes.length === 1) { Object.assign(f, nodeToForm(nodes[0])); more = advHasValue(); draw(); }
+      saveLabel();
+    };
+    $('#nf-links').addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(parse, 250); });
+    $('#nf-pastebtn').addEventListener('click', async () => { await pasteInto('#nf-links'); clearTimeout(timer); parse(); });
+  }
+  // 页面滑入之后再聚焦;这会儿已经点了别的输入框就别抢,不然刚打的字会落到别处
+  setTimeout(() => {
+    const cur = document.activeElement, box = $(tag ? '#nf-tag' : '#nf-links');
+    if (box && (!cur || cur === document.body)) box.focus();
+  }, 120);
 }
 
 // ---- 设置 ----
@@ -1038,8 +1374,6 @@ async function renderSettings(el) {
   // 一组 = 组名 + 一张卡;组名放在卡外面,和别的页的分节标题一个样式
   const group = (title, rows, tag) => rows.trim() ? `<div class="sgroup"><div class="sechead">${title}${tag ? ` <span class="tag">${tag}</span>` : ''}</div><div class="card tight">${rows}</div></div>` : '';
   el.innerHTML = `
-    <div class="field with-ic"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg><input type="search" id="set-search" placeholder="${t('set.search')}" spellcheck="false"></div>
-    <div id="set-nores" class="empty sm" hidden>${t('set.noMatch')}</div>
     ${group(t('set.g.conn'), `
       ${sw('f-tun', t('set.tun'), s.tun, t('set.tunHelp'))}
       <!-- macOS 上只有 gvisor 能用:系统协议栈在 macOS 握不了手,选了也会被改回 gvisor,不如别给选 -->
@@ -1070,6 +1404,7 @@ async function renderSettings(el) {
     ${state.platform === 'linux' ? group(t('set.g.net'), `
       ${sel('f-netmode', t('set.netMode'), s.netMode || 'local', [['local', t('set.netLocal')], ['gateway', t('set.netGateway')]], t('set.netModeHelp'))}
       ${txt('f-weblisten', t('set.webListen'), s.webListen || '', t('set.webListenHelp'))}
+      ${sw('f-webpublic', t('set.webPublic'), s.webAllowPublic, t('set.webPublicHelp'))}
     `) : ''}
     ${group(t('set.g.logs'), `
       ${sel('f-log', t('set.logLevel'), s.logLevel, [['debug', 'debug'], ['info', 'info'], ['warn', 'warn'], ['error', 'error']])}
@@ -1082,22 +1417,6 @@ async function renderSettings(el) {
       ${sel('f-theme', t('set.theme'), curTheme(), [['system', t('theme.system')], ['light', t('theme.light')], ['dark', t('theme.dark')]])}
     `, t('set.instant'))}
     <div class="savebar" id="savebar"><div class="note" id="save-note">${t('set.clean')}</div><button class="btn primary" id="save" disabled>${t('set.save')}</button></div>`;
-  // 搜索只是把对不上的行藏起来,整组都藏光了连组名一起收掉
-  $('#set-search').addEventListener('input', () => {
-    const q = $('#set-search').value.trim().toLowerCase();
-    let hit = 0;
-    el.querySelectorAll('.sgroup').forEach(g => {
-      let n = 0;
-      g.querySelectorAll('.srow, .field').forEach(r => {
-        const ok = !q || r.textContent.toLowerCase().includes(q);
-        r.hidden = !ok;
-        if (ok) n++;
-      });
-      g.hidden = !!q && !n;
-      hit += n;
-    });
-    $('#set-nores').hidden = !q || hit > 0;
-  });
   // 除了即点即生效的几项(开机自启、语言、主题),页面上每个设置项一改就要点亮"保存";
   // 以前手写名单,新加的「防流量逃逸」漏在外面,单独拨它保存按钮不亮
   const immediate = ['f-autostart', 'f-lang', 'f-theme'];
@@ -1109,7 +1428,7 @@ async function renderSettings(el) {
       mixedPort: Number($('#f-mixed').value), probeMinutes: Number($('#f-probe').value), updateHours: Number($('#f-update').value),
       remoteDns: $('#f-rdns').value.trim(), localDns: $('#f-ldns').value.trim(), fakeIp: $('#f-fakeip').checked, ipv6: $('#f-ipv6').checked, noDirect: $('#f-nodirect').checked, disableNicIpv6: $('#f-nicv6') ? $('#f-nicv6').checked : s.disableNicIpv6, adBlock: $('#f-ad').checked,
       bypassApps: $('#f-bypass').value.split(/\r?\n/).map(x => x.trim()).filter(Boolean), logLevel: $('#f-log').value, logDays: Number($('#f-logdays').value), coreLogDisk: $('#f-coredisk').checked, noExitLookup: !$('#f-exitlookup').checked };
-    if ($('#f-netmode')) { n.netMode = $('#f-netmode').value; n.webListen = $('#f-weblisten').value.trim(); }
+    if ($('#f-netmode')) { n.netMode = $('#f-netmode').value; n.webListen = $('#f-weblisten').value.trim(); n.webAllowPublic = $('#f-webpublic').checked; }
     try { s = await App().SaveSettings(n); dirty(false); toast(t('set.saved'), 'ok'); } catch (e) { toast(errText(e), 'err'); }
   });
   const fa = $('#f-autostart'); if (fa) fa.addEventListener('change', async e => { try { await App().SetAutostart(e.target.checked); toast(t('set.saved'), 'ok'); } catch (err) { toast(errText(err), 'err'); e.target.checked = !e.target.checked; } });

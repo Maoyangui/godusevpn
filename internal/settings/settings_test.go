@@ -44,7 +44,7 @@ func TestMigrateFromSchema1(t *testing.T) {
 	if len(s.Profiles) != 1 || s.Profiles[0].URL != "https://x.example/sub/u" || s.ActiveProfile != s.Profiles[0].ID || s.ProfileURL != "" {
 		t.Fatalf("迁移不对: %+v", s)
 	}
-	if s.Schema != Schema || s.ProbeMinutes != 3 {
+	if s.Schema != Schema || s.ProbeMinutes != DefaultProbeMinutes {
 		t.Fatalf("新字段应补默认值: %+v", s)
 	}
 	if !s.DisableNICIPv6 {
@@ -159,5 +159,16 @@ func TestPreserve(t *testing.T) {
 	}
 	if b, _ := os.ReadFile(p); string(b) != "{坏了" {
 		t.Fatal("原文件不该被动")
+	}
+}
+
+// 原来的默认值 3 分钟跟着新默认走;自己改过的不动。
+func TestMigrateProbeMinutes(t *testing.T) {
+	for _, c := range []struct{ schema, in, want int }{{4, 3, DefaultProbeMinutes}, {4, 7, 7}, {5, 3, 3}, {4, 0, DefaultProbeMinutes}} {
+		s := Settings{Schema: c.schema, ProbeMinutes: c.in}
+		s.migrate()
+		if s.ProbeMinutes != c.want {
+			t.Fatalf("schema %d 值 %d:得 %d", c.schema, c.in, s.ProbeMinutes)
+		}
 	}
 }

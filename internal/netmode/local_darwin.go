@@ -319,9 +319,16 @@ func flushDNS() {
 }
 
 // ApplyGateway / ClearGateway 网关模式只在 Linux 软路由上有。
-func ApplyGateway(string, []string) error { return nil }
+func ApplyGateway(string, []string, string) error { return nil }
 
 func ClearGateway() {}
+
+// ClearStaleRedirect / GatewayDown / PostStop 同上。
+func ClearStaleRedirect() {}
+
+func GatewayDown(string, string) error { return nil }
+
+func PostStop(string, string) {}
 
 // RestoreForward 同上。
 func RestoreForward() {}

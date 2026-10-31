@@ -12,6 +12,7 @@ import (
 
 	"github.com/Maoyangui/godusevpn/internal/builder"
 	"github.com/Maoyangui/godusevpn/internal/netmode"
+	"github.com/Maoyangui/godusevpn/internal/settings"
 )
 
 // sealedDoH 闸开着、「本地 DNS」又没有可用的加密解析(system 或填的域名)时用的 DoH 替身,和生成配置时一致。
@@ -26,12 +27,16 @@ var sealedDoH = builder.SealedBootstrapDoH
 // 所以闸开着时改用 DoH:按地址连「本地 DNS」那台
 // (没有可用的就用 sealedDoH),从本服务进程发出,解出地址后按地址拨号;TLS 仍按 URL 里的主机名校验。
 // 闸没开时行为不变。
+//
+// 规则模式的闸同样要这样:只判严格全局的话,这里给的是没带标记的客户端,Linux 上被自己的闸拦下,
+// 没有缓存时连接一直卡在拉订阅、永远连不上。
 func (d *Daemon) directHTTP() *http.Client {
-	if !d.guardArmed() {
+	if !d.guardUp() {
 		return d.http
 	}
-	resolve := d.bootResolver(d.getSettings())
-	if resolve == nil {
+	s := d.getSettings()
+	resolve := d.bootResolver(s)
+	if !settings.IsIP(s.LocalDNS) { // system 或域名 DoH:都要先走系统解析器,闸开着时不走
 		server := sealedDoH
 		resolve = func(ctx context.Context, host string) ([]string, error) { return lookupDoH(ctx, server, host) }
 	}
@@ -90,6 +95,17 @@ func (d *Daemon) SelfHTTP(timeout time.Duration) (*http.Client, error) {
 	}
 	return d.core.HTTPClient("proxy", timeout)
 }
+
+// TunnelHTTP 经隧道访问外网的客户端,隧道没起来时报错。定时检查更新用:没连接时不自己出去。
+// 直连模式下同样经节点,所以连着就都一样。
+func (d *Daemon) TunnelHTTP(timeout time.Duration) (*http.Client, error) {
+	if !d.core.Running() {
+		return nil, errNoTunnel
+	}
+	return d.core.HTTPClient("proxy", timeout)
+}
+
+var errNoTunnel = errors.New("隧道没起来:定时检查更新要等连上之后")
 
 // unarmedTransport 只在闸没开时直连;闸一开,新请求拒绝、在读的响应体停下。
 type unarmedTransport struct{ d *Daemon }

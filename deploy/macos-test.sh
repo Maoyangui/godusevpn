@@ -98,7 +98,12 @@ echo "  内核看到的入站连接数: $("$BIN" logs 400 core 2>/dev/null | gre
 # 只按地址比会把远程 DoH(1.1.1.1:443,本来就该经代理走)也算进来。
 # 排掉回环和 0.0.0.0:面板的监听地址(Linux 上是 0.0.0.0:9800)也会以 "ip:port" 的样子出现在诊断里,
 # 它排在所有节点 IP 前面,拿它当节点地址去打,那条"判给了直连"的检查就永远红。
-nodepairs() { "$BIN" diag 2>/dev/null | grep -o '"[0-9]\{1,3\}\.[0-9.]*:[0-9]\{1,5\}"' | tr -d '"' | grep -v '^127\.' | grep -v '^0\.0\.0\.0:' | sort -u; }
+# nodepairs 订阅里所有节点的"地址:端口"。诊断里节点地址打了码,这里直接读订阅缓存(只有 root 读得到,脚本本来就是 root)。
+# 比对要连端口一起比:只按地址比会把远程 DoH(1.1.1.1:443,本来就该经代理走)也算进来。
+nodepairs() {
+  d=$("$BIN" diag 2>/dev/null | sed -n 's/.*"dataDir": *"\([^"]*\)".*/\1/p' | head -1)
+  cat "$d"/profiles/*.json 2>/dev/null | tr -d ' ,"' | awk -F: '$1=="server"{s=$2} $1=="server_port"&&s!=""{print s":"$2; s=""}' | grep -E '^[0-9]+\.' | sort -u
+}
 loopcheck() {
   pairs=$(nodepairs)
   [ -z "$pairs" ] && { echo 0; return; }

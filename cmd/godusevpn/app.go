@@ -27,8 +27,6 @@ import (
 	"github.com/Maoyangui/godusevpn/internal/update"
 )
 
-const testURL = "http://www.gstatic.com/generate_204"
-
 // UIState 推给页面与托盘的一份快照:服务在不在、服务给的状态、实时速度、界面偏好。
 type UIState struct {
 	Service  bool   `json:"service"`  // 控制管道可达
@@ -310,6 +308,11 @@ func (a *App) updateLoop() {
 
 // pokeUpdate 查一次更新;force 为假时 15 分钟内只查一次(抽屉打开、连上网都会来戳)。结果有变就推一次状态。
 func (a *App) pokeUpdate(force bool) {
+	// 定时的只在连着时查(这时候流量经隧道):没连接时直连 GitHub,等于每小时告诉它一次"这个 IP 在用这个软件"。
+	// 不记时间:连上之后那一次照常查。点「检查更新」走 CheckUpdate,不受这条限制
+	if st := a.GetState(); !st.Service || (st.View.State.Status != "connected" && st.View.State.Status != "degraded") || st.View.Mode == "direct" {
+		return
+	}
 	a.mu.Lock()
 	if !force && time.Since(a.lastCheck) < 15*time.Minute {
 		a.mu.Unlock()
@@ -516,6 +519,9 @@ func (a *App) GetNodes() ([]NodeInfo, error) {
 		}
 		p := proxies[name]
 		ni := NodeInfo{Name: name, Type: p.Type, Delay: p.LastDelay(), Current: name == group.Now}
+		if v, ok := st.View.Delays[name]; ok { // 列表测速的结果优先:和后台自动选择那一轮量的不是一回事,一列数字要是同一种
+			ni.Delay = v
+		}
 		if name == "auto" {
 			ni.AutoNow = p.Now
 		}
@@ -527,12 +533,7 @@ func (a *App) GetNodes() ([]NodeInfo, error) {
 // TestAll 给全部节点测一次延迟,返回 节点 → 毫秒。
 func (a *App) TestAll() (map[string]int, error) {
 	n := len(a.GetState().View.Nodes)
-	if c, err := a.clashClient(); err == nil {
-		ctx, cancel := context.WithTimeout(a.ctx, clash.DelayBudget(n, 10, 8*time.Second))
-		defer cancel()
-		return c.GroupDelay(ctx, "proxy", testURL, 8*time.Second)
-	}
-	// 内核没跑:让服务用订阅里的出站起临时实例测,结果进状态里,GetNodes 就能显示。
+	// 服务来测,结果进状态里,GetNodes 就能显示。连着时直接量网卡到节点的握手,没连接时量直连的往返,都不经节点转发。
 	// 时限和服务那边的 probeBudget 一样按节点数算,再放宽十秒,别在服务还在测的时候这头先超时
 	ctx, cancel := context.WithTimeout(a.ctx, clash.DelayBudget(n, 8, 12*time.Second)+10*time.Second)
 	defer cancel()
@@ -572,6 +573,34 @@ func (a *App) GetProfiles() ([]ipc.ProfileView, error) {
 	if out == nil {
 		out = []ipc.ProfileView{}
 	}
+	return out, err
+}
+
+// GetManualNodes 手动节点。
+func (a *App) GetManualNodes() (ipc.ManualNodes, error) {
+	var out ipc.ManualNodes
+	err := a.call(ipc.MGetManualNodes, nil, &out)
+	return out, err
+}
+
+// ParseNodeLinks 解析粘贴的分享链接,不落盘。
+func (a *App) ParseNodeLinks(text string) (ipc.ParsedNodes, error) {
+	var out ipc.ParsedNodes
+	err := a.call(ipc.MParseNodeLinks, map[string]string{"text": text}, &out)
+	return out, err
+}
+
+// SaveManualNodes 添加手动节点;replace 不为空时替换这个名字的节点。
+func (a *App) SaveManualNodes(nodes []map[string]any, replace, name string) ([]ipc.ProfileView, error) {
+	var out []ipc.ProfileView
+	err := a.call(ipc.MSaveManualNodes, map[string]any{"nodes": nodes, "replace": replace, "name": name}, &out)
+	return out, err
+}
+
+// RemoveManualNode 删一个手动节点。
+func (a *App) RemoveManualNode(tag string) ([]ipc.ProfileView, error) {
+	var out []ipc.ProfileView
+	err := a.call(ipc.MRemoveManualNode, map[string]string{"tag": tag}, &out)
 	return out, err
 }
 

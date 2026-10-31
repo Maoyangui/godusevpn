@@ -74,6 +74,15 @@ func ApplyGuard(spec GuardSpec) error {
 	return nil
 }
 
+// SealTunDNS 只有 Linux 要做:这个平台的系统 DNS 另有接管(见 Protect / strict_route)。
+func SealTunDNS(string) error { return nil }
+
+// UnsealTunDNS 见 SealTunDNS。
+func UnsealTunDNS() {}
+
+// LANResolvers 只有 Linux 用得上。
+func LANResolvers() []string { return nil }
+
 // GuardTunUp 隧道网卡起来之后:本机 socket 那四层按隧道地址放行,网卡起不起来无所谓;
 // 但**经本机转发**的流量(热点共享、ICS)不走 socket,只在 IP 转发层能拦 —— 那一层按网卡放行,
 // 得等网卡真的在了才知道它的接口号。查不到网卡就报错,守护进程会记进状态并在下一次同步时重试。

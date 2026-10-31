@@ -44,7 +44,7 @@ func TestProbeDirectTCP(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
 	defer cancel()
-	res := probeDirect(ctx, p, nil, nil)
+	res := probeDirect(ctx, p, nil, nil, nil, "")
 	if res["ok"] < 0 || res["ok"] > 1000 {
 		t.Fatalf("本机监听应很快连上: %v", res)
 	}
@@ -57,7 +57,7 @@ func TestProbeDirectTCP(t *testing.T) {
 func TestPingLoopbackOrUnavailable(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	d, err := pingHost(ctx, "127.0.0.1")
+	d, err := pingHost(ctx, "127.0.0.1", nil)
 	if err != nil {
 		var u *icmpUnavailable
 		if !asUnavailable(err, &u) {
@@ -115,7 +115,7 @@ func TestProbeDirectSendsNothingWhenCanceled(t *testing.T) {
 	}}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	res := probeDirect(ctx, p, nil, nil)
+	res := probeDirect(ctx, p, nil, nil, nil, "")
 	select {
 	case <-accepted:
 		t.Fatal("已取消还发了探测")

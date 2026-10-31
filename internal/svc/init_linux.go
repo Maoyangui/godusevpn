@@ -94,7 +94,8 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=%s run
+ExecStart=%[1]s run
+ExecStopPost=-%[1]s post-stop
 Restart=on-failure
 RestartSec=3
 LimitNOFILE=1048576
@@ -215,7 +216,7 @@ USE_PROCD=1
 start_service() {
 	procd_open_instance
 	procd_set_param command %s run
-	procd_set_param respawn 3600 5 0
+	procd_set_param respawn 3600 1 0
 	procd_set_param stdout 1
 	procd_set_param stderr 1
 	procd_close_instance
@@ -352,6 +353,9 @@ func Refresh() error {
 		if p, err := filepath.EvalSymlinks(exe); err == nil {
 			exe = p
 		}
+		if err := refreshMainUnit(k, exe); err != nil {
+			return err
+		}
 		return ensureGuardUnit(k, exe)
 	}
 	if k != initEntware {
@@ -377,6 +381,39 @@ func Refresh() error {
 	}
 	_, err = sh("cru", entwareWatchdog...)
 	return err
+}
+
+// mainUnitText 当前版本的服务单元。
+func mainUnitText(k initKind, exe string) string {
+	if k == initProcd {
+		return fmt.Sprintf(procdScript, exe)
+	}
+	return fmt.Sprintf(systemdUnit, exe)
+}
+
+// refreshMainUnit 服务单元换成当前版本的内容:自更新只换程序文件,单元改了不会自己跟上。不重启服务,下次启动生效;
+// ExecStopPost 这类 systemd 重载后就按新的来。
+func refreshMainUnit(k initKind, exe string) error {
+	want := mainUnitText(k, exe)
+	if b, err := os.ReadFile(unitPath()); err == nil && string(b) == want {
+		return nil
+	}
+	tmp := unitPath() + ".tmp"
+	if err := os.WriteFile(tmp, []byte(want), 0o755); err != nil {
+		return err
+	}
+	if k == initSystemd {
+		_ = os.Chmod(tmp, 0o644)
+	}
+	if err := os.Rename(tmp, unitPath()); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	if k == initSystemd {
+		_, err := sh("systemctl", "daemon-reload")
+		return err
+	}
+	return nil
 }
 
 // entwareScriptLike 当前模板,开机自启的开关照抄已装的那份。

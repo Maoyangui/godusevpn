@@ -61,11 +61,12 @@ a6=$(getent ahostsv6 www.google.com 2>/dev/null | awk '{print $1}' | grep -v '^:
 # 节点服务器必须直连:内核自己去连节点(定时测速每轮都要连一遍)如果被自己的隧道接住,
 # 就会按当前模式再转出去,绕成"本机 → 隧道 → 当前节点 → 目标节点" —— 白绕一跳、流量算两份、
 # 测出来的延迟也不是节点的真实延迟。真机上出现过(anytls 这类 TCP 节点),这里长期盯着。
-# nodepairs 订阅里所有节点的"地址:端口"(诊断里现成的)。比对要连端口一起比:
-# 只按地址比会把远程 DoH(1.1.1.1:443,本来就该经代理走)也算进来。
-# 排掉回环和 0.0.0.0:面板的监听地址(Linux 上是 0.0.0.0:9800)也会以 "ip:port" 的样子出现在诊断里,
-# 它排在所有节点 IP 前面,拿它当节点地址去打,那条"判给了直连"的检查就永远红。
-nodepairs() { "$BIN" diag 2>/dev/null | grep -o '"[0-9]\{1,3\}\.[0-9.]*:[0-9]\{1,5\}"' | tr -d '"' | grep -v '^127\.' | grep -v '^0\.0\.0\.0:' | sort -u; }
+# nodepairs 订阅里所有节点的"地址:端口"。诊断里节点地址打了码,这里直接读订阅缓存(只有 root 读得到,脚本本来就是 root)。
+# 比对要连端口一起比:只按地址比会把远程 DoH(1.1.1.1:443,本来就该经代理走)也算进来。
+nodepairs() {
+  d=$("$BIN" diag 2>/dev/null | sed -n 's/.*"dataDir": *"\([^"]*\)".*/\1/p' | head -1)
+  cat "$d"/profiles/*.json 2>/dev/null | tr -d ' ,"' | awk -F: '$1=="server"{s=$2} $1=="server_port"&&s!=""{print s":"$2; s=""}' | grep -E '^[0-9]+\.' | sort -u
+}
 loopcheck() {
   pairs=$(nodepairs)
   [ -z "$pairs" ] && { echo 0; return; }
@@ -210,7 +211,7 @@ echo "== 3.8 规则模式的防流量逃逸:直连规则的地址段照常,其�
 rr=$(nft list table inet godusevpn_guard 2>/dev/null)
 check "规则模式下闸在、带放行段" "$(echo "$rr" | grep -c 'set direct4')" "$(echo "$rr" | grep -c .) 行"
 check "规则模式不拦 DNS / UPnP" "$([ -z "$(echo "$rr" | grep -E 'dport \{ (53, 853|1900, 5351) \} drop')" ] && echo 1 || echo 0)" ""
-check "规则模式不把 DNS 接进隧道(切过来时撤了策略路由)" "$([ "$(ip rule show | grep -c 'lookup 5053')" = 0 ] && echo 1 || echo 0)" "$(ip rule show | grep 5053 | tr '\n' ';')"
+check "规则模式同样把 DNS 接进隧道" "$(ip rule show | grep -c 'dport 53 lookup 5053')" "$(ip rule show | grep 5053 | tr '\n' ';')"
 CNIP=223.5.5.5 # 阿里 DNS,在 geoip-cn 里
 nicprobe() { su -s /bin/sh "$U" -c "curl -sk --interface $defif -m 6 -o /dev/null -w '%{http_code}' $1" 2>/dev/null || true; }
 plainprobe() { su -s /bin/sh "$U" -c "curl -sk -m 6 -o /dev/null -w '%{http_code}' $1" 2>/dev/null || true; }
@@ -227,8 +228,9 @@ if [ "$direct_ok" = 1 ]; then
     if command -v dig >/dev/null 2>&1; then
       g=$(su -s /bin/sh "$U" -c "dig +short +time=3 +tries=1 @$CNIP www.baidu.com A" 2>/dev/null | head -1)
       check "服务停着:问国内 DNS 能解析" "$([ -n "$g" ] && ! echo "$g" | grep -q 'timed out' && echo 1 || echo 0)" "$g"
-      g=$(su -s /bin/sh "$U" -c "dig +short +time=3 +tries=1 @8.8.8.8 www.google.com A" 2>/dev/null | grep -E '^[0-9.]+$' | head -1)
-      check "服务停着:问国外 DNS 被拦" "$([ -z "$g" ] && echo 1 || echo 0)" "$g"
+      g=$(su -s /bin/sh "$U" -c "dig +short +time=3 +tries=1 @8.8.8.8 www.baidu.com A" 2>/dev/null | grep -E '^[0-9.]+$' | head -1)
+      check "服务停着:系统配的 DNS 不在放行段里也能解析(直连要靠它)" "$([ -n "$g" ] && echo 1 || echo 0)" "$g"
+      a=$(plainprobe "https://8.8.8.8/"); check "服务停着:放行 DNS 不等于放行别的:同一台的 443 拦下" "$(isshut "$a")" "http=${a:-000}"
     fi
     pkill -9 -x godusevpn; systemctl start godusevpn
     check "服务起来后接着连上" "$(wait_status connected 60 && echo 1 || echo 0)" "$("$BIN" status | sed -n 2p)"

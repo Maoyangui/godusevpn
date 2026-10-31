@@ -12,9 +12,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"net"
-	"net/http"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -22,6 +20,7 @@ import (
 	"time"
 
 	"github.com/Maoyangui/godusevpn/internal/autostart"
+	"github.com/Maoyangui/godusevpn/internal/builder"
 	"github.com/Maoyangui/godusevpn/internal/buildinfo"
 	"github.com/Maoyangui/godusevpn/internal/cli"
 	"github.com/Maoyangui/godusevpn/internal/daemon"
@@ -92,6 +91,7 @@ func main() {
 		if err := svc.Start(); err != nil {
 			fail(fmt.Errorf("已注册自启但启动失败: %w", err))
 		}
+		waitService()
 		fmt.Printf("%s 已安装并启动(%s)\n", svc.DisplayName, svc.Kind())
 		printPanel(s, pw)
 	case "uninstall":
@@ -139,6 +139,10 @@ func main() {
 			fail(err)
 		}
 		fmt.Println("已停止并删除自启;设置与数据保留在", paths.ConfDir(), "与", paths.DataDir())
+	case "post-stop":
+		// 服务单元的 ExecStopPost:进程不管怎么没的,内核留下的转发重定向都要清,设备 DNS 改问公共 DNS(只在 Linux 网关模式下有事做)
+		s, _ := settings.Load(paths.Settings())
+		netmode.PostStop(builder.TunName, s.LocalDNS)
 	case "boot-guard":
 		// 开机闸单元调:早于联网把落盘的闸装上、按备份先停网卡 IPv6;没有落盘的就什么都不做
 		if err := netmode.ApplyBootGuard(); err != nil {
@@ -259,12 +263,6 @@ func printPanel(s settings.Settings, pw string) {
 		for _, ip := range locals {
 			fmt.Printf("  http://%s:%s/   (局域网 / 内网)\n", ip, port)
 		}
-		// 闸在的时候不去问公网回显服务:macOS 上 root 被闸放行,这一问就是从隧道外直连出去(Linux 上会被拦、白等)(升级 / 重装时闸通常还在)
-		if n, _ := netmode.GuardStatus(); n > 0 {
-			fmt.Println("  (防流量逃逸的闸开着:不去查公网地址)")
-		} else if pub := publicIPv4(); pub != "" && !contains(locals, pub) {
-			fmt.Printf("  http://%s:%s/   (公网;云主机要在安全组 / 防火墙放行 TCP %s)\n", pub, port, port)
-		}
 		fmt.Printf("  http://127.0.0.1:%s/   (本机)\n", port)
 	} else {
 		fmt.Println("  http://" + host + ":" + port + "/")
@@ -277,6 +275,9 @@ func printPanel(s settings.Settings, pw string) {
 	default:
 		fmt.Println("面板密码: 还没设 —— 设了面板才能用:sudo godusevpn passwd")
 	}
+	if s.WebPublic() && !s.WebAllowPublic {
+		fmt.Println("从公网打不开:面板是明文 HTTP,默认只给本机和局域网。要从外面用,推荐 SSH 隧道;实在要直连: godusevpn settings webAllowPublic=on")
+	}
 	if !s.WebPublic() {
 		fmt.Println("面板目前只允许本机访问;要在局域网其它设备上打开(路由器场景),执行:")
 		fmt.Println("  godusevpn passwd            # 先设密码")
@@ -284,30 +285,17 @@ func printPanel(s settings.Settings, pw string) {
 	}
 }
 
-// publicIPv4 云主机的公网地址(问一下公网回显服务,3 秒内答不上就算了)。
-func publicIPv4() string {
-	c := &http.Client{Timeout: 3 * time.Second}
-	for _, u := range []string{"https://api.ipify.org", "https://api4.ipify.org", "https://ipv4.icanhazip.com"} {
-		resp, err := c.Get(u)
-		if err != nil {
-			continue
+// waitService 等控制口能应答(最多五秒):install 之后紧接着的命令不该撞上"服务未运行"。
+func waitService() {
+	for i := 0; i < 50; i++ {
+		ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+		err := ipc.Call(ctx, ipc.MPing, nil, nil)
+		cancel()
+		if err == nil {
+			return
 		}
-		b, _ := io.ReadAll(io.LimitReader(resp.Body, 64))
-		resp.Body.Close()
-		if ip := net.ParseIP(strings.TrimSpace(string(b))); ip != nil && ip.To4() != nil && ip.IsGlobalUnicast() && !ip.IsPrivate() {
-			return ip.String()
-		}
+		time.Sleep(100 * time.Millisecond)
 	}
-	return ""
-}
-
-func contains(list []string, s string) bool {
-	for _, x := range list {
-		if x == s {
-			return true
-		}
-	}
-	return false
 }
 
 func localIPv4() []string {

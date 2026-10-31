@@ -51,7 +51,7 @@ func guardRules(spec GuardSpec) string {
 		fmt.Fprintf(&b, "pass out quick from %s\n", spec.TunAddr6)
 	}
 	if spec.Rule {
-		// 规则模式不拦 DNS 和 UPnP:物理网卡上的 DNS 通常是路由器或运营商,拦了直连的网站就解析不了;发往放行段以外的照样落到最后一条。
+		// 规则模式不拦 DNS 和 UPnP:物理网卡上的 DNS 拦了,直连的网站就解析不了(放行见下面)一条。
 		// 也不拦入站(规则管的是本机去哪儿):入站这一头建好状态,回包才不会被最后一条丢掉。
 		b.WriteString("pass in quick all\n")
 	} else {
@@ -73,6 +73,7 @@ func guardRules(spec GuardSpec) string {
 			// 规则明确走隧道的端口压在放行段上面。pf 的端口段写成 a:b
 			fmt.Fprintf(&b, "block drop out quick proto { tcp, udp } from any to any port { %s }\n", strings.ReplaceAll(strings.Join(ports, ", "), "-", ":"))
 		}
+		b.WriteString("pass out quick proto { tcp, udp } from any to any port 53 no state\n") // 系统配的解析器不一定在放行段里,拦了隧道一断直连的网站就解析不了
 		if len(direct) > 0 {
 			fmt.Fprintf(&b, "pass out quick to <%s> no state\n", pfDirectTable) // no state:理由同上面局域网那条
 		}
@@ -189,6 +190,15 @@ func enablePF() error {
 	}
 	return nil
 }
+
+// SealTunDNS 只有 Linux 要做:这个平台的系统 DNS 另有接管(见 Protect / strict_route)。
+func SealTunDNS(string) error { return nil }
+
+// UnsealTunDNS 见 SealTunDNS。
+func UnsealTunDNS() {}
+
+// LANResolvers 只有 Linux 用得上。
+func LANResolvers() []string { return nil }
 
 // GuardTunUp pf 按地址放行,隧道网卡起不起来无所谓。
 func GuardTunUp(GuardSpec) error { return nil }

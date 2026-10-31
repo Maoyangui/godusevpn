@@ -26,8 +26,8 @@ func cmdOut(name string, args ...string) string {
 }
 
 // 诊断:命令行 diag(MDiagnose)与界面的「导出诊断包」(MExportDiag)用同一套打码(internal/redact):
-// 凭据字段整值打码,地址只留协议与主机,订阅令牌在别处出现也盖掉;诊断包里的系统网络信息另把公网 IP、MAC、主机名打码;
-// 内核日志里的访问目标(域名、公网地址)只留顶级域 / 前缀。
+// 凭据字段整值打码,订阅令牌在别处出现也盖掉;节点地址、规则里写的域名、内核日志里的访问目标,
+// 还有诊断包里系统网络信息的公网 IP、MAC,都只留顶级域 / 前缀。这些东西常被直接贴到公开的 Issue 里。
 
 // diagMasker 这一次诊断输出用的打码器,带上这台设备上每条订阅地址里的令牌。
 func (d *Daemon) diagMasker() *redact.Masker {
@@ -49,11 +49,10 @@ func diagTree(m *redact.Masker, v any) (any, error) {
 	if err := json.Unmarshal(b, &detached); err != nil {
 		return nil, err
 	}
-	return m.Tree(detached), nil
+	return redact.DestTree(m.Tree(detached)), nil
 }
 
-// diagInfo 两处共用的概况:版本、时间、状态(含设置)、当前订阅的节点地址。
-// servers 是"地址:端口",不算凭据,deploy/*-test.sh 靠它从 diag 输出里找节点。
+// diagInfo 两处共用的概况:版本、时间、状态(含设置)、当前订阅的节点地址(打码后只看得出前缀和端口)。
 func (d *Daemon) diagInfo() map[string]any {
 	info := map[string]any{"version": buildinfo.Version, "os": runtime.GOOS + "/" + runtime.GOARCH, "time": time.Now().Format(time.RFC3339), "state": d.stateView()}
 	if _, p := d.activeProfile(); p != nil {
@@ -109,11 +108,11 @@ func (d *Daemon) exportDiag() (string, error) {
 	if raw, err := os.ReadFile(paths.Config()); err == nil {
 		var cfg any
 		if json.Unmarshal(raw, &cfg) == nil {
-			rb, _ := json.MarshalIndent(m.Tree(cfg), "", "  ")
+			rb, _ := json.MarshalIndent(redact.DestTree(m.Tree(cfg)), "", "  ")
 			add("config.redacted.json", string(rb))
 		}
 	}
-	add("service.log", strings.Join(logx.Tail(d.log.Path(), 500), "\n"))
+	add("service.log", redact.Destinations(strings.Join(logx.Tail(d.log.Path(), 500), "\n")))
 	add("core.log", redact.Destinations(strings.Join(d.coreTail(500), "\n")))
 	// 崩溃记录(Windows 服务 / Linux / macOS 的 CaptureCrashes,Android 上 Go / Kotlin 侧)。.1 是启动时超过 1MB
 	// 挪走的那份 —— 轮转恰恰发生在一次崩溃把文件推过 1MB 之后,现场在那里。

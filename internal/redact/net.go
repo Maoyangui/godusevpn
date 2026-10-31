@@ -132,6 +132,28 @@ func Destinations(s string) string {
 	return netIdentity(s, "")
 }
 
+// DestTree 把树里所有字符串按 Destinations 打码:诊断包是可以发给别人的,节点地址、规则里写的域名都不该原样留着。
+func DestTree(v any) any {
+	switch x := v.(type) {
+	case map[string]any:
+		out := make(map[string]any, len(x))
+		for k, val := range x {
+			out[k] = DestTree(val)
+		}
+		return out
+	case []any:
+		out := make([]any, len(x))
+		for i := range x {
+			out[i] = DestTree(x[i])
+		}
+		return out
+	case string:
+		return Destinations(x)
+	default:
+		return v
+	}
+}
+
 func maskDomain(d string) string {
 	d = strings.TrimSuffix(d, ".")
 	return "*." + d[strings.LastIndexByte(d, '.')+1:]

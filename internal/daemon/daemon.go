@@ -27,6 +27,7 @@ import (
 
 	"github.com/Maoyangui/godusevpn/internal/builder"
 	"github.com/Maoyangui/godusevpn/internal/buildinfo"
+	"github.com/Maoyangui/godusevpn/internal/clash"
 	"github.com/Maoyangui/godusevpn/internal/core"
 	"github.com/Maoyangui/godusevpn/internal/ipc"
 	"github.com/Maoyangui/godusevpn/internal/logx"
@@ -42,6 +43,8 @@ import (
 const DisplayName = buildinfo.DisplayName
 
 type Daemon struct {
+	probeBytes        int64      // 上一次定时测速时内核累计的流量(见 hadTraffic),probeMu 管
+	manualMu          sync.Mutex // 手动节点的读改写(见 manual.go)
 	mu                sync.Mutex
 	log               *logx.Rotator
 	coreLog           *logx.Rotator
@@ -210,8 +213,15 @@ func NewWithOptions(o Options) (*Daemon, error) {
 	if persistedTrusted {
 		d.purgeCoreCache(!prev.Wanted) // 上次不是连着关的,缓存早该删了;连着关的看它闲置了多久
 	}
-	if persistedTrusted && d.settingsTrusted() && !(prev.Wanted && s.TUN && s.NetMode == settings.NetGateway) {
+	netmode.ClearStaleRedirect() // 上次的内核被杀、崩了时留下的转发重定向:留着的话局域网设备一条连接都建不起来
+	gateway := prev.Wanted && s.TUN && s.NetMode == settings.NetGateway
+	if persistedTrusted && d.settingsTrusted() && !gateway {
 		netmode.RestoreForward() // 上次没走到 stop 就没了(崩溃、被杀),而现在已经不该开着
+	} else if gateway {
+		// 想连着的路由器:开机后节点连不上时,局域网设备也要能直连、能解析,不用等到连上
+		if err := netmode.GatewayDown(builder.TunName, s.LocalDNS); err != nil {
+			d.logf("网关模式没准备好(局域网设备可能上不了网): %v", err)
+		}
 	}
 	if persistedTrusted && !strictPending && d.settingsTrusted() {
 		if err := netmode.UnprotectChecked(); err != nil {
@@ -619,6 +629,9 @@ func (d *Daemon) fetchProfile(ctx context.Context, url string) (*profile.Profile
 	routes := []string{"proxy", "auto", "auto", "auto", "direct"} // 当前代理一次、auto 三次、最后直连
 	var last error
 	for i, tag := range routes {
+		if tag == "auto" && i == 1 && d.getSettings().Selected != "" {
+			d.groupTest(ctx) // 手动选节点时 auto 组平时不测(见 core.QuietAuto);当前节点拉不到了才靠它找一条通的
+		}
 		cl, err := d.core.HTTPClient(tag, 30*time.Second)
 		if err != nil {
 			continue
@@ -702,13 +715,20 @@ func (d *Daemon) refreshProfile(ctx context.Context, id string) (changed bool, e
 		close(c.done)
 	}()
 	var url string
+	manual := false
 	for _, p := range d.settings.Profiles {
 		if p.ID == id {
-			url = p.URL
+			url, manual = p.URL, p.Manual
 		}
 	}
 	old := d.profiles[id]
 	d.mu.Unlock()
+	if manual {
+		if old == nil { // 缓存就是它的存储,文件没了节点也就没了;别让调用方拿着空的往下走
+			return false, state.Errf(state.CodeProfileMissing, "手动节点不见了,请重新添加")
+		}
+		return false, nil // 手动节点没有地方可拉
+	}
 	if url == "" {
 		return false, state.Errf(state.CodeProfileMissing, "没有这条订阅")
 	}
@@ -747,7 +767,7 @@ func (d *Daemon) prepare(ctx context.Context) ([]byte, error) {
 	}
 	cacheOK := p != nil && p.URL == a.URL
 	stale := cacheOK && p.Stale(time.Duration(s.UpdateHours)*time.Hour)
-	if refreshBeforeStart(cacheOK, stale, s.NoDirect && s.Mode == settings.ModeGlobal) {
+	if refreshBeforeStart(cacheOK, stale, s.GuardOn()) {
 		if _, err := d.refreshProfile(ctx, a.ID); err != nil {
 			if !cacheOK {
 				return nil, err
@@ -758,10 +778,10 @@ func (d *Daemon) prepare(ctx context.Context) ([]byte, error) {
 			d.logf("订阅「%s」已更新:%d 个节点", a.Name, len(p.Outbounds))
 		}
 	} else if stale {
-		d.logf("订阅缓存已过期:严格全局下先用缓存连上,再经代理刷新(当前代理 → auto → 最后才直连)")
+		d.logf("订阅缓存已过期:防流量逃逸开着,先用缓存连上,再经代理刷新(当前代理 → auto → 最后才直连)")
 	}
 	clashPort := d.pickClashPort(s.ClashPort)
-	cfg, rep, skipped, err := buildValid(d.core, builder.Input{Profile: p, Settings: s, DataDir: paths.DataDir(), ClashSecret: d.secret, RuleSetDir: paths.RuleSets(),
+	cfg, rep, skipped, err := buildValid(d.core, builder.Input{Profile: p, Settings: s, DataDir: paths.DataDir(), ClashSecret: d.secret, RuleSetDir: paths.RuleSets(), LANDNS: netmode.LANResolvers(),
 		ClashPort: clashPort, NodeIPs: resolveNodeHosts(ctx, p, d.bootResolver(s)), SelfProcess: selfProcess()})
 	for tag, why := range skipped {
 		d.logf("节点「%s」本客户端建不起来,这次连接先跳过它: %s", tag, why)
@@ -900,9 +920,15 @@ func (d *Daemon) start(cfg []byte) error {
 	if err := core.PresetCache(builder.CachePath(paths.DataDir()), mode, "proxy", sel); err != nil {
 		d.logf("内核缓存里的模式 / 节点没对齐,起来之后再纠正: %v", err)
 	}
+	if sel != "auto" || s.Mode == settings.ModeDirect {
+		d.core.QuietAuto(tags) // 手动选了节点、直连模式:这次连接不碰别的节点
+	} else {
+		d.core.QuietAuto(nil)
+	}
 	if err := d.core.Start(cfg); err != nil {
 		return d.classifyStart(err)
 	}
+	d.syncTunDNS()
 	// 上面没对齐成时的兜底:按缓存里的旧模式 / 旧节点起来了就立刻纠正,并掐掉这一瞬间建起来的连接
 	if now, _, _ := d.core.Group("proxy"); now != sel || !strings.EqualFold(d.core.Mode(), mode) {
 		was := now + " / " + d.core.Mode()
@@ -944,7 +970,7 @@ func (d *Daemon) start(cfg []byte) error {
 	go d.maybeRefresh(context.Background())
 	if s.TUN {
 		if s.NetMode == settings.NetGateway {
-			if err := netmode.ApplyGateway(builder.TunName, lanInterfaces()); err != nil {
+			if err := netmode.ApplyGateway(builder.TunName, lanInterfaces(), s.LocalDNS); err != nil {
 				d.logf("网关模式没准备好(局域网设备的 UDP 可能不通): %v", err)
 			}
 		}
@@ -978,9 +1004,14 @@ func (d *Daemon) stop() error {
 		}
 	}
 	netmode.ClearGateway()
+	netmode.UnsealTunDNS()
 	// 重连、崩了在重试、服务重启都还"想连着",转发留着;真不想连了(或不是网关模式了)才关回去
 	if d.persistedStateOK() && !(persisted.Wanted && s.TUN && s.NetMode == settings.NetGateway) {
 		netmode.RestoreForward()
+	} else if s.TUN && s.NetMode == settings.NetGateway {
+		if gwErr := netmode.GatewayDown(builder.TunName, s.LocalDNS); gwErr != nil {
+			d.logf("隧道不在时设备 DNS 没切过去: %v", gwErr)
+		}
 	}
 	return err
 }
@@ -1102,7 +1133,7 @@ func (d *Daemon) modeSwitchIsLive(prev, next settings.Settings) bool {
 		return false
 	}
 	build := func(s settings.Settings) []byte {
-		cfg, _, err := builder.BuildEx(builder.Input{Profile: p, Settings: s, DataDir: paths.DataDir(), ClashSecret: d.secret,
+		cfg, _, err := builder.BuildEx(builder.Input{Profile: p, Settings: s, DataDir: paths.DataDir(), ClashSecret: d.secret, LANDNS: netmode.LANResolvers(),
 			RuleSetDir: paths.RuleSets(), ClashPort: 1, SelfProcess: selfProcess()})
 		if err != nil {
 			return nil
@@ -1590,20 +1621,42 @@ func (d *Daemon) autoProbeLoop(ctx context.Context) {
 		case <-t.C:
 		}
 		s := d.getSettings()
-		if s.Selected != "" || !d.core.Running() {
+		if s.Selected != "" || s.Mode == settings.ModeDirect || !d.core.Running() {
 			continue
 		}
 		every := time.Duration(s.ProbeMinutes) * time.Minute
 		if every < time.Minute {
-			every = 3 * time.Minute
+			every = settings.DefaultProbeMinutes * time.Minute
 		}
 		d.probeMu.Lock()
 		due := time.Since(d.probeAt) >= every
 		d.probeMu.Unlock()
-		if due {
+		if due && d.hadTraffic() {
 			d.groupTest(ctx)
 		}
 	}
+}
+
+// hadTraffic 从上一次定时测速到现在有没有真的在用网络。没人用的时候不测:半夜每隔几分钟把所有节点连一遍,
+// 在线路上就是一串有规律的心跳,手机上还费电。当前节点通不通另有健康检查盯着,不靠这一轮;一有流量,下一次检查就测。
+func (d *Daemon) hadTraffic() bool {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	conns, err := clash.New(d.activeClashPort(), d.secret).Connections(ctx)
+	if err != nil {
+		return true // 问不到就照常测,不能因为这个让自动选择停下来
+	}
+	total := conns.DownloadTotal + conns.UploadTotal
+	d.probeMu.Lock()
+	defer d.probeMu.Unlock()
+	if total < d.probeBytes {
+		d.probeBytes = 0 // 内核重启过,计数从头算
+	}
+	if total-d.probeBytes < idleBytes {
+		return false
+	}
+	d.probeBytes = total
+	return true
 }
 
 // nicIPv6Loop 连接期间盯着网卡:新插一张网卡、开个热点、起个虚拟机,那张新网卡上的 IPv6 没人管,
@@ -1633,6 +1686,9 @@ func (d *Daemon) nicIPv6Loop(ctx context.Context) {
 		// 半分钟看一次:这个循环现在 5 秒一轮(盯网卡 IPv6),macOS 上列网络服务要起 networksetup,不该跟着 5 秒跑
 		if s := d.getSettings(); d.core.Running() && s.TUN && time.Since(lastProtect) >= 30*time.Second {
 			lastProtect = time.Now()
+			if s.NetMode != settings.NetGateway && s.Mode != settings.ModeDirect {
+				d.syncTunDNS() // 接进隧道的那条路由跟着网卡走:连接时网卡可能还没注册好
+			}
 			if d.protectWarnText() != "" { // 连接时没做完(见 start):整套重做
 				if err := netmode.Protect(builder.TunName, s.IPv6); err != nil {
 					d.setProtectWarn(err.Error())
@@ -1953,7 +2009,7 @@ func (d *Daemon) profileViews() ([]ipc.ProfileView, *ipc.ProfileView) {
 	var active *ipc.ProfileView
 	out := make([]ipc.ProfileView, 0, len(d.settings.Profiles))
 	for _, sp := range d.settings.Profiles {
-		v := ipc.ProfileView{ID: sp.ID, Name: sp.Name, URL: sp.URL, Active: sp.ID == d.settings.ActiveProfile, Error: d.fetchErr[sp.ID],
+		v := ipc.ProfileView{ID: sp.ID, Name: sp.Name, URL: sp.URL, Manual: sp.Manual, Active: sp.ID == d.settings.ActiveProfile, Error: d.fetchErr[sp.ID],
 			Refreshing: d.refreshing[sp.ID] != nil || d.refreshQueued[sp.ID]}
 		if c := d.profiles[sp.ID]; c != nil {
 			v.Title, v.FetchedAt, v.NodeCount, v.Tags, v.Usage = c.Title, c.FetchedAt, len(c.Outbounds), c.Tags, c.Usage
@@ -2146,6 +2202,13 @@ func (d *Daemon) registerHandlers() {
 					return nil, &ipc.CallError{Code: state.CodeOf(err), Msg: "切换模式失败,已保持旧配置与隐私保护: " + err.Error()}
 				}
 			}
+			// 规则 ↔ 直连不跨严格全局的边界,配置就地切、内核不重启,闸得在这里跟上:
+			// 规则模式有闸、直连没有。漏了的话切到直连后防火墙还按规则拦着,要等下一轮巡检才撤。
+			d.syncGuard()
+			d.syncTunDNS()
+			if prev.Mode == settings.ModeDirect && s.Selected == "" {
+				go d.groupTest(context.Background()) // 直连模式下 auto 组没测过(见 core.QuietAuto):现测一轮,不然它不知道选哪个
+			}
 			return d.stateView(), nil
 		}
 		if s.Mode != prev.Mode { // 再点一次当前模式不算"更换模式",不同步(见 protectionChanged)
@@ -2228,10 +2291,9 @@ func (d *Daemon) registerHandlers() {
 		}
 		var res map[string]int
 		if d.core.Running() {
-			// 已连接:只测内核里有的(经出站做 URL 测试)。列表来自订阅缓存,刚刷新加进来的节点内核里还没有,
-			// 这些不测、也不给数 —— 全局模式下守护进程自己的探测包会进 TUN,量出来是假"不通"。选它连上后自然有数。
+			// 已连接:只测内核里有的。列表来自订阅缓存,刚刷新加进来的节点内核里还没有,这些不测、也不给数。选它连上后自然有数。
 			in, _ := d.splitByCore(p)
-			res = d.core.ProbeRunning(ctx, in.Tags, builder.TestURL, set)
+			res = d.probeConnected(ctx, in, set)
 		} else {
 			// 未连接:直连量到节点服务器的往返。但「防流量逃逸」的闸还开着的时候不做 —— 那说明用户想连着、
 			// 内核只是暂时没起来(在重启 / 在退避),这时从本机直接发 DNS 查询、ICMP、TCP 握手出去,
@@ -2245,7 +2307,7 @@ func (d *Daemon) registerHandlers() {
 			// 测速途中用户点了连接:装闸前就被取消(holdDirect),剩下的探测一律不再发 —— 它们都从本机直连出去
 			// (系统解析、ICMP、TCP、临时实例)。cancelOnGuard 再兜一层。
 			stop := d.cancelOnGuard(ctx, cancel)
-			res = probeDirect(ctx, p, set, d.logf)
+			res = probeDirect(ctx, p, set, d.logf, d.bootResolver(d.getSettings()), d.getSettings().LocalDNS)
 			stop()
 		}
 		// 存一份拷贝,别和返回值共用一个 map:返回值交给控制口在锁外序列化(遍历),而下一次测速每测出一个就往
@@ -2282,6 +2344,7 @@ func (d *Daemon) registerHandlers() {
 
 	// ---- 订阅 ----
 	h(ipc.MGetProfiles, func(json.RawMessage) (any, error) { v, _ := d.profileViews(); return v, nil })
+	d.registerManualHandlers(h)
 	h(ipc.MGetProfile, func(json.RawMessage) (any, error) { _, a := d.profileViews(); return a, nil })
 	h(ipc.MAddProfile, func(p json.RawMessage) (any, error) {
 		in, err := ipc.Decode[struct {
@@ -2429,7 +2492,13 @@ func (d *Daemon) registerHandlers() {
 			return nil, errors.New("没有这条订阅")
 		}
 		u := strings.TrimSpace(in.URL)
-		urlChanged := u != "" && u != s.Profiles[idx].URL
+		if s.Profiles[idx].Manual && u != "" {
+			return nil, errors.New("手动节点没有订阅地址")
+		}
+		d.mu.Lock()
+		noCache := d.profiles[in.ID] == nil
+		d.mu.Unlock()
+		urlChanged := u != "" && (u != s.Profiles[idx].URL || noCache) // 缓存丢了:同一个地址再设一次也要去拉,不然一直是 0 个节点
 		var np *profile.Profile
 		if urlChanged {
 			if !settings.ValidURL(u) {
@@ -2527,7 +2596,8 @@ func (d *Daemon) registerHandlers() {
 		}
 		s := d.getSettings()
 		var raw json.RawMessage
-		if a := s.Active(); a != nil {
+		a := s.Active()
+		if a != nil && !a.Manual {
 			raw, _ = json.Marshal(map[string]string{"id": a.ID, "url": in.URL})
 			if _, err := d.server.Dispatch(ipc.MRenameProfile, raw); err != nil {
 				return nil, err
@@ -2537,9 +2607,16 @@ func (d *Daemon) registerHandlers() {
 			if _, err := d.server.Dispatch(ipc.MAddProfile, raw); err != nil {
 				return nil, err
 			}
+			if a != nil { // 当前是手动节点:它没有地址可改,加一条新的并切过去,"设置订阅"的意思就是用这条
+				next := d.getSettings().Profiles
+				raw, _ = json.Marshal(map[string]string{"id": next[len(next)-1].ID})
+				if _, err := d.server.Dispatch(ipc.MSelectProfile, raw); err != nil {
+					return nil, err
+				}
+			}
 		}
-		_, a := d.profileViews()
-		return a, nil
+		_, view := d.profileViews()
+		return view, nil
 	})
 
 	// ---- 局域网设备(网关模式) ----
@@ -2671,7 +2748,7 @@ func (d *Daemon) registerHandlers() {
 			// 这几项都不进 sing-box 的配置:面板监听地址与密码归内置 HTTP 面板管,日志保留天数归滚动器管,
 			// 内核日志落不落盘归 corePrintf 管,查不查出口归 refreshExit 管,订阅刷新间隔归 Run 的循环管 —— 改它们不该让隧道断一下
 			live.WebListen, live.WebPassword, live.LogDays, live.UpdateHours = next.WebListen, next.WebPassword, next.LogDays, next.UpdateHours
-			live.CoreLogDisk, live.NoExitLookup = next.CoreLogDisk, next.NoExitLookup
+			live.CoreLogDisk, live.NoExitLookup, live.WebAllowPublic = next.CoreLogDisk, next.NoExitLookup, next.WebAllowPublic
 			if !reflect.DeepEqual(live, next) {
 				if err := d.restart(); err != nil {
 					return nil, &ipc.CallError{Code: state.CodeOf(err), Msg: "新设置的配置生成失败,保持当前连接: " + err.Error()}

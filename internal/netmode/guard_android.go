@@ -29,6 +29,16 @@ func androidVPNProtection() (AndroidVPNProtectionStatus, error) {
 // Android 的数据面仍然使用宿主 VpnService 的 TUN；这里没有 Go 侧闸可
 // 安装，所有方法保持幂等空操作，状态只由系统 lockdown 查询决定。
 func ApplyGuard(GuardSpec) error { return nil }
+
+// SealTunDNS 只有 Linux 要做:这个平台的系统 DNS 另有接管(见 Protect / strict_route)。
+func SealTunDNS(string) error { return nil }
+
+// UnsealTunDNS 见 SealTunDNS。
+func UnsealTunDNS() {}
+
+// LANResolvers 只有 Linux 用得上。
+func LANResolvers() []string { return nil }
+
 func GuardTunUp(GuardSpec) error { return nil }
 func GuardTunDown() error        { return nil }
 func ClearGuard() error          { return nil }

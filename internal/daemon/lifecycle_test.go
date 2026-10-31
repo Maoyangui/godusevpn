@@ -203,6 +203,7 @@ func TestGuardSyncWiring(t *testing.T) {
 		t.Fatal("MSetSettings 里只该有 protectionChanged 下那一处 syncGuard")
 	}
 	mode := handlerBody(t, src, "MSetMode")
+	before(t, mode, "d.switchModeLive(s.Mode)", "d.syncGuard()", "规则 ↔ 直连就地切模式,内核不重启,闸也要跟上")
 	if !strings.Contains(mode, "if s.Mode != prev.Mode {") || strings.Index(mode, "if s.Mode != prev.Mode {") > strings.LastIndex(mode, "d.syncGuard()") {
 		t.Fatal("再点一次当前模式不该同步闸与网卡 IPv6")
 	}
@@ -216,7 +217,7 @@ func TestGuardSyncWiring(t *testing.T) {
 	}
 }
 
-// 严格全局下内核没起来时拉订阅只能直连;缓存能用就先用缓存连上,再经"当前代理 → auto → 直连"刷新。
+// 防流量逃逸开着时(严格全局和规则模式)内核没起来时拉订阅只能直连;缓存能用就先用缓存连上,再经"当前代理 → auto → 直连"刷新。
 func TestRefreshBeforeStart(t *testing.T) {
 	for _, c := range []struct {
 		name                   string

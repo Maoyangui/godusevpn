@@ -1,6 +1,9 @@
 package ipc
 
 import (
+	"encoding/json"
+
+	"github.com/Maoyangui/godusevpn/internal/nodelink"
 	"github.com/Maoyangui/godusevpn/internal/profile"
 	"github.com/Maoyangui/godusevpn/internal/settings"
 	"github.com/Maoyangui/godusevpn/internal/state"
@@ -23,6 +26,19 @@ type ProfileView struct {
 	Error     string        `json:"error,omitempty"` // 最近一次拉取失败的原因
 	// Refreshing 这条订阅正在刷新(界面点的刷新在后台做,结果随状态推送回来)
 	Refreshing bool `json:"refreshing,omitempty"`
+	Manual     bool `json:"manual,omitempty"` // 手动添加的节点,没有地址也不刷新
+}
+
+// ManualNodes 手动节点。还没有时 ID 为空。
+type ManualNodes struct {
+	ID    string            `json:"id"`
+	Nodes []json.RawMessage `json:"nodes"`
+}
+
+// ParsedNodes 粘贴的分享链接解析结果。
+type ParsedNodes struct {
+	Nodes  []map[string]any     `json:"nodes"`
+	Errors []nodelink.LineError `json:"errors"`
 }
 
 // DeviceView 局域网设备(网关模式):设置里记过的带 Saved 与策略,只在网上看到的 Saved 为假。

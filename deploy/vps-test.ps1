@@ -391,8 +391,8 @@ if ($script:directOK) {
   $a = Plain-Http $fnUrl; Check "服务停着:国外地址拦下" ($a -notmatch '^[234]') "http=$a"
   $g = (Resolve-DnsName -Name "www.baidu.com" -Type A -Server 223.5.5.5 -DnsOnly -QuickTimeout -ErrorAction SilentlyContinue | Where-Object { $_.Type -eq "A" } | Select-Object -First 1).IPAddress
   Check "服务停着:问国内 DNS 能解析" ([bool]$g) "$g"
-  $g = (Resolve-DnsName -Name "www.google.com" -Type A -Server 8.8.8.8 -DnsOnly -QuickTimeout -ErrorAction SilentlyContinue | Where-Object { $_.Type -eq "A" } | Select-Object -First 1).IPAddress
-  Check "服务停着:问国外 DNS 被拦" (-not $g) "$g"
+  $g = (Resolve-DnsName -Name "www.baidu.com" -Type A -Server 8.8.8.8 -DnsOnly -QuickTimeout -ErrorAction SilentlyContinue | Where-Object { $_.Type -eq "A" } | Select-Object -First 1).IPAddress
+  Check "服务停着:系统配的 DNS 不在放行段里也能解析(直连要靠它)" ([bool]$g) "$g"
   & $svc start | Out-Null
   $stb = Wait-Status "connected" 60
   Check "服务起来后接着连上" ($stb -match "状态:\s+connected") ""

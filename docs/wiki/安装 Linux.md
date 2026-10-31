@@ -10,14 +10,17 @@ root 执行:
 curl -fsSL https://raw.githubusercontent.com/Maoyangui/godusevpn/master/deploy/install.sh | sh
 ```
 
-装完终端会打印面板地址(局域网 / 内网地址、云主机的公网地址、本机地址)和**随机生成的初始密码**。
+装完终端会打印面板地址(局域网 / 内网地址、本机地址)和**随机生成的初始密码**。
 
-默认监听 `0.0.0.0:9800`,局域网其它设备直接打开即可;云主机要在安全组 / 防火墙放行 TCP 9800。
+默认监听 `0.0.0.0:9800`,本机和局域网其它设备直接打开即可。
+
+**从公网默认打不开**:面板是明文 HTTP,公网上密码、订阅地址、节点密码路上都看得到。云主机上用 SSH 隧道最省事:`ssh -L 9800:127.0.0.1:9800 root@服务器`,然后在自己电脑上开 http://127.0.0.1:9800/。自己套 HTTPS 反代也行(反代从本机连过来,不受这条限制)。实在要直连:`godusevpn settings webAllowPublic=on`,再到安全组放行 TCP 9800。
 
 | 要做的事 | 命令 |
 |---|---|
 | 改面板密码 | `godusevpn passwd` |
 | 只给本机看 | `godusevpn settings webListen=127.0.0.1:9800` |
+| 允许从公网打开 | `godusevpn settings webAllowPublic=on` |
 | 服务开关 | `godusevpn install \| start \| stop \| status \| uninstall` |
 
 > 面板**必须**有密码才能用;没设密码的话面板一律不给用,本机来的也一样(命令行走控制口,照常)。

@@ -44,7 +44,7 @@ func diagDaemon(t *testing.T) *Daemon {
 // 内核日志里访问过的域名与目标公网地址(合起来就是浏览记录)。
 func assertDiagClean(t *testing.T, where, s string) {
 	t.Helper()
-	for _, secret := range []string{"alice", "S5PW", "0123456789abcdef", "/sub/", "visited-site", "142.250.72.4"} {
+	for _, secret := range []string{"alice", "S5PW", "0123456789abcdef", "/sub/", "visited-site", "142.250.72.4", "1.2.3.4", "panel.example"} {
 		if strings.Contains(s, secret) {
 			t.Errorf("%s 里还有 %q:\n%s", where, secret, s)
 		}
@@ -52,7 +52,7 @@ func assertDiagClean(t *testing.T, where, s string) {
 }
 
 // 命令行 diag(文档说"要发给别人看就导这个,订阅地址已打码")以前原样返回状态与日志。
-// 现在和诊断包同一套打码;排障要的主机、节点地址、失败原因都还在,运行中的设置不受影响。
+// 现在和诊断包同一套打码;节点地址和面板主机只留前缀,失败原因都还在,运行中的设置不受影响。
 func TestDiagnoseRedacts(t *testing.T) {
 	d := diagDaemon(t)
 	out, err := d.diagnose()
@@ -61,7 +61,7 @@ func TestDiagnoseRedacts(t *testing.T) {
 	}
 	b, _ := json.Marshal(out)
 	assertDiagClean(t, "diag 输出", string(b))
-	for _, keep := range []string{`panel.example:2056/***`, `"1.2.3.4:1080"`, "timeout", `"serviceLog"`, `"coreLog"`, `"webPassword":"***"`} {
+	for _, keep := range []string{`*.example:2056/***`, `"1.2.x.x:1080"`, "timeout", `"serviceLog"`, `"coreLog"`, `"webPassword":"***"`} {
 		if !strings.Contains(string(b), keep) {
 			t.Errorf("diag 输出缺了 %s:\n%s", keep, b)
 		}
@@ -112,7 +112,7 @@ func TestExportDiagRedacts(t *testing.T) {
 			t.Fatalf("%s 不是合法 JSON: %v", name, err)
 		}
 	}
-	if !strings.Contains(files["service.log"], "panel.example:2056/***") || !strings.Contains(files["info.json"], `"1.2.3.4:1080"`) {
+	if !strings.Contains(files["service.log"], "拉取失败") || !strings.Contains(files["info.json"], `"1.2.x.x:1080"`) {
 		t.Fatalf("排障要的主机 / 节点地址丢了:\n%s\n%s", files["service.log"], files["info.json"])
 	}
 }

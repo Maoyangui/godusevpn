@@ -273,7 +273,32 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 
 // ---- 路由 ----
 
+// localClient 本机、局域网、链路本地、运营商级 NAT / Tailscale 段。
+func localClient(host string) bool {
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return false
+	}
+	return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || cgnat.Contains(ip)
+}
+
+var cgnat = &net.IPNet{IP: net.IPv4(100, 64, 0, 0), Mask: net.CIDRMask(10, 32)}
+
+// Handler 面板默认只给本机和局域网:它是明文 HTTP,从公网打开时密码、订阅地址、节点密码、访问记录都能被路上看到,
+// 云主机上还会被扫到。要从公网用,推荐 SSH 隧道或自己套 HTTPS 反代(反代从本机连过来,不受这条限制),
+// 实在要直连就开 webAllowPublic。这里的回应不写产品名:扫描器不该从这个回应认出是什么。
 func (s *Server) Handler() http.Handler {
+	mux := s.routes()
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !localClient(clientIP(r)) && !s.ui.Settings().WebAllowPublic {
+			http.Error(w, "403 Forbidden\nOnly the local network can open this page. To allow it from elsewhere, run on this machine:\n  settings webAllowPublic=on\n只允许本机和局域网打开。要从别处打开,在这台机器上执行上面这条设置。", http.StatusForbidden)
+			return
+		}
+		mux.ServeHTTP(w, r)
+	})
+}
+
+func (s *Server) routes() http.Handler {
 	static := http.FileServer(http.FS(web.Dist()))
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) {

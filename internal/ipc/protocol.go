@@ -12,32 +12,36 @@ const Version = 1
 
 // 方法名
 const (
-	MGetState       = "GetState"
-	MConnect        = "Connect"
-	MDisconnect     = "Disconnect"
-	MSetMode        = "SetMode"
-	MSelectNode     = "SelectNode"
-	MTestLatency    = "TestLatency"
-	MProbeNodes     = "ProbeNodes" // 全部节点各测一次延迟;内核没跑时起临时实例测,结果缓存在状态里
-	MGetProfile     = "GetProfile"
-	MSetProfileURL  = "SetProfileURL"
-	MRefreshProfile = "RefreshProfile"
-	MGetSettings    = "GetSettings"
-	MSetSettings    = "SetSettings"
-	MGetLogs        = "GetLogs"
-	MDiagnose       = "Diagnose"
-	MPing           = "Ping"
-	MGetClashInfo   = "GetClashInfo" // 内核 Clash API 的端口与密钥,托盘客户端据此读实时速度、连接与节点延迟
-	MExportDiag     = "ExportDiag"   // 生成脱敏的诊断 zip,返回路径
-	MGetProfiles    = "GetProfiles"  // 订阅列表
-	MAddProfile     = "AddProfile"   // 新增订阅(先拉一次验证)
-	MRemoveProfile  = "RemoveProfile"
-	MSelectProfile  = "SelectProfile" // 切换当前订阅
-	MRenameProfile  = "RenameProfile"
-	MGetDevices     = "GetDevices"     // 局域网设备列表(网关模式)
-	MSetDevice      = "SetDevice"      // 记下 / 修改一台设备的名字与策略(按 MAC)
-	MRemoveDevice   = "RemoveDevice"   // 从设置里删掉一台设备
-	MDismissNICLost = "DismissNICLost" // 用户在界面上点了"知道了":删掉"网卡原值丢失"的记录
+	MGetState         = "GetState"
+	MConnect          = "Connect"
+	MDisconnect       = "Disconnect"
+	MSetMode          = "SetMode"
+	MSelectNode       = "SelectNode"
+	MTestLatency      = "TestLatency"
+	MProbeNodes       = "ProbeNodes" // 全部节点各测一次延迟;内核没跑时起临时实例测,结果缓存在状态里
+	MGetProfile       = "GetProfile"
+	MSetProfileURL    = "SetProfileURL"
+	MRefreshProfile   = "RefreshProfile"
+	MGetSettings      = "GetSettings"
+	MSetSettings      = "SetSettings"
+	MGetLogs          = "GetLogs"
+	MDiagnose         = "Diagnose"
+	MPing             = "Ping"
+	MGetClashInfo     = "GetClashInfo" // 内核 Clash API 的端口与密钥,托盘客户端据此读实时速度、连接与节点延迟
+	MExportDiag       = "ExportDiag"   // 生成脱敏的诊断 zip,返回路径
+	MGetProfiles      = "GetProfiles"  // 订阅列表
+	MAddProfile       = "AddProfile"   // 新增订阅(先拉一次验证)
+	MRemoveProfile    = "RemoveProfile"
+	MSelectProfile    = "SelectProfile" // 切换当前订阅
+	MRenameProfile    = "RenameProfile"
+	MGetManualNodes   = "GetManualNodes"  // 手动节点(带凭据,编辑要回填)
+	MParseNodeLinks   = "ParseNodeLinks"  // 解析粘贴的分享链接,不落盘
+	MSaveManualNodes  = "SaveManualNodes" // 添加 / 替换手动节点
+	MRemoveManualNode = "RemoveManualNode"
+	MGetDevices       = "GetDevices"     // 局域网设备列表(网关模式)
+	MSetDevice        = "SetDevice"      // 记下 / 修改一台设备的名字与策略(按 MAC)
+	MRemoveDevice     = "RemoveDevice"   // 从设置里删掉一台设备
+	MDismissNICLost   = "DismissNICLost" // 用户在界面上点了"知道了":删掉"网卡原值丢失"的记录
 )
 
 type Request struct {

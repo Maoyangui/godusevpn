@@ -31,15 +31,16 @@ import (
 
 // Core 数据面。
 type Core struct {
-	mu       sync.Mutex
-	box      *sb.Box
-	ctx      context.Context
-	cancel   context.CancelFunc
-	running  bool
-	logw     log.PlatformWriter
-	started  time.Time
-	platform adapter.PlatformInterface // Android:TUN 与网络接口由宿主提供
-	policy   SessionPolicy             // 会话看护的策略(守护进程);nil = 判废照样拆会话,但不预热、不通知
+	quietAuto []string // 见 QuietAuto
+	mu        sync.Mutex
+	box       *sb.Box
+	ctx       context.Context
+	cancel    context.CancelFunc
+	running   bool
+	logw      log.PlatformWriter
+	started   time.Time
+	platform  adapter.PlatformInterface // Android:TUN 与网络接口由宿主提供
+	policy    SessionPolicy             // 会话看护的策略(守护进程);nil = 判废照样拆会话,但不预热、不通知
 }
 
 // New logw 收内核日志(nil = 丢弃)。
@@ -227,6 +228,38 @@ func (c *Core) Unbuildable(outbounds []json.RawMessage) map[string]string {
 	return bad
 }
 
+// QuietAuto 下一次 Start 时,自动选择组不要自己把成员全测一轮(sing-box 启动时默认会测)。tags 为空就是照常测。
+//
+// 手动选了节点、或者直连模式下,连接只该碰用到的节点:全测一轮等于每次连接都让线路上的人看到整份节点清单、
+// 每个节点的服务器都看到一次你的地址和账号,而这些节点根本没在用。切到自动选择时会强制测一轮,不受这个影响。
+// 做法是预先给每个成员记一条"刚测过":组里判断"间隔内测过就跳过";延迟记 0,界面上就是"没测过"。
+func (c *Core) QuietAuto(tags []string) {
+	c.mu.Lock()
+	c.quietAuto = tags
+	c.mu.Unlock()
+}
+
+// DialDirect 经内核的直连出站连一下节点,返回握手用时。连着时守护进程自己的连接会进隧道(隧道那头立刻应答,量出来是假的),
+// 直连出站绑着物理网卡、带放行标记,量到的才是网卡到节点这一段。只握手,不说代理协议,也不发任何请求。
+func (c *Core) DialDirect(ctx context.Context, host string, port int) (time.Duration, error) {
+	box, _, ok := c.snapshot()
+	if !ok {
+		return 0, errors.New("内核未运行")
+	}
+	ob, found := box.Outbound().Outbound("direct")
+	if !found {
+		return 0, errors.New("没有直连出站")
+	}
+	start := time.Now()
+	conn, err := ob.DialContext(ctx, "tcp", M.ParseSocksaddrHostPort(host, uint16(port)))
+	if err != nil {
+		return 0, err
+	}
+	took := time.Since(start)
+	_ = conn.Close()
+	return took, nil
+}
+
 // Start 启动;已在运行则报错。
 func (c *Core) Start(raw []byte) error {
 	c.mu.Lock()
@@ -235,6 +268,13 @@ func (c *Core) Start(raw []byte) error {
 		return errors.New("内核已在运行")
 	}
 	ctx, cancel := c.newContext()
+	if len(c.quietAuto) > 0 {
+		history := urltest.NewHistoryStorage()
+		for _, tag := range c.quietAuto {
+			history.StoreURLTestHistory(tag, &adapter.URLTestHistory{Time: time.Now()})
+		}
+		ctx = service.ContextWithPtr(ctx, history)
+	}
 	opt, err := parse(ctx, raw)
 	if err != nil {
 		cancel()
@@ -500,7 +540,9 @@ func (c *Core) ProbeRunning(ctx context.Context, tags []string, link string, onE
 //     **所有**节点都测不出来。现在坏的那个自己跳过,别的照测。
 //
 // 返回的 error 只表示"这一轮整个没跑起来";单个节点测不通体现为结果里的 -1。
-func Probe(ctx context.Context, outbounds []json.RawMessage, tags []string, link string, onEach func(tag string, ms int)) (map[string]int, error) {
+//
+// doh 不为空时节点域名经这台 DoH 解析(按地址连),不交给系统解析器:这个临时实例在隧道外,系统解析就是明文问运营商。
+func Probe(ctx context.Context, outbounds []json.RawMessage, tags []string, link, doh string, onEach func(tag string, ms int)) (map[string]int, error) {
 	want := make(map[string]bool, len(tags))
 	for _, t := range tags {
 		want[t] = true
@@ -525,7 +567,12 @@ func Probe(ctx context.Context, outbounds []json.RawMessage, tags []string, link
 	}
 	list = append(list, map[string]any{"type": "direct", "tag": "direct"})
 
-	raw, err := json.Marshal(map[string]any{"log": map[string]any{"level": "warn"}, "outbounds": list})
+	doc := map[string]any{"log": map[string]any{"level": "warn"}, "outbounds": list}
+	if doh != "" {
+		doc["dns"] = map[string]any{"servers": []any{map[string]any{"type": "https", "tag": "boot", "server": doh}}}
+		doc["route"] = map[string]any{"default_domain_resolver": "boot"}
+	}
+	raw, err := json.Marshal(doc)
 	if err != nil {
 		return map[string]int{}, err
 	}

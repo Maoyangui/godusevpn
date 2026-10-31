@@ -6,6 +6,9 @@ import (
 	"os"
 	"testing"
 	"time"
+
+	"github.com/sagernet/sing-box/common/urltest"
+	"github.com/sagernet/sing/service"
 )
 
 // 内核没跑时的测速:只用出站起临时实例;连不上的节点要在父上下文超时内给出 -1,不能挂死也不能 panic。
@@ -17,7 +20,7 @@ func TestProbeOfflineUnreachable(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	start := time.Now()
-	res, err := Probe(ctx, outbounds, []string{"hk", "tw", "不存在"}, "", nil)
+	res, err := Probe(ctx, outbounds, []string{"hk", "tw", "不存在"}, "", "", nil)
 	if err != nil {
 		t.Fatalf("这几个节点内核都解得动,不该报错: %v", err)
 	}
@@ -49,7 +52,7 @@ func TestProbeWritesNothingToWorkingDir(t *testing.T) {
 	defer cancel()
 	_, _ = Probe(ctx, []json.RawMessage{
 		json.RawMessage(`{"type":"anytls","tag":"tw","server":"192.0.2.2","server_port":8443,"password":"p","tls":{"enabled":true,"server_name":"b.example"}}`),
-	}, []string{"tw"}, "", nil)
+	}, []string{"tw"}, "", "", nil)
 
 	ents, err := os.ReadDir(dir)
 	if err != nil {
@@ -67,7 +70,7 @@ func TestProbeSkipsUnparsableOutbound(t *testing.T) {
 	res, err := Probe(ctx, []json.RawMessage{
 		json.RawMessage(`{"type":"anytls","tag":"好的","server":"192.0.2.2","server_port":8443,"password":"p","tls":{"enabled":true,"server_name":"b.example"}}`),
 		json.RawMessage(`{"type":"这个类型内核不认识","tag":"坏的","server":"192.0.2.3","server_port":443}`),
-	}, []string{"好的", "坏的"}, "", nil)
+	}, []string{"好的", "坏的"}, "", "", nil)
 	if err == nil {
 		t.Fatal("跳过了坏节点,应该把这件事报上来")
 	}
@@ -76,5 +79,31 @@ func TestProbeSkipsUnparsableOutbound(t *testing.T) {
 	}
 	if res["坏的"] != -1 {
 		t.Fatalf("解不动的节点该报 -1,而不是在界面上留白让人以为没测过: %v", res)
+	}
+}
+
+// 手动选节点时连接不碰别的节点:自动选择组启动时那一轮被预先记的"刚测过"跳过,历史里延迟是 0(界面上的"没测过")。
+func TestQuietAutoSkipsFirstRound(t *testing.T) {
+	c := New(nil)
+	c.QuietAuto([]string{"a", "b"})
+	cfg := `{"log":{"disabled":true},"outbounds":[
+	  {"type":"urltest","tag":"auto","outbounds":["a","b"],"url":"http://127.0.0.1:1/","interval":"24h","idle_timeout":"25h"},
+	  {"type":"socks","tag":"a","server":"127.0.0.1","server_port":1},{"type":"socks","tag":"b","server":"127.0.0.1","server_port":1},
+	  {"type":"direct","tag":"direct"}]}`
+	if err := c.Start([]byte(cfg)); err != nil {
+		t.Fatal(err)
+	}
+	defer c.Stop()
+	time.Sleep(500 * time.Millisecond) // 真测了的话,连不上的节点这时候历史已经被删掉了
+	_, ctx, _ := c.snapshot()
+	h := service.PtrFromContext[urltest.HistoryStorage](ctx)
+	for _, tag := range []string{"a", "b"} {
+		v := h.LoadURLTestHistory(tag)
+		if v == nil || v.Delay != 0 {
+			t.Fatalf("%s: %+v", tag, v)
+		}
+	}
+	if took, err := c.DialDirect(context.Background(), "127.0.0.1", 1); err == nil {
+		t.Fatalf("没人听的端口不该连得上: %v", took)
 	}
 }

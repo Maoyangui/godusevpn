@@ -59,7 +59,7 @@
 
   let settings = {
     tun: true, tunStack: 'mixed', strictRoute: true, noDirect: true, lanBypass: true, mixedPort: 2080,
-    probeMinutes: 3, updateHours: 12, remoteDns: 'https://1.1.1.1/dns-query', localDns: 'https://223.5.5.5/dns-query',
+    probeMinutes: 10, updateHours: 12, remoteDns: 'https://1.1.1.1/dns-query', localDns: 'https://223.5.5.5/dns-query',
     fakeIp: true, ipv6: false, disableNicIpv6: true, adBlock: false, logLevel: 'info', logDays: 7,
     netMode: 'local', lanSubnets: [], webListen: '127.0.0.1:9800', bypassApps: ['steam.exe'],
     mode: 'rule', selected: '香港3-高带宽',
@@ -177,6 +177,26 @@
     applyExit(); log('已断开,网卡 IPv6 已还原'); push();
   }
 
+  // 手动节点:只放在这一页的内存里;链接只解析最常见的写法,够把界面走一遍
+  let MANUAL = null;
+  const demoProfiles = () => (MANUAL ? [PROFILE, Object.assign({}, MANUAL, { nodeCount: MANUAL.nodes.length, tags: MANUAL.nodes.map(n => n.tag), url: '', fetchedAt: 0 })] : [PROFILE]);
+  const demoParseLinks = text => {
+    const nodes = [], errors = [], kinds = { vless: 'vless', trojan: 'trojan', hysteria2: 'hysteria2', hy2: 'hysteria2', tuic: 'tuic', anytls: 'anytls', socks: 'socks', socks5: 'socks' };
+    String(text).split('\n').forEach((raw, i) => {
+      const line = raw.trim();
+      if (!line || line[0] === '#') return;
+      let u = null;
+      try { u = new URL(line); } catch (e) { errors.push({ line: i + 1, code: 'format', msg: '' }); return; }
+      const ty = kinds[u.protocol.slice(0, -1)];
+      if (!ty) { errors.push({ line: i + 1, code: /^https?:$/.test(u.protocol) ? 'subscription' : 'scheme', msg: '' }); return; }
+      const q = u.searchParams, n = { type: ty, tag: decodeURIComponent(u.hash.slice(1)) || u.hostname, server: u.hostname, server_port: Number(u.port) || 443 };
+      if (ty === 'vless') n.uuid = u.username; else if (ty === 'tuic') { n.uuid = u.username; n.password = u.password; } else n.password = u.username;
+      if (q.get('security') === 'reality') n.tls = { enabled: true, server_name: q.get('sni') || u.hostname, reality: { enabled: true, public_key: q.get('pbk') || '', short_id: q.get('sid') || '' }, utls: { enabled: true, fingerprint: q.get('fp') || 'chrome' } };
+      else if (ty !== 'socks' && (ty !== 'vless' || q.get('security') === 'tls')) n.tls = { enabled: true, server_name: q.get('sni') || u.hostname };
+      nodes.push(n);
+    });
+    return { nodes, errors };
+  };
   const api = {
     GetState: async () => st,
     GetNodes: async () => {
@@ -184,12 +204,32 @@
       return [{ name: 'auto', type: '', delay: 0, current: cur === 'auto', autoNow: view.autoNow }]
         .concat(NODES.map(n => ({ name: n.name, type: n.type, delay: n.delay, current: n.name === cur })));
     },
-    GetProfiles: async () => [PROFILE],
-    SelectProfile: async () => { push(); },
+    GetProfiles: async () => demoProfiles(),
+    SelectProfile: async id => { PROFILE.active = id === PROFILE.id; if (MANUAL) MANUAL.active = id === MANUAL.id; push(); },
+    GetManualNodes: async () => ({ id: MANUAL ? MANUAL.id : '', nodes: MANUAL ? MANUAL.nodes : [] }),
+    ParseNodeLinks: async text => demoParseLinks(text),
+    SaveManualNodes: async (nodes, replace, name) => {
+      if (!MANUAL) MANUAL = { id: 'manual', name, manual: true, active: false, nodes: [] };
+      if (replace) MANUAL.nodes = MANUAL.nodes.map(n => (n.tag === replace ? nodes[0] : n));
+      else {
+        const key = n => [n.type, n.server, n.server_port].join('|'), have = MANUAL.nodes.map(key);
+        const fresh = nodes.filter(n => !have.includes(key(n)));
+        if (!fresh.length) throw new Error('E_NODE_DUP: 这个节点已经添加过了');
+        MANUAL.nodes = MANUAL.nodes.concat(fresh.map(n => Object.assign({ tag: n.server }, n)));
+      }
+      push();
+      return demoProfiles();
+    },
+    RemoveManualNode: async tag => {
+      MANUAL.nodes = MANUAL.nodes.filter(n => n.tag !== tag);
+      if (!MANUAL.nodes.length) MANUAL = null;
+      push();
+      return demoProfiles();
+    },
     RefreshProfile: async () => { await sleep(600); PROFILE.fetchedAt = Math.floor(Date.now() / 1000); log('订阅已刷新'); push(); },
     AddProfile: async () => { throw new Error('演示里不连真实订阅,这一步只走界面'); },
-    UpdateProfile: async () => { throw new Error('演示里不连真实订阅,这一步只走界面'); },
-    RemoveProfile: async () => { throw new Error('演示里只有这一条订阅'); },
+    UpdateProfile: async (id, name) => { if (MANUAL && id === MANUAL.id) { MANUAL.name = name; return demoProfiles(); } throw new Error('演示里不连真实订阅,这一步只走界面'); },
+    RemoveProfile: async id => { if (MANUAL && id === MANUAL.id) { MANUAL = null; PROFILE.active = true; return demoProfiles(); } throw new Error('演示里只有这一条订阅'); },
     SelectNode: async n => {
       view.node = n;
       settings.selected = n === 'auto' ? '' : n;

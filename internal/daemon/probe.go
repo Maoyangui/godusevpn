@@ -14,8 +14,10 @@ import (
 	"golang.org/x/net/icmp"
 	"golang.org/x/net/ipv4"
 
+	"github.com/Maoyangui/godusevpn/internal/builder"
 	"github.com/Maoyangui/godusevpn/internal/core"
 	"github.com/Maoyangui/godusevpn/internal/profile"
+	"github.com/Maoyangui/godusevpn/internal/settings"
 )
 
 // 未连接时的测速:不经任何出站,直接量本机到节点服务器的往返。
@@ -25,6 +27,9 @@ import (
 // 不直接判"不通"。已连接时另有一套:经内核出站做 URL 测试。
 
 const probeTimeout = 4 * time.Second
+
+// idleBytes 两轮定时测速之间内核走过的流量少于这么多,就算没人在用(系统自己的零星连接不算)。
+const idleBytes = 256 << 10
 
 // probeBudget 整轮测速的总时限。并发 8、直连每个最多 4 秒、退回临时实例的再最多 8 秒:
 // 节点多的时候固定 40 秒根本轮不完,排在后面的会因为总闹钟到了被记成"不通"。按节点数算,再留 10 秒余量,封顶三分钟。
@@ -58,7 +63,10 @@ func endpoints(p *profile.Profile) []endpoint {
 
 // probeDirect 返回 节点 → 毫秒,-1 = 不通。
 // onEach 不为空时每测出一个就先报一次,界面好一个一个显示,不用干等全部测完。
-func probeDirect(ctx context.Context, p *profile.Profile, onEach func(tag string, ms int), logf func(string, ...any)) map[string]int {
+//
+// resolve 解析节点域名(见 bootResolver),这时候隧道还没起来:交给系统解析器就是把节点域名明文发给运营商,
+// 而真连节点时域名是经 DoH 解析的,连接里也不一定看得到它。localDNS 给退回临时实例的那条路用,是地址时临时实例也走 DoH。
+func probeDirect(ctx context.Context, p *profile.Profile, onEach func(tag string, ms int), logf func(string, ...any), resolve func(context.Context, string) ([]string, error), localDNS string) map[string]int {
 	res := map[string]int{}
 	var mu sync.Mutex
 	var wg sync.WaitGroup
@@ -87,7 +95,7 @@ func probeDirect(ctx context.Context, p *profile.Profile, onEach func(tag string
 			var d time.Duration
 			var err error
 			if udpProtocols[e.Type] {
-				d, err = pingHost(tctx, e.Server)
+				d, err = pingHost(tctx, e.Server, resolve)
 				if err != nil {
 					// ping 不通不等于节点不通:服务器防火墙丢 ICMP、用户所在网络(校园网、公司网)不放行 ICMP
 					// 都很常见,本机开不了原始套接字也走这里。这些节点改用临时实例真连一次再下结论。
@@ -97,7 +105,7 @@ func probeDirect(ctx context.Context, p *profile.Profile, onEach func(tag string
 					return
 				}
 			} else {
-				d, err = tcping(tctx, net.JoinHostPort(e.Server, strconv.Itoa(e.Port)))
+				d, err = tcping(tctx, e.Server, strconv.Itoa(e.Port), resolve)
 			}
 			ms := int(d / time.Millisecond)
 			if ms < 1 {
@@ -117,7 +125,11 @@ func probeDirect(ctx context.Context, p *profile.Profile, onEach func(tag string
 	}
 	wg.Wait()
 	if len(fallback) > 0 && ctx.Err() == nil {
-		got, err := core.Probe(ctx, p.Outbounds, fallback, "", onEach)
+		doh := ""
+		if settings.IsIP(localDNS) {
+			doh = localDNS
+		}
+		got, err := core.Probe(ctx, p.Outbounds, fallback, "", doh, onEach)
 		if err != nil {
 			// 以前这里失败是完全静默的:界面上那批节点永远没有数字,用户看到的是"点了没反应"。
 			if logf != nil {
@@ -131,7 +143,77 @@ func probeDirect(ctx context.Context, p *profile.Profile, onEach func(tag string
 	return res
 }
 
-func tcping(ctx context.Context, addr string) (time.Duration, error) {
+// lookupNode 节点域名 → IPv4 地址。resolve 为空(或本来就是地址)时原样返回,由系统解析。
+func lookupNode(ctx context.Context, host string, resolve func(context.Context, string) ([]string, error)) (string, error) {
+	if resolve == nil || net.ParseIP(host) != nil {
+		return host, nil
+	}
+	ips, err := resolve(ctx, host)
+	if err != nil {
+		return "", err
+	}
+	if len(ips) == 0 {
+		return "", errors.New("解析失败")
+	}
+	return ips[0], nil
+}
+
+// probeConnected 连着时给节点列表测速:TCP 类协议直接量网卡到节点的握手,不经节点转发。线路上看到的和真连一样只有地址和端口,
+// 少了一轮代理握手和一条经节点发出去的请求,数字也正是这条线路本身的延迟。只测得出"连得上",账号过期这种要选上之后才看得出。
+// UDP 类协议(hysteria2、tuic)没有 TCP 可握,ICMP 从这里发又会进隧道,只能经出站真连一次。
+func (d *Daemon) probeConnected(ctx context.Context, p *profile.Profile, onEach func(tag string, ms int)) map[string]int {
+	resolve := d.bootResolver(d.getSettings())
+	res := map[string]int{}
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, 8)
+	var udp []string
+	for _, e := range endpoints(p) {
+		if udpProtocols[e.Type] {
+			udp = append(udp, e.Tag)
+			continue
+		}
+		if e.Server == "" || e.Port <= 0 {
+			continue
+		}
+		wg.Add(1)
+		go func(e endpoint) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			tctx, cancel := context.WithTimeout(ctx, probeTimeout)
+			defer cancel()
+			v := -1
+			if host, err := lookupNode(tctx, e.Server, resolve); err == nil {
+				if took, err := d.core.DialDirect(tctx, host, e.Port); err == nil {
+					if v = int(took / time.Millisecond); v < 1 {
+						v = 1
+					}
+				}
+			}
+			mu.Lock()
+			res[e.Tag] = v
+			mu.Unlock()
+			if onEach != nil {
+				onEach(e.Tag, v)
+			}
+		}(e)
+	}
+	wg.Wait()
+	if len(udp) > 0 {
+		for tag, v := range d.core.ProbeRunning(ctx, udp, builder.TestURL, onEach) {
+			res[tag] = v
+		}
+	}
+	return res
+}
+
+func tcping(ctx context.Context, host, port string, resolve func(context.Context, string) ([]string, error)) (time.Duration, error) {
+	host, err := lookupNode(ctx, host, resolve)
+	if err != nil {
+		return 0, err
+	}
+	addr := net.JoinHostPort(host, port)
 	start := time.Now()
 	c, err := (&net.Dialer{}).DialContext(ctx, "tcp", addr)
 	if err != nil {
@@ -150,7 +232,11 @@ func (e *icmpUnavailable) Unwrap() error { return e.err }
 var pingSeq uint32
 
 // pingHost 解析域名(只取 IPv4)后 ping 一次。
-func pingHost(ctx context.Context, host string) (time.Duration, error) {
+func pingHost(ctx context.Context, host string, resolve func(context.Context, string) ([]string, error)) (time.Duration, error) {
+	host, err := lookupNode(ctx, host, resolve)
+	if err != nil {
+		return 0, err
+	}
 	ip := net.ParseIP(host)
 	if ip == nil {
 		addrs, err := net.DefaultResolver.LookupIP(ctx, "ip4", host)

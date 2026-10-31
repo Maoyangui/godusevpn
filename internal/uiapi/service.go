@@ -25,8 +25,6 @@ import (
 	"github.com/Maoyangui/godusevpn/internal/update"
 )
 
-const testURL = "http://www.gstatic.com/generate_204"
-
 // Backend 守护进程给的接口:进程内直接调控制口方法。
 type Backend interface {
 	Dispatch(method string, params json.RawMessage) (any, error)
@@ -37,6 +35,11 @@ type Backend interface {
 // 放行名单里(macOS 按 root),默认客户端直连出去就是隧道外流量(见 daemon.SelfHTTP)。
 type selfHTTP interface {
 	SelfHTTP(timeout time.Duration) (*http.Client, error)
+}
+
+// tunnelHTTP 后端给得出"经隧道出去"的客户端时,定时检查更新只走它:没连接时不去碰 GitHub。
+type tunnelHTTP interface {
+	TunnelHTTP(timeout time.Duration) (*http.Client, error)
 }
 
 // notNowError 后端说这会儿不许出去(不是网络错误)。
@@ -401,11 +404,6 @@ func (s *Service) Call(name string, args []json.RawMessage) (any, error) {
 	case "GetNodes":
 		return s.nodes(ctx)
 	case "TestAll":
-		if c, err := s.clashClient(); err == nil {
-			tctx, cancel := context.WithTimeout(ctx, clash.DelayBudget(len(s.State().View.Nodes), 10, 8*time.Second))
-			defer cancel()
-			return c.GroupDelay(tctx, "proxy", testURL, 8*time.Second)
-		}
 		var res map[string]int
 		err := s.dispatch(ipc.MProbeNodes, nil, &res)
 		return res, err
@@ -427,6 +425,18 @@ func (s *Service) Call(name string, args []json.RawMessage) (any, error) {
 		return profiles(ipc.MAddProfile, map[string]string{"name": arg[string](args, 0), "url": strings.TrimSpace(arg[string](args, 1))})
 	case "RemoveProfile":
 		return profiles(ipc.MRemoveProfile, map[string]string{"id": arg[string](args, 0)})
+	case "GetManualNodes":
+		var r ipc.ManualNodes
+		err := s.dispatch(ipc.MGetManualNodes, nil, &r)
+		return r, err
+	case "ParseNodeLinks":
+		var r ipc.ParsedNodes
+		err := s.dispatch(ipc.MParseNodeLinks, map[string]string{"text": arg[string](args, 0)}, &r)
+		return r, err
+	case "SaveManualNodes": // (nodes, 被替换的节点名, 新建时的订阅名)
+		return profiles(ipc.MSaveManualNodes, map[string]any{"nodes": arg[[]map[string]any](args, 0), "replace": arg[string](args, 1), "name": arg[string](args, 2)})
+	case "RemoveManualNode":
+		return profiles(ipc.MRemoveManualNode, map[string]string{"tag": arg[string](args, 0)})
 	case "SelectProfile":
 		return view(ipc.MSelectProfile, map[string]string{"id": arg[string](args, 0)})
 	case "UpdateProfile":
@@ -566,6 +576,9 @@ func (s *Service) nodes(ctx context.Context) ([]NodeInfo, error) {
 		}
 		p := proxies[name]
 		ni := NodeInfo{Name: name, Type: p.Type, Delay: p.LastDelay(), Current: name == group.Now}
+		if v, ok := st.View.Delays[name]; ok { // 列表测速的结果优先:和后台自动选择那一轮量的不是一回事,一列数字要是同一种
+			ni.Delay = v
+		}
 		if name == "auto" {
 			ni.AutoNow = p.Now
 		}
@@ -650,7 +663,13 @@ func (s *Service) pokeUpdate(force bool) {
 func (s *Service) checkUpdate(manual bool) (*update.Release, error) {
 	cctx, cancel := context.WithTimeout(s.ctx, 30*time.Second)
 	defer cancel()
-	client, err := s.httpClient(20 * time.Second)
+	var client *http.Client
+	var err error
+	if t, ok := s.b.(tunnelHTTP); ok && !manual {
+		client, err = t.TunnelHTTP(20 * time.Second) // 定时的只走隧道;点「检查更新」才可以直连
+	} else {
+		client, err = s.httpClient(20 * time.Second)
+	}
 	if err != nil {
 		return nil, notNowError{err}
 	}

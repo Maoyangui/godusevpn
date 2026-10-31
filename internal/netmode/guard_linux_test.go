@@ -79,6 +79,30 @@ func TestGuardBlocksDNSAndUPnPBeforeLAN(t *testing.T) {
 
 // forward 链不分网关 / 本机模式都要有(Docker、虚拟机 NAT、热点共享也经这里出网),
 // 而且要放行从隧道回来、转给设备的应答,否则局域网直通关着时设备的 UDP / ping 全断。
+// 网关模式:路由器自己的包是出来之后才改道的,要放行;没真进隧道的在 postrouting 拦下。本机模式没有这些。
+func TestGuardGatewayOwnTraffic(t *testing.T) {
+	r := guardRuleset(GuardSpec{TunName: "godusevpn", Gateway: true}, false)
+	for _, want := range []string{
+		"meta mark 0x2023 accept",
+		"ip daddr 127.0.0.0/8 accept",
+		"ip6 daddr ::1 accept",
+		"ip daddr 172.19.0.1/30 accept",
+		"type filter hook postrouting priority filter;",
+		"meta mark 0x2023 oifname != \"godusevpn\" drop",
+		"ip daddr 172.19.0.1/30 oifname != \"godusevpn\" drop",
+	} {
+		if !strings.Contains(r, want) {
+			t.Fatalf("缺 %q:\n%s", want, r)
+		}
+	}
+	local := guardRuleset(GuardSpec{TunName: "godusevpn"}, false)
+	for _, no := range []string{"0x2023", "127.0.0.0/8", "postrouting"} {
+		if strings.Contains(local, no) {
+			t.Fatalf("本机模式不该有 %q:\n%s", no, local)
+		}
+	}
+}
+
 func TestGuardForwardChain(t *testing.T) {
 	for _, gw := range []bool{false, true} {
 		for _, lan := range []bool{false, true} {
@@ -117,6 +141,11 @@ func TestGuardRuleMode(t *testing.T) {
 		if strings.Contains(r, gone) {
 			t.Fatalf("规则模式不该有 %q:\n%s", gone, r)
 		}
+	}
+	// DNS 不看目的地址放行:走隧道的端口压在它上面,直连放行段在它下面无所谓先后,都在最后一条 drop 之前
+	for _, chain := range []string{r[strings.Index(r, "chain output"):strings.Index(r, "chain forward")], r[strings.Index(r, "chain forward"):]} {
+		before(t, chain, "tcp dport { 8443", "udp dport 53 accept")
+		before(t, chain, "tcp dport 53 accept", "\t\tdrop\n\t}")
 	}
 	out := r[strings.Index(r, "chain output"):strings.Index(r, "chain forward")]
 	fake, lan, ports, direct, last := strings.Index(out, builder.FakeIP6), strings.Index(out, "10.0.0.0/8"), strings.Index(out, "tcp dport { 8443"), strings.Index(out, "@direct4"), strings.LastIndex(out, "drop")
@@ -190,5 +219,37 @@ func TestBootRARuleset(t *testing.T) {
 	}
 	if strings.Count(bootRARuleset, "drop") != 1 || strings.Contains(bootRARuleset, "hook output") {
 		t.Fatalf("只挡进来的路由器通告:\n%s", bootRARuleset)
+	}
+}
+
+// systemd-resolved 绑在物理网卡上的查询:丢 UDP 让它改走 TCP。只在本机模式的出站链里,局域网放行之后、放行 53 之前。
+func TestGuardRuleModeResolvedUDP(t *testing.T) {
+	old := resolvedUID
+	defer func() { resolvedUID = old }()
+	resolvedUID = func() int { return 101 }
+	const rule = "meta skuid 101 udp dport 53 drop"
+	spec := GuardSpec{TunName: "godusevpn", LAN: true, Rule: true}
+	r := guardRuleset(spec, true)
+	out := r[strings.Index(r, "chain output"):strings.Index(r, "chain forward")]
+	before(t, out, "10.0.0.0/8", rule)
+	before(t, out, rule, "tcp dport 53 accept")
+	if strings.Contains(r[strings.Index(r, "chain forward"):], "skuid 101") {
+		t.Fatal("转发链不管这个")
+	}
+	spec.Gateway = true
+	if strings.Contains(guardRuleset(spec, true), rule) {
+		t.Fatal("网关模式不管这个")
+	}
+	resolvedUID = func() int { return -1 }
+	spec.Gateway = false
+	if strings.Contains(guardRuleset(spec, true), "skuid -1") {
+		t.Fatal("没有这个用户就不写")
+	}
+}
+
+func TestLANResolvers(t *testing.T) {
+	got := lanResolvers("# c\nnameserver 192.168.1.1\nnameserver 8.8.8.8\nnameserver 127.0.0.53\nsearch lan\nnameserver 10.0.0.2\nnameserver fd00::1\n")
+	if strings.Join(got, ",") != "192.168.1.1,10.0.0.2" {
+		t.Fatalf("%v", got)
 	}
 }

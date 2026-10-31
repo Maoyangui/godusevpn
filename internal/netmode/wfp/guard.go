@@ -248,6 +248,9 @@ func installSet(session uintptr, spec Spec, withSelf, withForward bool) error {
 		if err := blockTunnelPorts(session, base, 11, spec.TunnelPorts); err != nil {
 			return err
 		}
+		if err := permitRuleDNS(session, base, 10); err != nil {
+			return err
+		}
 		if err := permitDirect(session, base, 10, spec.Direct, cFWPM_CONDITION_IP_REMOTE_ADDRESS, cFWPM_LAYER_ALE_AUTH_CONNECT_V4, cFWPM_LAYER_ALE_AUTH_CONNECT_V6, directPermitName4, directPermitName6); err != nil {
 			return err
 		}

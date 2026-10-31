@@ -136,9 +136,22 @@ func TestGuardUnitText(t *testing.T) {
 	}
 }
 
+// 服务单元:进程不管怎么没的,都要把内核留下的转发重定向清掉,不然局域网设备连直连都走不了。
+func TestSystemdCleansStaleRedirect(t *testing.T) {
+	text := mainUnitText(initSystemd, "/usr/local/bin/godusevpn")
+	for _, want := range []string{"ExecStart=/usr/local/bin/godusevpn run\n", "ExecStopPost=-/usr/local/bin/godusevpn post-stop\n"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("单元里要有 %q:\n%s", want, text)
+		}
+	}
+	if strings.Contains(text, "%!") {
+		t.Fatalf("模板格式不对:\n%s", text)
+	}
+}
+
 // procd 的重试次数写 0 才是无限重拉:写 5 的话一小时内崩 5 次就永久停着,严格全局下闸还在、整个局域网断网。
 func TestProcdRespawnForever(t *testing.T) {
-	if !strings.Contains(procdScript, "procd_set_param respawn 3600 5 0") {
+	if !strings.Contains(procdScript, "procd_set_param respawn 3600 1 0") {
 		t.Fatalf("procd 脚本没设无限重拉:\n%s", procdScript)
 	}
 }

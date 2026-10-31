@@ -71,6 +71,21 @@ func TestRenameProfileFetchesBeforeSaving(t *testing.T) {
 	}
 }
 
+// 缓存丢了(比如数据目录被清过):同一个地址再设一次要真的去拉,不然一直显示 0 个节点。
+func TestSameURLRefetchesWhenCacheMissing(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte(subBody)) }))
+	defer srv.Close()
+	d := profileOpsDaemon(t)
+	d.settings.Profiles = []settings.Profile{{ID: "p1", Name: "旧", URL: srv.URL + "/s"}}
+	d.settings.ActiveProfile = "p1"
+	if err := call(t, d, ipc.MSetProfileURL, map[string]string{"url": srv.URL + "/s"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, p := d.activeProfile(); p == nil || len(p.Outbounds) == 0 {
+		t.Fatal("缓存丢了时同一个地址也要去拉")
+	}
+}
+
 // 切换订阅:新订阅备不出配置时旧内核照跑,设置也要退回去,和正在跑的对得上。
 func TestSelectProfileRollsBackOnFailure(t *testing.T) {
 	d := profileOpsDaemon(t)

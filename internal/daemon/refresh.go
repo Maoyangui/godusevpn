@@ -267,6 +267,7 @@ func (d *Daemon) syncGuard() {
 		}
 		d.setGuard(false, "")
 		d.logf("防流量逃逸:已撤闸")
+		d.syncTunDNS() // 撤闸时 DNS 的策略路由跟着撤了;还连着的话要接回去,不等半分钟那一轮
 		if w := netmode.GuardWarning(); w != "" {
 			d.logf("防流量逃逸:%s", w)
 		}
@@ -318,6 +319,25 @@ func (d *Daemon) refreshRuleGuard() {
 
 // guardArmed 严格全局的闸此刻开着(按守护进程自己的记录),或者正在装(见 cancelDirect):直连动作一律按开着处理。
 // 规则模式的闸不算:规则模式本来就有直连,服务自己的直连动作(更新检查、未连接时的测速)和以前一样。
+// syncTunDNS 连着时把 53 端口接进隧道(本机模式、不是直连模式)。闸没开也做:连着的时候 DNS 不该直接问路由器。
+func (d *Daemon) syncTunDNS() {
+	s := d.getSettings()
+	if !s.TUN || s.NetMode == settings.NetGateway || s.Mode == settings.ModeDirect || !d.core.Running() {
+		netmode.UnsealTunDNS()
+		return
+	}
+	if err := netmode.SealTunDNS(builder.TunName); err != nil {
+		d.logf("DNS 没接进隧道(半分钟后重试): %v", err)
+	}
+}
+
+// guardUp 闸在不在(正在装也算),严格全局和规则模式都算。guardArmed 只认严格全局:那边还要管"服务能不能直连出去"。
+func (d *Daemon) guardUp() bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.guardArming || d.guardOn
+}
+
 func (d *Daemon) guardArmed() bool {
 	sealed := d.getSettings().Sealed()
 	d.mu.Lock()

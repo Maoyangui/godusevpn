@@ -22,6 +22,9 @@ import (
 	"go4.org/netipx"
 )
 
+// lanDomainSuffixes 约定俗成只在局域网里用的后缀。
+var lanDomainSuffixes = []string{"lan", "local", "localdomain", "home", "home.arpa", "internal", "intranet", "corp", "private"}
+
 type Input struct {
 	// SelfProcess 运行内核的那个进程的名字(桌面:godusevpn-svc.exe / godusevpn)。全局模式下"节点服务器直连"
 	// 那几条规则只放它自己(见下面节点规则的注释);空 = 不知道,按老样子不限定进程。Android 用的是本应用的包名。
@@ -30,6 +33,8 @@ type Input struct {
 	Settings    settings.Settings
 	DataDir     string // cache.db 放这里
 	ClashSecret string // Clash API 密钥,服务每次启动随机生成
+	// LANDNS 系统配的解析器里在局域网内的那些(见 netmode.LANResolvers)。DNS 接进隧道之后,nas.lan 这种名字要内核替它问路由器。
+	LANDNS []string
 	// ClashPort 这一轮 Clash API 实际要监听的端口;0 = 用设置里的。
 	// 设置里那个被别的程序占着时,守护进程会挑一个空闲的填进来(见 daemon.pickClashPort)——
 	// 端口被占会让内核整个起不来,而电视上界面里连改端口的地方都没有。
@@ -216,6 +221,10 @@ func buildConfig(in Input, rep *Report) ([]byte, error) {
 		}
 		servers = append(servers, local)
 	}
+	lanNames := len(in.LANDNS) > 0 && s.LANBypass && s.TUN && s.NetMode != settings.NetGateway && !(s.NoDirect && s.Mode == settings.ModeGlobal)
+	if lanNames {
+		servers = append(servers, obj("type", "udp", "tag", "lan", "server", in.LANDNS[0]))
+	}
 	if s.FakeIP {
 		fake := obj("type", "fakeip", "tag", "fakeip", "inet4_range", fakeIP4)
 		if s.IPv6 {
@@ -227,6 +236,10 @@ func buildConfig(in Input, rep *Report) ([]byte, error) {
 	// sing-box 把它排在 1.14.0 移除,换到真正删掉它的内核版本时整份配置会解析失败、所有人都连不上
 	dnsRules := []any{
 		obj("clash_mode", "Direct", "server", "local"),
+	}
+	if lanNames {
+		// 局域网名字和不带点的短名字只有路由器答得上。它们到不了别处:这两条排在所有规则前面,只问这一台
+		dnsRules = append(dnsRules, obj("domain_suffix", lanDomainSuffixes, "server", "lan"), obj("domain_regex", []string{`^[^.]+$`}, "server", "lan"))
 	}
 	var directConds []any // 排在前面、走直连的组的域名条件:路由是排前面的组先赢,后面的组在 DNS 里也要让开
 	for _, g := range s.RuleGroups {

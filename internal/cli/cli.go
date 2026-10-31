@@ -131,6 +131,8 @@ func Main(args []string) int {
 		if err == nil {
 			printProfile(p)
 		}
+	case "node":
+		err = nodeCmd(ctx, args)
 	case "refresh":
 		var list []ipc.ProfileView // 服务返回的是全部订阅,打印当前这条
 		if err = call(ctx, ipc.MRefreshProfile, nil, &list); err == nil {
@@ -328,7 +330,15 @@ func printProfile(p *ipc.ProfileView) {
 		fmt.Println("订阅:   (未设置)")
 		return
 	}
-	fmt.Printf("订阅:   %s  %d 个节点  更新于 %s\n", p.Title, p.NodeCount, time.Unix(p.FetchedAt, 0).Format("01-02 15:04"))
+	name := p.Title
+	if name == "" {
+		name = p.Name
+	}
+	if p.Manual {
+		fmt.Printf("订阅:   %s  %d 个节点(手动添加)\n", name, p.NodeCount)
+		return
+	}
+	fmt.Printf("订阅:   %s  %d 个节点  更新于 %s\n", name, p.NodeCount, time.Unix(p.FetchedAt, 0).Format("01-02 15:04"))
 	if p.Usage.Total > 0 || p.Usage.Expire > 0 {
 		used := float64(p.Usage.Upload+p.Usage.Download) / (1 << 30)
 		total := "不限"
@@ -344,7 +354,61 @@ func printProfile(p *ipc.ProfileView) {
 }
 
 // Usage 打印用法。
+// nodeCmd 手动节点:node add <分享链接...> | node list | node rm <名字>
+func nodeCmd(ctx context.Context, args []string) error {
+	sub := ""
+	if len(args) > 0 {
+		sub = args[0]
+	}
+	switch sub {
+	case "add":
+		var parsed ipc.ParsedNodes
+		if err := call(ctx, ipc.MParseNodeLinks, map[string]string{"text": strings.Join(args[1:], "\n")}, &parsed); err != nil {
+			return err
+		}
+		for _, e := range parsed.Errors {
+			fmt.Printf("第 %d 条没加上:%s\n", e.Line, e.Msg)
+		}
+		if len(parsed.Nodes) == 0 {
+			return errors.New("没有能添加的节点")
+		}
+		var list []ipc.ProfileView
+		if err := call(ctx, ipc.MSaveManualNodes, map[string]any{"nodes": parsed.Nodes}, &list); err != nil {
+			return err
+		}
+		fmt.Printf("已添加 %d 个节点\n", len(parsed.Nodes))
+		return nil
+	case "list", "":
+		var view ipc.ManualNodes
+		if err := call(ctx, ipc.MGetManualNodes, nil, &view); err != nil {
+			return err
+		}
+		for _, raw := range view.Nodes {
+			var n struct {
+				Tag    string `json:"tag"`
+				Type   string `json:"type"`
+				Server string `json:"server"`
+				Port   int    `json:"server_port"`
+			}
+			if json.Unmarshal(raw, &n) == nil {
+				fmt.Printf("%s  %s  %s:%d\n", n.Tag, n.Type, n.Server, n.Port)
+			}
+		}
+		if len(view.Nodes) == 0 {
+			fmt.Println("还没有手动节点")
+		}
+		return nil
+	case "rm":
+		if len(args) < 2 {
+			return errors.New("用法: " + Name + " node rm <节点名>")
+		}
+		var list []ipc.ProfileView
+		return call(ctx, ipc.MRemoveManualNode, map[string]string{"tag": strings.Join(args[1:], " ")}, &list)
+	}
+	return errors.New("用法: " + Name + " node add <分享链接...> | node list | node rm <节点名>")
+}
+
 func Usage() {
 	fmt.Println(buildinfo.DisplayName, buildinfo.Version)
-	fmt.Println("用法: " + Name + " status | connect | disconnect | mode <rule|global|direct> | nodes | select <节点> | test [节点|all] | profile [地址] | refresh | settings [k=v …] | rules | devices | device <MAC> <follow|proxy|direct|reject> [名字] | logs [n] [core] | diag | guard clear|status")
+	fmt.Println("用法: " + Name + " status | connect | disconnect | mode <rule|global|direct> | nodes | node add <分享链接...> | node list | node rm <节点名> | select <节点> | test [节点|all] | profile [地址] | refresh | settings [k=v …] | rules | devices | device <MAC> <follow|proxy|direct|reject> [名字] | logs [n] [core] | diag | guard clear|status")
 }

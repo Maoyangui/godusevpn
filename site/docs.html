@@ -82,11 +82,12 @@
     <h2 id="linux">Linux 与软路由</h2>
     <p>一个静态二进制,既是服务也是命令行,自带浏览器面板。root 执行:</p>
     <div class="copy"><pre><code>curl -fsSL https://raw.githubusercontent.com/Maoyangui/godusevpn/master/deploy/install.sh | sh</code></pre></div>
-    <p>装完终端会打印面板地址和随机生成的初始密码。默认监听 <code>0.0.0.0:9800</code>,局域网其它设备直接打开;云主机记得在安全组放行 TCP 9800。</p>
+    <p>装完终端会打印面板地址和随机生成的初始密码。默认监听 <code>0.0.0.0:9800</code>,本机和局域网其它设备直接打开。面板是明文 HTTP,从公网默认打不开:云主机上用 SSH 隧道(<code>ssh -L 9800:127.0.0.1:9800 root@服务器</code>)最省事,实在要直连再开下面那个开关并放行 TCP 9800。</p>
     <table>
       <tr><th>要做的事</th><th>命令</th></tr>
       <tr><td>改面板密码</td><td><code>godusevpn passwd</code></td></tr>
       <tr><td>只给本机看</td><td><code>godusevpn settings webListen=127.0.0.1:9800</code></td></tr>
+      <tr><td>允许从公网打开</td><td><code>godusevpn settings webAllowPublic=on</code></td></tr>
       <tr><td>服务开关</td><td><code>godusevpn install | start | stop | status | uninstall</code></td></tr>
     </table>
     <h3>网关模式(软路由)</h3>
@@ -103,7 +104,9 @@
 
     <h2 id="use">日常使用</h2>
     <h3>第一次打开</h3>
-    <p>先填面板给的订阅链接才能进入。之后在侧边菜单的"订阅管理"里可以加更多条,点一下切换。</p>
+    <p>先填面板给的订阅链接才能进入;没有订阅的话点"或手动添加节点"。之后在侧边菜单的"订阅管理"里可以加更多条,点一下切换。</p>
+    <h3>手动添加节点</h3>
+    <p>"添加订阅"下面的"或手动添加节点":贴分享链接(vless、vmess、trojan、ss、hysteria2、tuic、anytls、socks、http,可一次贴多条,也认 base64 和 sing-box 节点 JSON),或者选好协议逐项填写。保存前内核先干跑一遍,填错的不会存进去。这些节点归在一条"手动节点"里,点"使用"切过去后,节点列表、测速、规则的用法都和订阅一样,只存在本机。</p>
     <h3>续费</h3>
     <p>面板设置了「选购 / 续费」地址的话,订阅卡片上会多一颗续费按钮,点一下用系统浏览器打开。快到期或流量快用尽时它转橙色并写明还剩几天;已经到期、连订阅都拉不到时按钮也还在;面板没设置就不显示。</p>
     <h3>刷新订阅不断线</h3>
@@ -122,7 +125,7 @@
     <h3>选节点</h3>
     <p>点首页的出口卡片或"节点"格子打开列表。<b>打开时测一次速,之后不再定时测</b>——只有选了"自动选择"才会按设置里的周期测全部节点并切到最快的那个。列表顶上按地区归堆,点标签只看该地区;名字里写了倍率(<code>2x</code> / <code>x2</code> / <code>0.5倍</code>)会单独标出来。</p>
     <h3>有新版本时</h3>
-    <p>客户端每小时自己查一次。有新版本时首页顶栏"佛跳墙"旁边亮一个红色 <b>NEW</b>,侧栏"关于"也带 NEW;点 NEW 直接到"关于",升级并重启,设置与订阅都保留。</p>
+    <p>连着时客户端每小时经节点查一次,没连接时不自动查(「关于」里可以手动检查)。有新版本时首页顶栏"佛跳墙"旁边亮一个红色 <b>NEW</b>,侧栏"关于"也带 NEW;点 NEW 直接到"关于",升级并重启,设置与订阅都保留。</p>
     <h3>出口地址</h3>
     <p>首页那一行是<b>经当前节点</b>查来的,不是节点名上写的机房位置(节点自己再套一层就不是那儿了)。换节点立刻重测,自动选择在后台切了也重测,此外每 10 分钟复查一次。查不到就显示"正在查出口",不影响使用。</p>
 
@@ -157,6 +160,7 @@ godusevpn-cli connect
 godusevpn-cli status
 godusevpn-cli mode global | rule | direct
 godusevpn-cli nodes / select &lt;节点&gt; / test
+godusevpn-cli node add &lt;分享链接...&gt; / list / rm &lt;节点名&gt;
 godusevpn-cli settings ipv6=on probeMinutes=5 logDays=14
 godusevpn-cli logs 200 core
 godusevpn-cli diag                             打印诊断信息(订阅地址、凭据、访问记录已打码)

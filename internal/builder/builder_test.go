@@ -801,3 +801,42 @@ func TestAndroidKeepsMixedInboundWhenTunOff(t *testing.T) {
 		t.Fatalf("关掉 TUN 后唯一的入口应该是混合端口: %v", c.Inbounds)
 	}
 }
+
+// DNS 接进隧道之后局域网名字要问路由器;严格全局不问,网关模式、没有局域网解析器时也不加。
+func TestLANNamesAskRouter(t *testing.T) {
+	has := func(s settings.Settings, lan []string) bool {
+		t.Helper()
+		raw, _, err := BuildEx(Input{Profile: &profile.Profile{Tags: []string{"a"}, Outbounds: []json.RawMessage{json.RawMessage(`{"type":"socks","tag":"a","server":"1.2.3.4","server_port":1080}`)}}, Settings: s, DataDir: t.TempDir(), LANDNS: lan})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return strings.Contains(string(raw), "home.arpa")
+	}
+	s := settings.Default()
+	s.Mode, s.TUN, s.LANBypass, s.NoDirect = settings.ModeRule, true, true, true
+	if !has(s, []string{"192.168.1.1"}) {
+		t.Fatal("规则模式要问路由器")
+	}
+	if has(s, nil) {
+		t.Fatal("没有局域网解析器就不加")
+	}
+	g := s
+	g.Mode = settings.ModeGlobal
+	if has(g, []string{"192.168.1.1"}) {
+		t.Fatal("严格全局不问路由器")
+	}
+	g.NoDirect = false
+	if !has(g, []string{"192.168.1.1"}) {
+		t.Fatal("普通全局也要问")
+	}
+	n := s
+	n.NetMode = settings.NetGateway
+	if has(n, []string{"192.168.1.1"}) {
+		t.Fatal("网关模式不加")
+	}
+	l := s
+	l.LANBypass = false
+	if has(l, []string{"192.168.1.1"}) {
+		t.Fatal("局域网不直通就不加")
+	}
+}

@@ -578,9 +578,6 @@ body.tv .drawer-brand b { font-size: 22px; }
 /* 设置页:顶上的搜索框与分组 */
 .sgroup { margin-bottom: 16px; }
 .sgroup .card.tight { padding: 2px 16px; margin-bottom: 0; }
-.field.with-ic { position: relative; margin-bottom: 14px; }
-.field.with-ic svg { position: absolute; left: 12px; top: 50%; transform: translateY(-50%); width: 15px; height: 15px; fill: none; stroke: var(--muted2); stroke-width: 2; stroke-linecap: round; pointer-events: none; }
-.field.with-ic input { padding-left: 34px; }
 .tag.warn { background: rgba(217, 119, 6, .12); border-color: rgba(217, 119, 6, .35); color: var(--warn); }
 
 /* 续费按钮:面板给了「选购 / 续费」地址才出现。弱于卡片底下那排操作(它是外链,不是管理动作),
@@ -654,3 +651,48 @@ body.tv .drawer-brand b { font-size: 22px; }
   body.tv .drawer-state { padding: 8px 11px; margin-bottom: 8px; }
   body.tv .drawer-foot { padding: 6px 12px 0; }
 }
+
+/* 手动节点 */
+/* 比"添加订阅"轻,但要看得出是能点的:浅底、品牌色、带箭头 */
+.altlink, .morelink { display: flex; align-items: center; width: fit-content; border: 0; color: var(--brand2); font-weight: 500; }
+.altlink { margin: 12px auto 2px; padding: 7px 10px 7px 14px; border-radius: 999px; background: rgba(47, 139, 255, .1); font-size: 12.5px; transition: background .15s; }
+.altlink:hover { background: rgba(47, 139, 255, .18); }
+.altlink:active { transform: scale(.97); }
+.morelink { margin: 2px auto 10px; padding: 4px 8px; background: none; font-size: 12px; }
+.morelink:hover { text-decoration: underline; }
+.altlink svg, .morelink svg { width: 13px; height: 13px; margin-left: 3px; flex: none; fill: none; stroke: currentColor; stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
+.frow { display: flex; align-items: flex-start; }
+.frow > .field { flex: 1 1 0; min-width: 0; }
+.frow > .field + .field { margin-left: 10px; }
+.frow > .f-port { flex: 0 0 84px; }
+.field label em { font-style: normal; color: var(--muted2); margin-left: 5px; font-size: 11px; }
+.field.bad input, .field.bad select { border-color: var(--danger); }
+.field.bad input:focus, .field.bad select:focus { box-shadow: 0 0 0 3px rgba(225, 29, 72, .16); }
+.field .help.err { color: var(--danger); }
+.field .help.warn { color: var(--warn); }
+.nf { padding: 12px 14px; }
+.nf .field { margin-bottom: 10px; }
+.nf > .field:last-child, .nf > .frow:last-child > .field { margin-bottom: 0; }
+.nf > .srow:first-child { padding-top: 2px; }
+.nf > .srow:last-child { padding-bottom: 2px; }
+.nf .srow select { width: 140px; }
+.nf .srow + .field, .nf .srow + .frow { margin-top: 10px; }
+.nf .field + .srow, .nf .frow + .srow { padding-top: 2px; }
+.nf h3 { margin-bottom: 10px; }
+.nf-paste { margin-bottom: 0; }
+.nf input[type=text], .nf select { height: 38px; }
+.nf-paste textarea { min-height: 58px; padding-right: 64px; font-size: 12px; line-height: 1.45; word-break: break-all; resize: none; }
+.nf-help { font-size: 11px; color: var(--muted2); line-height: 1.45; margin-top: 6px; }
+.nf-res { font-size: 11.5px; line-height: 1.5; margin-top: 7px; }
+.nf-res.ok { color: var(--ok); }
+.nf-res.bad { color: var(--danger); }
+.nf-list { margin-top: 6px; }
+.nf-list .cond { padding: 3px 0; background: transparent; }
+.nf-list .val { font-family: inherit; }
+#nf-or { margin: 14px 0 12px; }
+#nf-parsed .linkbtn { padding: 4px 0 0; }
+.nrow { cursor: pointer; }
+.nrow .name span { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.nrow .icon-btn { flex: none; }
+.http-warn { font-size: 11px; color: var(--warn); line-height: 1.4; margin: -4px 2px 8px; }
+.pc-top .tag, .pm-top .tag { margin-left: 6px; flex: none; }
