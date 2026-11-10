@@ -44,8 +44,8 @@ type Profile struct {
 	Manual    bool              `json:"manual,omitempty"` // 手动添加的节点,不用刷新
 	// Groups 订阅里的线路组(见 Group),按订阅里的顺序。旧版本存的缓存没有这一项,刷新一次就有了。
 	Groups []Group `json:"groups,omitempty"`
-	// Parser 这份缓存是哪一版解析器读出来的。比 parserVersion 旧的(包括没有这一项的)算过期:
-	// 升级后第一次连接或定时刷新就去重拉,新版本多认出来的东西(线路组)不用等满刷新间隔。
+	// Parser 这份缓存是哪一版解析器读出来的。比 parserVersion 旧的(包括没有这一项的)算陈旧(Outdated):
+	// 升级后连上就经隧道补拉一次,新版本多认出来的东西(线路组)不用等满刷新间隔。
 	Parser int `json:"parser,omitempty"`
 }
 
@@ -393,12 +393,19 @@ func (p *Profile) Save(path string) error {
 	return os.Rename(tmp, path)
 }
 
-// Stale 距上次拉取是否超过 every;旧版解析器读出来的缓存也算(见 Profile.Parser)。手动节点没有地方可拉,永远不过期。
+// Stale 距上次拉取是否超过 every。
 func (p *Profile) Stale(every time.Duration) bool {
 	if p != nil && p.Manual {
 		return false
 	}
-	return p == nil || p.Parser < parserVersion || time.Since(time.Unix(p.FetchedAt, 0)) > every
+	return p == nil || time.Since(time.Unix(p.FetchedAt, 0)) > every
+}
+
+// Outdated 旧版本的解析器读出来的缓存(见 Profile.Parser):节点照样能用,只是少了新版本才认得出来的东西(线路组),
+// 值得补拉一次。不算过期 —— 不能为它在连上之前先直连拉一次订阅、挡着第一次连接;连上之后经隧道补拉(见 daemon.maybeRefresh)。
+// 手动节点没有地方可拉,永远不算。
+func (p *Profile) Outdated() bool {
+	return p != nil && !p.Manual && p.Parser < parserVersion
 }
 
 // Servers 节点的服务器地址(诊断包里看连通性用,不含凭据)。

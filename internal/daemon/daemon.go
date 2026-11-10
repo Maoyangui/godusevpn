@@ -1962,11 +1962,12 @@ func (d *Daemon) clearExit() {
 // 不做得更勤是因为没必要 —— 出口真变了几乎都是因为换了节点,而换节点是立刻就重测的。
 const exitMaxAge = 10 * time.Minute
 
-// maybeRefresh 定时刷新当前订阅;节点变了就重连。
+// maybeRefresh 定时刷新当前订阅;节点变了就重连。旧版本存的缓存(Outdated)也在这里补拉一次:连上之后经隧道拉,
+// 不挡第一次连接(见 profile.Outdated)。
 func (d *Daemon) maybeRefresh(ctx context.Context) {
 	s := d.getSettings()
 	a, p := d.activeProfile()
-	if a == nil || (p != nil && p.URL == a.URL && !p.Stale(time.Duration(s.UpdateHours)*time.Hour)) {
+	if a == nil || (p != nil && p.URL == a.URL && !p.Stale(time.Duration(s.UpdateHours)*time.Hour) && !(p.Outdated() && d.core.Running())) {
 		return
 	}
 	changed, err := d.refreshProfile(ctx, a.ID)

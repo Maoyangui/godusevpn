@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -448,5 +449,41 @@ func TestManualNodesHaveNoGroups(t *testing.T) {
 	})
 	if err != nil || len(p.Groups) != 0 || len(p.Tags) != 3 || !p.Manual {
 		t.Fatalf("手动节点不该有线路组: %+v %v", p.Groups, err)
+	}
+}
+
+// 旧版本存的订阅缓存(没有 parser,没认出线路组):连上之后经隧道补拉一次,线路组不用等满刷新间隔;
+// 没连上时不为它拉(连上之前直连拉订阅会挡着第一次连接,严格全局下还是一次直连),补过之后就不再拉。
+func TestOutdatedCacheRefreshesAfterConnect(t *testing.T) {
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hits.Add(1)
+		_, _ = w.Write([]byte(subBody))
+	}))
+	defer srv.Close()
+	d := profileOpsDaemon(t)
+	d.settings.Profiles = []settings.Profile{{ID: "p1", Name: "一", URL: srv.URL + "/sub"}}
+	d.settings.ActiveProfile = "p1"
+	old := prof(t, `{"type":"anytls","tag":"香港1","server":"192.0.2.1","server_port":8443,"password":"p"}`)
+	old.URL, old.FetchedAt = srv.URL+"/sub", time.Now().Unix() // 刚拉过,只是旧版本存的
+	d.profiles["p1"] = old
+	d.maybeRefresh(context.Background())
+	if n := hits.Load(); n != 0 {
+		t.Fatalf("没连上时不为它拉: %d", n)
+	}
+	startCore(t, d, `{"type":"selector","tag":"proxy","outbounds":["out"]},{"type":"direct","tag":"out"}`)
+	d.maybeRefresh(context.Background())
+	if n := hits.Load(); n != 1 {
+		t.Fatalf("连上之后补拉一次: %d", n)
+	}
+	if _, p := d.activeProfile(); p == nil || p.Outdated() {
+		t.Fatal("补拉之后就不陈旧了")
+	}
+	d.maybeRefresh(context.Background())
+	if n := hits.Load(); n != 1 {
+		t.Fatalf("补过就不再拉: %d", n)
+	}
+	if strings.Contains(funcBody(t, readDaemonSource(t), "func (d *Daemon) prepare(ctx context.Context) ([]byte, error) {"), "Outdated()") {
+		t.Fatal("连上之前不为陈旧的缓存拉订阅")
 	}
 }

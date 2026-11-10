@@ -113,8 +113,8 @@ func TestSubsetPrunesGroups(t *testing.T) {
 	}
 }
 
-// 旧版本存的缓存(没有 groups、没有 parser)照样读得出来,只是算过期:升级后第一次连接或定时刷新就去重拉,
-// 线路组不用等满刷新间隔。新缓存来回读写一致;手动节点永远不过期。
+// 旧版本存的缓存(没有 groups、没有 parser)照样读得出来,只是算陈旧(Outdated):升级后连上就补拉一次,线路组不用等满
+// 刷新间隔;但不算过期(Stale),连上之前不为它直连拉订阅。新缓存来回读写一致;手动节点两样都不算。
 func TestCacheGroupsCompat(t *testing.T) {
 	dir := t.TempDir()
 	old := filepath.Join(dir, "old.json")
@@ -130,12 +130,12 @@ func TestCacheGroupsCompat(t *testing.T) {
 	if len(p.Groups) != 0 || p.Parser != 0 {
 		t.Fatalf("旧缓存没有线路组: %+v", p)
 	}
-	if !p.Stale(24 * time.Hour) {
-		t.Fatal("旧版解析器存的缓存刚拉过也算过期,好让新版认出线路组")
+	if !p.Outdated() || p.Stale(24*time.Hour) {
+		t.Fatal("旧版解析器存的缓存刚拉过:算陈旧(连上后补拉),不算过期(连上之前不直连拉)")
 	}
 	p.Manual = true
-	if p.Stale(0) {
-		t.Fatal("手动节点没有地方可拉,永远不过期")
+	if p.Stale(0) || p.Outdated() {
+		t.Fatal("手动节点没有地方可拉,永远不过期、不陈旧")
 	}
 
 	fresh, err := Parse([]byte(groupSample), nil)
@@ -153,8 +153,8 @@ func TestCacheGroupsCompat(t *testing.T) {
 	if !reflect.DeepEqual(back.Groups, fresh.Groups) || back.Parser != parserVersion {
 		t.Fatalf("线路组来回读写不一致: %+v / %d", back.Groups, back.Parser)
 	}
-	if back.Stale(24 * time.Hour) {
-		t.Fatal("新版刚拉的缓存不该算过期")
+	if back.Stale(24*time.Hour) || back.Outdated() {
+		t.Fatal("新版刚拉的缓存不该算过期或陈旧")
 	}
 }
 
