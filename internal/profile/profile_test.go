@@ -140,3 +140,31 @@ func asFetch(err error, target **FetchError) bool {
 	}
 	return ok
 }
+
+// 用户从 m-ui 落地页复制了 Clash 地址(?format=clash)或浏览器地址(?format=page)粘进来,也要拿 sing-box JSON:
+// 客户端只认这一种;已经是 JSON 一族的写法(不分大小写)原样保留,其它参数不动。
+func TestFetchForcesJSONFormat(t *testing.T) {
+	var gotQuery string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotQuery = r.URL.RawQuery
+		w.Write([]byte(sample))
+	}))
+	defer srv.Close()
+	cases := map[string]string{
+		"?format=clash":     "format=json",
+		"?format=page":      "format=json",
+		"?format=Clash&x=1": "format=json&x=1",
+		"?format=sing-box":  "format=sing-box",
+		"?format=JSON":      "format=JSON",
+		"?format=sfi":       "format=sfi",
+		"?token=abc":        "format=json&token=abc",
+	}
+	for suffix, want := range cases {
+		if _, err := Fetch(context.Background(), srv.URL+"/sub/alice"+suffix, nil); err != nil {
+			t.Fatalf("%s: %v", suffix, err)
+		}
+		if gotQuery != want {
+			t.Errorf("%s:请求参数应为 %q,得 %q", suffix, want, gotQuery)
+		}
+	}
+}

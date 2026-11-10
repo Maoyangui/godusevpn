@@ -199,14 +199,24 @@ func SplitRenew(msg string) (text, link string) {
 	return msg[:i], msg[i+len(renewMark) : len(msg)-1]
 }
 
-// Fetch 拉订阅。地址不带 format 参数时补上 format=json。
+// jsonFormat 订阅地址里的 format 是不是 sing-box JSON 一族(m-ui 认的写法,不分大小写)。
+func jsonFormat(v string) bool {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "json", "sing-box", "singbox", "sfa", "sfi", "sfm", "sft", "sfw", "sfl":
+		return true
+	}
+	return false
+}
+
+// Fetch 拉订阅。客户端只认 sing-box JSON:地址不带 format、或带的是别的格式(用户从落地页复制了
+// Clash 地址 ?format=clash、浏览器地址 ?format=page 等)都改成 format=json,粘哪个地址都能用。
 func Fetch(ctx context.Context, rawURL string, client *http.Client) (*Profile, error) {
 	u, err := url.Parse(strings.TrimSpace(rawURL))
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
 		return nil, &FetchError{Msg: "订阅地址无效"}
 	}
 	q := u.Query()
-	if q.Get("format") == "" {
+	if !jsonFormat(q.Get("format")) {
 		q.Set("format", "json")
 		u.RawQuery = q.Encode()
 	}
