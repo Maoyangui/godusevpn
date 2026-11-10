@@ -8,6 +8,7 @@ import (
 	"github.com/Maoyangui/godusevpn/internal/builder"
 	"github.com/Maoyangui/godusevpn/internal/ipc"
 	"github.com/Maoyangui/godusevpn/internal/profile"
+	"github.com/Maoyangui/godusevpn/internal/settings"
 	"github.com/Maoyangui/godusevpn/internal/state"
 )
 
@@ -63,7 +64,7 @@ func lineAutoAfterSelect(p *profile.Profile, sel string, cur bool) bool {
 // lineAutoSelection 翻「线路自动」时当前选择怎么换算:
 //   - 打开:选的是某个线路组里的节点 → 换成那个线路组;自动选择、不属于任何组的节点不变(只换列表的显示)。
 //   - 关闭:选的是线路组 → 固定到组里此刻在用的那台(now 给,内核在跑时才有);内核没跑、或那台已经不在组里,
-//     取第一台这一轮连得上的(blocked 是这一轮连不上的节点,全是的话照样取第一台)。
+//     取第一台这一轮连得上的(blocked 是连不上的 IPv6 节点,全是的话照样取第一台)。
 func lineAutoSelection(p *profile.Profile, sel string, on bool, now func(group string) string, blocked []string) string {
 	if p == nil || sel == "" {
 		return sel
@@ -142,4 +143,38 @@ func (d *Daemon) applySelected(sel string) error {
 		d.refreshExit(d.beginExit(d.currentNode()))
 	}()
 	return nil
+}
+
+// ---- 关着 IPv6 时连不上的 IPv6 节点 ----
+
+// v6BlockedNow 当前订阅里这一轮连不上的 IPv6 节点(见 builder.V6Blocked)。网卡 IPv6 停没停按设置判(wantNICOff),
+// 只有 IPv6 地址的节点域名用最近一次连接时解析出来的那份。
+func (d *Daemon) v6BlockedNow(s settings.Settings) []string {
+	_, p := d.activeProfile()
+	d.mu.Lock()
+	v6 := d.v6Only
+	d.mu.Unlock()
+	return builder.V6Blocked(p, s, wantNICOff(s), v6)
+}
+
+// selectionBlocked 选中的就是这一轮连不上的 IPv6 节点,或者是成员全是这种节点的线路组。
+func selectionBlocked(p *profile.Profile, sel string, blocked []string) bool {
+	if p == nil || sel == "" || len(blocked) == 0 {
+		return false
+	}
+	if g, ok := p.Group(sel); ok {
+		for _, m := range g.Members {
+			if !slices.Contains(blocked, m) {
+				return false
+			}
+		}
+		return len(g.Members) > 0
+	}
+	return slices.Contains(blocked, sel)
+}
+
+// selectedV6 设置里选的节点(或线路组)这一轮连不上,原因是它只能走 IPv6 而现在关着 IPv6。
+func (d *Daemon) selectedV6(s settings.Settings) bool {
+	_, p := d.activeProfile()
+	return selectionBlocked(p, s.Selected, d.v6BlockedNow(s))
 }

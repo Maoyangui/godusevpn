@@ -329,6 +329,9 @@ func status(ctx context.Context) error {
 		node += "(实际在用 " + v.AutoNow + ")"
 	}
 	fmt.Println("节点:  ", node, fmt.Sprintf("(共 %d 个)", len(v.Nodes)))
+	if v.SelectedV6 {
+		fmt.Println("提示:   选中的节点使用 IPv6 地址,当前已关闭 IPv6,无法连接;打开 IPv6(settings ipv6=on)或换用 IPv4 节点")
+	}
 	s := v.Settings
 	fmt.Printf("设置:   TUN=%v(%s, strict=%v) 混合端口=%d DoH=%s/%s fake-ip=%v IPv6=%v\n", s.TUN, s.TUNStack, s.StrictRoute, s.MixedPort, s.RemoteDNS, s.LocalDNS, s.FakeIP, s.IPv6)
 	if s.WebListen != "" {

@@ -80,6 +80,7 @@ type Daemon struct {
 	refreshing                 map[string]*refreshCall     // 订阅 id → 正在跑的那次刷新:同一条订阅不叠第二条回退链
 	refreshQueued              map[string]bool             // 界面点的后台刷新:goroutine 还没登记进 refreshing 时也要显示"正在刷新"
 	unsupported                map[string]skippedNode      // 最近一次备配置时内核建不起来、被剔掉的节点(tag → 原因与当时的出站)
+	v6Only                     map[string]bool             // 最近一次备配置时解析出来、只有 IPv6 地址的节点域名(见 builder.V6Blocked)
 	running                    *profile.Profile            // 正在跑的内核是按哪份订阅生成的;刷新后拿它和缓存比,决定动不动隧道
 	prepared                   *profile.Profile            // prepare 刚按它生成了配置、内核还没起:start 成功后转成 running
 	guardOn                    bool                        // 「防流量逃逸」的闸此刻开着
@@ -781,8 +782,13 @@ func (d *Daemon) prepare(ctx context.Context) ([]byte, error) {
 		d.logf("订阅缓存已过期:防流量逃逸开着,先用缓存连上,再经代理刷新(当前代理 → auto → 最后才直连)")
 	}
 	clashPort := d.pickClashPort(s.ClashPort)
+	nodeIPs, noA := resolveNodeHosts(ctx, p, d.bootResolver(s))
+	var v6Only map[string]bool
+	if !s.IPv6 { // 开着 IPv6 时内核解析节点域名按 prefer_ipv4,只有 IPv6 地址的域名照样连得上,不用找
+		v6Only = v6OnlyHosts(ctx, p, nodeIPs, noA, d.bootLookup6(s))
+	}
 	cfg, rep, skipped, err := buildValid(d.core, builder.Input{Profile: p, Settings: s, DataDir: paths.DataDir(), ClashSecret: d.secret, RuleSetDir: paths.RuleSets(), LANDNS: netmode.LANResolvers(),
-		ClashPort: clashPort, NodeIPs: resolveNodeHosts(ctx, p, d.bootResolver(s)), SelfProcess: selfProcess()})
+		ClashPort: clashPort, NodeIPs: nodeIPs, V6Only: v6Only, SelfProcess: selfProcess()})
 	for tag, why := range skipped {
 		d.logf("节点「%s」本客户端建不起来,这次连接先跳过它: %s", tag, why)
 	}
@@ -798,11 +804,15 @@ func (d *Daemon) prepare(ctx context.Context) ([]byte, error) {
 	}
 	d.mu.Lock()
 	d.unsupported = bad
+	d.v6Only = v6Only
 	d.mu.Unlock()
 	if err != nil {
 		return nil, err
 	}
 	d.noteMissingRuleSets(rep.Missing)
+	if len(rep.V6Blocked) > 0 {
+		d.logf("这 %d 个节点用的是 IPv6 地址,而现在关着 IPv6,连不上;这次连接不会自动选它们: %s", len(rep.V6Blocked), strings.Join(rep.V6Blocked, "、"))
+	}
 	// Do not publish a rendered config if a concurrent settings update raced
 	// with the long subscription/build phase. The state machine will retry with
 	// the current policy, keeping DNS/route/privacy settings coherent.
@@ -959,6 +969,10 @@ func (d *Daemon) start(cfg []byte) error {
 		d.refreshExit(d.beginExit(d.currentNode()))
 	}()
 	go d.fillMissingRuleSets() // 隧道通了才去补规则集:直连多半拿不到 GitHub
+	if d.selectedV6(s) {
+		// 选的是这一轮连不上的 IPv6 节点:马上做一次健康检查,别让界面挂着「已连接」干等三分钟才知道不通
+		d.machine.CheckNow()
+	}
 	// 缓存过期而起内核前没刷新的(严格全局,见 refreshBeforeStart),现在经代理链刷新
 	go d.maybeRefresh(context.Background())
 	if s.TUN {
@@ -1032,7 +1046,7 @@ func (d *Daemon) health(ctx context.Context) error {
 		if !direct {
 			if _, err := d.core.URLTest(ctx, "proxy", builder.TestURL); err != nil {
 				d.setPing(0)
-				return state.Errf(state.CodeNodeDown, "当前节点不可用: %v", err)
+				return d.nodeDown(err)
 			}
 		}
 		return perr
@@ -1043,7 +1057,7 @@ func (d *Daemon) health(ctx context.Context) error {
 	ms, err := d.core.URLTest(ctx, "proxy", builder.TestURL)
 	if err != nil {
 		d.setPing(0)
-		return state.Errf(state.CodeNodeDown, "当前节点不可用: %v", err)
+		return d.nodeDown(err)
 	}
 	d.setPing(ms)
 	// 出口跟着"此刻实际在用哪个节点"走。自动选择模式下内核会自己切到更快的一个,
@@ -1057,6 +1071,15 @@ func (d *Daemon) health(ctx context.Context) error {
 		go d.refreshExit(d.beginExit(now))
 	}
 	return nil
+}
+
+// nodeDown 当前节点测不通时报给状态机的错误。正在用的是这一轮连不上的 IPv6 节点(关着 IPv6,见 builder.V6Blocked)时
+// 换成单独的错误码:界面据此说清楚原因和该去哪儿改,而不是笼统一句"当前节点不可用"。
+func (d *Daemon) nodeDown(err error) error {
+	if now := d.currentNode(); now != "" && slices.Contains(d.v6BlockedNow(d.getSettings()), now) {
+		return state.Errf(state.CodeNodeV6, "%v", err)
+	}
+	return state.Errf(state.CodeNodeDown, "当前节点不可用: %v", err)
 }
 
 // restart 重建配置重连:内核停了再起,隧道要断几秒,所以能就地改的(切节点、自动 / 手动、
@@ -1961,9 +1984,10 @@ func (d *Daemon) maybeRefresh(ctx context.Context) {
 // 用域名写的节点,在隧道里是靠嗅探到的 SNI 命中直连规则的;不带 TLS 的协议嗅不出域名,那时就只能按地址认。
 // 解析不出来不算错(退回只按域名匹配),所以整体给一个短超时,不让它拖慢连接。
 // lookup 是解析函数(见 bootResolver:防逃逸下只用加密 DoH);为 nil 表示这一轮不解析。
-func resolveNodeHosts(ctx context.Context, p *profile.Profile, lookup func(context.Context, string) ([]string, error)) map[string][]string {
+// noA 是问到了、但没有 A 记录的那些域名(DoH 只问 A,见 lookupDoH):是不是只有 IPv6 地址,由 v6OnlyHosts 再判。
+func resolveNodeHosts(ctx context.Context, p *profile.Profile, lookup func(context.Context, string) ([]string, error)) (ips map[string][]string, noA map[string]bool) {
 	if p == nil || lookup == nil {
-		return nil
+		return nil, nil
 	}
 	hosts := map[string]bool{}
 	for _, hp := range p.Servers() {
@@ -1977,7 +2001,7 @@ func resolveNodeHosts(ctx context.Context, p *profile.Profile, lookup func(conte
 		hosts[h] = true
 	}
 	if len(hosts) == 0 {
-		return nil
+		return nil, nil
 	}
 	ctx, cancel := context.WithTimeout(ctx, 4*time.Second)
 	defer cancel()
@@ -1989,6 +2013,14 @@ func resolveNodeHosts(ctx context.Context, p *profile.Profile, lookup func(conte
 		go func(h string) {
 			defer wg.Done()
 			addrs, err := lookup(ctx, h)
+			if errors.Is(err, errNoARecord) {
+				mu.Lock()
+				if noA == nil {
+					noA = map[string]bool{}
+				}
+				noA[h] = true
+				mu.Unlock()
+			}
 			if err != nil || len(addrs) == 0 {
 				return
 			}
@@ -1999,9 +2031,9 @@ func resolveNodeHosts(ctx context.Context, p *profile.Profile, lookup func(conte
 	}
 	wg.Wait()
 	if len(out) == 0 {
-		return nil
+		return nil, noA
 	}
-	return out
+	return out, noA
 }
 
 func sameNodes(a, b *profile.Profile) bool {
@@ -2101,6 +2133,8 @@ func (d *Daemon) stateView() ipc.StateView {
 	if a := d.settings.Active(); a != nil {
 		if p := d.profiles[a.ID]; p != nil {
 			v.Groups = p.Groups // 缓存里的订阅解析出来之后不再改,只读着用
+			v.V6Blocked = builder.V6Blocked(p, s, wantNICOff(s), d.v6Only)
+			v.SelectedV6 = selectionBlocked(p, s.Selected, v.V6Blocked)
 		}
 	}
 	// 只标当前订阅里名字和内容都没变的:换了订阅、或刷新后机场把节点改成能用的,不再沿用上次连接时的判断
@@ -2279,7 +2313,7 @@ func (d *Daemon) registerHandlers() {
 		}
 		s := d.getSettings()
 		_, cur := d.activeProfile()
-		next := lineAutoSelection(cur, s.Selected, in.On, d.groupNow, nil)
+		next := lineAutoSelection(cur, s.Selected, in.On, d.groupNow, d.v6BlockedNow(s))
 		changed := next != s.Selected
 		s.LineAuto, s.Selected = in.On, next
 		if err := d.setSettings(s); err != nil {

@@ -44,6 +44,9 @@ const (
 	CodeCoreStart = "E_CORE_START"
 	CodeCoreCrash = "E_CORE_CRASH"
 	CodeNodeDown  = "E_NODE_DOWN"
+	// CodeNodeV6 正在用的节点是 IPv6 地址、而这一轮关着 IPv6(见 builder.V6Blocked):连不上不是节点坏了,是设置挡着。
+	// 状态机按节点不通处理(降级、自救),界面据此说清楚原因和去哪儿改
+	CodeNodeV6 = "E_NODE_V6"
 	// 隐私保护前置条件未满足时必须退避重试，不能继续启动数据面。
 	CodePrivacyGuard = "E_PRIVACY_GUARD"
 	CodePrivacyNIC   = "E_PRIVACY_NIC"

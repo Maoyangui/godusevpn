@@ -96,6 +96,10 @@ type StateView struct {
 	Tunnel *TunnelView `json:"tunnel,omitempty"`
 	// Groups 当前订阅里的线路组(同一条线路部署在多台服务器上,见 profile.Group)。没有就不显示「线路自动」开关
 	Groups []profile.Group `json:"groups,omitempty"`
+	// V6Blocked 这一轮连不上的 IPv6 节点(关着 IPv6,见 builder.V6Blocked):节点列表标成「IPv6 节点」
+	V6Blocked []string `json:"v6Blocked,omitempty"`
+	// SelectedV6 选中的节点(或成员全是这种节点的线路组)就是上面那种:首页要明说为什么连不上、怎么办
+	SelectedV6 bool `json:"selectedV6,omitempty"`
 }
 
 // TunnelView 隧道会话的看护记录,本次服务运行期间累计。

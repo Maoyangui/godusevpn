@@ -48,6 +48,9 @@ type Input struct {
 	// 域名节点在隧道里靠嗅探到的 SNI 命中直连规则,但不带 TLS 的协议嗅不出域名,这份是兜底。
 	// 拿不到就留空,退回只按域名匹配。
 	NodeIPs map[string][]string
+	// V6Only 用域名写的节点里只解析得到 IPv6 地址的那些(域名 → true),守护进程解析节点域名时顺带找出来的。
+	// 关着 IPv6 时内核按 ipv4_only 解析节点域名,这种节点连不上:不进自动选择,界面标出来(见 V6Blocked)。拿不到就留空。
+	V6Only  map[string]bool
 	Darwin  bool // 按 macOS 生成:隧道网卡名由内核分配(utunN),不能写死;不传时看运行平台
 	Android bool // 按 Android 生成:"进程名"是应用包名(package_name),按应用直连的应用整个绕过 VPN(exclude_package);不传时看运行平台
 	Linux   bool // 按 Linux 生成:内核出站带 RouteMark(route.default_mark);不传时看运行平台
@@ -135,6 +138,8 @@ type Report struct {
 	// Missing 本地找不到的规则集。用到它们的规则已经从配置里摘掉,内核照样起得来,
 	// 只是那几条规则这一轮不生效;守护进程会在连上之后把它们补下来,下次连接就有了。
 	Missing []MissingRuleSet
+	// V6Blocked 这一轮连不上的 IPv6 节点(见 V6Blocked):已经从自动选择和线路组里摘掉,手动选它照样会选上,只是连不通。
+	V6Blocked []string
 }
 
 // Build 渲染配置(带缩进的 JSON,便于放进诊断包看)。
@@ -178,6 +183,8 @@ func buildConfig(in Input, rep *Report) ([]byte, error) {
 	if _, ok := in.Profile.Group(selected); ok {
 		groups = in.Profile.Groups
 	}
+	// 这一轮连不上的 IPv6 节点不进自动选择和线路组(见 V6Blocked);一个能用的都不剩时照旧放着,配置得建得起来,界面另有说明
+	rep.V6Blocked = V6Blocked(in.Profile, s, !android && s.TUN && !s.IPv6 && s.DisableNICIPv6, in.V6Only)
 	proxyList := make([]string, 0, 1+len(groups)+len(tags))
 	proxyList = append(proxyList, "auto")
 	for _, g := range groups {
@@ -186,10 +193,10 @@ func buildConfig(in Input, rep *Report) ([]byte, error) {
 	proxyList = append(proxyList, tags...)
 	outbounds := []any{
 		obj("type", "selector", "tag", "proxy", "outbounds", proxyList, "default", selected, "interrupt_exist_connections", true),
-		autoGroup(tags),
+		autoGroup(reachable(tags, rep.V6Blocked)),
 	}
 	for _, g := range groups {
-		outbounds = append(outbounds, urltestGroup(g.Tag, g.Members))
+		outbounds = append(outbounds, urltestGroup(g.Tag, reachable(g.Members, rep.V6Blocked)))
 	}
 	for _, raw := range in.Profile.Outbounds {
 		outbounds = append(outbounds, json.RawMessage(raw))
@@ -740,6 +747,23 @@ func autoGroup(tags []string) map[string]any { return urltestGroup("auto", tags)
 func urltestGroup(tag string, members []string) map[string]any {
 	return obj("type", "urltest", "tag", tag, "outbounds", members, "url", TestURL, "tolerance", 50,
 		"interval", "24h", "idle_timeout", "25h")
+}
+
+// reachable list 去掉 blocked 里的;一个不剩时原样返回(空的测速组整份配置都起不来)。blocked 为空时返回 list 本身。
+func reachable(list, blocked []string) []string {
+	if len(blocked) == 0 {
+		return list
+	}
+	out := make([]string, 0, len(list))
+	for _, t := range list {
+		if !slices.Contains(blocked, t) {
+			out = append(out, t)
+		}
+	}
+	if len(out) == 0 {
+		return list
+	}
+	return out
 }
 
 // hostCIDRs 把解析出来的地址转成规则要的写法,顺手挡掉不该进来的:
