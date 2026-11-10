@@ -475,6 +475,15 @@ func (a *App) SelectNode(tag string) (ipc.StateView, error) {
 	return v, err
 }
 
+// SetLineAuto 节点面板顶上的「线路自动」开关:打开时按线路合并显示,选中的节点换成它所在的线路组;
+// 关掉时选中的线路组固定到组里此刻在用的那台。返回换算之后的状态,页面据此立刻重画。
+func (a *App) SetLineAuto(on bool) (ipc.StateView, error) {
+	var v ipc.StateView
+	err := a.call(ipc.MSetLineAuto, map[string]bool{"on": on}, &v)
+	go a.refresh()
+	return v, err
+}
+
 // NodeInfo 节点页一行。
 type NodeInfo struct {
 	Name    string `json:"name"`

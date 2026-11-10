@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"runtime"
+	"slices"
 	"strings"
 	"time"
 
@@ -121,8 +122,9 @@ func (d *Daemon) splitByCore(p *profile.Profile) (in, out *profile.Profile) {
 	return p.Subset(ins), p.Subset(outs)
 }
 
-// needRebuildFor 选中的节点能不能就地换。列表来自订阅缓存、内核用的是它启动时那份:
+// needRebuildFor 选中的节点 / 线路组能不能就地换。列表来自订阅缓存、内核用的是它启动时那份:
 // 节点是刷新后新加的(内核里没有)、或者它的参数跟内核那份不一样,就得重建配置才连得上;
+// 线路组同理:内核里没有(这次连接没选过线路组,配置里就没放),或者成员和内核那份不一样、任一成员参数变了。
 // 空 tag 是「自动选择」,组本身一直在。
 func (d *Daemon) needRebuildFor(tag string) bool {
 	if tag == "" || !d.core.Running() {
@@ -132,14 +134,7 @@ func (d *Daemon) needRebuildFor(tag string) bool {
 	if err != nil {
 		return false
 	}
-	found := false
-	for _, n := range all {
-		if n == tag {
-			found = true
-			break
-		}
-	}
-	if !found {
+	if !slices.Contains(all, tag) {
 		return true
 	}
 	d.mu.Lock()
@@ -148,9 +143,35 @@ func (d *Daemon) needRebuildFor(tag string) bool {
 	if running == nil || fresh == nil {
 		return false
 	}
+	if g, ok := fresh.Group(tag); ok {
+		// 内核里那一组是按 running 生成的:成员集合要一样,每个成员的参数也要一样
+		was, ok := running.Group(tag)
+		if !ok || !sameMembers(was.Members, g.Members) {
+			return true
+		}
+		for _, m := range g.Members {
+			old, hadOld := running.Node(m)
+			nw, hasNew := fresh.Node(m)
+			if !hadOld || !hasNew || old != nw {
+				return true
+			}
+		}
+		return false
+	}
 	old, hadOld := running.Node(tag)
 	nw, hasNew := fresh.Node(tag)
 	return hadOld && hasNew && old != nw
+}
+
+// sameMembers 两组成员是不是同一批节点(顺序不算)。
+func sameMembers(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	x, y := slices.Clone(a), slices.Clone(b)
+	slices.Sort(x)
+	slices.Sort(y)
+	return slices.Equal(x, y)
 }
 
 // ---- 「防流量逃逸」的闸 ----

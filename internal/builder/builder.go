@@ -90,12 +90,23 @@ func ModeName(mode string) string {
 	}
 }
 
-// DefaultSelected proxy 组这一轮该落在哪个节点:设置里选的在订阅里就是它,否则自动选择。
-func DefaultSelected(tags []string, selected string) string {
-	if selected != "" && slices.Contains(tags, selected) {
+// SelectedFor proxy 组这一轮落在哪:设置里选的节点或线路组还在订阅里就是它,否则自动选择。
+func SelectedFor(p *profile.Profile, selected string) string {
+	if p == nil || selected == "" {
+		return "auto"
+	}
+	if slices.Contains(p.Tags, selected) {
+		return selected
+	}
+	if _, ok := p.Group(selected); ok {
 		return selected
 	}
 	return "auto"
+}
+
+// DefaultSelected 同 SelectedFor,只认节点(给只有节点列表的地方用)。
+func DefaultSelected(tags []string, selected string) string {
+	return SelectedFor(&profile.Profile{Tags: tags}, selected)
 }
 
 // CachePath 内核缓存文件(选中节点、模式、fake-ip)的位置。
@@ -158,12 +169,27 @@ func buildConfig(in Input, rep *Report) ([]byte, error) {
 		return nil, err
 	}
 	tags := in.Profile.Tags
-	selected := DefaultSelected(tags, s.Selected)
+	selected := SelectedFor(in.Profile, s.Selected)
 
 	// ---- 出站 ----
+	// 线路组只在选中的就是某条线路组时才进配置,而且全部放进去(线路之间切换才能就地完成)。选的是自动选择或某个节点时
+	// 一个都不放:生成的配置和没有这个功能时逐字节一样 —— 用不上的东西不进配置,也就没有让连接失败的机会。
+	var groups []profile.Group
+	if _, ok := in.Profile.Group(selected); ok {
+		groups = in.Profile.Groups
+	}
+	proxyList := make([]string, 0, 1+len(groups)+len(tags))
+	proxyList = append(proxyList, "auto")
+	for _, g := range groups {
+		proxyList = append(proxyList, g.Tag)
+	}
+	proxyList = append(proxyList, tags...)
 	outbounds := []any{
-		obj("type", "selector", "tag", "proxy", "outbounds", append([]string{"auto"}, tags...), "default", selected, "interrupt_exist_connections", true),
+		obj("type", "selector", "tag", "proxy", "outbounds", proxyList, "default", selected, "interrupt_exist_connections", true),
 		autoGroup(tags),
+	}
+	for _, g := range groups {
+		outbounds = append(outbounds, urltestGroup(g.Tag, g.Members))
 	}
 	for _, raw := range in.Profile.Outbounds {
 		outbounds = append(outbounds, json.RawMessage(raw))
@@ -707,8 +733,12 @@ func cidrSuffix(ip string) string {
 // 很长的间隔,idle_timeout 必须不小于它);什么时候测一轮由守护进程按设置里的"定时测速(分钟)"来叫
 // (Core.GroupTest),而且只在自动选择时叫 —— 手动指定了节点,后台每隔几分钟把上百个节点全连一遍没有意义,
 // 打开节点列表时会现测。这样配置不随"自动 / 手动"变:两者之间切换就地换选择组,不用重建配置重连(那要断几秒网)。
-func autoGroup(tags []string) map[string]any {
-	return obj("type", "urltest", "tag", "auto", "outbounds", tags, "url", TestURL, "tolerance", 50,
+func autoGroup(tags []string) map[string]any { return urltestGroup("auto", tags) }
+
+// urltestGroup 测速组(自动选择、线路组共用):测速地址用我们自己的 TestURL,订阅里组自带的地址和间隔一概不用;
+// 定时测速同样关掉,由守护进程按"定时测速(分钟)"只叫当前在用的那一组(sing-box 要求 interval 不大于 idle_timeout)。
+func urltestGroup(tag string, members []string) map[string]any {
+	return obj("type", "urltest", "tag", tag, "outbounds", members, "url", TestURL, "tolerance", 50,
 		"interval", "24h", "idle_timeout", "25h")
 }
 

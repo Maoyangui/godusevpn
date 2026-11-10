@@ -86,6 +86,7 @@ func buildManual(outs []json.RawMessage) (*profile.Profile, error) {
 		return nil, err
 	}
 	p.Manual = true
+	p.Groups = nil // 手动节点是一个一个加的,没有线路组(贴进来的配置里就算带着测速组也不认)
 	return p, nil
 }
 

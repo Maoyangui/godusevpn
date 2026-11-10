@@ -64,8 +64,8 @@ type StateView struct {
 	Protocol   int            `json:"protocol"`
 	State      state.Snapshot `json:"state"`
 	Mode       string         `json:"mode"`              // rule / global / direct
-	Node       string         `json:"node"`              // proxy 组当前项
-	AutoNow    string         `json:"autoNow,omitempty"` // 自动选择组当前落在哪个节点(内核在跑时才有)
+	Node       string         `json:"node"`              // proxy 组当前项(节点、auto 或线路组)
+	AutoNow    string         `json:"autoNow,omitempty"` // proxy 落在测速组(自动选择或线路组)上时,组里实际在用的节点(内核在跑时才有)
 	Nodes      []string       `json:"nodes"`
 	Delays     map[string]int `json:"delays,omitempty"`     // 最近一次全节点测速(节点 → 毫秒,-1 不通);内核没跑时界面靠它显示
 	Ping       int            `json:"ping,omitempty"`       // 当前节点最近一次测得的延迟(毫秒):连上后立刻测一次,之后每次健康检查顺带更新
@@ -94,6 +94,8 @@ type StateView struct {
 	// Tunnel 隧道会话的看护记录(hysteria2 / tuic 这类一条 QUIC 会话承载全部流量的节点)。
 	// 出事时凭它一眼分清是"会话废了被重建"还是别的:以前这些事一点痕迹都不留。
 	Tunnel *TunnelView `json:"tunnel,omitempty"`
+	// Groups 当前订阅里的线路组(同一条线路部署在多台服务器上,见 profile.Group)。没有就不显示「线路自动」开关
+	Groups []profile.Group `json:"groups,omitempty"`
 }
 
 // TunnelView 隧道会话的看护记录,本次服务运行期间累计。

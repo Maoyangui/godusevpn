@@ -199,3 +199,25 @@ func TestSchemaStaysReadableByOldClients(t *testing.T) {
 		t.Fatalf("schema 变成了 %d,v0.7.1 到 v0.7.15 都读不了这份设置", Schema)
 	}
 }
+
+// 「线路自动」是后加的键,不升 schema:新版读得到;旧版读设置时忽略它(退回旧版照样起得来,开关回到关)。
+// 命令行按 key=value 也能改它(服务那边由 SetLineAuto 接手)。
+func TestLineAutoKey(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "settings.json")
+	if err := os.WriteFile(p, []byte(`{"schema":4,"lineAuto":true,"mode":"rule","selected":"香港1"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s, err := Load(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !s.LineAuto || s.Selected != "香港1" || s.Schema != 4 {
+		t.Fatalf("读不到 lineAuto: %+v", s.LineAuto)
+	}
+	if s.LineAuto = false; Default().LineAuto {
+		t.Fatal("默认关")
+	}
+	if next, err := s.Apply("lineAuto", "on"); err != nil || !next.LineAuto {
+		t.Fatalf("命令行改 lineAuto: %v", err)
+	}
+}

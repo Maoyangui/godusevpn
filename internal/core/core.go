@@ -414,6 +414,25 @@ func (c *Core) Group(tag string) (now string, all []string, err error) {
 	return g.Now(), g.All(), nil
 }
 
+// Members 选择组 / 测速组的全部成员;不是组(单个节点、没有这个出站、内核没跑)返回 false。
+// 只看成员、不读当前项:sing-box 的测速组读当前项(Now)和它自己测完换选择之间没有同步,只想知道"是不是组、组里有谁"
+// 的地方(定时测速挑目标、换线时认线路组)用这个,不去碰那个字段。
+func (c *Core) Members(tag string) ([]string, bool) {
+	box, _, ok := c.snapshot()
+	if !ok {
+		return nil, false
+	}
+	ob, found := box.Outbound().Outbound(tag)
+	if !found {
+		return nil, false
+	}
+	g, isGroup := ob.(adapter.OutboundGroup)
+	if !isGroup {
+		return nil, false
+	}
+	return g.All(), true
+}
+
 // Select 在选择组里选一个节点。
 func (c *Core) Select(group, tag string) error {
 	box, _, ok := c.snapshot()

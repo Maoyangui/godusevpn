@@ -630,7 +630,7 @@ func (d *Daemon) fetchProfile(ctx context.Context, url string) (*profile.Profile
 	var last error
 	for i, tag := range routes {
 		if tag == "auto" && i == 1 && d.getSettings().Selected != "" {
-			d.groupTest(ctx) // 手动选节点时 auto 组平时不测(见 core.QuietAuto);当前节点拉不到了才靠它找一条通的
+			d.groupTest(ctx, "auto") // 手动选节点 / 线路组时 auto 组平时不测(见 core.QuietAuto);当前节点拉不到了才靠它找一条通的
 		}
 		cl, err := d.core.HTTPClient(tag, 30*time.Second)
 		if err != nil {
@@ -911,20 +911,13 @@ func (d *Daemon) start(cfg []byte) error {
 	}
 	// 内核启动时先读缓存里记着的模式与选中节点、盖过配置(见 core.PresetCache),起之前按这份配置对齐
 	d.mu.Lock()
-	var tags []string
-	if d.prepared != nil {
-		tags = d.prepared.Tags
-	}
+	prepared := d.prepared
 	d.mu.Unlock()
-	mode, sel := builder.ModeName(s.Mode), builder.DefaultSelected(tags, s.Selected)
+	mode, sel := builder.ModeName(s.Mode), builder.SelectedFor(prepared, s.Selected)
 	if err := core.PresetCache(builder.CachePath(paths.DataDir()), mode, "proxy", sel); err != nil {
 		d.logf("内核缓存里的模式 / 节点没对齐,起来之后再纠正: %v", err)
 	}
-	if sel != "auto" || s.Mode == settings.ModeDirect {
-		d.core.QuietAuto(tags) // 手动选了节点、直连模式:这次连接不碰别的节点
-	} else {
-		d.core.QuietAuto(nil)
-	}
+	d.core.QuietAuto(quietTags(prepared, sel, s.Mode == settings.ModeDirect)) // 这次连接只碰用得到的节点
 	if err := d.core.Start(cfg); err != nil {
 		return d.classifyStart(err)
 	}
@@ -1577,14 +1570,15 @@ func (d *Daemon) protectWarnText() string {
 	return d.protectWarn
 }
 
-// groupTest 让 auto 组测一轮全部节点并换到最快的,记下时间。sing-box 自己的定时测速在配置里关掉了
-// (builder.autoGroup),什么时候测由这里叫:切到自动选择时立刻一次,之后 autoProbeLoop 按"定时测速(分钟)"来。
-func (d *Daemon) groupTest(ctx context.Context) {
-	// 超时要按节点数给。sing-box 是并发分批测的,节点多时 20 秒根本测不完,而 ctx 一到期
+// groupTest 让测速组(auto,或选中的线路组)测一轮自己的成员并换到最快的,记下时间。sing-box 自己的定时测速在配置里关掉了
+// (builder.urltestGroup),什么时候测由这里叫:切到自动选择 / 线路组时立刻一次,之后 autoProbeLoop 按"定时测速(分钟)"来。
+// 线路组只测这一组自己的服务器,不碰别的节点。
+func (d *Daemon) groupTest(ctx context.Context, tag string) {
+	// 超时要按成员数给。sing-box 是并发分批测的,节点多时 20 秒根本测不完,而 ctx 一到期
 	// 没轮到的那些会被当成"测失败"清掉历史 —— 下次自动选择就只能在测过的那几个里挑。
 	// 每个节点算 400ms,下限 20 秒、上限 3 分钟(和定时测速的最小间隔留足余量)。
 	budget := 20 * time.Second
-	if _, all, err := d.core.Group("auto"); err == nil && len(all) > 0 {
+	if all, ok := d.core.Members(tag); ok && len(all) > 0 {
 		budget = time.Duration(len(all)) * 400 * time.Millisecond
 		if budget < 20*time.Second {
 			budget = 20 * time.Second
@@ -1595,11 +1589,29 @@ func (d *Daemon) groupTest(ctx context.Context) {
 	}
 	tctx, cancel := context.WithTimeout(ctx, budget)
 	defer cancel()
-	if _, err := d.core.GroupTest(tctx, "auto"); err != nil {
-		d.logf("自动选择组测速失败: %v", err)
+	if _, err := d.core.GroupTest(tctx, tag); err != nil {
+		if tag == "auto" {
+			d.logf("自动选择组测速失败: %v", err)
+		} else {
+			d.logf("线路组「%s」测速失败: %v", tag, err)
+		}
 		return
 	}
 	d.markProbed()
+}
+
+// probeTarget proxy 组此刻落在哪个测速组上(自动选择,或某条线路组):定时测速、切过去之后的现测都测它。
+// 落在单个节点上(手动选的、临时换线借的)返回空 —— 那时候后台不测别的节点。
+// 看的是内核里的实际状态而不是设置:设置里选的线路组 / 节点已经不在订阅里时,这一轮其实落在自动选择上,照样要测。
+func (d *Daemon) probeTarget() string {
+	now, _, err := d.core.Group("proxy")
+	if err != nil || now == "" {
+		return ""
+	}
+	if _, ok := d.core.Members(now); !ok {
+		return "" // 单个节点
+	}
+	return now
 }
 
 func (d *Daemon) markProbed() {
@@ -1608,8 +1620,8 @@ func (d *Daemon) markProbed() {
 	d.probeMu.Unlock()
 }
 
-// autoProbeLoop "定时测速(分钟)":自动选择时每隔这么久让 auto 组测一轮全部节点并换到最快的。手动指定节点时不测
-// (后台每几分钟把上百个节点全连一遍没有意义,打开节点列表时会现测)。以前这个间隔写在 auto 组的配置里,
+// autoProbeLoop "定时测速(分钟)":自动选择时每隔这么久让 auto 组测一轮全部节点并换到最快的;选的是线路组时只测这一组。
+// 手动指定节点时不测(后台每几分钟把上百个节点全连一遍没有意义,打开节点列表时会现测)。以前这个间隔写在 auto 组的配置里,
 // 自动 / 手动之间切一次就得重建配置重连,断几秒网;现在配置不随模式变,切换就地完成,改间隔也即刻生效。
 func (d *Daemon) autoProbeLoop(ctx context.Context) {
 	t := time.NewTicker(15 * time.Second)
@@ -1621,7 +1633,11 @@ func (d *Daemon) autoProbeLoop(ctx context.Context) {
 		case <-t.C:
 		}
 		s := d.getSettings()
-		if s.Selected != "" || s.Mode == settings.ModeDirect || !d.core.Running() {
+		if s.Mode == settings.ModeDirect || !d.core.Running() {
+			continue
+		}
+		target := d.probeTarget()
+		if target == "" {
 			continue
 		}
 		every := time.Duration(s.ProbeMinutes) * time.Minute
@@ -1632,7 +1648,7 @@ func (d *Daemon) autoProbeLoop(ctx context.Context) {
 		due := time.Since(d.probeAt) >= every
 		d.probeMu.Unlock()
 		if due && d.hadTraffic() {
-			d.groupTest(ctx)
+			d.groupTest(ctx, target)
 		}
 	}
 }
@@ -1773,16 +1789,15 @@ func nicRetryDue(quiet bool, last, now time.Time) bool {
 	return !quiet || now.Sub(last) >= nicQuietRetry
 }
 
-// currentNode 内核里 proxy 组此刻实际落在哪个节点;自动选择时是 auto 组选中的那个。
+// currentNode 内核里 proxy 组此刻实际落在哪个节点;落在测速组(自动选择、线路组)上时是组里选中的那个。
+// 出口查询、健康检查里"节点变了就重查出口"都按它,线路组在组里换了服务器同样算换了节点。
 func (d *Daemon) currentNode() string {
 	now, _, err := d.core.Group("proxy")
 	if err != nil {
 		return ""
 	}
-	if now == "auto" {
-		if inner, _, err := d.core.Group("auto"); err == nil {
-			return inner
-		}
+	if inner, _, err := d.core.Group(now); err == nil {
+		return inner
 	}
 	return now
 }
@@ -2040,9 +2055,11 @@ func (d *Daemon) stateView() ipc.StateView {
 		}
 		if now, _, err := d.core.Group("proxy"); err == nil {
 			v.Node = now
-		}
-		if now, _, err := d.core.Group("auto"); err == nil {
-			v.AutoNow = now
+			// 只在 proxy 落在测速组(自动选择、线路组)上时才填:手动选了节点时 auto 组带着启动时预记的假历史,
+			// 它"选中"的那个从没测过,填出去通知栏、首页就会显示一个根本没在用的节点
+			if inner, _, err := d.core.Group(now); err == nil {
+				v.AutoNow = inner
+			}
 		}
 	}
 	// 节点列表直接来自最新的订阅缓存,不来自内核:刷新拿到的增删立刻反映在列表里,正在用的连接一点不动。
@@ -2080,6 +2097,11 @@ func (d *Daemon) stateView() ipc.StateView {
 	}
 	if want {
 		v.NICWarn = d.nicWarn
+	}
+	if a := d.settings.Active(); a != nil {
+		if p := d.profiles[a.ID]; p != nil {
+			v.Groups = p.Groups // 缓存里的订阅解析出来之后不再改,只读着用
+		}
 	}
 	// 只标当前订阅里名字和内容都没变的:换了订阅、或刷新后机场把节点改成能用的,不再沿用上次连接时的判断
 	if a := d.settings.Active(); a != nil && len(d.unsupported) > 0 {
@@ -2206,8 +2228,9 @@ func (d *Daemon) registerHandlers() {
 			// 规则模式有闸、直连没有。漏了的话切到直连后防火墙还按规则拦着,要等下一轮巡检才撤。
 			d.syncGuard()
 			d.syncTunDNS()
-			if prev.Mode == settings.ModeDirect && s.Selected == "" {
-				go d.groupTest(context.Background()) // 直连模式下 auto 组没测过(见 core.QuietAuto):现测一轮,不然它不知道选哪个
+			if target := d.probeTarget(); prev.Mode == settings.ModeDirect && target != "" {
+				// 直连模式下测速组没测过(见 core.QuietAuto):现测一轮,不然它不知道选哪个。线路组只测这一组
+				go d.groupTest(context.Background(), target)
 			}
 			return d.stateView(), nil
 		}
@@ -2220,6 +2243,9 @@ func (d *Daemon) registerHandlers() {
 		return d.stateView(), nil
 	})
 	h(ipc.MSelectNode, func(p json.RawMessage) (any, error) {
+		// 和切模式、保存设置一样串行:选择、「线路自动」开关、保存设置都会读改写 Selected / LineAuto
+		d.settingsOpMu.Lock()
+		defer d.settingsOpMu.Unlock()
 		in, err := ipc.Decode[struct {
 			Tag string `json:"tag"`
 		}](p)
@@ -2232,44 +2258,43 @@ func (d *Daemon) registerHandlers() {
 		if tag == "auto" {
 			s.Selected = ""
 		}
+		_, cur := d.activeProfile()
+		s.LineAuto = lineAutoAfterSelect(cur, s.Selected, s.LineAuto)
 		if err := d.setSettings(s); err != nil {
 			return nil, err
 		}
-		if !d.core.Running() {
-			return d.stateView(), nil
-		}
-		// 自动 / 手动之间切换也是就地换:定时测速不再写在配置里(autoProbeLoop 按设置叫),配置不随模式变,
-		// 不用重建重连。以前这里要重启内核,每切一次断几秒网。
-		// 选的节点内核里还没有(刚刷新加进来的)、或者参数已经跟内核用的那份不一样:就地换不了,重建配置重连
-		if d.needRebuildFor(s.Selected) {
-			if err := d.restart(); err != nil {
-				return nil, &ipc.CallError{Code: state.CodeOf(err), Msg: "切换失败,保持当前连接: " + err.Error()}
-			}
-			return d.stateView(), nil
-		}
-		if err := d.core.Select("proxy", tag); err != nil {
+		if err := d.applySelected(s.Selected); err != nil {
 			return nil, err
 		}
-		// 选择组只对新连接生效:不掐掉老连接,用户会看到"选了新节点,连接列表里还是老节点",
-		// 长连接(Telegram、推送、anytls 的连接池)能挂十几分钟不断。掐掉后应用自己重连,就都走新节点了。
-		if err := d.core.CloseAllConnections(); err != nil {
-			d.logf("切节点后掐断旧连接失败(旧连接会继续用老节点): %v", err)
+		return d.stateView(), nil
+	})
+	h(ipc.MSetLineAuto, func(p json.RawMessage) (any, error) {
+		d.settingsOpMu.Lock()
+		defer d.settingsOpMu.Unlock()
+		in, err := ipc.Decode[struct {
+			On bool `json:"on"`
+		}](p)
+		if err != nil {
+			return nil, err
 		}
-		// 换了节点,出口多半也变了:先抹掉旧值,再在后台重新测延迟与出口
-		d.clearExit()
-		d.setPing(0)
-		go func() {
-			// 切到自动选择:先让 auto 组现测一轮换到最快的,首页的延迟 / 出口才是新节点的
-			if s.Selected == "" {
-				d.groupTest(context.Background())
+		s := d.getSettings()
+		_, cur := d.activeProfile()
+		next := lineAutoSelection(cur, s.Selected, in.On, d.groupNow, nil)
+		changed := next != s.Selected
+		s.LineAuto, s.Selected = in.On, next
+		if err := d.setSettings(s); err != nil {
+			return nil, err
+		}
+		if changed {
+			if in.On {
+				d.logf("线路自动:打开,改用线路组「%s」", next)
+			} else {
+				d.logf("线路自动:关闭,固定到「%s」", next)
 			}
-			ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
-			defer cancel()
-			if ms, err := d.core.URLTest(ctx, "proxy", builder.TestURL); err == nil {
-				d.setPing(ms)
+			if err := d.applySelected(next); err != nil {
+				return nil, err
 			}
-			d.refreshExit(d.beginExit(d.currentNode()))
-		}()
+		}
 		return d.stateView(), nil
 	})
 	h(ipc.MProbeNodes, func(json.RawMessage) (any, error) {
@@ -2701,6 +2726,7 @@ func (d *Daemon) registerHandlers() {
 		next.Schema = settings.Schema
 		next.ProbeMoved = true                                                // 用户这次保存的就是他要的间隔
 		next.Profiles, next.ActiveProfile = prev.Profiles, prev.ActiveProfile // 订阅另有接口管,这里不动
+		next.LineAuto = prev.LineAuto                                         // 「线路自动」只归 SetLineAuto 管:设置页拿着打开时的旧快照整份保存
 		if err := d.setSettings(next); err != nil {
 			return nil, err
 		}
@@ -2762,25 +2788,10 @@ func (d *Daemon) registerHandlers() {
 					return d.getSettings(), nil
 				}
 				if next.Selected != prev.Selected {
-					if d.needRebuildFor(next.Selected) {
-						if err := d.restart(); err != nil {
-							return nil, &ipc.CallError{Code: state.CodeOf(err), Msg: "切换失败,保持当前连接: " + err.Error()}
-						}
-						return d.getSettings(), nil
+					// 和节点列表里切节点同一套:内核里没有 / 参数变了就重建,否则就地换、掐掉老连接、清掉出口与延迟重测
+					if err := d.applySelected(next.Selected); err != nil {
+						return nil, err
 					}
-					sel := next.Selected
-					if sel == "" {
-						sel = "auto"
-						go d.groupTest(context.Background()) // 切到自动选择:现测一轮换到最快的
-					}
-					_ = d.core.Select("proxy", sel)
-					// 和节点列表里切节点保持一致:选择组只对新连接生效,不掐掉老连接的话
-					// 用户会看到"选了新节点、连接列表里还是老节点";出口和延迟也得清掉重测
-					if err := d.core.CloseAllConnections(); err != nil {
-						d.logf("切节点后掐断旧连接失败(旧连接会继续用老节点): %v", err)
-					}
-					d.clearExit()
-					d.setPing(0)
 				}
 			}
 		}

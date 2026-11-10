@@ -401,6 +401,8 @@ func (s *Service) Call(name string, args []json.RawMessage) (any, error) {
 		return view(ipc.MSetMode, map[string]string{"mode": arg[string](args, 0)})
 	case "SelectNode":
 		return view(ipc.MSelectNode, map[string]string{"tag": arg[string](args, 0)})
+	case "SetLineAuto": // 节点面板顶上的「线路自动」开关(Android 与 Linux 网页面板共用这一条)
+		return view(ipc.MSetLineAuto, map[string]bool{"on": arg[bool](args, 0)})
 	case "GetNodes":
 		return s.nodes(ctx)
 	case "TestAll":

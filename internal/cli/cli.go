@@ -3,12 +3,12 @@
 //	status                 当前状态、模式、节点、订阅
 //	connect / disconnect
 //	mode rule|global|direct
-//	nodes                  节点列表(当前项带 *)
-//	select <节点名|auto>
+//	nodes                  节点列表(当前项带 *),订阅里有线路组时后面再列线路组与成员
+//	select <节点名|线路组名|auto>
 //	test [节点名]          经该节点(默认当前 proxy 组)测延迟
 //	profile [订阅地址]     查看或设置订阅
 //	refresh                立刻刷新订阅
-//	settings [key=value …] 查看或修改设置
+//	settings [key=value …] 查看或修改设置;lineAuto=on|off 走「线路自动」开关(顺带换算当前选择)
 //	rules                  规则组
 //	logs [n] [core]        最近 n 行服务 / 内核日志
 //	diag                   诊断信息(JSON)
@@ -86,10 +86,11 @@ func Main(args []string) int {
 				}
 				fmt.Println(mark + n + ms)
 			}
+			printGroups(v)
 		}
 	case "select":
 		if len(args) != 1 {
-			err = errors.New("用法: select <节点名|auto>")
+			err = errors.New("用法: select <节点名|线路组名|auto>")
 			break
 		}
 		var v ipc.StateView
@@ -150,7 +151,12 @@ func Main(args []string) int {
 			break
 		}
 		if len(args) > 0 {
-			for _, kv := range args {
+			// lineAuto 只归「线路自动」开关管(保存设置时服务沿用原值):拦下来单独调,其余照常一起保存
+			rest, lineAuto, lerr := takeLineAuto(args)
+			if err = lerr; err != nil {
+				break
+			}
+			for _, kv := range rest {
 				k, v, ok := strings.Cut(kv, "=")
 				if !ok {
 					err = fmt.Errorf("参数需为 key=value: %s", kv)
@@ -163,7 +169,18 @@ func Main(args []string) int {
 			if err != nil {
 				break
 			}
-			err = call(ctx, ipc.MSetSettings, s, &s)
+			if len(rest) > 0 {
+				if err = call(ctx, ipc.MSetSettings, s, &s); err != nil {
+					break
+				}
+			}
+			if lineAuto != nil {
+				var v ipc.StateView
+				if err = call(ctx, ipc.MSetLineAuto, map[string]bool{"on": *lineAuto}, &v); err != nil {
+					break
+				}
+				s = v.Settings
+			}
 		}
 		if err == nil {
 			s.WebPassword = "" // 哈希也不用给人看
@@ -307,7 +324,11 @@ func status(ctx context.Context) error {
 		fmt.Println("已连接:", (time.Duration(v.Uptime) * time.Second).String())
 	}
 	fmt.Println("模式:  ", v.Mode)
-	fmt.Println("节点:  ", v.Node, fmt.Sprintf("(共 %d 个)", len(v.Nodes)))
+	node := v.Node
+	if v.AutoNow != "" && v.AutoNow != v.Node {
+		node += "(实际在用 " + v.AutoNow + ")"
+	}
+	fmt.Println("节点:  ", node, fmt.Sprintf("(共 %d 个)", len(v.Nodes)))
 	s := v.Settings
 	fmt.Printf("设置:   TUN=%v(%s, strict=%v) 混合端口=%d DoH=%s/%s fake-ip=%v IPv6=%v\n", s.TUN, s.TUNStack, s.StrictRoute, s.MixedPort, s.RemoteDNS, s.LocalDNS, s.FakeIP, s.IPv6)
 	if s.WebListen != "" {
@@ -323,6 +344,46 @@ func status(ctx context.Context) error {
 		fmt.Printf("隧道:   判废 %d 次,重建 %d 次%s\n", tv.Sick, tv.Rebuilds, last)
 	}
 	return nil
+}
+
+// printGroups nodes 命令的后半:订阅里的线路组和各自的成员(当前选中的带 *)。没有就什么都不打。
+func printGroups(v ipc.StateView) {
+	if len(v.Groups) == 0 {
+		return
+	}
+	on := "关"
+	if v.Settings.LineAuto {
+		on = "开"
+	}
+	fmt.Printf("线路组(线路自动:%s;select <线路组名> 就在组里自动用最快的那台):\n", on)
+	for _, g := range v.Groups {
+		mark := "  "
+		if g.Tag == v.Node || g.Tag == v.Settings.Selected {
+			mark = "* "
+		}
+		fmt.Println(mark + g.Tag + ":" + strings.Join(g.Members, " / "))
+	}
+}
+
+// takeLineAuto 从 settings 的参数里挑出 lineAuto=on|off(它要单独调 SetLineAuto),返回剩下的参数。
+func takeLineAuto(args []string) (rest []string, on *bool, err error) {
+	for _, kv := range args {
+		k, v, ok := strings.Cut(kv, "=")
+		if !ok || k != "lineAuto" {
+			rest = append(rest, kv)
+			continue
+		}
+		var b bool
+		switch strings.ToLower(strings.TrimSpace(v)) {
+		case "on", "true", "yes", "1":
+			b = true
+		case "off", "false", "no", "0":
+		default:
+			return nil, nil, fmt.Errorf("lineAuto 的值只能是 on 或 off: %s", v)
+		}
+		on = &b
+	}
+	return rest, on, nil
 }
 
 func printProfile(p *ipc.ProfileView) {
@@ -410,5 +471,5 @@ func nodeCmd(ctx context.Context, args []string) error {
 
 func Usage() {
 	fmt.Println(buildinfo.DisplayName, buildinfo.Version)
-	fmt.Println("用法: " + Name + " status | connect | disconnect | mode <rule|global|direct> | nodes | node add <分享链接...> | node list | node rm <节点名> | select <节点> | test [节点|all] | profile [地址] | refresh | settings [k=v …] | rules | devices | device <MAC> <follow|proxy|direct|reject> [名字] | logs [n] [core] | diag | guard clear|status")
+	fmt.Println("用法: " + Name + " status | connect | disconnect | mode <rule|global|direct> | nodes | node add <分享链接...> | node list | node rm <节点名> | select <节点|线路组> | test [节点|all] | profile [地址] | refresh | settings [k=v …] | rules | devices | device <MAC> <follow|proxy|direct|reject> [名字] | logs [n] [core] | diag | guard clear|status")
 }

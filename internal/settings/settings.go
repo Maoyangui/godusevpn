@@ -71,7 +71,11 @@ type Settings struct {
 	LANSubnets     []string `json:"lanSubnets"`     // 保留字段,没有接线(见 gateway.go)
 	Devices        []Device `json:"devices"`        // 局域网设备策略
 	ClashPort      int      `json:"clashPort"`      // 内核 Clash API 端口(只监听回环)
-	Selected       string   `json:"selected"`       // proxy 组当前选中的节点;空 = auto
+	Selected       string   `json:"selected"`       // proxy 组当前选中的节点或线路组;空 = auto
+	// LineAuto 节点面板顶上的「线路自动」:同一线路有多台服务器时合成一项,选它就在这几台里自动用最快的。
+	// 只是"按线路选"的偏好,本身不改内核配置(只有选中的是线路组时配置里才有线路组,见 builder);只归 SetLineAuto 管,
+	// 保存设置时沿用原值。加这一项不升 schema:旧版读设置时忽略它,退回旧版也起得来(见 TestSchemaStaysReadableByOldClients)。
+	LineAuto bool `json:"lineAuto"`
 	// BypassApps 这些进程(如 steam.exe)的流量不走代理,直连出去;按进程名匹配,不分大小写
 	BypassApps []string `json:"bypassApps"`
 	// RuleGroups 用户自定义规则组,按顺序匹配,排在内置默认规则之前(见 rules.go)

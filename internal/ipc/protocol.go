@@ -17,6 +17,7 @@ const (
 	MDisconnect       = "Disconnect"
 	MSetMode          = "SetMode"
 	MSelectNode       = "SelectNode"
+	MSetLineAuto      = "SetLineAuto" // 「线路自动」开关:{on};顺带把当前选择换算成线路组 / 组里正在用的那台
 	MTestLatency      = "TestLatency"
 	MProbeNodes       = "ProbeNodes" // 全部节点各测一次延迟;内核没跑时起临时实例测,结果缓存在状态里
 	MGetProfile       = "GetProfile"
