@@ -255,14 +255,15 @@ function renderDrawerState() {
   $('#ds-dot').className = 'dot ' + (on ? 'on' : (st === 'error' || !state.service) ? 'err' : '');
   $('#ds-state').textContent = state.service ? t('st.' + st) : svcText(state);
   $('#ds-time').textContent = on && v.uptime ? fmtDuration(v.uptime) : '';
-  const auto = v.node === 'auto' || !v.node;
-  const name = auto ? (v.autoNow || t('node.auto')) : v.node;
+  const grp = groupByTag(v, v.node); // 选的是线路组:连着时显示组里实际那台,没连时显示线路名
+  const auto = !grp && (v.node === 'auto' || !v.node);
+  const name = auto ? (v.autoNow || t('node.auto')) : grp ? (v.autoNow || v.node) : v.node;
   setFlag($('#ds-flag'), geoCode(name));
   $('#ds-name').textContent = cleanName(name);
   const ping = v.ping || lastPing;
-  $('#ds-sub').textContent = !on ? t('home.pickNode')
+  $('#ds-sub').textContent = !on ? (grp ? t('pick.lineAuto') : t('home.pickNode'))
     : v.mode === 'direct' ? t('home.directAll')
-      : ([v.exitIp || '', ping ? ping + ' ' + t('common.ms') : ''].filter(Boolean).join(' · ') || t('mode.' + v.mode));
+      : ([grp ? t('pick.lineAuto') : '', v.exitIp || '', ping ? ping + ' ' + t('common.ms') : ''].filter(Boolean).join(' · ') || t('mode.' + v.mode));
   $('#ds-modes').querySelectorAll('button').forEach(b => b.classList.toggle('on', b.dataset.mode === v.mode));
 }
 function openDrawer() {
@@ -583,6 +584,7 @@ function renderHome(el) {
       <div class="guard-pill" id="guard-pill" hidden></div>
       <div class="guard-pill warn" id="nic-pill" hidden></div>
       <div class="guard-pill warn" id="privacy-pill" hidden></div>
+      <div class="guard-pill warn" id="v6-pill" hidden></div>
     </div>
     <button class="idcard" id="id-card">
       <span class="flag none" id="id-flag">${ICON_GLOBE}</span>
@@ -672,13 +674,28 @@ function updateHome() {
     pp.innerHTML = warns.length ? ICON_WARN + `<span>${esc(warns.join('; '))}</span>` : '';
     pp.title = warns.join('\n'); // 胶囊里放不下全文时,悬停可以看全
   }
+  // 选的节点只能走 IPv6、而现在关着 IPv6:一直挂着说清楚,不让人对着「节点不稳」猜
+  const vp = $('#v6-pill');
+  if (vp) {
+    const key = v.selectedV6 ? LANG : '';
+    if (vp.dataset.key !== key) {
+      vp.dataset.key = key;
+      vp.hidden = !key;
+      // 后半句"去哪儿改"是要紧的:手机、电视上没有悬停提示,这一条折行显示全,不像别的胶囊那样截断
+      vp.style.borderRadius = '12px';
+      vp.innerHTML = key ? ICON_WARN + `<span style="white-space:normal;text-align:left">${esc(t('node.v6Hint'))}</span>` : '';
+      vp.title = key ? t('node.v6Hint') : '';
+    }
+  }
 
-  // 出口卡片:自动选择时显示实际落到的那个节点,底下是这条线路真正的出口地址
-  const auto = v.node === 'auto' || !v.node;
-  const name = auto ? (v.autoNow || t('node.auto')) : v.node;
+  // 出口卡片:自动选择时显示实际落到的那个节点,底下是这条线路真正的出口地址;线路组同样显示组里实际那台
+  const grp = groupByTag(v, v.node);
+  const auto = !grp && (v.node === 'auto' || !v.node);
+  const name = auto ? (v.autoNow || t('node.auto')) : grp ? (v.autoNow || v.node) : v.node;
   setFlag($('#id-flag'), on || !auto ? geoCode(name) : geoCode(v.node));
   $('#id-name').textContent = cleanName(name);
-  $('#id-auto').hidden = !auto;
+  $('#id-auto').hidden = !auto && !grp;
+  $('#id-auto').textContent = t(grp ? 'pick.lineAuto' : 'pick.auto');
   const mult = nodeMult(name);
   $('#id-mult').hidden = !mult;
   if (mult) $('#id-mult').textContent = t('node.mult', { n: mult });
@@ -705,7 +722,7 @@ function updateHome() {
 
   $('#pk-mode-v').textContent = t('mode.' + v.mode);
   $('#pk-prof-v').textContent = v.profile ? v.profile.name : t('prof.empty');
-  $('#pk-node-v').textContent = auto ? t('pick.auto') : cleanName(v.node);
+  $('#pk-node-v').textContent = auto ? t('pick.auto') : grp ? cleanName(v.node) + ' · ' + t('pick.lineAuto') : cleanName(v.node);
   $('#pk-node-ms').textContent = '';
   const b = $('#home-banner');
   const want = state.service ? '' : (state.svcState === 'no-permission' ? 'noperm' : 'down');
@@ -797,7 +814,8 @@ async function sheetNodes() {
   await drawNodes(false);
   testNodes(false);
 }
-// applyNodeFilter 搜索框与地区标签只是把行藏起来,不重画列表:测速正在跑时列表也不会闪
+// applyNodeFilter 搜索框与地区标签只是把行藏起来,不重画列表:测速正在跑时列表也不会闪。
+// 线路组那一行按成员名也能搜到(搜服务器名找得到它所在的线路)。
 function applyNodeFilter() {
   const body = $('#sheet-body');
   if (!body) return;
@@ -805,7 +823,8 @@ function applyNodeFilter() {
   body.querySelectorAll('.item[data-name]').forEach(it => {
     const name = it.dataset.name || '';
     if (name === 'auto') { it.hidden = false; return; } // 自动选择永远留在最上面
-    it.hidden = !!((q && !name.toLowerCase().includes(q)) || (nodeRegion && it.dataset.geo !== nodeRegion));
+    const hay = (name + ' ' + (it.dataset.search || '')).toLowerCase();
+    it.hidden = !!((q && hay.indexOf(q) < 0) || (nodeRegion && it.dataset.geo !== nodeRegion));
   });
   body.querySelectorAll('.chip').forEach(c => c.classList.toggle('on', (c.dataset.geo || '') === nodeRegion));
 }
@@ -822,11 +841,107 @@ function regionChips(nodes) {
   return `<div class="chips"><button class="chip on" data-geo="">${t('node.all')}</button>`
     + list.map(([c, k]) => `<button class="chip" data-geo="${c}">${esc(regionName(c))} ${k}</button>`).join('') + '</div>';
 }
+
+// ---- 线路自动:同一条线路部署在多台服务器上时合成一项,选它就在这几台里自动用最快的 ----
+// groupsOf 当前订阅里的线路组(服务没报 = 没有:旧服务,或订阅里没有部署在多台服务器上的线路)
+function groupsOf(v) { return (v && v.groups) || []; }
+function groupByTag(v, tag) {
+  if (!tag) return null;
+  const g = groupsOf(v).filter(x => x.tag === tag);
+  return g.length ? g[0] : null;
+}
+// lineAutoOn 开关的显示:开着,或者选的就是线路组(退回旧版服务再升回来,lineAuto 会丢,选择还在)
+function lineAutoOn(v) {
+  if (!groupsOf(v).length) return false;
+  const s = (v && v.settings) || {};
+  return !!s.lineAuto || !!groupByTag(v, s.selected);
+}
+// groupSub 线路组那一行的小字:选中且连着时是组里实际在用的那台,平时是"自动 · N 台"
+function groupSub(n) { return n.now ? t('node.now', { n: n.now }) : t('node.groupSub', { n: n.count }); }
+// groupRow 一条线路组在列表里的那一行。延迟:选中且连着时用实际那台的,其它时候用成员里最低的(全不通是 -1,没测过是 0)。
+function groupRow(g, nodes, at, v, v6) {
+  const ms = [];
+  g.members.forEach(m => { if (at.has(m)) ms.push(nodes[at.get(m)]); });
+  const st = v.state && v.state.status, online = st === 'connected' || st === 'degraded';
+  const current = v.node === g.tag;
+  const now = current && online && v.autoNow ? v.autoNow : '';
+  let delay = 0;
+  if (now) {
+    delay = at.has(now) ? nodes[at.get(now)].delay : 0;
+  } else {
+    ms.forEach(x => { if (x.delay > 0 && (!delay || x.delay < delay)) delay = x.delay; });
+    if (!delay && ms.length && ms.every(x => x.delay < 0)) delay = -1;
+  }
+  return {
+    name: g.tag, group: true, count: g.members.length, members: ms.map(x => x.name), current, now, delay,
+    mult: ms.some(x => nodeMult(x.name)), v6: ms.length > 0 && ms.every(x => v6.has(x.name)),
+  };
+}
+// lineRows 开着「线路自动」时的列表:按 GetNodes 的顺序走,每个线路组插在它第一个成员的位置,组里的成员不再单独列;
+// 自动选择和不属于任何组的节点照旧。
+function lineRows(nodes, v, v6) {
+  const at = new Map(), place = new Map(), member = new Set();
+  nodes.forEach((n, i) => at.set(n.name, i));
+  groupsOf(v).forEach(g => {
+    let first = -1;
+    g.members.forEach(m => {
+      member.add(m);
+      const i = at.has(m) ? at.get(m) : -1;
+      if (i >= 0 && (first < 0 || i < first)) first = i;
+    });
+    if (first < 0) return;
+    if (!place.has(first)) place.set(first, []);
+    place.get(first).push(g);
+  });
+  const out = [];
+  nodes.forEach((n, i) => {
+    (place.get(i) || []).forEach(g => out.push(groupRow(g, nodes, at, v, v6)));
+    if (!member.has(n.name)) out.push(n);
+  });
+  return out;
+}
+let lineBusy = false;
+// toggleLineAuto 翻「线路自动」。正在翻的时候再按(电视上连按 OK)直接吞掉;不用 disabled —— 禁用了焦点就掉了,遥控器没有落点。
+// 服务按开关换算当前选择后返回新状态,立刻合进来整块重画;焦点按 data-name 落回开关上。
+async function toggleLineAuto(el) {
+  if (lineBusy) return;
+  lineBusy = true;
+  const on = el.checked, before = (state && state.view) || {}; // 下面会把新状态合进 state.view:先把要比的记下来
+  const prevSel = (before.settings && before.settings.selected) || '';
+  const wasOn = !!before.state && (before.state.status === 'connected' || before.state.status === 'degraded');
+  const wasGroup = !!groupByTag(before, prevSel);
+  try {
+    const nv = await App().SetLineAuto(on);
+    if (nv && state) Object.assign(state.view, nv);
+    const st = nv && nv.state && nv.state.status;
+    const sel = (nv && nv.settings && nv.settings.selected) || '';
+    if (on && wasOn && st && st !== 'connected' && st !== 'degraded') toast(t('node.lineAutoReconnect')); // 头一回选线路组要重连一次
+    else if (!on && sel !== prevSel && wasGroup) toast(t('node.lineAutoPinned', { n: cleanName(sel) }), 'ok');
+    nodeSig = ''; // 列表结构变了
+    updateHome();
+    if ($('#sheet').classList.contains('show')) await drawNodes(false);
+  } catch (e) {
+    el.checked = !on;
+    toast(errText(e), 'err');
+  } finally {
+    lineBusy = false;
+  }
+}
 function nodeRow(n, i, max, testing) {
   if (n.name === 'auto') {
     return `<div class="item auto ${n.current ? 'current' : ''}" data-name="auto"><span class="check"></span>
       <div class="name"><b>${t('node.auto')}</b><span>${n.autoNow ? t('node.now', { n: esc(n.autoNow) }) : t('node.autoDesc')}</span></div>
       <span class="ms ${msClass(n.delay)}"></span></div>`;
+  }
+  if (n.group) { // 线路组:和自动选择一样是粗体名字 + 小字;成员里有倍率不是 1 的服务器就挂「含倍率」
+    const gc = geoCode(n.name);
+    return `<div class="item ${n.current ? 'current' : ''}" data-name="${esc(n.name)}" data-group="1" data-search="${esc(n.members.join(' '))}" data-geo="${gc}" style="animation-delay:${Math.min(i, 12) * 25}ms"><span class="check"></span>
+    ${flagHTML(gc, 'sm')}
+    <div class="name">
+      <div class="ntop"><b>${esc(cleanName(n.name))}</b>${n.mult ? `<em class="tag warn">${t('node.groupMult')}</em>` : ''}${n.v6 ? `<em class="tag warn">${t('node.v6')}</em>` : ''}</div>
+      <span class="gsub">${esc(groupSub(n))}</span>
+    </div>
+    <span class="ms ${msClass(n.delay)}">${msText(n.delay, testing)}</span></div>`;
   }
   const code = geoCode(n.name), mult = nodeMult(n.name);
   // 本客户端的内核建不起来的节点(订阅里 naive、SSR 之类):照样列出来、标明,点它只说原因不去选
@@ -834,7 +949,7 @@ function nodeRow(n, i, max, testing) {
   return `<div class="item ${n.current ? 'current' : ''}${n.unsupported ? ' unsupported' : ''}" data-name="${esc(n.name)}"${bad} data-geo="${code}" style="animation-delay:${Math.min(i, 12) * 25}ms"><span class="check"></span>
     ${flagHTML(code, 'sm')}
     <div class="name">
-      <div class="ntop"><b>${esc(cleanName(n.name))}</b>${mult ? `<em class="tag warn">${t('node.mult', { n: mult })}</em>` : ''}${n.unsupported ? `<em class="tag">${t('node.unsupported')}</em>` : ''}${n.pending ? `<em class="tag">${t('node.pending')}</em>` : ''}${n.type ? `<em class="ntype">${esc(n.type)}</em>` : ''}</div>
+      <div class="ntop"><b>${esc(cleanName(n.name))}</b>${mult ? `<em class="tag warn">${t('node.mult', { n: mult })}</em>` : ''}${n.v6 ? `<em class="tag warn">${t('node.v6')}</em>` : ''}${n.unsupported ? `<em class="tag">${t('node.unsupported')}</em>` : ''}${n.pending ? `<em class="tag">${t('node.pending')}</em>` : ''}${n.type ? `<em class="ntype">${esc(n.type)}</em>` : ''}</div>
       <div class="bar"><i style="width:${barWidth(n.delay, max)}"></i></div>
     </div>
     <span class="ms ${msClass(n.delay)}">${n.unsupported || n.pending ? '' : msText(n.delay, testing)}</span></div>`;
@@ -852,23 +967,42 @@ async function drawNodes(testing) {
     }
     $('#sheet-body').innerHTML = `<div class="empty">${p ? t('node.notFetched') : t('prof.empty')}</div>`; return;
   }
+  const v = (state && state.view) || {};
+  const v6 = new Set(v.v6Blocked || []); // 关着 IPv6 时连不上的 IPv6 节点:标出来
+  nodes.forEach(n => { n.v6 = v6.has(n.name); });
+  const hasGroups = groupsOf(v).length > 0, lineOn = lineAutoOn(v);
+  const rows = lineOn ? lineRows(nodes, v, v6) : nodes;
   const max = Math.max(1, ...nodes.filter(n => n.delay > 0).map(n => n.delay));
   // 节点集合没变就只改数字,别整块重画:一百来个节点重画一次会先空一下,入场动画还要错峰放完,
   // 滚动位置和筛选框里的字也跟着丢 —— 测速结束那一下看着就是"闪一下白再出来"。
-  const sig = nodes.map(n => n.name + (n.pending ? '+' : '') + (n.unsupported ? '!' : '')).join(' '); // 新节点重连后用上了,标签要跟着变
-  if (sig === nodeSig && patchNodes(nodes, max, testing)) return;
+  const sig = (hasGroups ? (lineOn ? 'L|' : 'N|') : '') // 开关翻了 / 线路组出现或消失:整块重画
+    + rows.map(n => n.name + (n.group ? '#' : '') + (n.pending ? '+' : '') + (n.unsupported ? '!' : '') + (n.v6 ? '6' : '')).join(' '); // 新节点重连后用上了,标签要跟着变
+  if (sig === nodeSig && patchNodes(rows, max, testing)) return;
   nodeSig = sig;
-  const st = state && state.view.state.status, online = st === 'connected' || st === 'degraded';
+  const st = v.state && v.state.status, online = st === 'connected' || st === 'degraded';
   const hint = online ? '' : `<div class="small muted" style="padding:0 4px 8px">${t('node.offlineHint')}</div>`;
+  // 「线路自动」开关:订阅里有线路组才出现,排在最上面。data-name 让重画之后焦点落回它(电视遥控器)
+  const sw = hasGroups ? `<div class="srow"><div class="lbl">${t('node.lineAuto')}<div>${t('node.lineAutoHelp')}</div></div><label class="switch"><input type="checkbox" id="node-lineauto" data-name="__lineauto" data-tvskip ${lineOn ? 'checked' : ''}></label></div>` : '';
   const keep = focusKey($('#sheet-body'), 'data-name');
-  $('#sheet-body').innerHTML = hint
-    + (nodes.length > 8 ? `<div class="sheet-filter"><input type="text" id="node-filter" placeholder="${t('node.filter')}" value="${esc(nodeFilter)}"></div>` : '')
-    + regionChips(nodes)
-    + `<div class="list">${nodes.map((n, i) => nodeRow(n, i, max, testing)).join('')}</div>`;
+  $('#sheet-body').innerHTML = sw + hint
+    + (rows.length > 8 ? `<div class="sheet-filter"><input type="text" id="node-filter" placeholder="${t('node.filter')}" value="${esc(nodeFilter)}"></div>` : '')
+    + regionChips(rows)
+    + `<div class="list">${rows.map((n, i) => nodeRow(n, i, max, testing)).join('')}</div>`;
   $('#sheet-body').querySelectorAll('.item').forEach(it => it.addEventListener('click', async () => {
     if (it.dataset.unsupported) { toast(t('node.unsupportedWhy', { why: it.dataset.unsupported }), 'err'); return; }
-    try { await App().SelectNode(it.dataset.name); closeSheet(); } catch (e) { toast(errText(e), 'err'); }
+    try {
+      const nv = await App().SelectNode(it.dataset.name);
+      closeSheet();
+      const nst = nv && nv.state && nv.state.status;
+      if (nv && nv.selectedV6) toast(t('node.v6Hint'), 'err'); // 选的节点只能走 IPv6,而现在关着 IPv6
+      else if (it.dataset.group && online && nst && nst !== 'connected' && nst !== 'degraded') toast(t('node.lineAutoReconnect'));
+    } catch (e) { toast(errText(e), 'err'); }
   }));
+  const la = $('#node-lineauto');
+  if (la) {
+    la.addEventListener('click', e => { if (lineBusy) e.preventDefault(); }); // 上一次还没回来:这一下不翻
+    la.addEventListener('change', () => toggleLineAuto(la));
+  }
   $('#sheet-body').querySelectorAll('.chip').forEach(c => c.addEventListener('click', () => { nodeRegion = c.dataset.geo || ''; applyNodeFilter(); }));
   refocus($('#sheet-body'), 'data-name', keep);
   const f = $('#node-filter');
@@ -894,6 +1028,10 @@ function patchNodes(nodes, max, testing) {
     if (n.name === 'auto') {
       const sub = it.querySelector('.name span');
       if (sub) sub.textContent = n.autoNow ? t('node.now', { n: n.autoNow }) : t('node.autoDesc');
+    }
+    if (n.group) {
+      const sub = it.querySelector('.gsub');
+      if (sub) sub.textContent = groupSub(n);
     }
   }
   return true;
@@ -2142,7 +2280,11 @@ function spatialMove(dir) {
   const layers = focusLayer(), list = focusables(layers);
   if (!list.length) return;
   const cur = document.activeElement;
-  if (!cur || cur === document.body || !layers.some(l => l.contains(cur))) { focusEl(list[0]); return; }
+  if (!cur || cur === document.body || !layers.some(l => l.contains(cur))) {
+    // 头一个落点不落在一按就改设置的开关上(data-tvskip,比如节点面板顶上的「线路自动」):打开面板手一抖按了 OK 就会重连
+    focusEl(list.filter(el => !el.hasAttribute('data-tvskip'))[0] || list[0]);
+    return;
+  }
   const a = cur.getBoundingClientRect(), ax = (a.left + a.right) / 2, ay = (a.top + a.bottom) / 2;
   let best = null, bestScore = Infinity;
   // 上下走整行,左右可以走进当前行内部。原来对四个方向一律排除"自己的后代",于是列表行右边那颗
