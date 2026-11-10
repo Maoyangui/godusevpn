@@ -70,6 +70,7 @@ func Diff(a, b *Profile) Change {
 }
 
 // Subset 只留这些 tag 的节点(下标对齐),别的字段照抄;找不到的 tag 略过。
+// 线路组跟着剪:不在子集里的成员去掉,剪到一个不剩的组丢掉;只剩一个的照留(sing-box 允许,选中的组不会因为一台建不起来就消失)。
 func (p *Profile) Subset(tags []string) *Profile {
 	if p == nil {
 		return &Profile{}
@@ -79,11 +80,24 @@ func (p *Profile) Subset(tags []string) *Profile {
 		want[t] = true
 	}
 	q := *p
-	q.Outbounds, q.Tags = nil, nil
+	q.Outbounds, q.Tags, q.Groups = nil, nil, nil
+	kept := make(map[string]bool, len(tags))
 	for i, t := range p.Tags {
 		if want[t] && i < len(p.Outbounds) {
 			q.Outbounds = append(q.Outbounds, p.Outbounds[i])
 			q.Tags = append(q.Tags, t)
+			kept[t] = true
+		}
+	}
+	for _, g := range p.Groups {
+		var members []string
+		for _, m := range g.Members {
+			if kept[m] {
+				members = append(members, m)
+			}
+		}
+		if len(members) > 0 {
+			q.Groups = append(q.Groups, Group{Tag: g.Tag, Members: members})
 		}
 	}
 	return &q

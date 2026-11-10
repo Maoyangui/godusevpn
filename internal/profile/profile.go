@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -41,9 +42,25 @@ type Profile struct {
 	Tags      []string          `json:"tags"`
 	Usage     Usage             `json:"usage"`
 	Manual    bool              `json:"manual,omitempty"` // 手动添加的节点,不用刷新
+	// Groups 订阅里的线路组(见 Group),按订阅里的顺序。旧版本存的缓存没有这一项,刷新一次就有了。
+	Groups []Group `json:"groups,omitempty"`
+	// Parser 这份缓存是哪一版解析器读出来的。比 parserVersion 旧的(包括没有这一项的)算过期:
+	// 升级后第一次连接或定时刷新就去重拉,新版本多认出来的东西(线路组)不用等满刷新间隔。
+	Parser int `json:"parser,omitempty"`
 }
 
-// 这些 tag 是客户端自己用的,节点不能撞;这些类型不是节点,直接丢
+// Group 订阅里的线路组:sing-box 的 urltest 出站,成员都是本订阅里的节点。m-ui 给部署在多台服务器上的线路出这种组
+// (同一条线路、不同的入口服务器),客户端选它,就在这几台里挑最快的,线路和出口不变。
+// 只记成员:订阅给的测速地址和间隔一概不用 —— 不然第三方订阅能让每个节点定时去访问它指定的地址。
+type Group struct {
+	Tag     string   `json:"tag"`
+	Members []string `json:"members"`
+}
+
+// parserVersion 见 Profile.Parser。1 = 认线路组。
+const parserVersion = 1
+
+// 这些 tag 是客户端自己用的,节点不能撞;这些类型不是节点,直接丢(urltest 另外收成线路组,见 Parse)
 var reservedTags = map[string]bool{"proxy": true, "auto": true, "direct": true, "block": true, "dns-out": true}
 var nonNodeTypes = map[string]bool{"selector": true, "urltest": true, "direct": true, "block": true, "dns": true}
 
@@ -55,18 +72,27 @@ func Parse(body []byte, hdr http.Header) (*Profile, error) {
 	if err := json.Unmarshal(body, &doc); err != nil {
 		return nil, fmt.Errorf("订阅不是 sing-box JSON: %w", err)
 	}
-	p := &Profile{FetchedAt: time.Now().Unix()}
+	p := &Profile{FetchedAt: time.Now().Unix(), Parser: parserVersion}
 	used := map[string]bool{}
 	for k := range reservedTags {
 		used[k] = true
 	}
+	renamed := map[string]string{} // 订阅里节点原来的 tag → 清洗后的 tag(线路组的成员按原 tag 写)
+	var urltests []json.RawMessage
 	for _, raw := range doc.Outbounds {
 		var meta struct {
 			Type     string          `json:"type"`
 			Tag      string          `json:"tag"`
 			Resolver json.RawMessage `json:"domain_resolver"`
 		}
-		if json.Unmarshal(raw, &meta) != nil || meta.Type == "" || nonNodeTypes[meta.Type] {
+		if json.Unmarshal(raw, &meta) != nil || meta.Type == "" {
+			continue
+		}
+		if meta.Type == "urltest" {
+			urltests = append(urltests, raw)
+			continue
+		}
+		if nonNodeTypes[meta.Type] {
 			continue
 		}
 		tag := strings.TrimSpace(meta.Tag)
@@ -89,18 +115,98 @@ func Parse(body []byte, hdr http.Header) (*Profile, error) {
 			delete(m, "domain_resolver")
 			raw, _ = json.Marshal(m)
 		}
+		if _, dup := renamed[meta.Tag]; !dup && meta.Tag != "" {
+			renamed[meta.Tag] = tag
+		}
 		p.Outbounds = append(p.Outbounds, raw)
 		p.Tags = append(p.Tags, tag)
 	}
 	if len(p.Outbounds) == 0 {
 		return nil, ErrNoNodes
 	}
+	p.Groups = parseGroups(urltests, renamed, len(p.Tags), used)
 	if hdr != nil {
 		p.Title = decodeTitle(hdr.Get("Profile-Title"))
 		p.Usage = parseUserinfo(hdr.Get("Subscription-Userinfo"))
 		p.WebPage = safeWebPage(hdr.Get("Profile-Web-Page-Url"))
 	}
 	return p, nil
+}
+
+// parseGroups 从订阅的 urltest 出站里收线路组。outbounds 那一项单独解,不和节点共用一份 meta:
+// 第三方出站里要是有个同名、类型却不对的字段,不能连累节点被丢掉。
+//
+//   - 成员按 renamed 换成清洗后的节点名;对不上的(direct、别的组、不存在的)丢掉,组内去重;
+//   - 剩不到 2 个成员的不要;成员正好是全部节点的不要(那就是全局自动:m-ui 的 auto、别家的"自动选择");
+//   - tag 是客户端保留名的不要;成员集合和前面某个组一模一样的不要;
+//   - 组名去掉首尾空白,和节点、保留名、前面的组撞了加序号,保证全局唯一(used 会被改)。
+func parseGroups(urltests []json.RawMessage, renamed map[string]string, nodes int, used map[string]bool) []Group {
+	var out []Group
+	seen := map[string]bool{} // 成员集合(排序后拼起来)
+	for _, raw := range urltests {
+		var g struct {
+			Tag       string   `json:"tag"`
+			Outbounds []string `json:"outbounds"`
+		}
+		if json.Unmarshal(raw, &g) != nil {
+			continue
+		}
+		tag := strings.TrimSpace(g.Tag)
+		if tag == "" || reservedTags[tag] {
+			continue
+		}
+		var members []string
+		in := map[string]bool{}
+		for _, o := range g.Outbounds {
+			if t, ok := renamed[o]; ok && !in[t] {
+				in[t] = true
+				members = append(members, t)
+			}
+		}
+		if len(members) < 2 || len(members) == nodes {
+			continue
+		}
+		key := slices.Clone(members)
+		slices.Sort(key)
+		if k := strings.Join(key, "\x00"); seen[k] {
+			continue
+		} else {
+			seen[k] = true
+		}
+		base := tag
+		for i := 2; used[tag]; i++ {
+			tag = fmt.Sprintf("%s %d", base, i)
+		}
+		used[tag] = true
+		out = append(out, Group{Tag: tag, Members: members})
+	}
+	return out
+}
+
+// Group 按 tag 找线路组。
+func (p *Profile) Group(tag string) (Group, bool) {
+	if p == nil || tag == "" {
+		return Group{}, false
+	}
+	for _, g := range p.Groups {
+		if g.Tag == tag {
+			return g, true
+		}
+	}
+	return Group{}, false
+}
+
+// GroupOf 第一个包含这个节点的线路组的 tag;不在任何组里返回空串。
+func (p *Profile) GroupOf(node string) string {
+	if p == nil || node == "" {
+		return ""
+	}
+	for _, g := range p.Groups {
+		if slices.Contains(g.Members, node) {
+			return g.Tag
+		}
+	}
+	return ""
 }
 
 // decodeTitle Profile-Title 可能是 base64:xxx(Clash 系约定)或 RFC 8187 的 utf-8”%E4%B8%AD 形式。
@@ -287,12 +393,12 @@ func (p *Profile) Save(path string) error {
 	return os.Rename(tmp, path)
 }
 
-// Stale 距上次拉取是否超过 every。
+// Stale 距上次拉取是否超过 every;旧版解析器读出来的缓存也算(见 Profile.Parser)。手动节点没有地方可拉,永远不过期。
 func (p *Profile) Stale(every time.Duration) bool {
 	if p != nil && p.Manual {
 		return false
 	}
-	return p == nil || time.Since(time.Unix(p.FetchedAt, 0)) > every
+	return p == nil || p.Parser < parserVersion || time.Since(time.Unix(p.FetchedAt, 0)) > every
 }
 
 // Servers 节点的服务器地址(诊断包里看连通性用,不含凭据)。
