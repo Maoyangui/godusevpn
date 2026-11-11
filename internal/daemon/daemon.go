@@ -102,6 +102,7 @@ type Daemon struct {
 	nicWarn      string     // 非严格模式下网卡 IPv6 没能停用:照常连,首页标出来(严格全局仍拒绝连接,见 nicReady)
 	persistedOK  bool       // persisted 状态文件可被可靠读取;未知时不撤保护、不自动连接
 	connOpMu     sync.Mutex // MConnect / MDisconnect 串行:两者交错会让落盘意愿与状态机相反
+	persistMu    sync.Mutex // savePersisted 串行(见那里)
 	// settingsOK 设置文件读出来了。读不出来时用的是默认值,而默认值(模式=规则)会让
 	// syncGuard 判定"不该有闸"、syncNICIPv6 判定"该还原" —— 等于拿一份猜出来的设置去放宽用户的保护。
 	// 所以未知时一律保持现状:不撤闸、不还原网卡 IPv6、不自动连接。用户在界面里保存一次设置就恢复正常。
@@ -427,16 +428,22 @@ func (d *Daemon) persistedStateOK() bool {
 	return d.persistedOK
 }
 
+// savePersisted 落盘连接状态(想不想连着)。persistMu 串行:同一时刻只有一个在写,后到的改名后落盘,磁盘上就是它的值;
+// 临时文件每次另起一个名字(os.CreateTemp,同目录才能原子改名):以前固定写 state.json.tmp,两个调用交错时
+// 一个改完名、另一个的改名就报"文件不存在",还可能把写了一半的内容改名成 state.json。
 func (d *Daemon) savePersisted(p persisted) error {
 	b, err := json.Marshal(p)
 	if err != nil {
 		return err
 	}
-	tmp := paths.State() + ".tmp"
-	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	d.persistMu.Lock()
+	defer d.persistMu.Unlock()
+	dst := paths.State()
+	f, err := os.CreateTemp(filepath.Dir(dst), filepath.Base(dst)+".*.tmp") // 权限 0600
 	if err != nil {
 		return err
 	}
+	tmp := f.Name()
 	if _, err = f.Write(b); err == nil {
 		err = f.Sync()
 	}
@@ -447,7 +454,7 @@ func (d *Daemon) savePersisted(p persisted) error {
 		_ = os.Remove(tmp)
 		return err
 	}
-	if err := os.Rename(tmp, paths.State()); err != nil {
+	if err := os.Rename(tmp, dst); err != nil {
 		_ = os.Remove(tmp)
 		return err
 	}
@@ -2530,7 +2537,7 @@ func (d *Daemon) registerHandlers() {
 		return map[string]string{"path": p}, nil
 	})
 	h(ipc.MConnect, func(json.RawMessage) (any, error) {
-		// 连接与断开互斥:两个并发调用会各自 savePersisted(同一个 .tmp 路径)并交错调用状态机,
+		// 连接与断开互斥:两个并发调用会各自 savePersisted 并交错调用状态机,
 		// 落盘的 Wanted 可能和状态机的意愿相反,重启后按落盘值重连或撤闸就错了。
 		d.connOpMu.Lock()
 		defer d.connOpMu.Unlock()
@@ -2868,13 +2875,18 @@ func (d *Daemon) registerHandlers() {
 		_ = os.Remove(paths.ProfileCache(in.ID))
 		if wasActive {
 			if len(kept) == 0 {
-				if err := d.savePersisted(persisted{Wanted: false}); err != nil {
-					return nil, err
-				}
-				d.bootWanted.Store(false)
-				d.machine.Disconnect()
-				d.syncGuard()
-				if err := d.syncNICIPv6(); err != nil {
+				// 和 MConnect / MDisconnect 一样拿 connOpMu:不然和同时点的连接交错,落盘的意愿可能和状态机相反
+				if err := func() error {
+					d.connOpMu.Lock()
+					defer d.connOpMu.Unlock()
+					if err := d.savePersisted(persisted{Wanted: false}); err != nil {
+						return err
+					}
+					d.bootWanted.Store(false)
+					d.machine.Disconnect()
+					d.syncGuard()
+					return d.syncNICIPv6()
+				}(); err != nil {
 					return nil, err
 				}
 			} else if err := d.restart(); err != nil {
