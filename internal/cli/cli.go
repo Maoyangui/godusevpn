@@ -166,6 +166,11 @@ func Main(args []string) int {
 					err = fmt.Errorf("参数需为 key=value: %s", kv)
 					break
 				}
+				if k == "webPassword" || k == "rev" {
+					// 密码只经 passwd 改(服务那边加盐哈希、只动这一项);rev 是读设置时带的版本号,存回去按它合并别处这期间的修改
+					err = fmt.Errorf("%s 不能这样改(改面板密码用 passwd)", k)
+					break
+				}
 				if s, err = s.Apply(k, v); err != nil {
 					break
 				}

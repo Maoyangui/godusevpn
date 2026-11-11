@@ -466,8 +466,8 @@ func (s *Service) Call(name string, args []json.RawMessage) (any, error) {
 		return s.Settings().ForPage(), nil // 不把密码哈希、订阅地址给页面
 	case "SaveSettings":
 		in := arg[settings.Settings](args, 0)
-		// 页面拿到的是去掉密码哈希的那份:原样存回去会把密码清掉。密码另有接口改,这里带上此刻的;
-		// 和改密码串行,不然两边一交错,刚改的密码会被这次保存盖回旧的
+		// 页面拿到的是去掉密码哈希的那份。带着版本号(Rev)存时服务不看这一项(密码只归 SetWebPassword 管);
+		// 没带的(旧页面)整份存,原样存回去会把密码清掉,所以带上此刻的,并和改密码串行
 		s.pwMu.Lock()
 		in.WebPassword = s.Settings().WebPassword
 		var out settings.Settings
@@ -477,12 +477,8 @@ func (s *Service) Call(name string, args []json.RawMessage) (any, error) {
 	case "SetWebPassword":
 		s.pwMu.Lock()
 		defer s.pwMu.Unlock()
-		st := s.Settings()
-		if err := st.SetWebPassword(arg[string](args, 0)); err != nil {
-			return nil, err
-		}
-		var out settings.Settings
-		return nil, s.dispatch(ipc.MSetSettings, st, &out)
+		// 只改密码这一项(服务那边在设置的锁里改):不拿整份设置存回去,免得盖掉这期间别处改的
+		return nil, s.dispatch(ipc.MSetWebPassword, map[string]string{"password": arg[string](args, 0)}, nil)
 	case "GetLogs":
 		var lines []string
 		err := s.dispatch(ipc.MGetLogs, map[string]any{"lines": arg[int](args, 0), "core": arg[bool](args, 1)}, &lines)

@@ -68,9 +68,16 @@ type Daemon struct {
 	// settingsGeneration changes on every persisted settings update. A prepare
 	// can run for minutes while the user edits settings; the generation binds a
 	// rendered config to the exact settings snapshot that produced it.
-	configPublishMu            sync.RWMutex // publish settings vs. starting a rendered config
-	preparedMu                 sync.Mutex   // bind cfg bytes and metadata through start
-	settingsGeneration         uint64
+	configPublishMu    sync.RWMutex // publish settings vs. starting a rendered config
+	preparedMu         sync.Mutex   // bind cfg bytes and metadata through start
+	settingsGeneration uint64
+	// settingsHist 最近几版设置(版本号 → 那一版):经控制口整份存回来的设置带着它读到的版本,按那一版合并(见 settings.Merge3)。
+	settingsHist map[uint64]settings.Settings
+	// diskBase / diskRaw 上次读到或写下的设置文件(设置与原始字节):存之前看文件有没有被别的进程改过(见 settings.SaveChecked)。
+	// diskOK 为假:读的那次没读出来,手上是默认值,存的时候整份覆盖(覆盖前另存一份,见 writeSettings)。
+	diskBase                   settings.Settings
+	diskRaw                    []byte
+	diskOK                     bool
 	preparedSettingsGeneration uint64
 	preparedSettingsValid      bool
 	preparedConfigHash         [sha256.Size]byte
@@ -200,8 +207,9 @@ func NewWithOptions(o Options) (*Daemon, error) {
 	if o.Platform != nil {
 		d.core.SetPlatform(o.Platform)
 	}
-	s, err := settings.Load(paths.Settings())
+	s, raw, err := settings.LoadRaw(paths.Settings())
 	d.settingsOK = err == nil
+	d.diskBase, d.diskRaw, d.diskOK = s.Clone(), raw, err == nil
 	if err != nil {
 		// 设置决定「防流量逃逸」与网卡 IPv6 策略,损坏 / 不可读时确实不能拿默认值去覆盖并撤保护。
 		// 但 m29 的做法是整个服务拒绝启动 —— 那把用户关在了门外:Windows 上托盘只剩一句"服务未运行",
@@ -286,8 +294,10 @@ func (d *Daemon) loadProfileCaches() {
 	}
 	if healed && d.settingsOK {
 		// 设置读不出来时手上这份是默认值,写回去等于把用户损坏但仍有救的文件抹成空白。
-		if err := d.settings.Save(paths.Settings()); err != nil {
+		if saved, err := d.saveSettingsFile(d.settings); err != nil {
 			d.logf("恢复订阅链接后写设置失败: %v", err)
+		} else {
+			d.settings = saved
 		}
 	}
 	if legacy, err := profile.Load(paths.LegacyProfileCache()); err == nil {
@@ -507,7 +517,8 @@ func (d *Daemon) writeSettings(next func(cur settings.Settings) (settings.Settin
 			d.logf("原设置文件读不出来,已另存为 %s,现在按新设置覆盖", bak)
 		}
 	}
-	if err := s.Save(paths.Settings()); err != nil {
+	s, err := d.saveSettingsFile(s) // 别的进程这期间写过文件:它改的那几项合并进来
+	if err != nil {
 		return err
 	}
 	d.mu.Lock()
@@ -516,10 +527,70 @@ func (d *Daemon) writeSettings(next func(cur settings.Settings) (settings.Settin
 	}
 	d.settings = s
 	d.settingsGeneration++
+	d.rememberRev(d.settingsGeneration, s)
 	d.settingsOK = true // 刚刚整份写成功了,文件从此可信 —— 之前读不出来的那次到此为止
 	d.mu.Unlock()
 	d.applyLogRetention()
 	return nil
+}
+
+// saveSettingsFile 设置落盘:别的进程(服务没跑时的命令行、「恢复网络」的离线兜底)这期间写过文件,就在文件现在的内容上
+// 合并这次改的字段(见 settings.SaveChecked)。返回实际存下的那份,记成下一次的 base。调用方保证不并发(writeSettings 持着
+// configPublishMu;启动时只有一个人)。
+func (d *Daemon) saveSettingsFile(s settings.Settings) (settings.Settings, error) {
+	d.mu.Lock()
+	base, raw, ok := d.diskBase, d.diskRaw, d.diskOK
+	d.mu.Unlock()
+	saved, wrote, err := settings.SaveChecked(paths.Settings(), base, raw, ok, s)
+	if err != nil {
+		return s, err
+	}
+	d.mu.Lock()
+	d.diskBase, d.diskRaw, d.diskOK = saved.Clone(), wrote, true
+	d.mu.Unlock()
+	return saved, nil
+}
+
+// settingsKeep 记多少版设置(见 settingsHist)。选节点、刷新订阅也会出新版,设置页开着放一阵子也够用。
+const settingsKeep = 128
+
+// rememberRev 记下一版设置。调用方持着 d.mu。
+func (d *Daemon) rememberRev(rev uint64, s settings.Settings) {
+	if rev == 0 {
+		return
+	}
+	if d.settingsHist == nil {
+		d.settingsHist = map[uint64]settings.Settings{}
+	}
+	if _, ok := d.settingsHist[rev]; ok {
+		return
+	}
+	s = s.Clone()
+	s.Rev = 0
+	d.settingsHist[rev] = s
+	for k := range d.settingsHist {
+		if k+settingsKeep <= rev {
+			delete(d.settingsHist, k)
+		}
+	}
+}
+
+// settingsWithRev 此刻的设置,带上版本号(经控制口给出去的那份;存回来时按这一版合并,见 MSetSettings)。
+func (d *Daemon) settingsWithRev() settings.Settings {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	s := d.settings.Clone()
+	s.Rev = d.settingsGeneration
+	d.rememberRev(s.Rev, d.settings)
+	return s
+}
+
+// settingsAt 记着的那一版设置;认不出(太旧、不是这个服务进程给出去的)返回 false。
+func (d *Daemon) settingsAt(rev uint64) (settings.Settings, bool) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	s, ok := d.settingsHist[rev]
+	return s.Clone(), ok
 }
 
 // rollbackSelection 换选择(选节点、翻「线路自动」、保存设置里改的选择)要重建配置、而新配置备不出来时(旧内核照跑,
@@ -2956,21 +3027,64 @@ func (d *Daemon) registerHandlers() {
 	})
 
 	// ---- 设置 ----
-	h(ipc.MGetSettings, func(json.RawMessage) (any, error) { return d.getSettings(), nil })
-	h(ipc.MSetSettings, func(p json.RawMessage) (any, error) {
-		d.settingsOpMu.Lock()
-		defer d.settingsOpMu.Unlock()
-		next, err := ipc.Decode[settings.Settings](p)
+	h(ipc.MGetSettings, func(json.RawMessage) (any, error) { return d.settingsWithRev(), nil })
+	h(ipc.MSetWebPassword, func(p json.RawMessage) (any, error) {
+		in, err := ipc.Decode[struct {
+			Password string `json:"password"`
+		}](p)
 		if err != nil {
 			return nil, err
 		}
-		prev := d.getSettings()
-		next.Schema = settings.Schema
-		next.ProbeMoved = true                                                // 用户这次保存的就是他要的间隔
-		next.Profiles, next.ActiveProfile = prev.Profiles, prev.ActiveProfile // 订阅另有接口管,这里不动
-		next.LineAuto = prev.LineAuto                                         // 「线路自动」只归 SetLineAuto 管:设置页拿着打开时的旧快照整份保存
-		if err := d.setSettings(next); err != nil {
+		var pwErr error
+		if err := d.updateSettings(func(s *settings.Settings) bool {
+			pwErr = s.SetWebPassword(in.Password)
+			return pwErr == nil
+		}); err != nil {
 			return nil, err
+		}
+		return nil, pwErr
+	})
+	h(ipc.MSetSettings, func(p json.RawMessage) (any, error) {
+		d.settingsOpMu.Lock()
+		defer d.settingsOpMu.Unlock()
+		in, err := ipc.Decode[settings.Settings](p)
+		if err != nil {
+			return nil, err
+		}
+		// 带着版本号(界面、网页面板、命令行读设置时拿到的):只把相对那一版改了的字段合并到此刻的设置上 ——
+		// 设置页打开以后别处改的(命令行 settings、选节点、另一个界面)不被这份旧快照盖回去。面板密码只归 SetWebPassword 管。
+		// 没带版本号的(旧客户端)照旧整份存。
+		var base *settings.Settings
+		if in.Rev != 0 {
+			b, ok := d.settingsAt(in.Rev)
+			if !ok {
+				return nil, errors.New("设置在这期间被改过很多次,认不出这份是从哪一版改的:重新打开设置再改")
+			}
+			base = &b
+		}
+		var prev, next settings.Settings
+		var mergeErr error
+		if err := d.writeSettings(func(cur settings.Settings) (settings.Settings, bool) {
+			prev = cur
+			n := in
+			if base != nil {
+				if n, mergeErr = settings.Merge3(*base, cur, in); mergeErr != nil {
+					return cur, false
+				}
+				n.WebPassword = cur.WebPassword
+			}
+			n.Rev = 0
+			n.Schema = settings.Schema
+			n.ProbeMoved = true                                           // 用户这次保存的就是他要的间隔
+			n.Profiles, n.ActiveProfile = cur.Profiles, cur.ActiveProfile // 订阅另有接口管,这里不动
+			n.LineAuto = cur.LineAuto                                     // 「线路自动」只归 SetLineAuto 管:设置页拿着打开时的旧快照整份保存
+			next = n
+			return n, true
+		}); err != nil {
+			return nil, err
+		}
+		if mergeErr != nil {
+			return nil, mergeErr
 		}
 		if prev.CoreLogDisk != next.CoreLogDisk {
 			d.coreDisk.Store(next.CoreLogDisk)
@@ -2996,7 +3110,7 @@ func (d *Daemon) registerHandlers() {
 				}
 				return nil, &ipc.CallError{Code: state.CodeOf(err), Msg: msg}
 			}
-			return d.getSettings(), nil
+			return d.settingsWithRev(), nil
 		}
 		if protectionChanged(prev, next) {
 			d.syncGuard()
@@ -3027,7 +3141,7 @@ func (d *Daemon) registerHandlers() {
 					if err := d.restart(); err != nil {
 						return nil, &ipc.CallError{Code: state.CodeOf(err), Msg: "切换模式失败,保持当前连接: " + err.Error()}
 					}
-					return d.getSettings(), nil
+					return d.settingsWithRev(), nil
 				}
 				if next.Selected != prev.Selected {
 					// 和节点列表里切节点同一套:内核里没有 / 参数变了就重建,否则就地换、掐掉老连接、清掉出口与延迟重测
@@ -3038,7 +3152,7 @@ func (d *Daemon) registerHandlers() {
 				}
 			}
 		}
-		return d.getSettings(), nil
+		return d.settingsWithRev(), nil
 	})
 	h(ipc.MGetLogs, func(p json.RawMessage) (any, error) {
 		in, err := ipc.Decode[struct {

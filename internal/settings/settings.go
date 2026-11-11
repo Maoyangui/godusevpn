@@ -89,6 +89,10 @@ type Settings struct {
 	RuleGroups []RuleGroup `json:"ruleGroups"`
 	// DefaultRules 内置默认规则里可改的几项(私网 / 国内 / 其余),可一键还原出厂
 	DefaultRules DefaultRules `json:"defaultRules"`
+	// Rev 这份设置是守护进程手里的第几版:只在控制口上出现(读设置时带出去,存设置时带回来),不落盘。
+	// 存设置的一方拿着旧版本整份存回来时,守护进程只把它相对那一版改了的字段合并上去,别人这期间改的不被盖掉(见 Merge3)。
+	// 0 = 没带(旧客户端),整份照存。
+	Rev uint64 `json:"rev,omitempty"`
 }
 
 // Default 出厂默认:TUN + 规则模式 + DoH + fake-ip + 禁 IPv6。
@@ -110,14 +114,26 @@ func NewID() string {
 
 // Load 读设置;文件不存在给默认值。旧 schema 在这里迁移。
 func Load(path string) (Settings, error) {
-	s := Default()
+	s, _, err := LoadRaw(path)
+	return s, err
+}
+
+// LoadRaw 同 Load,另外给出读到的原始字节(文件不存在时为 nil):存的时候拿它判断这期间文件有没有被别的进程改过(见 SaveChecked)。
+func LoadRaw(path string) (Settings, []byte, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return s, nil
+			return Default(), nil, nil
 		}
-		return s, err
+		return Default(), nil, err
 	}
+	s, err := parse(b)
+	return s, b, err
+}
+
+// parse 把设置文件的内容读成设置(迁移、校验);读不出来给默认值和错误。
+func parse(b []byte) (Settings, error) {
+	s := Default()
 	s.ProbeMoved = false // 老文件没有这个键,读出来得是 false 才会迁
 	if err := json.Unmarshal(b, &s); err != nil {
 		return Default(), fmt.Errorf("设置文件损坏: %w", err)
@@ -128,6 +144,7 @@ func Load(path string) (Settings, error) {
 	if s.Schema > Schema {
 		return Default(), fmt.Errorf("设置文件来自更新的版本(schema %d),请升级客户端", s.Schema)
 	}
+	s.Rev = 0 // 不落盘的东西,文件里有也不认
 	s.migrate()
 	if err := s.Validate(); err != nil {
 		return Default(), err
@@ -177,21 +194,35 @@ func (s *Settings) migrate() {
 // 选的是线路组时,selected 写组里的一台(SelectedNode)、组名写进 selectedGroup:退回旧版本时旧版不认识线路组,
 // 把组名当节点就找不到、回落自动选择,还会把它当"手动选了节点"停掉定时测速;写成组里的一台,旧版就按手动选了这台来连,
 // 线路不变。不升 schema(旧版读到更新的 schema 会拒绝启动)。
+//
+// 和别的进程写设置互斥(见 lockFile);要"读出来、改几项、存回去"的用 Update,守护进程用 SaveChecked。
 func (s Settings) Save(path string) error {
+	unlock, err := lockFile(path)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	_, err = s.write(path)
+	return err
+}
+
+// write 落盘,返回写下的字节。调用方持着 lockFile。
+func (s Settings) write(path string) ([]byte, error) {
 	disk := s
+	disk.Rev = 0
 	disk.SelectedGroup = ""
 	if s.SelectedNode != "" && s.SelectedNode != s.Selected && s.Selected != "" {
 		disk.Selected, disk.SelectedGroup = s.SelectedNode, s.Selected
 	}
 	b, err := json.MarshalIndent(disk, "", "  ")
 	if err != nil {
-		return err
+		return nil, err
 	}
 	// 先落盘再改名:断电时宁可是旧文件,也不能是一份截断的(读不出来就退回默认值,见 Load)
 	tmp := path + ".tmp"
 	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if _, err = f.Write(b); err == nil {
 		err = f.Sync()
@@ -201,9 +232,12 @@ func (s Settings) Save(path string) error {
 	}
 	if err != nil {
 		_ = os.Remove(tmp)
-		return err
+		return nil, err
 	}
-	return os.Rename(tmp, path)
+	if err := os.Rename(tmp, path); err != nil {
+		return nil, err
+	}
+	return b, nil
 }
 
 // Preserve 把读不出来的设置文件另存一份(<path>.bad-<时间>),返回另存的路径;文件不存在返回空串。

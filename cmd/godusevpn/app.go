@@ -683,8 +683,8 @@ func (a *App) GetSettings() (settings.Settings, error) {
 	return s.ForPage(), err
 }
 
-// SaveSettings 页面拿到的设置不带面板密码哈希:原样存回去会把密码清掉,这里带上此刻的(密码另有途径改)。
-// 订阅列表服务那边不看页面给的(MSetSettings 沿用原来的)。
+// SaveSettings 页面拿到的设置带着版本号(Rev):服务只把相对那一版改了的字段合并上去,设置页打开之后命令行、别的界面改的不被盖掉;
+// 密码、订阅列表服务那边不看页面给的。没带版本号(旧页面)时整份存,原样存回去会把密码清掉,所以照旧带上此刻的。
 func (a *App) SaveSettings(s settings.Settings) (settings.Settings, error) {
 	var cur settings.Settings
 	if err := a.call(ipc.MGetSettings, nil, &cur); err != nil {

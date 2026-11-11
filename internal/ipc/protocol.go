@@ -24,7 +24,8 @@ const (
 	MSetProfileURL    = "SetProfileURL"
 	MRefreshProfile   = "RefreshProfile"
 	MGetSettings      = "GetSettings"
-	MSetSettings      = "SetSettings"
+	MSetSettings      = "SetSettings"    // 整份存设置;带着读到的版本(Rev)时只合并相对那一版改了的字段,面板密码不经它改
+	MSetWebPassword   = "SetWebPassword" // 改面板密码:{password}(明文,服务这边加盐哈希);空串 = 清除
 	MGetLogs          = "GetLogs"
 	MDiagnose         = "Diagnose"
 	MPing             = "Ping"
