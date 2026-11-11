@@ -104,8 +104,11 @@ func TestQuietAutoLineGroup(t *testing.T) {
 // 读的是 sing-box 内部的标记:换了 sing-box 版本这条测试会先红。
 func TestGroupBusy(t *testing.T) {
 	release := make(chan struct{})
+	arrived := make(chan struct{}, 4) // 这一轮的测速请求真到了
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		<-release // 测速请求一直挂着,这一轮就一直"在测"
+		arrived <- struct{}{}
+		<-release                         // 测速请求一直挂着,这一轮就一直"在测"
+		time.Sleep(20 * time.Millisecond) // 放行之后再慢一点:测出来的延迟不会是 0(0 是"没测出来")
 		w.WriteHeader(http.StatusNoContent)
 	}))
 	defer srv.Close()
@@ -139,12 +142,31 @@ func TestGroupBusy(t *testing.T) {
 		}
 		t.Fatalf("等不到 GroupBusy = %v", want)
 	}
-	wait(false) // 启动那一轮(什么都不用测)早就完了
+	wait(false)
 	done := make(chan map[string]uint16, 1)
-	go func() {
-		res, _ := c.GroupTest(context.Background(), "G")
-		done <- res
-	}()
+	round := func() {
+		go func() {
+			res, _ := c.GroupTest(context.Background(), "G")
+			done <- res
+		}()
+	}
+	// 内核刚起来时它自己那一轮(PostStart:成员预记了"刚测过",什么都不测、瞬间就完)可能这时才开始:撞上它时 GroupTest
+	// 立刻回空结果、什么都不测(daemon 的自救用例也是这样),标记只亮一下,轮询看不到。那就再叫,直到这一轮的测速请求真到了
+	round()
+	for deadline := time.Now().Add(5 * time.Second); ; {
+		select {
+		case <-arrived:
+		case res := <-done:
+			if len(res) != 0 {
+				t.Fatalf("测速请求挂着,这一轮不该测完: %v", res)
+			}
+			round()
+			continue
+		case <-time.After(time.Until(deadline)):
+			t.Fatal("这一轮的测速请求一直没到")
+		}
+		break
+	}
 	wait(true)
 	if res, err := c.GroupTest(context.Background(), "G"); err != nil || len(res) != 0 {
 		t.Fatalf("正在测时再叫一次:sing-box 立刻回空结果: %v %v", res, err)

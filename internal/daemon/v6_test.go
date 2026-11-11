@@ -139,13 +139,17 @@ func TestProbeSkipsV6Nodes(t *testing.T) {
 	if res["v6"] != -1 || res["v4"] <= 0 || hits6.Load() != 0 {
 		t.Fatalf("连着时:同样不测 IPv6 节点: %v,IPv6 那头收到 %d 次", res, hits6.Load())
 	}
-	// 开着 IPv6 时照常测
+	// 开着 IPv6 时照常测。测速那边握手一完成就返回了,听的这边 Accept 回来、记上数可能还差一点:等一下再看
 	s := d.getSettings()
 	s.IPv6 = true
 	d.settings = s
 	_ = d.core.Stop()
-	if res = probe(); res["v6"] <= 0 || hits6.Load() == 0 {
-		t.Fatalf("开着 IPv6 时 IPv6 节点照常测: %v", res)
+	res = probe()
+	for deadline := time.Now().Add(2 * time.Second); hits6.Load() == 0 && time.Now().Before(deadline); {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if res["v6"] <= 0 || hits6.Load() == 0 {
+		t.Fatalf("开着 IPv6 时 IPv6 节点照常测: %v,IPv6 那头收到 %d 次", res, hits6.Load())
 	}
 }
 
