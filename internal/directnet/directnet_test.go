@@ -72,6 +72,21 @@ func TestTransportNoIdleConns(t *testing.T) {
 	}
 }
 
+// 解析器连 DNS 服务器同样收口:关着 IPv6 时 IPv6 地址的 DNS 服务器不去连(拨号这一步就被拒)。
+func TestResolverDialsV4(t *testing.T) {
+	r := Resolver((&net.Dialer{}).DialContext, func() bool { return false })
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_, err := r.Dial(ctx, "udp", "[::1]:53")
+	var ae *net.AddrError
+	if !errors.As(err, &ae) {
+		t.Fatalf("关着 IPv6 还去连 IPv6 的 DNS 服务器:%v", err)
+	}
+	if r.PreferGo {
+		t.Fatal("不该改成强制用 Go 的解析器(Windows、macOS 上行为会变)")
+	}
+}
+
 func TestKeepV4(t *testing.T) {
 	in := []string{"2001:db8::1", "1.2.3.4", "::ffff:5.6.7.8", "bad", " 9.9.9.9 "}
 	if got := strings.Join(KeepV4(in, false), ","); got != "1.2.3.4,5.6.7.8,9.9.9.9" {

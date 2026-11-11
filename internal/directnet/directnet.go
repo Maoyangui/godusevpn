@@ -52,9 +52,17 @@ func Transport(allow6 func() bool, control func(network, address string, c sysca
 	if control != nil {
 		dialer.Control = control
 	}
+	dialer.Resolver = Resolver((&net.Dialer{Timeout: 5 * time.Second, Control: control}).DialContext, allow6)
 	tr.DialContext = Dial(dialer.DialContext, allow6)
 	tr.DisableKeepAlives = true
 	return tr
+}
+
+// Resolver 解析域名用的解析器:Go 自己的解析器(Linux、Android 上就是它)连系统配的 DNS 服务器时也按 allow6 收口 ——
+// 关着 IPv6 时配成 IPv6 地址的 DNS 服务器不去连,换下一台。只设 Dial、不设 PreferGo:用系统解析器的平台(Windows、macOS)
+// 行为不变,那一步程序管不到(见文档「关于 IPv6」)。
+func Resolver(dial DialFunc, allow6 func() bool) *net.Resolver {
+	return &net.Resolver{Dial: Dial(dial, allow6)}
 }
 
 // Client 带 Transport 的客户端。

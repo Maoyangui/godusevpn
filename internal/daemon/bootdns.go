@@ -40,7 +40,7 @@ func (d *Daemon) bootResolver(s settings.Settings) func(ctx context.Context, hos
 			return nil // 明文系统解析在防逃逸下一个包都不该发
 		}
 		return func(ctx context.Context, host string) ([]string, error) {
-			return net.DefaultResolver.LookupHost(ctx, host)
+			return sysResolver(s.IPv6).LookupHost(ctx, host)
 		}
 	}
 	if !settings.IsIP(s.LocalDNS) {
@@ -49,7 +49,7 @@ func (d *Daemon) bootResolver(s settings.Settings) func(ctx context.Context, hos
 			return nil
 		}
 		return func(ctx context.Context, host string) ([]string, error) {
-			return net.DefaultResolver.LookupHost(ctx, host)
+			return sysResolver(s.IPv6).LookupHost(ctx, host)
 		}
 	}
 	server, allow6 := s.LocalDNS, s.IPv6
@@ -82,7 +82,7 @@ func (d *Daemon) bootLookup4(s settings.Settings) func(ctx context.Context, host
 		return nil // 同 bootResolver:明文系统解析在防逃逸下一个包都不该发
 	}
 	return func(ctx context.Context, host string) ([]string, error) {
-		ips, err := net.DefaultResolver.LookupIP(ctx, "ip4", host)
+		ips, err := sysResolver(s.IPv6).LookupIP(ctx, "ip4", host)
 		var de *net.DNSError
 		if errors.As(err, &de) && de.IsNotFound {
 			return nil, errNoARecord
@@ -99,6 +99,12 @@ func (d *Daemon) bootLookup4(s settings.Settings) func(ctx context.Context, host
 		}
 		return out, nil
 	}
+}
+
+// sysResolver 交给系统配的 DNS 服务器解析时用的解析器:关着 IPv6 时 IPv6 地址的 DNS 服务器不去连(Go 自己的解析器才管得到,
+// 见 directnet.Resolver);Linux 的闸按标记放行本服务。
+func sysResolver(allow6 bool) *net.Resolver {
+	return directnet.Resolver((&net.Dialer{Timeout: 4 * time.Second, Control: netmode.SelfControl}).DialContext, func() bool { return allow6 })
 }
 
 // v6OnlyHosts 用域名写的节点里,只解析得到 IPv6 地址的那些(域名 → true)。关着 IPv6 时内核给节点域名解析按 ipv4_only 来

@@ -274,7 +274,7 @@ func tcping(ctx context.Context, host, port string, resolve func(context.Context
 		network = "tcp4" // 关着 IPv6:域名交给系统解析时也只拨 IPv4,写成 IPv6 地址的直接拨不出去
 	}
 	start := time.Now()
-	c, err := (&net.Dialer{}).DialContext(ctx, network, addr)
+	c, err := (&net.Dialer{Resolver: sysResolver(allow6)}).DialContext(ctx, network, addr)
 	if err != nil {
 		return 0, err
 	}
@@ -298,7 +298,7 @@ func pingHost(ctx context.Context, host string, resolve func(context.Context, st
 	}
 	ip := net.ParseIP(host)
 	if ip == nil {
-		addrs, err := net.DefaultResolver.LookupIP(ctx, "ip4", host)
+		addrs, err := sysResolver(allow6).LookupIP(ctx, "ip4", host)
 		if err != nil || len(addrs) == 0 {
 			return 0, errors.New("解析失败")
 		}
