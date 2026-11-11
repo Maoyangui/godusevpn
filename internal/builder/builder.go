@@ -286,7 +286,7 @@ func buildConfig(in Input, rep *Report) ([]byte, error) {
 	// 「本地 DNS」在全局模式下只剩一个用处:给节点服务器自己的域名做解析(default_domain_resolver)。
 	// 设成 system 就是明文 53 发到路由器 / 运营商 —— 防流量逃逸开着的时候不能这么干,
 	// 换成加密的公共 DoH(按地址连,不再需要任何别的解析)。规则 / 直连模式不改,那本来就不承诺不直连。
-	localDNS := s.LocalDNS
+	localDNS := LocalDNS(s) // 关着 IPv6 时填的 IPv6 地址不去连
 	if localDNS == "system" && s.NoDirect && s.Mode == settings.ModeGlobal {
 		localDNS = SealedBootstrapDoH
 	}

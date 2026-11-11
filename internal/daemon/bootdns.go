@@ -16,6 +16,7 @@ import (
 
 	"golang.org/x/net/dns/dnsmessage"
 
+	"github.com/Maoyangui/godusevpn/internal/builder"
 	"github.com/Maoyangui/godusevpn/internal/directnet"
 	"github.com/Maoyangui/godusevpn/internal/netmode"
 	"github.com/Maoyangui/godusevpn/internal/profile"
@@ -32,6 +33,7 @@ import (
 
 // bootResolver 返回一个按当前设置解析节点域名的函数;返回 nil 表示这一轮不解析。
 func (d *Daemon) bootResolver(s settings.Settings) func(ctx context.Context, host string) ([]string, error) {
+	s.LocalDNS = builder.LocalDNS(s) // 关着 IPv6 时填的 IPv6 地址不去连,和配置里一致
 	sealed := s.NoDirect && s.Mode == settings.ModeGlobal
 	if s.LocalDNS == "system" {
 		if sealed {
@@ -58,6 +60,7 @@ func (d *Daemon) bootResolver(s settings.Settings) func(ctx context.Context, hos
 // 只有「本地 DNS」是按地址连的 DoH 时才需要:那时节点域名只问了 A(见 lookupDoH);系统解析器本来就把 IPv6 地址一起给了,
 // 不用另外问,防逃逸下不解析的那几种情况(见 bootResolver)也就不问。
 func (d *Daemon) bootLookup6(s settings.Settings) func(ctx context.Context, host string) ([]string, error) {
+	s.LocalDNS = builder.LocalDNS(s)
 	if !settings.IsIP(s.LocalDNS) {
 		return nil
 	}
@@ -70,6 +73,7 @@ func (d *Daemon) bootLookup6(s settings.Settings) func(ctx context.Context, host
 // bootLookup4 返回一个只问 IPv4 地址的查询,给 v6OnlyHosts 再确认一次"真的没有 A 记录"用:明确答了"没有"才返回 errNoARecord,
 // 超时、上游出错都是别的错误(不下结论)。和 bootResolver 用同一台解析器;防逃逸下不解析的那几种情况返回 nil。
 func (d *Daemon) bootLookup4(s settings.Settings) func(ctx context.Context, host string) ([]string, error) {
+	s.LocalDNS = builder.LocalDNS(s)
 	if settings.IsIP(s.LocalDNS) {
 		server, allow6 := s.LocalDNS, s.IPv6
 		return func(ctx context.Context, host string) ([]string, error) { return lookupDoH(ctx, server, host, allow6) }

@@ -173,3 +173,19 @@ func TestSealedPrivacyBoundaryUnchanged(t *testing.T) {
 		})
 	}
 }
+
+// 「本地 DNS」填的是 IPv6 地址而「允许 IPv6」关着:连它就是在本机走 IPv6(本地 DNS 是直连的),换成按地址连的公共 DoH;
+// 开着 IPv6 时照用。不分模式。
+func TestLocalDNSv6WhenIPv6Off(t *testing.T) {
+	for _, mode := range []string{settings.ModeRule, settings.ModeGlobal, settings.ModeDirect} {
+		s := settings.Default()
+		s.Mode, s.LocalDNS = mode, "2001:db8::53"
+		if got := dnsServerByTag(t, sealedBuild(t, s), "local")["server"]; got != SealedBootstrapDoH {
+			t.Fatalf("%s 模式、关着 IPv6:本地 DNS 应换成 %s,得到 %v", mode, SealedBootstrapDoH, got)
+		}
+		s.IPv6 = true
+		if got := dnsServerByTag(t, sealedBuild(t, s), "local")["server"]; got != "2001:db8::53" {
+			t.Fatalf("%s 模式、开着 IPv6:照用填的地址,得到 %v", mode, got)
+		}
+	}
+}

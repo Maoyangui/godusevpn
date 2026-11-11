@@ -38,6 +38,7 @@ func (d *Daemon) directHTTP() *http.Client {
 		return d.http
 	}
 	s := d.getSettings()
+	s.LocalDNS = builder.LocalDNS(s)
 	resolve := d.bootResolver(s)
 	if !settings.IsIP(s.LocalDNS) { // system 或域名 DoH:都要先走系统解析器,闸开着时不走
 		server, allow6 := sealedDoH, s.IPv6

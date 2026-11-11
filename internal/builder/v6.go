@@ -93,6 +93,18 @@ func V6Blocked(p *profile.Profile, s settings.Settings, v6Only map[string]bool) 
 	return out
 }
 
+// LocalDNS 「本地 DNS」这一轮实际连哪台(直连、不经代理:节点域名的解析、守护进程隧道起来之前的 DoH、未连接时的临时测速实例)。
+// 填的是 IPv6 地址而「允许 IPv6」关着时,连它就是在本机走 IPv6:换成按地址连的加密公共 DoH(SealedBootstrapDoH,
+// 和防流量逃逸下替 system 的是同一台)。其余原样。局域网设备的 DNS(网关模式)本来就只认 IPv4 公网地址,不经这里。
+func LocalDNS(s settings.Settings) string {
+	if !s.IPv6 {
+		if ip, err := netip.ParseAddr(strings.TrimSuffix(strings.TrimPrefix(strings.TrimSpace(s.LocalDNS), "["), "]")); err == nil && ip.Is6() && !ip.Is4In6() {
+			return SealedBootstrapDoH
+		}
+	}
+	return s.LocalDNS
+}
+
 func isIPLiteral(server string) bool {
 	_, err := netip.ParseAddr(strings.TrimSuffix(strings.TrimPrefix(strings.TrimSpace(server), "["), "]"))
 	return err == nil

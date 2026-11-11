@@ -2661,7 +2661,7 @@ func (d *Daemon) registerHandlers() {
 			// (系统解析、ICMP、TCP、临时实例)。cancelOnGuard 再兜一层。
 			stop := d.cancelOnGuard(ctx, cancel)
 			s := d.getSettings()
-			res = probeDirect(ctx, p, set, d.logf, d.bootResolver(s), s.LocalDNS, s.IPv6, skip)
+			res = probeDirect(ctx, p, set, d.logf, d.bootResolver(s), builder.LocalDNS(s), s.IPv6, skip)
 			stop()
 		}
 		// 存一份拷贝,别和返回值共用一个 map:返回值交给控制口在锁外序列化(遍历),而下一次测速每测出一个就往

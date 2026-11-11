@@ -12,6 +12,8 @@ import (
 	"testing"
 	"time"
 
+	"golang.org/x/net/dns/dnsmessage"
+
 	"github.com/Maoyangui/godusevpn/internal/builder"
 	"github.com/Maoyangui/godusevpn/internal/ipc"
 	"github.com/Maoyangui/godusevpn/internal/settings"
@@ -261,17 +263,23 @@ func TestDirectRequestsIPv4OnlyWhenIPv6Off(t *testing.T) {
 		t.Fatalf("闸开着:关着 IPv6 还去拨 IPv6 地址了:%v", err)
 	}
 
-	// DoH 服务器自己写成 IPv6 地址:关着 IPv6 时不去连它
-	d.mu.Lock()
-	d.settings.LocalDNS = "::1"
-	d.mu.Unlock()
+	// DoH 服务器自己写成 IPv6 地址:关着 IPv6 时拨号这一步就不去连它;「本地 DNS」填的是 IPv6 地址时换成按地址连的公共 DoH
+	// (和配置里一致,见 builder.LocalDNS)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if _, err := d.bootResolver(d.getSettings())(ctx, "example.com"); !errors.As(err, &ae) {
-		t.Fatalf("关着 IPv6 还去连 IPv6 地址的 DoH:%v", err)
+	for _, qt := range []dnsmessage.Type{dnsmessage.TypeA, dnsmessage.TypeAAAA} {
+		if _, err := queryDoH(ctx, "::1", "example.com", qt, false); !errors.As(err, &ae) {
+			t.Fatalf("关着 IPv6 还去连 IPv6 地址的 DoH(%v):%v", qt, err)
+		}
 	}
-	if _, err := d.bootLookup6(d.getSettings())(ctx, "example.com"); !errors.As(err, &ae) {
-		t.Fatalf("关着 IPv6 还去连 IPv6 地址的 DoH(问 AAAA 那一路):%v", err)
+	s := d.getSettings()
+	s.LocalDNS = "2001:db8::53"
+	if got := builder.LocalDNS(s); got != builder.SealedBootstrapDoH {
+		t.Fatalf("关着 IPv6 时「本地 DNS」填 IPv6 地址:应换成 %s,得到 %s", builder.SealedBootstrapDoH, got)
+	}
+	s.IPv6 = true
+	if got := builder.LocalDNS(s); got != "2001:db8::53" {
+		t.Fatalf("开着 IPv6 时照用:得到 %s", got)
 	}
 }
 
