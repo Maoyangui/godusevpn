@@ -520,6 +520,22 @@ func (d *Daemon) writeSettings(next func(cur settings.Settings) (settings.Settin
 	return nil
 }
 
+// rollbackSelection 换选择(选节点、翻「线路自动」、保存设置里改的选择)要重建配置、而新配置备不出来时(旧内核照跑,
+// 返回「切换失败,保持当前连接」):把落盘的选择退回 prev,和正在跑的对得上 —— 界面按失败把开关拨回去,
+// 设置里却留着新选择的话,下一次重连会悄悄按它连,再拨一次开关又成了空操作。只退选择这几项;
+// 这期间选择又被改过(不是我们写的那份)就不动。
+func (d *Daemon) rollbackSelection(prev, wrote settings.Settings) {
+	if err := d.updateSettings(func(cur *settings.Settings) bool {
+		if cur.Selected != wrote.Selected || cur.LineAuto != wrote.LineAuto || cur.ActiveProfile != prev.ActiveProfile {
+			return false
+		}
+		cur.Selected, cur.LineAuto, cur.SelectedNode = prev.Selected, prev.LineAuto, prev.SelectedNode
+		return true
+	}); err != nil {
+		d.logf("切换失败后退回原来的选择没成功: %v", err)
+	}
+}
+
 // fillSelectedNode 选的是线路组时记着"线路组用不了的时候用哪台"(settings.SelectedNode:退回旧版本时磁盘上 selected 写的就是它,
 // 线路组从订阅里没了时这一轮也用它)。已经记着的还在组里就留着 —— 调用方可以先填上更合适的(用户原来在用的那台、
 // 组里此刻在用的那台);不然取第一台这一轮能用的。经控制口来的整份设置里没有它:选择没变就沿用原来记的。
@@ -2436,6 +2452,7 @@ func (d *Daemon) registerHandlers() {
 		}
 		tag := strings.TrimSpace(in.Tag)
 		s := d.getSettings()
+		prev := s
 		s.Selected = tag
 		if tag == "auto" {
 			s.Selected = ""
@@ -2452,6 +2469,7 @@ func (d *Daemon) registerHandlers() {
 			return nil, err
 		}
 		if err := d.applySelected(s.Selected); err != nil {
+			d.rollbackSelection(prev, s)
 			return nil, err
 		}
 		return d.stateView(), nil
@@ -2466,6 +2484,7 @@ func (d *Daemon) registerHandlers() {
 			return nil, err
 		}
 		s := d.getSettings()
+		prev := s
 		_, cur := d.activeProfile()
 		next := lineAutoSelection(cur, s.Selected, in.On, d.groupNow, d.v6BlockedNow(s), s.SelectedNode)
 		changed := next != s.Selected
@@ -2483,6 +2502,7 @@ func (d *Daemon) registerHandlers() {
 				d.logf("线路自动:关闭,固定到「%s」", next)
 			}
 			if err := d.applySelected(next); err != nil {
+				d.rollbackSelection(prev, s)
 				return nil, err
 			}
 		}
@@ -2990,6 +3010,7 @@ func (d *Daemon) registerHandlers() {
 				if next.Selected != prev.Selected {
 					// 和节点列表里切节点同一套:内核里没有 / 参数变了就重建,否则就地换、掐掉老连接、清掉出口与延迟重测
 					if err := d.applySelected(next.Selected); err != nil {
+						d.rollbackSelection(prev, next) // 换不过去:选择退回去,别的设置照存
 						return nil, err
 					}
 				}

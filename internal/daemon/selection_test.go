@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -15,6 +16,7 @@ import (
 	"github.com/Maoyangui/godusevpn/internal/ipc"
 	"github.com/Maoyangui/godusevpn/internal/paths"
 	"github.com/Maoyangui/godusevpn/internal/settings"
+	"github.com/Maoyangui/godusevpn/internal/state"
 )
 
 // oldSettingsFile 旧版本(v0.7.17 及更早)读这份设置文件看到的 selected:同一个 schema,不认识的键(lineAuto、selectedGroup)一律忽略。
@@ -224,5 +226,47 @@ func TestOutdatedRefetchTunnelOnlyOnce(t *testing.T) {
 	d.maybeRefresh(context.Background())
 	if n := hits.Load(); n < 4 {
 		t.Fatalf("过期的照旧走完整回退链: 拉了 %d 次", n)
+	}
+}
+
+// 翻「线路自动」/ 选节点要重建配置、而新配置备不出来(Prepare 失败,旧内核照跑):报错「切换失败,保持当前连接」,
+// 落盘的选择也退回去 —— 不然界面把开关拨回去了,设置里却已经是新选择:下一次重连悄悄按它连,再拨一次开关又成了空操作。
+func TestSelectionRollsBackWhenSwitchFails(t *testing.T) {
+	d := lineDaemon(t)
+	d.settings.Selected, d.settings.NoExitLookup = "hk-B", true
+	d.machine = state.New(state.Deps{ // 想连着、但怎么都备不出配置的状态机(不碰任何系统状态)
+		Prepare: func(context.Context) ([]byte, error) { return nil, errors.New("备不出配置") },
+		Start:   func([]byte) error { return nil },
+		Stop:    func() error { return nil },
+		Logf:    d.logf,
+		Backoff: []time.Duration{time.Hour},
+	})
+	d.machine.Connect()
+	defer d.machine.Disconnect()
+	startCore(t, d, lineOutbounds("hk-B", false, "http://127.0.0.1:1/")) // 内核里还没有线路组:选线路组要重建
+	raw, _ := json.Marshal(map[string]bool{"on": true})
+	if _, err := d.Dispatch(ipc.MSetLineAuto, raw); err == nil {
+		t.Fatal("新配置备不出来应当报错")
+	}
+	if s := d.getSettings(); s.Selected != "hk-B" || s.LineAuto {
+		t.Fatalf("开关失败:选择和开关都退回去,和正在跑的对得上: %q %v", s.Selected, s.LineAuto)
+	}
+	if got, err := settings.Load(paths.Settings()); err != nil || got.Selected != "hk-B" || got.LineAuto {
+		t.Fatalf("落盘的也退回去: %q %v %v", got.Selected, got.LineAuto, err)
+	}
+	if err := call(t, d, ipc.MSelectNode, map[string]string{"tag": "hk"}); err == nil {
+		t.Fatal("选线路组同样要重建,备不出来应当报错")
+	}
+	if s := d.getSettings(); s.Selected != "hk-B" || s.LineAuto {
+		t.Fatalf("选节点失败也退回去: %q %v", s.Selected, s.LineAuto)
+	}
+	next := d.getSettings()
+	next.Selected, next.LogDays = "hk", 5
+	raw, _ = json.Marshal(next)
+	if _, err := d.Dispatch(ipc.MSetSettings, raw); err == nil {
+		t.Fatal("保存设置时改的选择要重建,备不出来应当报错")
+	}
+	if s := d.getSettings(); s.Selected != "hk-B" || s.LogDays != 5 {
+		t.Fatalf("选择退回去,别的设置照存: %q %d", s.Selected, s.LogDays)
 	}
 }
