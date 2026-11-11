@@ -281,9 +281,10 @@ halt() {
 	echo " done."
 }
 # 拉起那一段(查有没有在跑 → 没有就拉起 → 等它出现)同一时间只让一个脚本做:不然守护进程刚崩时,用户手动起服务恰好
-# 撞上看门狗整分钟的那一下,两边都查到没在跑,就各拉起一个。BusyBox 和 Entware 上不保证有 flock,用 mkdir 建锁目录
+# 撞上看门狗整分钟的那一下,两边都查到没在跑,就各拉起一个。stop / kill 也拿这把锁,写"用户停了"的标记和停守护进程
+# 都在锁里(见下面 stop 那段)。BusyBox 和 Entware 上不保证有 flock,用 mkdir 建锁目录
 # (建成了就是拿到了,是原子的),里面 owner 写持有者的进程号和开机秒数(/proc/uptime,不受改系统时间影响)。拿不到就
-# 隔一秒再试;持有者已经不在了、锁拿了超过 LOCKTTL 秒(正常最多十来秒)、或者是重启前留下的(锁在 /opt 上,重启不丢),
+# 隔一秒再试;持有者已经不在了、锁拿了超过 LOCKTTL 秒(正常最多十几秒)、或者是重启前留下的(锁在 /opt 上,重启不丢),
 # 当成没放掉的旧锁清掉。拿着锁时被 TERM / INT / HUP 打断也先放锁。
 LOCK=/opt/var/run/godusevpn.lock
 LOCKTTL=30
@@ -335,9 +336,20 @@ unlock() {
 }
 # launch 照 rc.func 的 start:守护进程已经在跑就不再起(重复 start 没事);否则在后台拉起,等它出现,最多 10 秒,
 # 出现了才算起来了。整段拿着锁(见上)。开机自启的开关不在这里看(只有开机的 start 看,见上)。
+# "用户停了"的标记也在锁里看、在锁里去:看门狗($1 是 watchdog)拿到锁再看一次,有标记就不拉 —— 它在锁外看那一眼之后、
+# 拿到锁之前,用户的 stop 可能已经写下标记停完了;起服务的去掉标记(用户要它起来),和 stop 在锁里写标记前后分明,
+# 同时跑的 start 和 stop 谁后拿到锁就照谁的,不会出现停着、标记却被去掉(一分钟后看门狗又拉起来)的情形。
 launch() {
-	echo " Starting $DESC..."
 	lock
+	if [ "$1" = watchdog ]; then
+		if [ -f "$STOPPED" ]; then
+			unlock
+			return 0
+		fi
+	else
+		rm -f "$STOPPED"
+	fi
+	echo " Starting $DESC..."
 	if [ -n "$(daemons)" ]; then
 		unlock
 		echo " $DESC is already running."
@@ -385,15 +397,21 @@ start | manual-start | restart | reconfigure)
 	fi
 	launch "$1"
 	rc=$?
-	# 去标记、挂定时放在拉起之后(拉起那一段有锁,看门狗赶上整分钟那一下也只会起一个);没拉起来也照样挂,看门狗每分钟再试
-	rm -f "$STOPPED"
+	# 标记在 launch 里、拿着锁去掉;定时挂在拉起之后(拉起那一段有锁,看门狗赶上整分钟那一下也只会起一个)。
+	# 没拉起来也照样挂,看门狗每分钟再试
 	command -v cru >/dev/null 2>&1 && cru a $PROCS "* * * * * /opt/etc/init.d/S99godusevpn watchdog"
 	exit $rc
 	;;
 stop | kill)
+	# 写标记、停守护进程都拿着拉起那一段的锁:守护进程崩着时 stop 撞上看门狗,看门狗可能已经看过标记(还没写)、正在拉起,
+	# 刚拉起的还没出现,不在锁里的话 stop 一个都停不到就报 done,守护进程随后起来、一直跑着。拿到锁时那边要么已经拉起来了
+	# (这里停掉它),要么还没拿到锁(拿到后看到标记,不拉)
+	lock
 	mkdir -p "${STOPPED%/*}" && touch "$STOPPED"
 	if [ "$1" = kill ]; then halt KILL; else halt TERM; fi
-	exit $?
+	rc=$?
+	unlock
+	exit $rc
 	;;
 check)
 	if [ -n "$(daemons)" ]; then

@@ -60,8 +60,16 @@ func fakeGodusevpn(dir string, args []string) int {
 	} else if err != nil {
 		code = -1
 	}
-	_ = os.WriteFile(filepath.Join(dir, "caller.out"), []byte(fmt.Sprintf("%d\n%s", code, out)), 0o644)
+	_ = os.WriteFile(filepath.Join(dir, callerOutName()), []byte(fmt.Sprintf("%d\n%s", code, out)), 0o644)
 	return 0
+}
+
+// callerOutName 调用者把结果写进哪个文件:默认 caller.out,同时跑几个调用者时各用各的(FAKE_OUT)。
+func callerOutName() string {
+	if n := os.Getenv("FAKE_OUT"); n != "" {
+		return n
+	}
+	return "caller.out"
 }
 
 // fakeRCFunc 照 Entware 的 /opt/etc/init.d/rc.func 写的替身:按进程名 pidof / killall;start 在后台拉起 "$PROC $ARGS",
@@ -230,9 +238,14 @@ func (r *entwareRig) caller(sub, action string, env ...string) (code int, out st
 
 // callerRun 同 caller,出错时返回错误而不是让测试失败(别的 goroutine 里用)。
 func (r *entwareRig) callerRun(sub, action string, env ...string) (code int, out string, alive bool, err error) {
-	_ = os.Remove(filepath.Join(r.dir, "caller.out"))
+	return r.callerRunOut("caller.out", sub, action, env...)
+}
+
+// callerRunOut 同 callerRun,结果写进 dir 下的 outName(几个调用者同时跑时各用各的文件)。
+func (r *entwareRig) callerRunOut(outName, sub, action string, env ...string) (code int, out string, alive bool, err error) {
+	_ = os.Remove(filepath.Join(r.dir, outName))
 	c := exec.Command(r.fake, sub)
-	c.Env = r.envWith(append([]string{"FAKE_ACTION=" + action}, env...)...)
+	c.Env = r.envWith(append([]string{"FAKE_ACTION=" + action, "FAKE_OUT=" + outName}, env...)...)
 	if err := c.Start(); err != nil {
 		return 0, "", false, err
 	}
@@ -244,7 +257,7 @@ func (r *entwareRig) callerRun(sub, action string, env ...string) (code int, out
 		_ = c.Process.Kill()
 		return 0, "", false, fmt.Errorf("调用者跑 %s 超时", action)
 	}
-	b, err := os.ReadFile(filepath.Join(r.dir, "caller.out"))
+	b, err := os.ReadFile(filepath.Join(r.dir, outName))
 	if err != nil {
 		return 0, "", false, nil // 被杀了,结果没写出来
 	}
@@ -785,6 +798,153 @@ func TestEntwareStartRacesWatchdog(t *testing.T) {
 					t.Fatalf("%s 第 %d 轮:应只有一边真的拉起(记一笔 Started),得 %q", v.name, i, got)
 				}
 			}
+		}
+	})
+}
+
+// 梅林(Entware):守护进程崩着时用户 godusevpn stop 恰好撞上看门狗整分钟的那一下 —— 看门狗先看了一眼,没有"用户停了"的
+// 标记、也没在跑,就去拉起;stop 随后写下标记去停,可刚拉起的守护进程还没出现,stop 一个都没停到就报 done,守护进程随后
+// 起来、一直跑着(标记在,看门狗以后也不管它)。现在 stop / kill 和拉起那一段拿同一把锁:拿到锁再写标记、再停;看门狗拿到锁
+// 之后再看一次标记。真并发两路(一路像 cru 那样跑 watchdog,一路是同名的调用者跑 godusevpn stop),照常、慢起(拉起之后
+// 0.3 秒守护进程才出现,路由器从 U 盘加载程序就是这样)各重复多轮,单数轮让看门狗晚出发几毫秒、双数轮让 stop 晚出发:
+// 每轮 stop 都活着拿到 0;stop 返回时、两边都跑完再等一会儿,守护进程都不在;标记留着,锁放掉了。
+func TestEntwareStopRacesWatchdog(t *testing.T) {
+	eachToolset(t, func(t *testing.T, busybox bool) {
+		r := newEntwareRig(t, "gvsrace", busybox)
+		r.write("slowexec", "#!/bin/sh\nsleep 0.3\nexec \"$@\"\n", 0o755)
+		slow := strings.Replace(r.localize(entwareScript), `PREARGS=""`, `PREARGS="`+filepath.Join(r.dir, "slowexec")+`"`, 1)
+		if !strings.Contains(slow, "slowexec") {
+			t.Fatal("脚本模板变了:没有 PREARGS=\"\"")
+		}
+		var bad []string
+		for _, v := range []struct{ name, script string }{{"照常", r.localize(entwareScript)}, {"慢起", slow}} {
+			r.write("S99godusevpn", v.script, 0o755)
+			for i := 0; i < 8; i++ {
+				// 守护进程刚崩:没在跑、没有"用户停了"的标记
+				for _, pid := range r.alive() {
+					_ = syscall.Kill(pid, syscall.SIGKILL)
+				}
+				waitFor(t, "守护进程没了", func() bool { return len(r.alive()) == 0 && len(entwareDaemonsByScan(r.name)) == 0 })
+				_ = os.Remove(r.stopped)
+				r.clearLogs()
+
+				var (
+					wg             sync.WaitGroup
+					wOut, sOut     string
+					wErr, sErr     error
+					code           int
+					stopAlive      bool
+					atStop         []int
+					wDelay, sDelay time.Duration
+					jitter         = time.Duration(i%4) * 3 * time.Millisecond
+				)
+				if i%2 == 1 {
+					wDelay = jitter
+				} else {
+					sDelay = jitter
+				}
+				gate := make(chan struct{})
+				wg.Add(2)
+				go func() { // cru 的看门狗
+					defer wg.Done()
+					<-gate
+					time.Sleep(wDelay)
+					wOut, wErr = r.run("watchdog")
+				}()
+				go func() { // 用户的 godusevpn stop
+					defer wg.Done()
+					<-gate
+					time.Sleep(sDelay)
+					code, sOut, stopAlive, sErr = r.callerRun("stop", "stop")
+					atStop = entwareDaemonsByScan(r.name) // stop 一返回就数
+				}()
+				close(gate)
+				wg.Wait()
+				if wErr != nil || sErr != nil || !stopAlive || code != 0 {
+					t.Fatalf("%s 第 %d 轮:看门狗 %v / stop alive=%v code=%d %v\n看门狗: %s\nstop: %s", v.name, i, wErr, stopAlive, code, sErr, wOut, sOut)
+				}
+				later := r.settled()
+				if len(atStop) != 0 || len(later) != 0 || len(entwareDaemonsByScan(r.name)) != 0 {
+					bad = append(bad, fmt.Sprintf("%s 第 %d 轮:stop 返回时守护进程 %v,两边跑完过一会儿 %v\n看门狗: %s\nstop: %s",
+						v.name, i, atStop, later, strings.TrimSpace(wOut), strings.TrimSpace(sOut)))
+					for _, pid := range later {
+						_ = syscall.Kill(pid, syscall.SIGKILL)
+					}
+				}
+				if !r.marked() {
+					t.Fatalf("%s 第 %d 轮:stop 之后标记要留着", v.name, i)
+				}
+				if r.locked() {
+					t.Fatalf("%s 第 %d 轮:两边都跑完了,锁应已放掉", v.name, i)
+				}
+			}
+		}
+		if len(bad) > 0 {
+			t.Fatalf("stop 报 done 了,守护进程却还在跑(%d 轮):\n%s", len(bad), strings.Join(bad, "\n"))
+		}
+	})
+}
+
+// 同时跑的 godusevpn start 和 godusevpn stop(服务在跑):结果要前后一致 —— 守护进程在跑就没有"用户停了"的标记(看门狗照管),
+// 停着就留着标记(不然一分钟后看门狗又把它拉起来,stop 白停)。以前 start 在拉起之后、锁外才去掉标记:stop 在中间写下标记、
+// 停掉守护进程,start 随后把标记去掉,服务停着、标记没了。现在标记在锁里写、在锁里去,谁后拿到锁就照谁的。
+// 真并发两路同名的调用者,单双数轮轮流让一边晚出发几毫秒,重复多轮。
+func TestEntwareStartStopConsistent(t *testing.T) {
+	eachToolset(t, func(t *testing.T, busybox bool) {
+		r := newEntwareRig(t, "gvstst", busybox)
+		var bad []string
+		for i := 0; i < 12; i++ {
+			if len(r.alive()) == 0 {
+				if out, err := r.run(startAction(initEntware)); err != nil {
+					t.Fatalf("第 %d 轮起服务: %v\n%s", i, err, out)
+				}
+				waitFor(t, "守护进程起来", func() bool { return len(r.alive()) == 1 })
+			}
+			_ = os.Remove(r.stopped)
+
+			var (
+				wg             sync.WaitGroup
+				aOut, bOut     string
+				aErr, bErr     error
+				aCode, bCode   int
+				aAlive, bAlive bool
+				aDelay, bDelay time.Duration
+				jitter         = time.Duration(i%4) * 3 * time.Millisecond
+			)
+			if i%2 == 1 {
+				aDelay = jitter
+			} else {
+				bDelay = jitter
+			}
+			gate := make(chan struct{})
+			wg.Add(2)
+			go func() {
+				defer wg.Done()
+				<-gate
+				time.Sleep(aDelay)
+				aCode, aOut, aAlive, aErr = r.callerRunOut("start.out", "start", startAction(initEntware))
+			}()
+			go func() {
+				defer wg.Done()
+				<-gate
+				time.Sleep(bDelay)
+				bCode, bOut, bAlive, bErr = r.callerRunOut("stop.out", "stop", "stop")
+			}()
+			close(gate)
+			wg.Wait()
+			if aErr != nil || bErr != nil || !aAlive || !bAlive || aCode != 0 || bCode != 0 {
+				t.Fatalf("第 %d 轮:start alive=%v code=%d %v / stop alive=%v code=%d %v\nstart: %s\nstop: %s", i, aAlive, aCode, aErr, bAlive, bCode, bErr, aOut, bOut)
+			}
+			n, m := len(r.settled()), r.marked()
+			if !(n == 1 && !m) && !(n == 0 && m) {
+				bad = append(bad, fmt.Sprintf("第 %d 轮:守护进程 %d 个,标记=%v\nstart: %s\nstop: %s", i, n, m, strings.TrimSpace(aOut), strings.TrimSpace(bOut)))
+			}
+			if r.locked() {
+				t.Fatalf("第 %d 轮:两边都跑完了,锁应已放掉", i)
+			}
+		}
+		if len(bad) > 0 {
+			t.Fatalf("start 和 stop 同时跑,结果前后对不上(停着却没标记 = 一分钟后看门狗又拉起来)%d 轮:\n%s", len(bad), strings.Join(bad, "\n"))
 		}
 	})
 }
