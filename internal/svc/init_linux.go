@@ -280,11 +280,66 @@ halt() {
 	done
 	echo " done."
 }
+# 拉起那一段(查有没有在跑 → 没有就拉起 → 等它出现)同一时间只让一个脚本做:不然守护进程刚崩时,用户手动起服务恰好
+# 撞上看门狗整分钟的那一下,两边都查到没在跑,就各拉起一个。BusyBox 和 Entware 上不保证有 flock,用 mkdir 建锁目录
+# (建成了就是拿到了,是原子的),里面 owner 写持有者的进程号和开机秒数(/proc/uptime,不受改系统时间影响)。拿不到就
+# 隔一秒再试;持有者已经不在了、锁拿了超过 LOCKTTL 秒(正常最多十来秒)、或者是重启前留下的(锁在 /opt 上,重启不丢),
+# 当成没放掉的旧锁清掉。拿着锁时被 TERM / INT / HUP 打断也先放锁。
+LOCK=/opt/var/run/godusevpn.lock
+LOCKTTL=30
+MYLOCK=
+uptime_s() { read -r s _ < /proc/uptime; echo "${s%%.*}"; }
+# stale 锁的记录($1:"进程号 开机秒数")作不作数:持有者不在了(退出了没收尸的也算;进程号是自己的,说明是重启前
+# 留下的)、开机秒数比现在还大(重启前留下的)、或者拿了超过 LOCKTTL 秒,都不作数。记录不全(刚建还没写上、写坏了)
+# 的不在这里判,由 lock 自己计时。
+stale() {
+	case "$1" in *" "*) ;; *) return 1 ;; esac
+	pid=${1%% *} up=${1#* }
+	case "$pid:$up" in *[!0-9:]* | :* | *: | 0?* | *:0?*) return 1 ;; esac
+	now=$(uptime_s)
+	[ "$now" -lt "$up" ] || [ $((now - up)) -gt $LOCKTTL ] || [ "$pid" = $$ ] || [ ! -d /proc/$pid ] && return 0
+	[ "$(sed -n 's/.*) \(.\) .*/\1/p' /proc/$pid/stat 2>/dev/null)" = Z ]
+}
+lock() {
+	trap unlock EXIT
+	trap 'unlock; exit 129' HUP
+	trap 'unlock; exit 130' INT
+	trap 'unlock; exit 143' TERM
+	mkdir -p "${LOCK%/*}" 2>/dev/null
+	seen=- waited=0 tries=0
+	# 记录在每次建目录之前算好,建成了紧接着写进去:建好目录到写上记录之间越短,别人看到"没记录"的锁越少
+	until MYLOCK="$$ $(uptime_s)"; mkdir "$LOCK" 2>/dev/null; do
+		if [ ! -d "$LOCK" ]; then
+			# 锁目录不在却建不成(/opt 只读之类):不加锁,照以前那样起。刚被放掉的话下一圈就建成了
+			tries=$((tries + 1))
+			[ $tries -ge 3 ] && { MYLOCK=; return 0; }
+			continue
+		fi
+		owner=$(cat "$LOCK/owner" 2>/dev/null)
+		[ "$owner" = "$seen" ] || { seen=$owner; waited=0; }
+		if stale "$owner" || [ $waited -ge $LOCKTTL ]; then
+			# 清之前再看一眼还是不是这一把,别把别人刚建的新锁清掉
+			[ "$(cat "$LOCK/owner" 2>/dev/null)" = "$owner" ] && rm -rf "$LOCK"
+			continue
+		fi
+		sleep 1
+		waited=$((waited + 1))
+	done
+	echo "$MYLOCK" > "$LOCK/owner" || { rm -rf "$LOCK"; MYLOCK=; }
+}
+unlock() {
+	[ -n "$MYLOCK" ] && [ "$(cat "$LOCK/owner" 2>/dev/null)" = "$MYLOCK" ] && rm -rf "$LOCK"
+	MYLOCK=
+	trap - EXIT HUP INT TERM
+	return 0
+}
 # launch 照 rc.func 的 start:守护进程已经在跑就不再起(重复 start 没事);否则在后台拉起,等它出现,最多 10 秒,
-# 出现了才算起来了。开机自启的开关不在这里看(只有开机的 start 看,见上)。
+# 出现了才算起来了。整段拿着锁(见上)。开机自启的开关不在这里看(只有开机的 start 看,见上)。
 launch() {
 	echo " Starting $DESC..."
+	lock
 	if [ -n "$(daemons)" ]; then
+		unlock
 		echo " $DESC is already running."
 		return 0
 	fi
@@ -292,6 +347,7 @@ launch() {
 	i=0
 	until [ -n "$(daemons)" ]; do
 		if [ $i -ge 10 ]; then
+			unlock
 			echo " $DESC failed to start."
 			logger "Failed to start $DESC from ${CALLER:-$1}." 2>/dev/null
 			return 255
@@ -299,6 +355,7 @@ launch() {
 		sleep 1
 		i=$((i + 1))
 	done
+	unlock
 	logger "Started $DESC from ${CALLER:-$1}." 2>/dev/null
 	echo " done."
 }
@@ -328,7 +385,7 @@ start | manual-start | restart | reconfigure)
 	fi
 	launch "$1"
 	rc=$?
-	# 去标记、挂定时放在拉起之后:先挂上的话赶上整分钟那一下,看门狗和这里会各拉起一个。没拉起来也照样挂,看门狗每分钟再试
+	# 去标记、挂定时放在拉起之后(拉起那一段有锁,看门狗赶上整分钟那一下也只会起一个);没拉起来也照样挂,看门狗每分钟再试
 	rm -f "$STOPPED"
 	command -v cru >/dev/null 2>&1 && cru a $PROCS "* * * * * /opt/etc/init.d/S99godusevpn watchdog"
 	exit $rc

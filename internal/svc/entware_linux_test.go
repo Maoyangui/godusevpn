@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -185,19 +186,26 @@ func (r *entwareRig) render(enabled bool) {
 	r.write("S99godusevpn", r.localize(s), 0o755)
 }
 
-// localize 脚本里的程序名、rc.func、标记、PATH 换到替身环境。
+// localize 脚本里的程序名、rc.func、标记、拉起用的锁、PATH 换到替身环境。
 func (r *entwareRig) localize(s string) string {
 	r.t.Helper()
 	orig := s
 	s = strings.Replace(s, "PROCS=godusevpn", "PROCS="+r.name, 1)
 	s = strings.Replace(s, "/opt/etc/init.d/rc.func", filepath.Join(r.dir, "rc.func"), 1)
 	s = strings.Replace(s, "/opt/var/lib/godusevpn/stopped", r.stopped, 1)
+	s = strings.Replace(s, "/opt/var/run/godusevpn.lock", r.lockDir(), 1)
 	s = strings.Replace(s, "PATH=/opt/bin:", "PATH="+r.bin+":/opt/bin:", 1)
-	if s == orig || strings.Count(s, r.dir) != 3 || !strings.Contains(s, "PROCS="+r.name+"\n") {
+	if s == orig || strings.Count(s, r.dir) != 4 || !strings.Contains(s, "PROCS="+r.name+"\n") {
 		r.t.Fatalf("脚本模板变了,测试里的替换要跟上:\n%s", s)
 	}
 	return s
 }
+
+// lockDir 替身环境里拉起用的锁目录(脚本里是 /opt/var/run/godusevpn.lock;上一级目录一开始不在,脚本自己建)。
+func (r *entwareRig) lockDir() string { return filepath.Join(r.dir, "run", "godusevpn.lock") }
+
+// locked 锁目录在不在。
+func (r *entwareRig) locked() bool { _, err := os.Stat(r.lockDir()); return err == nil }
 
 // legacy 以前的做法:起停全交给 rc.func(和改之前的脚本落到 rc.func 的那一段一样),返回脚本路径。
 func (r *entwareRig) legacy() string {
@@ -213,11 +221,20 @@ func (r *entwareRig) envWith(kv ...string) []string {
 // 返回退出码、输出,以及调用者是不是活着跑完了 —— 被脚本杀了就没有结果。
 func (r *entwareRig) caller(sub, action string, env ...string) (code int, out string, alive bool) {
 	r.t.Helper()
+	code, out, alive, err := r.callerRun(sub, action, env...)
+	if err != nil {
+		r.t.Fatal(err)
+	}
+	return code, out, alive
+}
+
+// callerRun 同 caller,出错时返回错误而不是让测试失败(别的 goroutine 里用)。
+func (r *entwareRig) callerRun(sub, action string, env ...string) (code int, out string, alive bool, err error) {
 	_ = os.Remove(filepath.Join(r.dir, "caller.out"))
 	c := exec.Command(r.fake, sub)
 	c.Env = r.envWith(append([]string{"FAKE_ACTION=" + action}, env...)...)
 	if err := c.Start(); err != nil {
-		r.t.Fatal(err)
+		return 0, "", false, err
 	}
 	done := make(chan error, 1)
 	go func() { done <- c.Wait() }()
@@ -225,15 +242,15 @@ func (r *entwareRig) caller(sub, action string, env ...string) (code int, out st
 	case <-done:
 	case <-time.After(40 * time.Second):
 		_ = c.Process.Kill()
-		r.t.Fatalf("调用者跑 %s 超时", action)
+		return 0, "", false, fmt.Errorf("调用者跑 %s 超时", action)
 	}
 	b, err := os.ReadFile(filepath.Join(r.dir, "caller.out"))
 	if err != nil {
-		return 0, "", false // 被杀了,结果没写出来
+		return 0, "", false, nil // 被杀了,结果没写出来
 	}
 	first, rest, _ := strings.Cut(string(b), "\n")
 	code, _ = strconv.Atoi(first)
-	return code, rest, true
+	return code, rest, true, nil
 }
 
 // run 测试进程自己跑一遍脚本:调用者不叫这个名字,和 cru 的看门狗、开机时 rc.unslung 调它一样。
@@ -480,6 +497,9 @@ func TestEntwareStartFromCaller(t *testing.T) {
 		if got := r.log("cru.log"); !strings.Contains(got, " watchdog") {
 			t.Fatalf("没起来也要挂上看门狗定时,每分钟再试: %q", got)
 		}
+		if r.locked() {
+			t.Fatal("没起来(255)也要放掉拉起用的锁")
+		}
 
 		// 5. 对照:以前的做法(start 交给 rc.func,按名字 pidof)把调用者当成服务已经在跑,一个都不拉
 		code, out, alive = r.caller("install", "start", "FAKE_SCRIPT="+r.legacy())
@@ -699,6 +719,227 @@ func TestEntwareReconfigureRestartsDaemon(t *testing.T) {
 		}
 		waitSignaled(t, done, syscall.SIGHUP)
 		waitFor(t, "对照里别的同名进程也被 HUP 打掉", func() bool { return !fakeAlive(bystander, r.name) })
+	})
+}
+
+// 梅林(Entware):守护进程刚崩,用户手动起服务恰好撞上看门狗整分钟的那一下 —— 两边都查到没在跑,就各拉起一个
+// (两个守护进程抢同一个控制口、同一张 TUN 和防火墙规则)。现在"查有没有在跑 → 没有就拉起 → 等它出现"那一段有锁
+// (mkdir 建的锁目录),同一时间只有一个脚本在拉,另一边拿到锁时守护进程已经在了,只说 already running。
+// 真并发两路:一路像 cru 那样跑 watchdog,一路是同名的调用者跑 godusevpn start 的动作,同时放出去,重复多轮,
+// 每轮之后都只有一个守护进程、只有一边真的拉起(记了一笔 Started)、锁放掉了。"慢起"那几轮让守护进程拉起之后
+// 0.3 秒才出现(路由器从 U 盘加载几十 MB 的程序就是这样),撞车的窗口放大:没有锁时这几轮都会起两个。
+func TestEntwareStartRacesWatchdog(t *testing.T) {
+	eachToolset(t, func(t *testing.T, busybox bool) {
+		r := newEntwareRig(t, "gvrace", busybox)
+		r.write("slowexec", "#!/bin/sh\nsleep 0.3\nexec \"$@\"\n", 0o755)
+		slow := strings.Replace(r.localize(entwareScript), `PREARGS=""`, `PREARGS="`+filepath.Join(r.dir, "slowexec")+`"`, 1)
+		if !strings.Contains(slow, "slowexec") {
+			t.Fatal("脚本模板变了:没有 PREARGS=\"\"")
+		}
+		for _, v := range []struct{ name, script string }{{"照常", r.localize(entwareScript)}, {"慢起", slow}} {
+			r.write("S99godusevpn", v.script, 0o755)
+			for i := 0; i < 5; i++ {
+				// 守护进程刚崩:没在跑、没有"用户停了"的标记
+				for _, pid := range r.alive() {
+					_ = syscall.Kill(pid, syscall.SIGKILL)
+				}
+				waitFor(t, "守护进程没了", func() bool { return len(r.alive()) == 0 })
+				_ = os.Remove(r.stopped)
+				r.clearLogs()
+
+				var (
+					wg          sync.WaitGroup
+					wOut, cOut  string
+					wErr, cErr  error
+					code        int
+					callerAlive bool
+				)
+				gate := make(chan struct{})
+				wg.Add(2)
+				go func() { // cru 的看门狗;错开 0~9 毫秒,把两边查"在不在跑"的先后来回挪
+					defer wg.Done()
+					<-gate
+					time.Sleep(time.Duration(i%4) * 3 * time.Millisecond)
+					wOut, wErr = r.run("watchdog")
+				}()
+				go func() { // 用户的 godusevpn start
+					defer wg.Done()
+					<-gate
+					code, cOut, callerAlive, cErr = r.callerRun("start", startAction(initEntware))
+				}()
+				close(gate)
+				wg.Wait()
+				if wErr != nil || cErr != nil || !callerAlive || code != 0 {
+					t.Fatalf("%s 第 %d 轮:看门狗 %v / 手动 start alive=%v code=%d %v\n看门狗: %s\n手动 start: %s", v.name, i, wErr, callerAlive, code, cErr, wOut, cOut)
+				}
+				if ds := entwareDaemonsByScan(r.name); len(ds) != 1 {
+					t.Fatalf("%s 第 %d 轮:看门狗和手动 start 同时跑,应只有一个守护进程,得 %v\n看门狗: %s\n手动 start: %s", v.name, i, ds, wOut, cOut)
+				}
+				if got := r.settled(); len(got) != 1 {
+					t.Fatalf("%s 第 %d 轮:过一会儿应还是只有一个守护进程,得 %v", v.name, i, got)
+				}
+				if r.locked() {
+					t.Fatalf("%s 第 %d 轮:两边都跑完了,锁应已放掉", v.name, i)
+				}
+				if got := r.log("logger.log"); !busybox && strings.Count(got, "Started ") != 1 { // BusyBox 的 logger 记进系统日志
+					t.Fatalf("%s 第 %d 轮:应只有一边真的拉起(记一笔 Started),得 %q", v.name, i, got)
+				}
+			}
+		}
+	})
+}
+
+// uptimeSeconds 开机到现在的秒数(/proc/uptime 的整数部分,和脚本记进锁里的一样)。
+func uptimeSeconds(t *testing.T) int {
+	t.Helper()
+	b, err := os.ReadFile("/proc/uptime")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := strings.Fields(string(b))
+	if len(f) == 0 {
+		t.Fatalf("/proc/uptime: %q", b)
+	}
+	n, err := strconv.Atoi(strings.SplitN(f[0], ".", 2)[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	return n
+}
+
+// 拉起那一段的锁:mkdir 建的锁目录,里面 owner 写持有者的进程号和开机秒数。别人拿着(进程还在、没超过 30 秒)就等着,
+// 放掉了接着起;持有者已经不在、锁拿了超过 30 秒、或者是重启前留下的(开机秒数比现在还大),当成没放掉的旧锁清掉,
+// 不用干等;记录没写上的(持有者刚建完目录就没了),等满时限也清掉。退出时都放锁:已经在跑、起来了、被 TERM 打断
+// (没起来报 255 的那条见 TestEntwareStartFromCaller)。
+func TestEntwareLaunchLock(t *testing.T) {
+	eachToolset(t, func(t *testing.T, busybox bool) {
+		r := newEntwareRig(t, "gvlock", busybox)
+		sh := "sh"
+		if busybox {
+			sh = filepath.Join(r.bin, "sh")
+		}
+		hold := func(owner string) { // 替别人拿着锁
+			t.Helper()
+			if err := os.MkdirAll(r.lockDir(), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if owner != "" {
+				if err := os.WriteFile(filepath.Join(r.lockDir(), "owner"), []byte(owner+"\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+		stopAll := func() {
+			t.Helper()
+			if out, err := r.run("stop"); err != nil {
+				t.Fatalf("stop: %v\n%s", err, out)
+			}
+			waitFor(t, "守护进程停掉", func() bool { return len(r.alive()) == 0 })
+		}
+		// startOK 起服务,应在 within 之内起来、只有一个,锁放掉
+		startOK := func(what string, within time.Duration) {
+			t.Helper()
+			began := time.Now()
+			out, err := r.run(startAction(initEntware))
+			if err != nil || time.Since(began) > within {
+				t.Fatalf("%s:应在 %v 内起来,用了 %v: %v\n%s", what, within, time.Since(began), err, out)
+			}
+			if ds := entwareDaemonsByScan(r.name); len(ds) != 1 {
+				t.Fatalf("%s:应起了一个守护进程,得 %v\n%s", what, ds, out)
+			}
+			if r.locked() {
+				t.Fatalf("%s:起完要放锁", what)
+			}
+		}
+		other := exec.Command("sleep", "120") // 别的活着的进程(拿着锁的"别人")
+		if err := other.Start(); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = other.Process.Kill(); _ = other.Wait() })
+		holder := other.Process.Pid
+
+		// 1. 别人拿着(进程活着、刚拿):等着不起,也不动别人的锁;放掉之后接着起来
+		hold(fmt.Sprintf("%d %d", holder, uptimeSeconds(t)))
+		res := make(chan error, 1)
+		go func() { _, err := r.run(startAction(initEntware)); res <- err }()
+		time.Sleep(2500 * time.Millisecond)
+		select {
+		case err := <-res:
+			t.Fatalf("锁被别人拿着时应等着,却返回了: %v(守护进程 %v)", err, r.alive())
+		default:
+		}
+		if got := r.alive(); len(got) != 0 || !r.locked() {
+			t.Fatalf("锁被别人拿着时不该拉起、不该动别人的锁: 守护进程=%v 锁在=%v", got, r.locked())
+		}
+		_ = os.RemoveAll(r.lockDir()) // 别人放锁
+		select {
+		case err := <-res:
+			if err != nil {
+				t.Fatalf("放锁之后应接着起来: %v", err)
+			}
+		case <-time.After(15 * time.Second):
+			t.Fatal("放锁之后还在等")
+		}
+		waitFor(t, "放锁之后起来了", func() bool { return len(r.alive()) == 1 })
+		if r.locked() {
+			t.Fatal("起完要放锁")
+		}
+
+		// 2. 已经在跑:already running,也放锁
+		if out, err := r.run(startAction(initEntware)); err != nil || !strings.Contains(out, "already running") || r.locked() {
+			t.Fatalf("已经在跑时应直接成功并放锁: %v 锁在=%v\n%s", err, r.locked(), out)
+		}
+		stopAll()
+
+		// 3. 持有者已经不在了:当成旧锁清掉,马上起
+		dead := exec.Command("true")
+		if err := dead.Run(); err != nil {
+			t.Fatal(err)
+		}
+		hold(fmt.Sprintf("%d %d", dead.Process.Pid, uptimeSeconds(t)))
+		startOK("持有者已经不在的旧锁", 5*time.Second)
+		stopAll()
+
+		// 4. 持有者活着(进程号给了别的程序之类),但锁拿了超过 30 秒:清掉,不用干等
+		if up := uptimeSeconds(t); up > 40 { // 刚开机的机器上没法往前倒 31 秒
+			hold(fmt.Sprintf("%d %d", holder, up-31))
+			startOK("拿了超过 30 秒的旧锁", 5*time.Second)
+			stopAll()
+		}
+
+		// 5. 重启前留下的(锁在 /opt 上,重启不丢):开机秒数比现在还大
+		hold(fmt.Sprintf("%d %d", holder, uptimeSeconds(t)+100000))
+		startOK("重启前留下的旧锁", 5*time.Second)
+		stopAll()
+
+		// 6. 记录没写上(持有者刚建完目录就没了):等满时限(这里把 30 秒改成 3 秒)再清掉
+		r.write("S99godusevpn", strings.Replace(r.localize(entwareScript), "LOCKTTL=30", "LOCKTTL=3", 1), 0o755)
+		hold("")
+		began := time.Now()
+		startOK("没写记录的旧锁", 10*time.Second)
+		if d := time.Since(began); d < 2500*time.Millisecond {
+			t.Fatalf("没写记录的锁不知道是谁的,要等满时限才清(等了 %v)", d)
+		}
+		stopAll()
+		r.render(true)
+
+		// 7. 拿着锁时被 TERM 打断(程序不在,一直等它出现):先放锁再退出
+		missing := filepath.Join(r.dir, "S99missing")
+		r.write("S99missing", strings.Replace(r.localize(entwareScript), "PROCS="+r.name+"\n", "PROCS="+r.name+"x\n", 1), 0o755)
+		c := exec.Command(sh, missing, startAction(initEntware))
+		c.Env = r.env
+		if err := c.Start(); err != nil {
+			t.Fatal(err)
+		}
+		waitFor(t, "脚本拿到锁", func() bool {
+			b, _ := os.ReadFile(filepath.Join(r.lockDir(), "owner"))
+			return strings.HasPrefix(string(b), strconv.Itoa(c.Process.Pid)+" ")
+		})
+		_ = c.Process.Signal(syscall.SIGTERM)
+		err := c.Wait()
+		if code := exitCode(err); code != 143 || r.locked() {
+			t.Fatalf("被 TERM 打断要放锁再退出(143): code=%d 锁在=%v", code, r.locked())
+		}
 	})
 }
 
