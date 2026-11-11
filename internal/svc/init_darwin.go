@@ -15,6 +15,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 const DisplayName = "佛跳墙"
@@ -28,8 +30,13 @@ func plistPath() string { return "/Library/LaunchDaemons/" + label + ".plist" }
 // Kind 面板"服务状态"里显示的初始化系统。
 func Kind() string { return "launchd" }
 
-// KeepStderrForCrashes 只在梅林(Entware)上有事做(见 Linux 版);launchd 的 StandardErrorPath 这里不动。
-func KeepStderrForCrashes() bool { return false }
+// KeepStderrForCrashes 守护进程一启动就调(内核起来之前):由 launchd 拉起时标准错误接着 /Library/Logs/godusevpn.launchd.log
+// (plist 的 StandardErrorPath,磁盘上、不轮转),把 Go 这一层写标准错误的改去 /dev/null,那个文件里只剩崩溃和没起来的原因
+// (见 quietStderr)。在终端里前台跑的不动。返回改没改。
+func KeepStderrForCrashes() bool { return quietStderr() }
+
+// ioctlReadTermios 取终端属性的 ioctl(isTerminal 用)。
+const ioctlReadTermios = unix.TIOCGETA
 
 // Refresh 守护进程启动时让旧版装下的服务文件跟上当前版本(见 Linux 版):补上开机闸的 LaunchDaemon。
 // 只动已经装好的(没装服务、手动跑的不碰)。

@@ -31,7 +31,11 @@ curl -fsSL https://raw.githubusercontent.com/Maoyangui/godusevpn/master/deploy/i
 |---|---|
 | `/etc/godusevpn/` | 设置(`settings.json`)、订阅配置 |
 | `/var/lib/godusevpn/` | 订阅缓存、规则集 `.srs`、`config.json`、日志、诊断包 |
-| Entware(梅林等) | 对应 `/opt/etc/` 与 `/opt/var/lib/`;守护进程崩溃时的原因与栈在 `/opt/var/log/godusevpn.stderr.log`(只有崩溃信息,不记连接目标) |
+| Entware(梅林等) | 对应 `/opt/etc/` 与 `/opt/var/lib/`;守护进程崩溃时的原因与栈、没起来的原因在 `/opt/var/log/godusevpn.stderr.log`(只有这些,不记连接目标) |
+
+服务没起来时看系统日志:systemd 用 `journalctl -u godusevpn`,OpenWrt 用 `logread -e godusevpn`,梅林看上面那个文件;
+`/var/lib/godusevpn/logs/crash.log` 里也有。系统日志里只有崩溃和没起来的原因,**不记访问记录**(内核给每条连接记的目标
+不往那里写,看内核日志用面板的日志页或 `godusevpn logs`;在终端里前台跑 `godusevpn run` 时照旧打在终端上)。
 
 自启按初始化系统落地:systemd 单元、OpenWrt 的 procd 脚本、Entware 的 init.d 脚本。
 开机自启的开关只管开机:关着时重启后服务不会自己起来,`godusevpn start` 照样能起。

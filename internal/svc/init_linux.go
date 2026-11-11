@@ -8,7 +8,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -16,6 +15,8 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+
+	"golang.org/x/sys/unix"
 
 	"github.com/Maoyangui/godusevpn/internal/paths"
 )
@@ -281,11 +282,13 @@ halt() {
 	done
 	echo " done."
 }
-` + entwareLockSh + `# 守护进程的标准错误接到 ERRLOG,不丢进 /dev/null:运行时崩溃(fatal error、panic)时把原因和全部 goroutine 的栈直接写到
-# 标准错误,守护进程自己的 crash.log 只抄得到栈,fatal error 那一行原因只在这里。守护进程平时也往标准错误写 —— 内核在 info 级
-# 给每条连接记一行目标 —— 它一起来看到标准错误接着这个文件,就把这些改去 /dev/null(连接目标默认不落盘),这里只剩崩溃信息
-# 和每次拉起记的一行抬头。只给 root 看(0600);超过 ERRMAX 就在拉起时整份挪成 .1、只留一份旧的(一次崩溃的栈就可能几百 KB,
-# 原因在最前面,截尾巴会把它截掉)。建不成(/opt 只读之类)就照旧接 /dev/null,照样起。
+` + entwareLockSh + `# ERRLOG 留守护进程运行时崩溃(fatal error、panic)时直接写到标准错误的原因和全部 goroutine 的栈(守护进程自己的 crash.log
+# 只抄得到栈,fatal error 那一行原因只在这里),以及没起来的原因。脚本这里只管轮转和每次拉起记的一行抬头,标准错误照旧
+# 接 /dev/null:守护进程平时也往标准错误写 —— 内核在 info 级给每条连接记一行目标 —— 是它自己一起来把标准错误(fd 2)
+# 接到这个文件、同时把平时写的那些改去 /dev/null(连接目标默认不落盘,见 svc.KeepStderrForCrashes)。脚本要是直接把
+# 标准错误接过去,拉起的却是没有这一步的旧版本程序(手动换回旧版、解包目录里的新版先跑了 start 换了脚本),每条连接目标
+# 就都写进了这个文件。只给 root 看(0600);超过 ERRMAX 就在拉起时整份挪成 .1、只留一份旧的(一次崩溃的栈就可能几百 KB,
+# 原因在最前面,截尾巴会把它截掉)。建不成(/opt 只读之类)就不记抬头,照样起。
 ERRLOG=/opt/var/log/godusevpn.stderr.log
 ERRMAX=262144
 errlog() {
@@ -319,9 +322,8 @@ launch() {
 		echo " $DESC is already running."
 		return 0
 	fi
-	err=/dev/null
-	errlog "$1" && err=$ERRLOG
-	$PREARGS $PROCS $ARGS >/dev/null 2>>"$err" &
+	errlog "$1"
+	$PREARGS $PROCS $ARGS >/dev/null 2>/dev/null &
 	i=0
 	until [ -n "$(daemons)" ]; do
 		if [ $i -ge 10 ]; then
@@ -892,34 +894,42 @@ func entwareDaemons(proc string) []int {
 
 func Status() string { return QueryStatus() }
 
-// crashStderr 换掉 os.Stderr 之后,原来那个(fd 2,接着崩溃记录文件)得有人引用着:os.File 有终结器,没人引用了垃圾回收
-// 就把 fd 2 关掉,运行时崩溃时就写不进去了(fd 2 还可能被别的文件、连接占去,崩溃输出写进别处)。
-var crashStderr *os.File
+// ioctlReadTermios 取终端属性的 ioctl(isTerminal 用)。
+const ioctlReadTermios = unix.TCGETS
 
-// KeepStderrForCrashes 守护进程一启动就调(内核起来之前)。梅林(Entware)的启动脚本把标准错误接到 paths.EntwareStderrLog,
-// 为的是留下运行时崩溃时直接往 fd 2 写的原因和栈;可守护进程平时也往标准错误写 —— 内核(sing-box)在 info 级给每条连接
-// 记一行目标,写到它建日志那一刻的 os.Stderr,连接目标默认不落盘。所以标准错误接着这个文件时,把 Go 这一层写标准错误的
-// (os.Stderr、标准库 log)改去 /dev/null,返回 true;运行时崩溃时照样直接写 fd 2,进那个文件。
-// 别的情形(systemd / procd 收标准错误进系统日志、前台跑的接着终端)什么都不动。
-func KeepStderrForCrashes() bool { return keepStderrForCrashes(paths.EntwareStderrLog) }
+// KeepStderrForCrashes 守护进程一启动就调(内核起来之前),见 quietStderr:由初始化系统拉起的(标准错误不是终端)把 Go 这一层
+// 写标准错误的改去 /dev/null,原来的 fd 2 只留给崩溃和没起来的原因。
+// 梅林(Entware)上由启动脚本拉起时(标准错误是 /dev/null),先把 fd 2 接到 paths.EntwareStderrLog:梅林没有收标准错误的
+// 系统日志,不接的话运行时崩溃的原因(fatal error 那一行只写 fd 2)哪儿都不留。由守护进程自己接、不由脚本接,是因为脚本
+// 拉起的未必是有这一步的新版本(见脚本里 ERRLOG 那段)。返回改没改(改了之后 CrashStderr 是原来那个)。
+func KeepStderrForCrashes() bool {
+	crashLog := ""
+	if detect() == initEntware && launchedByScript() {
+		crashLog = paths.EntwareStderrLog
+	}
+	return keepStderrForCrashes(crashLog)
+}
 
-func keepStderrForCrashes(logPath string) bool {
-	cur, err := os.Stderr.Stat()
+// keepStderrForCrashes crashLog 非空且标准错误是 /dev/null 时先把 fd 2 接到它,再照 quietStderr 改道。
+func keepStderrForCrashes(crashLog string) bool {
+	if crashLog != "" && isDevNull(os.Stderr) {
+		_ = attachStderr(crashLog)
+	}
+	return quietStderr()
+}
+
+// attachStderr 把 fd 2 接到文件 p(追加;只给 root 看,0600;上一级目录不在就建)。接不上(/opt 只读之类)就不动。
+func attachStderr(p string) error {
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		return err
+	}
+	f, err := os.OpenFile(p, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0o600)
 	if err != nil {
-		return false
+		return err
 	}
-	want, err := os.Stat(logPath)
-	if err != nil || !os.SameFile(cur, want) {
-		return false
-	}
-	null, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
-	if err != nil {
-		return false
-	}
-	crashStderr = os.Stderr
-	os.Stderr = null
-	log.SetOutput(null)
-	return true
+	defer f.Close()
+	_ = f.Chmod(0o600)
+	return unix.Dup3(int(f.Fd()), 2, 0)
 }
 
 // Enabled 是否开机自启。

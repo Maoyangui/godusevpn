@@ -57,13 +57,29 @@ func fakeGodusevpn(dir string, args []string) int {
 			_ = os.WriteFile(filepath.Join(dir, "refreshed."+pid), []byte(fmt.Sprint(err)), 0o644)
 		}
 		var crash chan os.Signal
-		if p := os.Getenv("FAKE_STDERR_LOG"); p != "" {
+		if os.Getenv("FAKE_OLD") != "" {
+			// 冒充没有处理标准错误这一步的旧版本:内核照旧往标准错误写连接目标
+			fakeEmitTargets()
+		}
+		if p := os.Getenv("FAKE_STDERR_LOG"); p != "" || os.Getenv("FAKE_KEEP") != "" {
 			// 像真的守护进程那样一启动就处理标准错误,再像内核那样往标准错误写连接目标;收到 USR1 就真的崩一次(fatal error)。
 			// 崩之前先让垃圾回收和终结器跑几遍:原来的标准错误(fd 2)要是没人引用着,终结器会把它关掉,崩溃输出就丢了。
-			// sing-box 的日志包初始化时建了一个包级日志(拿着原来的 os.Stderr),先把它换掉,别让它替我们引用着
+			// sing-box 的日志包初始化时建了一个包级日志(拿着原来的 os.Stderr),先把它换掉(守护进程里是 daemon.QuietLibraryLogs),
+			// 别让它替我们引用着。
+			// 崩溃记录文件(FAKE_STDERR_LOG,脚本里的 ERRLOG)只有启动脚本拉起来的才接,和 KeepStderrForCrashes 一样;
+			// 设了 FAKE_FAIL 就像守护进程没起来(建数据目录失败之类)那样,把原因写到 CrashStderr 后退出
 			sblog.SetStdLogger(sblog.NewNOPFactory().Logger())
-			kept := keepStderrForCrashes(p)
+			crashLog := ""
+			if launchedByScript() {
+				crashLog = p
+			}
+			kept := keepStderrForCrashes(crashLog)
 			fakeEmitTargets()
+			if os.Getenv("FAKE_FAIL") != "" {
+				_ = os.WriteFile(filepath.Join(dir, "stderr."+pid), []byte(strconv.FormatBool(kept)), 0o644)
+				fmt.Fprintln(CrashStderr(), "失败: 建数据目录: mkdir /opt/var/lib/godusevpn: read-only file system")
+				return 1
+			}
 			for i := 0; i < 3; i++ {
 				runtime.GC()
 				time.Sleep(30 * time.Millisecond)
@@ -1203,13 +1219,14 @@ func TestEntwareRefreshArmsWatchdogOnlyForScriptLaunch(t *testing.T) {
 }
 
 // 梅林(Entware):守护进程的标准错误以前丢进 /dev/null,崩了看不到原因 —— 运行时崩溃时把原因和全部 goroutine 的栈直接写到
-// 标准错误,守护进程自己的 crash.log 只抄得到栈,fatal error 那一行原因不在里面。现在启动脚本把标准错误接到
-// /opt/var/log/godusevpn.stderr.log(0600,每次拉起先记一行"== 时间 由 谁 拉起";超过 256KB 下次拉起时整份挪成 .1,
-// 只留一份旧的;建不成就照旧接 /dev/null,照样起)。而守护进程平时也往标准错误写:内核(sing-box)在 info 级给每条连接
-// 记一行目标,写到建日志那一刻的 os.Stderr —— 连接目标默认不落盘,所以守护进程一启动(KeepStderrForCrashes)看到标准错误
-// 接着这个文件,就把 Go 这一层写标准错误的(os.Stderr、标准库 log)改去 /dev/null,文件里只剩崩溃信息。
+// 标准错误,守护进程自己的 crash.log 只抄得到栈,fatal error 那一行原因不在里面。现在留在 /opt/var/log/godusevpn.stderr.log
+// (0600,启动脚本每次拉起先记一行"== 时间 由 谁 拉起";超过 256KB 下次拉起时整份挪成 .1,只留一份旧的;建不成就照旧
+// 接 /dev/null,照样起)。守护进程平时也往标准错误写:内核(sing-box)在 info 级给每条连接记一行目标,写到建日志那一刻的
+// os.Stderr —— 连接目标默认不落盘。所以脚本照旧把标准错误接 /dev/null,由守护进程一启动(KeepStderrForCrashes)自己把
+// fd 2 接到这个文件,同时把 Go 这一层写标准错误的(os.Stderr、标准库 log)改去 /dev/null,文件里只剩崩溃信息和没起来的
+// 原因;脚本拉起的要是没有这一步的旧版本程序,它的标准错误还是 /dev/null,连接目标也不会写进来。
 // 测试程序冒充的守护进程一启动就做这一步,再用真的 sing-box 日志、标准库 log、os.Stderr 各写一行连接目标,收到 USR1 就
-// 真的崩一次(fatal error,崩之前先跑几遍垃圾回收)。前台跑的(标准错误接着管道)什么都不改。
+// 真的崩一次(fatal error,崩之前先跑几遍垃圾回收)。在终端里前台跑的什么都不改。
 func TestEntwareStderrKeepsCrashesOnly(t *testing.T) {
 	eachToolset(t, func(t *testing.T, busybox bool) {
 		r := newEntwareRig(t, "gverrl", busybox)
@@ -1225,9 +1242,9 @@ func TestEntwareStderrKeepsCrashesOnly(t *testing.T) {
 			b, _ := os.ReadFile(f)
 			return string(b)
 		}
-		start := func(what string) int {
+		start := func(what string, extra ...string) int {
 			t.Helper()
-			if code, out, alive := r.caller("start", startAction(initEntware), env...); !alive || code != 0 {
+			if code, out, alive := r.caller("start", startAction(initEntware), append(append([]string(nil), env...), extra...)...); !alive || code != 0 {
 				t.Fatalf("%s:start alive=%v code=%d\n%s", what, alive, code, out)
 			}
 			waitFor(t, what+":守护进程起来", func() bool { return len(r.alive()) == 1 })
@@ -1319,24 +1336,45 @@ func TestEntwareStderrKeepsCrashesOnly(t *testing.T) {
 		}
 		stopAll()
 
-		// 5. 前台跑的(标准错误接着管道,像终端那样):什么都不改,内核的输出照旧出在标准错误上
-		var buf strings.Builder
-		c := exec.Command(r.fake, "run")
-		c.Env = r.envWith(env...)
-		c.Stdout, c.Stderr = &buf, &buf
-		if err := c.Start(); err != nil {
-			t.Fatal(err)
+		// 5. 在终端里前台跑的:什么都不改,内核的输出照旧出在终端上,也不接崩溃记录文件
+		out, k := runOnTerminal(t, r, env...)
+		if k != "false" {
+			t.Fatalf("在终端里前台跑的不该改标准错误(得 %s)", k)
 		}
-		if got := kept(c.Process.Pid); got != "false" {
-			t.Fatalf("前台跑的标准错误不是那个文件,不该改(得 %s)", got)
+		if !strings.Contains(out, "secret-target-singbox.example") || !strings.Contains(out, "secret-target-stdlog.example") {
+			t.Fatalf("在终端里前台跑的内核日志照旧出在终端上:\n%s", out)
 		}
-		_ = c.Process.Kill()
-		_ = c.Wait()
-		if out := buf.String(); !strings.Contains(out, "secret-target-singbox.example") || !strings.Contains(out, "secret-target-stdlog.example") {
-			t.Fatalf("前台跑的内核日志照旧出在标准错误上:\n%s", out)
-		}
+		noTargets("在终端里前台跑过之后", content())
 
-		// 6. 日志目录建不成(那里是个文件之类):照样起,标准错误照旧接 /dev/null
+		// 6. 启动脚本拉起的是旧版本的程序(手动换回旧版、或者解包目录里的新版先跑了 start 换了脚本而 /opt/bin 还是旧版):
+		//    它不会自己处理标准错误,脚本也不能把它的标准错误接到这个文件 —— 不然它在 info 级写的每条连接目标都落了盘
+		before := content()
+		pid = start("拉起旧版本", "FAKE_OLD=1", "FAKE_STDERR_LOG=")
+		waitFor(t, "旧版本写完连接目标", func() bool { _, err := os.Stat(filepath.Join(r.dir, "run."+strconv.Itoa(pid))); return err == nil })
+		if got := fd(pid, 2); got != os.DevNull {
+			t.Fatalf("拉起的程序自己不接崩溃记录文件时,标准错误要是 /dev/null,得 %q", got)
+		}
+		s = content()
+		noTargets("拉起旧版本之后", s)
+		if !strings.HasPrefix(s, before) {
+			t.Fatalf("拉起旧版本不该动之前的记录:\n%s", s)
+		}
+		stopAll()
+
+		// 7. 守护进程没起来(建数据目录失败、控制管道被占着之类,这些不经它自己的日志):原因要留在这个文件里,
+		//    连接目标照样没有。直接像脚本那样拉起(标准输入输出、标准错误都是 /dev/null),不经脚本,省得它等满 10 秒
+		c := exec.Command(r.fake, "run")
+		c.Env = r.envWith(append(env, "FAKE_FAIL=1")...)
+		if err := c.Run(); exitCode(err) != 1 {
+			t.Fatalf("没起来的守护进程应以 1 退出: %v", err)
+		}
+		s = content()
+		if !strings.Contains(s, "失败: 建数据目录: mkdir /opt/var/lib/godusevpn: read-only file system") {
+			t.Fatalf("守护进程没起来的原因要留在 %s:\n%s", errLog, s)
+		}
+		noTargets("没起来之后", s)
+
+		// 8. 日志目录建不成(那里是个文件之类):照样起,标准错误照旧接 /dev/null(连接目标一样不写)
 		if err := os.RemoveAll(filepath.Dir(errLog)); err != nil {
 			t.Fatal(err)
 		}
@@ -1347,8 +1385,8 @@ func TestEntwareStderrKeepsCrashesOnly(t *testing.T) {
 		if got := fd(pid, 2); got != os.DevNull {
 			t.Fatalf("日志建不成时标准错误照旧接 /dev/null,得 %q", got)
 		}
-		if got := kept(pid); got != "false" {
-			t.Fatalf("标准错误没接那个文件,不该改(得 %s)", got)
+		if got := kept(pid); got != "true" {
+			t.Fatalf("标准错误不是终端,照样要改去 /dev/null(得 %s)", got)
 		}
 		stopAll()
 

@@ -6,6 +6,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
+	"os"
 	"os/exec"
 	"syscall"
 	"time"
@@ -213,8 +215,39 @@ func stopHard(s stopper, timeout time.Duration) error {
 // Refresh 只有 Linux / macOS 的守护进程启动时用来跟上旧版装下的启动脚本 / 开机单元;Windows 的服务由安装器登记。
 func Refresh() error { return nil }
 
-// KeepStderrForCrashes 只在梅林(Entware)上有事做(见 Linux 版);Windows 服务的标准错误由 daemon.CaptureCrashes 接管。
-func KeepStderrForCrashes() bool { return false }
+// crashStderr 改道之前的 os.Stderr(留着引用,终结器不关它);没改过是 nil。
+var crashStderr *os.File
+
+// KeepStderrForCrashes 服务模式下守护进程一启动就调(内核起来之前):把 Go 这一层写标准错误的(os.Stderr、标准库 log)明确
+// 改去 NUL,返回 true。服务进程的标准错误本来是无效句柄,内核(sing-box)在 info 级给每条连接记的目标写不出去;
+// 进程的标准错误句柄另由 daemon.CaptureCrashes 指到 crash.log(运行时崩溃每次重新取句柄,写得进去),
+// 而 os.Stderr 是启动时定下的旧句柄 —— 这里不靠这一点,明确改掉,连接目标绝不会跟着进 crash.log。
+// 前台跑的(godusevpn-svc run,排障)不动。
+func KeepStderrForCrashes() bool {
+	if crashStderr != nil {
+		return true
+	}
+	if !IsService() {
+		return false
+	}
+	null, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
+	if err != nil {
+		return false
+	}
+	crashStderr = os.Stderr
+	os.Stderr = null
+	log.SetOutput(null)
+	return true
+}
+
+// CrashStderr 没起来、出错退出的原因写到这里(见 Linux 版):改过道就是原来的标准错误,没改过就是 os.Stderr。
+// 服务模式下它是无效句柄,原因另由 daemon.RecordFailure 记进 crash.log。
+func CrashStderr() *os.File {
+	if crashStderr != nil {
+		return crashStderr
+	}
+	return os.Stderr
+}
 
 func Start() error {
 	m, err := mgr.Connect()

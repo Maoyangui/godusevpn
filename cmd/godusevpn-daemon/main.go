@@ -45,6 +45,7 @@ func main() {
 			fail(fmt.Errorf("需要 root 权限(TUN 与路由)"))
 		}
 		if err := svc.Run(runDaemon); err != nil {
+			daemon.RecordFailure(err) // 没起来的原因也进 crash.log,诊断包带得出来
 			fail(err)
 		}
 	case "repair":
@@ -188,9 +189,12 @@ func main() {
 
 // runDaemon 守护进程 + 面板一起跑。
 func runDaemon(ctx context.Context) error {
-	// 梅林(Entware):启动脚本把标准错误接到了崩溃记录文件,内核日志之类(带连接目标)不往里写,只留崩溃信息。
+	// 由初始化系统拉起时(systemd 收进 journald、procd 收进 logread、launchd 写进日志文件、梅林接到崩溃记录文件),
+	// 内核日志之类(带连接目标)不往标准错误写,那里只留崩溃和没起来的原因;在终端里前台跑的不动。
 	// 要在内核起来之前做:sing-box 建日志时取的是那一刻的 os.Stderr
-	svc.KeepStderrForCrashes()
+	if svc.KeepStderrForCrashes() {
+		daemon.QuietLibraryLogs()
+	}
 	daemon.CaptureCrashes(true)
 	d, err := daemon.New()
 	if err != nil {
@@ -317,8 +321,10 @@ func localIPv4() []string {
 	return out
 }
 
+// fail 打出原因后以 1 退出。守护进程改过标准错误的道(KeepStderrForCrashes)之后 os.Stderr 是 /dev/null,
+// 原因要写到原来的标准错误(CrashStderr):系统日志、launchd 的日志文件、梅林的崩溃记录文件里才看得到服务为什么没起来。
 func fail(err error) {
-	fmt.Fprintln(os.Stderr, "失败:", err)
+	fmt.Fprintln(svc.CrashStderr(), "失败:", err)
 	os.Exit(1)
 }
 
