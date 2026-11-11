@@ -56,6 +56,10 @@ func (b *secretBackend) Dispatch(method string, params json.RawMessage) (any, er
 		return b.saved, nil
 	case ipc.MGetClashInfo:
 		return ipc.ClashInfo{}, nil
+	case ipc.MGetProfiles, ipc.MRefreshProfile, ipc.MAddProfile, ipc.MRemoveProfile, ipc.MRenameProfile, ipc.MSaveManualNodes, ipc.MRemoveManualNode:
+		return secretView().Profiles, nil // 订阅列表:服务给的每一条都带着地址和续费地址
+	case ipc.MSetProfileURL:
+		return secretView().Profile, nil
 	}
 	return secretView(), nil // 连接、断开、切模式、选节点、线路自动、切订阅、取状态:都回整份状态
 }
@@ -90,6 +94,16 @@ func TestPageNeverSeesCredentials(t *testing.T) {
 		{"SetLineAuto", []json.RawMessage{json.RawMessage(`true`)}},
 		{"SelectProfile", []json.RawMessage{json.RawMessage(`"p1"`)}},
 		{"GetSettings", nil},
+		// 订阅列表:刷新订阅(首页订阅面板的刷新图标、节点面板没节点时的自动拉取)、确认刷新结果、增删改订阅、手动节点,
+		// 页面都只看名字、用量、刷新状态和错误
+		{"GetProfiles", nil},
+		{"RefreshProfile", []json.RawMessage{json.RawMessage(`"p1"`), json.RawMessage(`true`)}},
+		{"AddProfile", []json.RawMessage{json.RawMessage(`"二"`), json.RawMessage(`"https://panel.example/sub/other"`)}},
+		{"RemoveProfile", []json.RawMessage{json.RawMessage(`"p2"`)}},
+		{"UpdateProfile", []json.RawMessage{json.RawMessage(`"p1"`), json.RawMessage(`"新名字"`), json.RawMessage(`""`)}},
+		{"SaveManualNodes", []json.RawMessage{json.RawMessage(`[]`), json.RawMessage(`""`), json.RawMessage(`"手动"`)}},
+		{"RemoveManualNode", []json.RawMessage{json.RawMessage(`"n1"`)}},
+		{"SetProfileURL", []json.RawMessage{json.RawMessage(`"https://panel.example/sub/other"`)}},
 	} {
 		res, err := svc.Call(m.name, m.args)
 		if err != nil {
@@ -107,5 +121,14 @@ func TestPageNeverSeesCredentials(t *testing.T) {
 	check("SaveSettings", res)
 	if b.saved.WebPassword != pwHash {
 		t.Fatalf("保存设置把面板密码弄丢了: %q", b.saved.WebPassword)
+	}
+	// 只有订阅管理页取带地址的那份:标「未加密」、编辑地址、续费按钮要用
+	res, err = svc.Call("GetProfilesWithLinks", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := json.Marshal(res)
+	if !strings.Contains(string(raw), subToken) || !strings.Contains(string(raw), "renew?u=") {
+		t.Fatalf("订阅管理页要拿到地址和续费地址: %s", raw)
 	}
 }

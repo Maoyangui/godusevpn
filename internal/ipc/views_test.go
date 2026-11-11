@@ -27,3 +27,22 @@ func TestStateViewForPage(t *testing.T) {
 		t.Fatal("原来那份被改了")
 	}
 }
+
+// 订阅列表给页面的那份:去掉订阅地址和续费地址,别的照留;原来的列表不动(服务、订阅管理页还要用);nil 还是 nil。
+func TestProfilesForPage(t *testing.T) {
+	list := []ProfileView{{ID: "p1", Name: "一", URL: "https://x/sub/TOKEN", WebPage: "https://x/renew/TOKEN", NodeCount: 3, Refreshing: true, Error: "坏了"}}
+	page := ProfilesForPage(list)
+	raw, _ := json.Marshal(page)
+	if strings.Contains(string(raw), "TOKEN") {
+		t.Fatalf("订阅列表里带着地址: %s", raw)
+	}
+	if page[0].ID != "p1" || page[0].NodeCount != 3 || !page[0].Refreshing || page[0].Error != "坏了" {
+		t.Fatalf("别的都要留着(刷新状态、错误页面要看): %s", raw)
+	}
+	if list[0].URL == "" || list[0].WebPage == "" {
+		t.Fatal("原来那份被改了")
+	}
+	if ProfilesForPage(nil) != nil {
+		t.Fatal("nil 还是 nil")
+	}
+}

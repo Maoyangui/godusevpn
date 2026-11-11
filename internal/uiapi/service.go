@@ -368,14 +368,20 @@ func (s *Service) Call(name string, args []json.RawMessage) (any, error) {
 		err := s.dispatch(method, params, &v)
 		return v.ForPage(), err
 	}
-	profiles := func(method string, params any) (any, error) {
+	// 订阅列表(刷新、增删改订阅、手动节点都回全部订阅)给页面的那份不带订阅地址和续费地址(见 ipc.ProfileView.ForPage);
+	// 只有订阅管理页取带地址的那份(GetProfilesWithLinks)
+	profileList := func(method string, params any, links bool) (any, error) {
 		var out []ipc.ProfileView
 		err := s.dispatch(method, params, &out)
 		if out == nil {
 			out = []ipc.ProfileView{}
 		}
+		if !links {
+			out = ipc.ProfilesForPage(out)
+		}
 		return out, err
 	}
+	profiles := func(method string, params any) (any, error) { return profileList(method, params, false) }
 	devices := func(method string, params any) (any, error) {
 		var out []ipc.DeviceView
 		err := s.dispatch(method, params, &out)
@@ -419,11 +425,17 @@ func (s *Service) Call(name string, args []json.RawMessage) (any, error) {
 	case "SetProfileURL":
 		var p *ipc.ProfileView
 		err := s.dispatch(ipc.MSetProfileURL, map[string]string{"url": strings.TrimSpace(arg[string](args, 0))}, &p)
+		if p != nil {
+			pp := p.ForPage()
+			p = &pp
+		}
 		return p, err
 	case "RefreshProfile": // 第二个参数为真 = 后台刷新、立刻返回(结果随状态推送回来)
 		return profiles(ipc.MRefreshProfile, map[string]any{"id": arg[string](args, 0), "async": arg[bool](args, 1)})
 	case "GetProfiles":
 		return profiles(ipc.MGetProfiles, nil)
+	case "GetProfilesWithLinks": // 订阅管理页:标「未加密」、编辑地址、续费按钮要用地址,只有这一处取
+		return profileList(ipc.MGetProfiles, nil, true)
 	case "AddProfile":
 		return profiles(ipc.MAddProfile, map[string]string{"name": arg[string](args, 0), "url": strings.TrimSpace(arg[string](args, 1))})
 	case "RemoveProfile":

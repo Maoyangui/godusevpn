@@ -390,7 +390,7 @@ func (s Settings) Apply(key, value string) (Settings, error) {
 // Clone 深拷贝:切片字段都换成新的底层数组,拿到副本的人随便改也不会影响原设置。
 // ForPage 给界面(网页面板、Android / 桌面的页面)看的那份:去掉凭据 —— 面板密码哈希(单轮加盐 SHA-256,拿到能离线爆破)、
 // 订阅地址(带令牌,拿到就能拉走全部节点的凭据)。页面不用它们:设置页整份保存时服务沿用原来的订阅
-// (MSetSettings 不动订阅列表),密码另有接口改;订阅管理要显示、编辑地址,另走 GetProfiles。
+// (MSetSettings 不动订阅列表),密码另有接口改;订阅管理要显示、编辑地址,另走带地址的订阅列表(页面方法 GetProfilesWithLinks)。
 // 状态每 1.5 秒推一次,局域网明文访问网页面板时路上看得见。
 func (s Settings) ForPage() Settings {
 	c := s.Clone()

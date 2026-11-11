@@ -106,23 +106,37 @@ type StateView struct {
 }
 
 // ForPage 给界面看的那份状态:设置里去掉凭据(见 settings.Settings.ForPage),订阅去掉带令牌的地址和续费地址
-// (状态里用不上:订阅管理另走 GetProfiles)。不改原来那份。
+// (见 ProfileView.ForPage)。不改原来那份。
 func (v StateView) ForPage() StateView {
 	v.Settings = v.Settings.ForPage()
 	if v.Profile != nil {
-		p := *v.Profile
-		p.URL, p.WebPage = "", ""
+		p := v.Profile.ForPage()
 		v.Profile = &p
 	}
 	if v.Profiles != nil {
-		ps := make([]ProfileView, len(v.Profiles))
-		for i, p := range v.Profiles {
-			p.URL, p.WebPage = "", ""
-			ps[i] = p
-		}
-		v.Profiles = ps
+		v.Profiles = ProfilesForPage(v.Profiles)
 	}
 	return v
+}
+
+// ForPage 给页面的那份订阅:去掉带令牌的订阅地址和续费地址。页面平时只看名字、用量、刷新状态和错误;
+// 只有订阅管理页(要标「未加密」、编辑地址、续费按钮)另取带地址的那份(页面方法 GetProfilesWithLinks)。
+// 局域网明文访问网页面板时,状态推送、刷新订阅这些天天走的请求路上都看得见。
+func (p ProfileView) ForPage() ProfileView {
+	p.URL, p.WebPage = "", ""
+	return p
+}
+
+// ProfilesForPage 同 ProfileView.ForPage,整个列表;不改原来那份。nil 照旧是 nil。
+func ProfilesForPage(ps []ProfileView) []ProfileView {
+	if ps == nil {
+		return nil
+	}
+	out := make([]ProfileView, len(ps))
+	for i, p := range ps {
+		out[i] = p.ForPage()
+	}
+	return out
 }
 
 // SelNote 选的东西订阅里没了。

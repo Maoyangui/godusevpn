@@ -574,6 +574,10 @@ func (a *App) SetProfileURL(url string) (*ipc.ProfileView, error) {
 	var p *ipc.ProfileView
 	err := a.call(ipc.MSetProfileURL, map[string]string{"url": strings.TrimSpace(url)}, &p)
 	go a.refresh()
+	if p != nil {
+		pp := p.ForPage()
+		p = &pp
+	}
 	return p, err
 }
 
@@ -583,10 +587,21 @@ func (a *App) RefreshProfile(id string, async bool) ([]ipc.ProfileView, error) {
 	var out []ipc.ProfileView
 	err := a.call(ipc.MRefreshProfile, map[string]any{"id": id, "async": async}, &out)
 	go a.refresh()
-	return out, err
+	return ipc.ProfilesForPage(out), err
 }
 
+// GetProfiles 订阅列表,不带订阅地址和续费地址(和网页面板一样,见 ipc.ProfileView.ForPage);订阅管理页另取 GetProfilesWithLinks。
 func (a *App) GetProfiles() ([]ipc.ProfileView, error) {
+	var out []ipc.ProfileView
+	err := a.call(ipc.MGetProfiles, nil, &out)
+	if out == nil {
+		out = []ipc.ProfileView{}
+	}
+	return ipc.ProfilesForPage(out), err
+}
+
+// GetProfilesWithLinks 订阅管理页用的订阅列表:带订阅地址和续费地址(标「未加密」、编辑地址、续费按钮要用)。
+func (a *App) GetProfilesWithLinks() ([]ipc.ProfileView, error) {
 	var out []ipc.ProfileView
 	err := a.call(ipc.MGetProfiles, nil, &out)
 	if out == nil {
@@ -613,14 +628,14 @@ func (a *App) ParseNodeLinks(text string) (ipc.ParsedNodes, error) {
 func (a *App) SaveManualNodes(nodes []map[string]any, replace, name string) ([]ipc.ProfileView, error) {
 	var out []ipc.ProfileView
 	err := a.call(ipc.MSaveManualNodes, map[string]any{"nodes": nodes, "replace": replace, "name": name}, &out)
-	return out, err
+	return ipc.ProfilesForPage(out), err
 }
 
 // RemoveManualNode 删一个手动节点。
 func (a *App) RemoveManualNode(tag string) ([]ipc.ProfileView, error) {
 	var out []ipc.ProfileView
 	err := a.call(ipc.MRemoveManualNode, map[string]string{"tag": tag}, &out)
-	return out, err
+	return ipc.ProfilesForPage(out), err
 }
 
 // AddProfile 新增订阅(服务会先拉一次,拉不到就不加);第一条会自动成为当前订阅。
@@ -628,14 +643,14 @@ func (a *App) AddProfile(name, url string) ([]ipc.ProfileView, error) {
 	var out []ipc.ProfileView
 	err := a.call(ipc.MAddProfile, map[string]string{"name": name, "url": strings.TrimSpace(url)}, &out)
 	go a.refresh()
-	return out, err
+	return ipc.ProfilesForPage(out), err
 }
 
 func (a *App) RemoveProfile(id string) ([]ipc.ProfileView, error) {
 	var out []ipc.ProfileView
 	err := a.call(ipc.MRemoveProfile, map[string]string{"id": id}, &out)
 	go a.refresh()
-	return out, err
+	return ipc.ProfilesForPage(out), err
 }
 
 func (a *App) SelectProfile(id string) (ipc.StateView, error) {
@@ -647,7 +662,7 @@ func (a *App) UpdateProfile(id, name, url string) ([]ipc.ProfileView, error) {
 	var out []ipc.ProfileView
 	err := a.call(ipc.MRenameProfile, map[string]string{"id": id, "name": name, "url": strings.TrimSpace(url)}, &out)
 	go a.refresh()
-	return out, err
+	return ipc.ProfilesForPage(out), err
 }
 
 // GetSettings 给页面的设置不带凭据(面板密码哈希、订阅地址,见 settings.ForPage)。

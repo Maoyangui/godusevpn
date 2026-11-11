@@ -1266,7 +1266,8 @@ function renderProfiles(el, editId) {
     </div></div>`;
   const load = async () => {
     let list = [];
-    try { list = await App().GetProfiles() || []; } catch (e) { if ($('#prof-list')) $('#prof-list').innerHTML = `<div class="empty">${esc(errText(e))}</div>`; return; }
+    // 只有这一页取带地址的订阅列表(标「未加密」、编辑地址、续费按钮要用);别处取的列表、状态里的订阅都不带
+    try { list = await App().GetProfilesWithLinks() || []; } catch (e) { if ($('#prof-list')) $('#prof-list').innerHTML = `<div class="empty">${esc(errText(e))}</div>`; return; }
     if (!$('#prof-list')) return; // 等结果的时候已经离开了这一页
     if (!list.length) { $('#prof-list').innerHTML = `<div class="empty">${t('prof.empty')}</div>`; return; }
     const cur = list.find(p => p.active) || list[0], rest = list.filter(p => p !== cur);
