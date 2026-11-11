@@ -487,7 +487,8 @@ func Install(exe string) error {
 				return fmt.Errorf("建 %s 链接: %w", target, err)
 			}
 		}
-		return os.WriteFile(unitPath(), []byte(entwareScript), 0o755)
+		// 重装时服务可能正在跑,看门狗的 sh 可能正读着旧脚本:换文件不原地改(见 replaceFile)
+		return replaceFile(unitPath(), []byte(entwareScript), 0o755)
 	}
 	return errors.New("没识别出初始化系统(systemd / procd / Entware),请手动配置自启:" + exe + " run")
 }
@@ -558,9 +559,12 @@ func Refresh() error {
 	return err
 }
 
-// refreshEntwareScript 已装的 Entware 脚本(p)和当前模板不同就按原来的开关状态重写(先写临时文件再改名:脚本可能正被 sh 读着)。
-// 返回开机自启开着没有。
+// refreshEntwareScript 已装的 Entware 脚本(p)和当前模板不同就按原来的开关状态重写(换文件不原地改,权限照旧,见 replaceFile:
+// 脚本可能正被 sh 读着)。返回开机自启开着没有。
+// 顺带清掉旧版本改写时用的临时文件 p.tmp:改写被打断(断电、被杀)时留下的,名字以 S 开头、可执行,开机时 rc.unslung
+// 会把它当成另一份启动脚本跑(半截的话就是跑一份坏脚本);脚本已经是当前模板时也清。
 func refreshEntwareScript(p string) (enabled bool, err error) {
+	_ = os.Remove(p + ".tmp")
 	b, err := os.ReadFile(p)
 	if err != nil {
 		return false, err
@@ -569,15 +573,7 @@ func refreshEntwareScript(p string) (enabled bool, err error) {
 	if string(b) == want {
 		return enabled, nil
 	}
-	tmp := p + ".tmp"
-	if err := os.WriteFile(tmp, []byte(want), 0o755); err != nil {
-		return enabled, err
-	}
-	if err := os.Rename(tmp, p); err != nil {
-		_ = os.Remove(tmp)
-		return enabled, err
-	}
-	return enabled, nil
+	return enabled, replaceFile(p, []byte(want), modeOf(p, 0o755))
 }
 
 // mainUnitText 当前版本的服务单元。
@@ -816,12 +812,58 @@ func SetEnabled(on bool) error {
 		_, err := sh(unitPath(), a)
 		return err
 	case initEntware:
-		b, err := os.ReadFile(unitPath())
-		if err != nil {
-			return err
-		}
-		s := strings.ReplaceAll(strings.ReplaceAll(string(b), "ENABLED=yes", "ENABLED=no"), "ENABLED=no", map[bool]string{true: "ENABLED=yes", false: "ENABLED=no"}[on])
-		return os.WriteFile(unitPath(), []byte(s), 0o755)
+		return setEntwareEnabled(unitPath(), on)
 	}
 	return errors.New("没识别出初始化系统")
+}
+
+// setEntwareEnabled 改已装的 Entware 启动脚本 p 里开机自启的开关(ENABLED)。和 Refresh 一样换文件不原地改(见 replaceFile):
+// 看门狗每分钟、起停时都有 sh 可能正读着这个脚本。
+func setEntwareEnabled(p string, on bool) error {
+	b, err := os.ReadFile(p)
+	if err != nil {
+		return err
+	}
+	s := strings.ReplaceAll(strings.ReplaceAll(string(b), "ENABLED=yes", "ENABLED=no"), "ENABLED=no", map[bool]string{true: "ENABLED=yes", false: "ENABLED=no"}[on])
+	if s == string(b) {
+		return nil
+	}
+	return replaceFile(p, []byte(s), modeOf(p, 0o755))
+}
+
+// replaceFile 把 p 换成内容 data、权限 mode 的新文件:同目录先建一个临时文件写好、设好权限、落盘,再改名盖过去。
+// 原地截断重写的话,正在读它的进程会读到空的、半截的内容 —— sh 跑脚本是边读边执行的(BusyBox 的 ash 一次只读一小段),
+// 改名之后正在读的接着读旧的那份,新打开的读新的。临时文件名以 . 开头、带随机后缀:Entware 的 rc.unslung 开机时按 S*
+// 找可执行的脚本挨个跑,改写被打断留下的临时文件不能被它当成另一份启动脚本;几个进程同时改写也各写各的,不会写进同一个文件。
+func replaceFile(p string, data []byte, mode os.FileMode) error {
+	f, err := os.CreateTemp(filepath.Dir(p), "."+filepath.Base(p)+".*.tmp")
+	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	_, err = f.Write(data)
+	if err == nil {
+		err = f.Chmod(mode)
+	}
+	if err == nil {
+		err = f.Sync()
+	}
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err == nil {
+		err = os.Rename(tmp, p)
+	}
+	if err != nil {
+		_ = os.Remove(tmp)
+	}
+	return err
+}
+
+// modeOf p 现在的权限位(用户改过的照旧,比如去掉执行位、不让 rc.unslung 开机时跑它);p 不在就用 def。
+func modeOf(p string, def os.FileMode) os.FileMode {
+	if st, err := os.Stat(p); err == nil {
+		return st.Mode().Perm()
+	}
+	return def
 }
