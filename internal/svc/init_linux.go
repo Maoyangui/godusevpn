@@ -532,13 +532,31 @@ func Uninstall() error {
 		_ = os.Remove(unitPath())
 		removeGuardUnit(k)
 	case initEntware:
-		if _, err := exec.LookPath("cru"); err == nil {
-			_, _ = sh("cru", "d", name) // 看门狗定时
-		}
-		_ = os.Remove(unitPath())
-		_ = os.Remove("/opt/bin/" + name)
+		removeEntware(unitPath(), "/opt/bin/"+name, entwareLock)
 	}
 	return nil
+}
+
+// entwareLock 启动脚本拉起那一段的锁目录(和脚本里的 LOCK 一致)。
+const entwareLock = "/opt/var/run/" + name + ".lock"
+
+// removeEntware 卸载 Entware 上的自启:script 是启动脚本,bin 是 /opt/bin 里的链接,lock 是拉起那一段的锁目录。
+// 先删看门狗定时和脚本(之后不会再有脚本来拿锁),再删:改写脚本时被打断留下的临时文件(旧版本的 S99godusevpn.tmp
+// 名字以 S 开头,留着的话开机时 rc.unslung 还会把它当启动脚本跑;现在的是 .S99godusevpn.*.tmp,见 replaceFile)、
+// 锁目录(正常都会放掉,只有持有锁的脚本被 KILL 才会留下,卸载完没有脚本再来清它)。
+func removeEntware(script, bin, lock string) {
+	if _, err := exec.LookPath("cru"); err == nil {
+		_, _ = sh("cru", "d", name) // 看门狗定时
+	}
+	_ = os.Remove(script)
+	_ = os.Remove(script + ".tmp")
+	if tmps, err := filepath.Glob(filepath.Join(filepath.Dir(script), "."+filepath.Base(script)+".*.tmp")); err == nil {
+		for _, p := range tmps {
+			_ = os.Remove(p)
+		}
+	}
+	_ = os.Remove(bin)
+	_ = os.RemoveAll(lock)
 }
 
 // Refresh 守护进程每次启动时调:面板自更新只换程序文件、不重跑 install,旧版装下的启动脚本会一直留着。

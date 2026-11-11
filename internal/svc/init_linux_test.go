@@ -225,6 +225,60 @@ func TestSetEntwareEnabledAtomic(t *testing.T) {
 	}
 }
 
+// 梅林(Entware)上卸载:看门狗定时、启动脚本、/opt/bin 里的链接之外,拉起那一段的锁目录也删掉 —— 正常都会放掉,只有持有锁的
+// 脚本被 KILL 才会留下,卸载完没有脚本再来清它。启动脚本改写时被打断留下的临时文件(旧版本的 S99godusevpn.tmp,现在的
+// .S99godusevpn.*.tmp)也一起删。同目录里别的启动脚本不碰。
+func TestRemoveEntware(t *testing.T) {
+	dir := t.TempDir()
+	initd := filepath.Join(dir, "init.d")
+	bin := filepath.Join(dir, "bin")
+	for _, d := range []string{initd, bin} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// 假 cru:只记账
+	cruLog := filepath.Join(dir, "cru.log")
+	if err := os.WriteFile(filepath.Join(bin, "cru"), []byte("#!/bin/sh\necho \"$*\" >> "+cruLog+"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+":"+os.Getenv("PATH"))
+	script := filepath.Join(initd, "S99godusevpn")
+	link := filepath.Join(dir, "godusevpn")
+	lock := filepath.Join(dir, "run", "godusevpn.lock")
+	files := map[string]string{
+		script:          entwareScript,
+		script + ".tmp": "#!/bin/sh\n", // 旧版本改写时被打断留下的
+		filepath.Join(initd, ".S99godusevpn.123.tmp"): "#!/bin/sh\n", // 现在的临时文件被打断留下的
+		filepath.Join(initd, "S50other"):              "#!/bin/sh\n", // 别的服务的,不能碰
+		link:                                          "",
+		filepath.Join(lock, "owner"):                  "4242 100\n", // 持有者被 KILL 留下的锁
+	}
+	for p, s := range files {
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(s), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	removeEntware(script, link, lock)
+	for _, p := range []string{script, script + ".tmp", filepath.Join(initd, ".S99godusevpn.123.tmp"), link, lock} {
+		if _, err := os.Stat(p); !os.IsNotExist(err) {
+			t.Errorf("卸载后 %s 应删掉(%v)", p, err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(initd, "S50other")); err != nil {
+		t.Errorf("别的启动脚本不能碰: %v", err)
+	}
+	if b, _ := os.ReadFile(cruLog); strings.TrimSpace(string(b)) != "d "+name {
+		t.Errorf("要删掉看门狗定时(cru d %s),得 %q", name, b)
+	}
+	if !strings.Contains(entwareScript, "\nLOCK="+entwareLock+"\n") {
+		t.Errorf("卸载删的锁目录(%s)要和启动脚本里的 LOCK 一致", entwareLock)
+	}
+}
+
 // 开机闸单元:早于联网、不带默认依赖(否则会被排到联网之后),两个落盘文件任一在才跑,跑本程序的 boot-guard;
 // OpenWrt 的脚本排在 network(20)之前、只在开机时做。Entware 做不到,不给。
 func TestGuardUnitText(t *testing.T) {
