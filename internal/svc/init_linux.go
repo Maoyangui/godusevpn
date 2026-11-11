@@ -281,61 +281,7 @@ halt() {
 	done
 	echo " done."
 }
-# 拉起那一段(查有没有在跑 → 没有就拉起 → 等它出现)同一时间只让一个脚本做:不然守护进程刚崩时,用户手动起服务恰好
-# 撞上看门狗整分钟的那一下,两边都查到没在跑,就各拉起一个。stop / kill 也拿这把锁,写"用户停了"的标记和停守护进程
-# 都在锁里(见下面 stop 那段)。BusyBox 和 Entware 上不保证有 flock,用 mkdir 建锁目录
-# (建成了就是拿到了,是原子的),里面 owner 写持有者的进程号和开机秒数(/proc/uptime,不受改系统时间影响)。拿不到就
-# 隔一秒再试;持有者已经不在了、锁拿了超过 LOCKTTL 秒(正常最多十几秒)、或者是重启前留下的(锁在 /opt 上,重启不丢),
-# 当成没放掉的旧锁清掉。拿着锁时被 TERM / INT / HUP 打断也先放锁。
-LOCK=/opt/var/run/godusevpn.lock
-LOCKTTL=30
-MYLOCK=
-uptime_s() { read -r s _ < /proc/uptime; echo "${s%%.*}"; }
-# stale 锁的记录($1:"进程号 开机秒数")作不作数:持有者不在了(退出了没收尸的也算;进程号是自己的,说明是重启前
-# 留下的)、开机秒数比现在还大(重启前留下的)、或者拿了超过 LOCKTTL 秒,都不作数。记录不全(刚建还没写上、写坏了)
-# 的不在这里判,由 lock 自己计时。
-stale() {
-	case "$1" in *" "*) ;; *) return 1 ;; esac
-	pid=${1%% *} up=${1#* }
-	case "$pid:$up" in *[!0-9:]* | :* | *: | 0?* | *:0?*) return 1 ;; esac
-	now=$(uptime_s)
-	[ "$now" -lt "$up" ] || [ $((now - up)) -gt $LOCKTTL ] || [ "$pid" = $$ ] || [ ! -d /proc/$pid ] && return 0
-	[ "$(sed -n 's/.*) \(.\) .*/\1/p' /proc/$pid/stat 2>/dev/null)" = Z ]
-}
-lock() {
-	trap unlock EXIT
-	trap 'unlock; exit 129' HUP
-	trap 'unlock; exit 130' INT
-	trap 'unlock; exit 143' TERM
-	mkdir -p "${LOCK%/*}" 2>/dev/null
-	seen=- waited=0 tries=0
-	# 记录在每次建目录之前算好,建成了紧接着写进去:建好目录到写上记录之间越短,别人看到"没记录"的锁越少
-	until MYLOCK="$$ $(uptime_s)"; mkdir "$LOCK" 2>/dev/null; do
-		if [ ! -d "$LOCK" ]; then
-			# 锁目录不在却建不成(/opt 只读之类):不加锁,照以前那样起。刚被放掉的话下一圈就建成了
-			tries=$((tries + 1))
-			[ $tries -ge 3 ] && { MYLOCK=; return 0; }
-			continue
-		fi
-		owner=$(cat "$LOCK/owner" 2>/dev/null)
-		[ "$owner" = "$seen" ] || { seen=$owner; waited=0; }
-		if stale "$owner" || [ $waited -ge $LOCKTTL ]; then
-			# 清之前再看一眼还是不是这一把,别把别人刚建的新锁清掉
-			[ "$(cat "$LOCK/owner" 2>/dev/null)" = "$owner" ] && rm -rf "$LOCK"
-			continue
-		fi
-		sleep 1
-		waited=$((waited + 1))
-	done
-	echo "$MYLOCK" > "$LOCK/owner" || { rm -rf "$LOCK"; MYLOCK=; }
-}
-unlock() {
-	[ -n "$MYLOCK" ] && [ "$(cat "$LOCK/owner" 2>/dev/null)" = "$MYLOCK" ] && rm -rf "$LOCK"
-	MYLOCK=
-	trap - EXIT HUP INT TERM
-	return 0
-}
-# 守护进程的标准错误接到 ERRLOG,不丢进 /dev/null:运行时崩溃(fatal error、panic)时把原因和全部 goroutine 的栈直接写到
+` + entwareLockSh + `# 守护进程的标准错误接到 ERRLOG,不丢进 /dev/null:运行时崩溃(fatal error、panic)时把原因和全部 goroutine 的栈直接写到
 # 标准错误,守护进程自己的 crash.log 只抄得到栈,fatal error 那一行原因只在这里。守护进程平时也往标准错误写 —— 内核在 info 级
 # 给每条连接记一行目标 —— 它一起来看到标准错误接着这个文件,就把这些改去 /dev/null(连接目标默认不落盘),这里只剩崩溃信息
 # 和每次拉起记的一行抬头。只给 root 看(0600);超过 ERRMAX 就在拉起时整份挪成 .1、只留一份旧的(一次崩溃的栈就可能几百 KB,
@@ -444,6 +390,109 @@ check)
 esac
 
 . /opt/etc/init.d/rc.func
+`
+
+// entwareLockSh 启动脚本里拉起那一段用的锁(lock / unlock),单独拿出来测试里好直接跑。
+const entwareLockSh = `# 拉起那一段(查有没有在跑 → 没有就拉起 → 等它出现)同一时间只让一个脚本做:不然守护进程刚崩时,用户手动起服务恰好
+# 撞上看门狗整分钟的那一下,两边都查到没在跑,就各拉起一个。stop / kill 也拿这把锁,写"用户停了"的标记和停守护进程
+# 都在锁里(见下面 stop 那段)。BusyBox 和 Entware 上不保证有 flock,用 mkdir 建锁目录
+# (建成了就是拿到了,是原子的),里面 owner 写持有者的进程号和开机秒数(/proc/uptime,不受改系统时间影响)。拿不到就
+# 隔一秒再试;持有者已经不在了、锁拿了超过 LOCKTTL 秒(正常最多十几秒)、或者是重启前留下的(锁在 /opt 上,重启不丢),
+# 当成没放掉的旧锁清掉(见 unstale)。旧锁清不掉(/opt 被重新挂成只读之类)就照锁目录建不成那样,试三回之后不加锁照以前
+# 那样起,不会一直等下去。拿着锁时被 TERM / INT / HUP 打断也先放锁。
+LOCK=/opt/var/run/godusevpn.lock
+LOCKTTL=30
+MYLOCK=
+CLEANING=
+uptime_s() { read -r s _ < /proc/uptime; echo "${s%%.*}"; }
+# stale 锁的记录($1:"进程号 开机秒数")作不作数:持有者不在了(退出了没收尸的也算;进程号是自己的,说明是重启前
+# 留下的)、开机秒数比现在还大(重启前留下的)、或者拿了超过 LOCKTTL 秒,都不作数。记录不全(刚建还没写上、写坏了)
+# 的不在这里判,由 lock 自己计时。
+stale() {
+	case "$1" in *" "*) ;; *) return 1 ;; esac
+	pid=${1%% *} up=${1#* }
+	case "$pid:$up" in *[!0-9:]* | :* | *: | 0?* | *:0?*) return 1 ;; esac
+	now=$(uptime_s)
+	[ "$now" -lt "$up" ] || [ $((now - up)) -gt $LOCKTTL ] || [ "$pid" = $$ ] || [ ! -d /proc/$pid ] && return 0
+	[ "$(sed -n 's/.*) \(.\) .*/\1/p' /proc/$pid/stat 2>/dev/null)" = Z ]
+}
+# unstale 清掉判定为旧锁的那一把($1 是判定时看到的记录)。"看记录"和"删"是两步:几个等锁的同时判定同一把旧锁时,
+# 先删的紧接着建好了自己的新锁,后删的还拿着判定时的结论,就会把这把新锁删掉,两边都进了锁里。所以清旧锁要先拿
+# 清理锁($LOCK.clean,也是 mkdir 建的),拿着它再看一眼:记录没变、本进程在这一把里留的记号(.w进程号,见 lock)
+# 还在 —— 说明还是判定的那一把,不是别人清掉之后新建的 —— 才删。清理只要一眨眼,清理锁占着超过 5 秒就是清的那个
+# 被打断留下的,删掉它。
+# 返回 0:删掉了 / 那一把已经不在了,马上再建;1:换了一把或别人正在清,等一秒再看;2:清不掉(/opt 只读之类)。
+unstale() {
+	if ! mkdir "$LOCK.clean" 2>/dev/null; then
+		[ -d "$LOCK.clean" ] || return 2
+		cleanwait=$((cleanwait + 1))
+		if [ $cleanwait -ge 5 ]; then
+			rm -rf "$LOCK.clean" 2>/dev/null
+			[ -d "$LOCK.clean" ] && return 2
+			cleanwait=0
+		fi
+		return 1
+	fi
+	CLEANING=1 cleanwait=0 rc=1
+	if [ ! -d "$LOCK" ]; then
+		rc=0
+	elif [ -e "$LOCK/.w$$" ] && [ "$(cat "$LOCK/owner" 2>/dev/null)" = "$1" ]; then
+		rm -rf "$LOCK" 2>/dev/null
+		rc=0
+		[ -d "$LOCK" ] && rc=2
+	fi
+	rmdir "$LOCK.clean" 2>/dev/null
+	CLEANING=
+	return $rc
+}
+lock() {
+	trap unlock EXIT
+	trap 'unlock; exit 129' HUP
+	trap 'unlock; exit 130' INT
+	trap 'unlock; exit 143' TERM
+	mkdir -p "${LOCK%/*}" 2>/dev/null
+	seen=- waited=0 tries=0 cleanwait=0
+	# 记录在每次建目录之前算好,建成了紧接着写进去:建好目录到写上记录之间越短,别人看到"没记录"的锁越少
+	until MYLOCK="$$ $(uptime_s)"; mkdir "$LOCK" 2>/dev/null; do
+		if [ ! -d "$LOCK" ]; then
+			# 锁目录不在却建不成(/opt 只读之类):不加锁,照以前那样起。刚被放掉的话下一圈就建成了
+			tries=$((tries + 1))
+			[ $tries -ge 3 ] && { MYLOCK=; return 0; }
+			continue
+		fi
+		owner=$(cat "$LOCK/owner" 2>/dev/null)
+		# 换了一把就重新计时,并在这一把里留个记号(unstale 靠它认出还是不是这一把):记录变了,或者记录一样、
+		# 记号却没了(这一把被清掉、又建了一把还没写上记录的)。记号写不进去(只读)就照记录计时。
+		# 用 touch 不用 ": >":锁目录随时可能被放掉,特殊内建命令的重定向失败会让整个脚本退出
+		if [ "$owner" != "$seen" ]; then
+			seen=$owner waited=0
+			touch "$LOCK/.w$$" 2>/dev/null
+		elif [ ! -e "$LOCK/.w$$" ] && touch "$LOCK/.w$$" 2>/dev/null; then
+			waited=0
+		fi
+		if stale "$owner" || [ $waited -ge $LOCKTTL ]; then
+			unstale "$owner"
+			case $? in
+			0) continue ;;
+			2)
+				tries=$((tries + 1))
+				[ $tries -ge 3 ] && { MYLOCK=; return 0; }
+				;;
+			esac
+		fi
+		sleep 1
+		waited=$((waited + 1))
+	done
+	echo "$MYLOCK" > "$LOCK/owner" || { rm -rf "$LOCK"; MYLOCK=; }
+}
+unlock() {
+	[ -n "$CLEANING" ] && rmdir "$LOCK.clean" 2>/dev/null
+	CLEANING=
+	[ -n "$MYLOCK" ] && [ "$(cat "$LOCK/owner" 2>/dev/null)" = "$MYLOCK" ] && rm -rf "$LOCK"
+	MYLOCK=
+	trap - EXIT HUP INT TERM
+	return 0
+}
 `
 
 // entwareWatchdog 看门狗定时的 cru 编号与命令(和脚本里那行一致)。
@@ -557,6 +606,7 @@ func removeEntware(script, bin, lock string) {
 	}
 	_ = os.Remove(bin)
 	_ = os.RemoveAll(lock)
+	_ = os.RemoveAll(lock + ".clean") // 清旧锁用的清理锁(见脚本里的 unstale),同样只有被 KILL 才会留下
 }
 
 // Refresh 守护进程每次启动时调:面板自更新只换程序文件、不重跑 install,旧版装下的启动脚本会一直留着。

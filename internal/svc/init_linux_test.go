@@ -225,8 +225,8 @@ func TestSetEntwareEnabledAtomic(t *testing.T) {
 	}
 }
 
-// 梅林(Entware)上卸载:看门狗定时、启动脚本、/opt/bin 里的链接之外,拉起那一段的锁目录也删掉 —— 正常都会放掉,只有持有锁的
-// 脚本被 KILL 才会留下,卸载完没有脚本再来清它。启动脚本改写时被打断留下的临时文件(旧版本的 S99godusevpn.tmp,现在的
+// 梅林(Entware)上卸载:看门狗定时、启动脚本、/opt/bin 里的链接之外,拉起那一段的锁目录(连同清旧锁用的清理锁)也删掉 ——
+// 正常都会放掉,只有持有锁的脚本被 KILL 才会留下,卸载完没有脚本再来清它。启动脚本改写时被打断留下的临时文件(旧版本的 S99godusevpn.tmp,现在的
 // .S99godusevpn.*.tmp)也一起删。同目录里别的启动脚本不碰。
 func TestRemoveEntware(t *testing.T) {
 	dir := t.TempDir()
@@ -253,6 +253,7 @@ func TestRemoveEntware(t *testing.T) {
 		filepath.Join(initd, "S50other"):              "#!/bin/sh\n", // 别的服务的,不能碰
 		link:                                          "",
 		filepath.Join(lock, "owner"):                  "4242 100\n", // 持有者被 KILL 留下的锁
+		filepath.Join(lock+".clean", ".keep"):         "",           // 清旧锁时被 KILL 留下的清理锁
 	}
 	for p, s := range files {
 		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
@@ -263,7 +264,7 @@ func TestRemoveEntware(t *testing.T) {
 		}
 	}
 	removeEntware(script, link, lock)
-	for _, p := range []string{script, script + ".tmp", filepath.Join(initd, ".S99godusevpn.123.tmp"), link, lock} {
+	for _, p := range []string{script, script + ".tmp", filepath.Join(initd, ".S99godusevpn.123.tmp"), link, lock, lock + ".clean"} {
 		if _, err := os.Stat(p); !os.IsNotExist(err) {
 			t.Errorf("卸载后 %s 应删掉(%v)", p, err)
 		}

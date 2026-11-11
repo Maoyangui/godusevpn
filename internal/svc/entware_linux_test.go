@@ -161,7 +161,7 @@ done
 `
 
 // busyboxApplets 梅林上脚本用到的这些都是 BusyBox 的;BusyBox 那一遍把它们换成测试机上的 busybox。
-var busyboxApplets = []string{"sh", "pidof", "tr", "sed", "kill", "sleep", "mkdir", "touch", "rm", "cat", "wc", "mv", "chmod", "date"}
+var busyboxApplets = []string{"sh", "pidof", "tr", "sed", "kill", "sleep", "mkdir", "touch", "rm", "cat", "wc", "mv", "chmod", "date", "rmdir"}
 
 // eachToolset 用系统自带的 sh / pidof / tr / sed … 跑一遍,再换成 BusyBox 的跑一遍(梅林上就是这些;没装 busybox 就跳过那一遍)。
 func eachToolset(t *testing.T, f func(t *testing.T, busybox bool)) {
