@@ -59,14 +59,17 @@ function codeText(code, detail) {
 }
 const errText = e => errParts(e).text;
 // refreshProfileBg 订阅刷新放到服务后台做:立刻返回、这条订阅标成"正在刷新",刷新结束(状态推送里 refreshing 落下)时
-// 这个 Promise 落定 —— 没有失败原因算成功,有就按它报错。回退链(当前节点 → 自动选择 → 直连)最长两分多钟,
-// 一次调用等不了那么久:控制管道 60 秒就断,以前界面报超时而后台其实还在刷、可能已经成功。
+// 这个 Promise 落定 —— 没有失败原因算成功,有就按它报错。连着时回退链(当前节点 → 先强测自动选择组、再走自动选择 → 直连)
+// 最长约 5 分 40 秒,拉到了要重连还得备新配置(最长 3 分钟),一次调用等不了那么久。
+// REFRESH_WAIT_MS 只是兜底(状态推送断了也别一直挂着):不短于守护进程这一整趟的上限(和 ipc.SlowCallTimeout 一样 10 分钟),
+// 不然后台还在刷、稍后可能成功,界面已先报「太慢」。
+const REFRESH_WAIT_MS = 600000;
 const refreshWaits = [];
 async function refreshProfileBg(id) {
   const list = await App().RefreshProfile(id, true) || [];
   return new Promise((resolve, reject) => {
     const w = { id, resolve, reject };
-    w.timer = setTimeout(() => { refreshWaits.splice(refreshWaits.indexOf(w), 1); reject(new Error(t('prof.refreshSlow'))); }, 240000);
+    w.timer = setTimeout(() => { refreshWaits.splice(refreshWaits.indexOf(w), 1); reject(new Error(t('prof.refreshSlow'))); }, REFRESH_WAIT_MS);
     refreshWaits.push(w);
     checkRefreshWaits(list, true);
   });

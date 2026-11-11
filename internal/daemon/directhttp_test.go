@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -296,5 +298,27 @@ func TestCallersWaitAsLongAsDaemon(t *testing.T) {
 	body := funcBody(t, strings.ReplaceAll(string(b), "\r\n", "\n"), "func (a *App) call(method string, params, result any) error {")
 	if !strings.Contains(body, "ipc.SlowCallTimeout") {
 		t.Fatalf("桌面端调守护进程没按 ipc.SlowCallTimeout 等:\n%s", body)
+	}
+}
+
+// 界面等后台刷新订阅(refreshProfileBg)的兜底时限不短于守护进程这一趟的上限:连着时整条回退链,拉到了还可能重连、备新配置。
+// 短了的话后台还在刷(稍后可能成功),界面已先报「太慢」。
+func TestUIRefreshWaitCoversFetchChain(t *testing.T) {
+	b, err := os.ReadFile("../../web/dist/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := strings.ReplaceAll(string(b), "\r\n", "\n")
+	m := regexp.MustCompile(`(?m)^const REFRESH_WAIT_MS = (\d+);`).FindStringSubmatch(src)
+	if m == nil {
+		t.Fatal("app.js 里找不到 REFRESH_WAIT_MS")
+	}
+	ms, _ := strconv.Atoi(m[1])
+	if need := fetchChainBudget() + state.PrepareTimeout; time.Duration(ms)*time.Millisecond < need {
+		t.Fatalf("界面等后台刷新 %dms,守护进程最长要 %v", ms, need)
+	}
+	i := strings.Index(src, "async function refreshProfileBg(")
+	if i < 0 || !strings.Contains(src[i:i+600], "REFRESH_WAIT_MS)") {
+		t.Fatal("refreshProfileBg 没按 REFRESH_WAIT_MS 等")
 	}
 }
