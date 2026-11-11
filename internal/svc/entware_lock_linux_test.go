@@ -118,6 +118,7 @@ func lockHarness(t *testing.T, r *entwareRig) string {
 	r.write("harness", "#!/bin/sh\n"+body+`
 while [ ! -e "`+d+`/go" ]; do :; done
 lock
+[ -n "$MYLOCK" ] || echo NOLOCK
 mkdir "`+d+`/inside" 2>/dev/null || echo OVERLAP
 sleep 0.2 2>/dev/null || sleep 1
 rmdir "`+d+`/inside" 2>/dev/null
@@ -172,6 +173,9 @@ func TestEntwareLockStaleRace(t *testing.T) {
 				t.Fatalf("%s:%v 内没都拿到锁做完:\n%s", what, limit, strings.Join(outs, "\n"))
 			}
 			all := strings.Join(outs, "\n")
+			if strings.Contains(all, "NOLOCK") {
+				t.Fatalf("%s:锁目录建得了,却有没拿到锁就进去的:\n%s", what, all)
+			}
 			if strings.Contains(all, "OVERLAP") {
 				t.Fatalf("%s:有两个同时进了锁里:\n%s", what, all)
 			}
@@ -312,5 +316,81 @@ echo DONE
 		if left, _ := filepath.Glob(r.lockDir() + "*"); len(left) != 0 {
 			t.Fatalf("放锁后不该剩下锁目录或挪开的:%v", left)
 		}
+	})
+}
+
+// 梅林(Entware):拿锁、清旧锁时 mkdir 建不成、再一看又不在 —— 等锁的一多,这多半是别人刚好在这中间建了又放掉(抢先了),
+// 不是这里建不了。以前一律算一回"建不成 / 清不掉",一次等锁里数满三回就不加锁进去,和拿着锁的同时在锁里
+// (GitHub 的 ubuntu runner 上 TestEntwareLockStaleRace 第 1 轮就这么出过三个 OVERLAP)。脚本里的 mkdir 换成一个
+// 函数,前几回对锁目录 / 清理锁假装"被别人抢先了"(不建、返回失败,目录照样不在),确定地造出这个交错:目录建得了时
+// 要接着等、拿到锁,不能不加锁进去。名字上是个文件(怎么都建不成)时照旧试几回就不加锁照样起,不卡住。
+func TestEntwareLockLostRaceNotCounted(t *testing.T) {
+	eachToolset(t, func(t *testing.T, busybox bool) {
+		r := newEntwareRig(t, "gvlklr", busybox)
+		body := strings.Replace(entwareLockSh, "LOCK=/opt/var/run/godusevpn.lock\n", "LOCK="+r.lockDir()+"\n", 1)
+		if body == entwareLockSh {
+			t.Fatalf("锁那一段变了,测试里的替换要跟上:\n%s", entwareLockSh)
+		}
+		// LOST 是要假装抢输的那个目录,前 5 回建它都"被别人抢先"
+		r.write("lost", "#!/bin/sh\n"+body+`
+lost=0
+mkdir() {
+	if [ "$1" = "$LOST" ] && [ $lost -lt 5 ]; then
+		lost=$((lost + 1))
+		return 1
+	fi
+	command mkdir "$@"
+}
+lock
+[ -n "$MYLOCK" ] || echo NOLOCK
+echo "LOST=$lost"
+unlock
+echo DONE
+`, 0o755)
+		sh := "sh"
+		if busybox {
+			sh = filepath.Join(r.bin, "sh")
+		}
+		run := func(lost string, limit time.Duration) string {
+			t.Helper()
+			ctx, cancel := context.WithTimeout(context.Background(), limit)
+			defer cancel()
+			c := exec.CommandContext(ctx, sh, filepath.Join(r.dir, "lost"))
+			c.Env = append(append([]string{}, r.env...), "LOST="+lost)
+			b, err := c.CombinedOutput()
+			if ctx.Err() != nil {
+				t.Fatalf("%s:%v 内没做完(卡住了):\n%s", lost, limit, b)
+			}
+			if err != nil || !strings.Contains(string(b), "DONE") {
+				t.Fatalf("%s:应做完: %v\n%s", lost, err, b)
+			}
+			return string(b)
+		}
+		// 锁目录不在、建它前 5 回都被抢先:每回都是马上再建,不用等
+		_ = os.RemoveAll(r.lockDir())
+		_ = os.MkdirAll(filepath.Dir(r.lockDir()), 0o755)
+		if out := run(r.lockDir(), 10*time.Second); strings.Contains(out, "NOLOCK") || !strings.Contains(out, "LOST=5") {
+			t.Fatalf("锁目录被抢先几回不能算建不成、不加锁进去:\n%s", out)
+		}
+		if r.locked() {
+			t.Fatal("锁目录被抢先:做完要放锁")
+		}
+		// 有一把持有者不在了的旧锁,清它要拿的清理锁前 5 回都被抢先:每回隔一秒再看,最后清掉、拿到锁
+		if err := os.MkdirAll(r.lockDir(), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		r.write("run/godusevpn.lock/owner", fmt.Sprintf("%d %d\n", deadPID(t), uptimeSeconds(t)), 0o644)
+		if out := run(r.lockDir()+".clean", 20*time.Second); strings.Contains(out, "NOLOCK") || !strings.Contains(out, "LOST=5") {
+			t.Fatalf("清理锁被抢先几回不能算清不掉、不加锁进去:\n%s", out)
+		}
+		if left, _ := filepath.Glob(r.lockDir() + "*"); len(left) != 0 {
+			t.Fatalf("清理锁被抢先:做完不该剩下锁目录、清理锁或挪开的:%v", left)
+		}
+		// 名字上是个文件:怎么都建不成,试几回就不加锁照样起,不卡住、不空转
+		r.write("run/godusevpn.lock", "", 0o644)
+		if out := run("-", 10*time.Second); !strings.Contains(out, "NOLOCK") {
+			t.Fatalf("锁目录的名字上是个文件,应不加锁照样起:\n%s", out)
+		}
+		_ = os.Remove(r.lockDir())
 	})
 }

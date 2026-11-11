@@ -427,11 +427,14 @@ stale() {
 # 删不掉时再看一眼:锁目录已经没了算删掉了,记录变了算换了一把(别人放掉又建了),都不算清不掉。
 unstale() {
 	if ! mkdir "$LOCK.clean" 2>/dev/null; then
-		[ -d "$LOCK.clean" ] || return 2
+		if [ ! -d "$LOCK.clean" ]; then
+			cantmk "$LOCK.clean" && return 2
+			return 1
+		fi
 		cleanwait=$((cleanwait + 1))
 		if [ $cleanwait -ge 5 ]; then
 			rm -rf "$LOCK.clean" 2>/dev/null
-			[ -d "$LOCK.clean" ] && return 2
+			[ -d "$LOCK.clean" ] && cantmk "$LOCK.clean" && return 2
 			cleanwait=0
 		fi
 		return 1
@@ -461,6 +464,18 @@ droplock() {
 	rm -rf "$LOCK".dead.* 2>/dev/null
 	return 0
 }
+# cantmk 目录 $1(锁目录或清理锁)建不成、再一看又不在时,是不是真建不了:那个名字上是个文件 / 链接(不是这里建的,
+# 怎么都建不成),或者锁目录所在的地方建不了目录(/opt 只读之类,拿一个只有本进程用的名字真建一下;和 droplock
+# 挪开用的同名,留下了也由 droplock、卸载清掉)。都不是,就只是别人正好在这中间把它放掉了 —— 建得了,只是被别人
+# 抢先 —— 不算一回"建不成 / 清不掉":以前算,等锁的一多、机器一忙,一次等锁里撞上几回很平常,数满三回就不加锁
+# 进去了,和拿着锁的同时在里面。
+cantmk() {
+	[ -f "$1" ] || [ -L "$1" ] && return 0
+	rm -rf "$LOCK.dead.$$" 2>/dev/null
+	mkdir "$LOCK.dead.$$" 2>/dev/null || return 0
+	rmdir "$LOCK.dead.$$" 2>/dev/null
+	return 1
+}
 lock() {
 	trap unlock EXIT
 	trap 'unlock; exit 129' HUP
@@ -471,9 +486,12 @@ lock() {
 	# 记录在每次建目录之前算好,建成了紧接着写进去:建好目录到写上记录之间越短,别人看到"没记录"的锁越少
 	until MYLOCK="$$ $(uptime_s)"; mkdir "$LOCK" 2>/dev/null; do
 		if [ ! -d "$LOCK" ]; then
-			# 锁目录不在却建不成(/opt 只读之类):不加锁,照以前那样起。刚被放掉的话下一圈就建成了
-			tries=$((tries + 1))
-			[ $tries -ge 3 ] && { MYLOCK=; return 0; }
+			# 锁目录不在却建不成:真建不了(/opt 只读之类,见 cantmk)就数一回,三回之后不加锁照以前那样起;
+			# 只是别人刚好在这中间建了又放掉的,不数,马上再建
+			if cantmk "$LOCK"; then
+				tries=$((tries + 1))
+				[ $tries -ge 3 ] && { MYLOCK=; return 0; }
+			fi
 			continue
 		fi
 		owner=$(cat "$LOCK/owner" 2>/dev/null)
