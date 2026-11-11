@@ -213,6 +213,9 @@ func stopHard(s stopper, timeout time.Duration) error {
 // Refresh 只有 Linux / macOS 的守护进程启动时用来跟上旧版装下的启动脚本 / 开机单元;Windows 的服务由安装器登记。
 func Refresh() error { return nil }
 
+// KeepStderrForCrashes 只在梅林(Entware)上有事做(见 Linux 版);Windows 服务的标准错误由 daemon.CaptureCrashes 接管。
+func KeepStderrForCrashes() bool { return false }
+
 func Start() error {
 	m, err := mgr.Connect()
 	if err != nil {

@@ -28,6 +28,9 @@ func plistPath() string { return "/Library/LaunchDaemons/" + label + ".plist" }
 // Kind 面板"服务状态"里显示的初始化系统。
 func Kind() string { return "launchd" }
 
+// KeepStderrForCrashes 只在梅林(Entware)上有事做(见 Linux 版);launchd 的 StandardErrorPath 这里不动。
+func KeepStderrForCrashes() bool { return false }
+
 // Refresh 守护进程启动时让旧版装下的服务文件跟上当前版本(见 Linux 版):补上开机闸的 LaunchDaemon。
 // 只动已经装好的(没装服务、手动跑的不碰)。
 func Refresh() error {

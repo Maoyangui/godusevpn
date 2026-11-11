@@ -31,7 +31,7 @@ curl -fsSL https://raw.githubusercontent.com/Maoyangui/godusevpn/master/deploy/i
 |---|---|
 | `/etc/godusevpn/` | 设置(`settings.json`)、订阅配置 |
 | `/var/lib/godusevpn/` | 订阅缓存、规则集 `.srs`、`config.json`、日志、诊断包 |
-| Entware(梅林等) | 对应 `/opt/etc/` 与 `/opt/var/lib/` |
+| Entware(梅林等) | 对应 `/opt/etc/` 与 `/opt/var/lib/`;守护进程崩溃时的原因与栈在 `/opt/var/log/godusevpn.stderr.log`(只有崩溃信息,不记连接目标) |
 
 自启按初始化系统落地:systemd 单元、OpenWrt 的 procd 脚本、Entware 的 init.d 脚本。
 开机自启的开关只管开机:关着时重启后服务不会自己起来,`godusevpn start` 照样能起。

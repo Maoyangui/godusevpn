@@ -121,6 +121,13 @@ func (d *Daemon) exportDiag() (string, error) {
 			add(name, s)
 		}
 	}
+	// 梅林(Entware):启动脚本把守护进程的标准错误接到这里(每次拉起记一行 "== …" 抬头,和 crash.log 一样分段),
+	// fatal error 那一行原因只在这里有,crash.log 里只有栈。别的平台没有这个文件
+	for _, p := range []string{entwareStderrLog, entwareStderrLog + ".1"} {
+		if s := crashExcerpt(p); s != "" {
+			add(filepath.Base(p), s)
+		}
+	}
 	sysDiag(func(name, content string) { add(name, redact.Net(content)) })
 	if err := zw.Close(); err != nil {
 		return "", err
@@ -193,3 +200,6 @@ func crashExcerpt(path string) string {
 	}
 	return strings.Join(out, "\n")
 }
+
+// entwareStderrLog 梅林(Entware)的启动脚本把守护进程的标准错误接到的文件(测试里换掉)。
+var entwareStderrLog = paths.EntwareStderrLog

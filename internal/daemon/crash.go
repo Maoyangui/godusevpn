@@ -31,8 +31,9 @@ var crashFile *os.File
 // 收不到的:DLL 自己起的线程里崩掉(那里没有 Go 的 g,Go 不打印,系统直接结束进程),只剩系统日志里的
 // "意外终止"(7031 / 7034)。
 // 其余情形用 SetCrashOutput 另抄一份,fatal 的原因行留在标准错误那边:systemd / procd / launchd 都收标准
-// 错误,前台 run 模式留给控制台。Entware(梅林)的启动脚本把标准错误丢进 /dev/null,那里原因行仍会丢、
-// 只剩栈 —— 已知,要改 Entware 的启停脚本(和它的卸载问题一起)。
+// 错误,前台 run 模式留给控制台。Entware(梅林)的启动脚本把标准错误接到 paths.EntwareStderrLog(以前丢进
+// /dev/null,原因行就丢了),守护进程一启动(svc.KeepStderrForCrashes)把内核日志之类改去 /dev/null,那个文件里
+// 只剩崩溃信息;诊断包两份都带。
 func CaptureCrashes(service bool) {
 	dir := paths.Logs()
 	if err := os.MkdirAll(dir, 0o700); err != nil {

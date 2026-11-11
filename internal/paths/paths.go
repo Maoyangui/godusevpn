@@ -8,6 +8,10 @@ import (
 // AppName 目录名与服务名,三端一致。
 const AppName = "godusevpn"
 
+// EntwareStderrLog 梅林等 Entware 环境下,启动脚本把守护进程的标准错误接到这个文件,只为留下运行时崩溃时直接写到
+// 标准错误的原因和栈(守护进程起来后把内核日志之类改去 /dev/null,见 svc.KeepStderrForCrashes)。别的平台没有这个文件。
+const EntwareStderrLog = "/opt/var/log/" + AppName + ".stderr.log"
+
 func Settings() string { return filepath.Join(ConfDir(), "settings.json") }
 
 // ProfileCache 某条订阅的节点缓存。

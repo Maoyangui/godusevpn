@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -334,6 +335,23 @@ unlock() {
 	trap - EXIT HUP INT TERM
 	return 0
 }
+# 守护进程的标准错误接到 ERRLOG,不丢进 /dev/null:运行时崩溃(fatal error、panic)时把原因和全部 goroutine 的栈直接写到
+# 标准错误,守护进程自己的 crash.log 只抄得到栈,fatal error 那一行原因只在这里。守护进程平时也往标准错误写 —— 内核在 info 级
+# 给每条连接记一行目标 —— 它一起来看到标准错误接着这个文件,就把这些改去 /dev/null(连接目标默认不落盘),这里只剩崩溃信息
+# 和每次拉起记的一行抬头。只给 root 看(0600);超过 ERRMAX 就在拉起时整份挪成 .1、只留一份旧的(一次崩溃的栈就可能几百 KB,
+# 原因在最前面,截尾巴会把它截掉)。建不成(/opt 只读之类)就照旧接 /dev/null,照样起。
+ERRLOG=/opt/var/log/godusevpn.stderr.log
+ERRMAX=262144
+errlog() {
+	mkdir -p "${ERRLOG%/*}" 2>/dev/null && (umask 077 && : >> "$ERRLOG") 2>/dev/null || return 1
+	size=$(wc -c < "$ERRLOG" 2>/dev/null | tr -dc 0-9)
+	if [ "${size:-0}" -gt $ERRMAX ] && mv -f "$ERRLOG" "$ERRLOG.1" 2>/dev/null; then
+		chmod 600 "$ERRLOG.1" 2>/dev/null
+		(umask 077 && : >> "$ERRLOG") 2>/dev/null || return 1
+	fi
+	chmod 600 "$ERRLOG" 2>/dev/null
+	echo "== $(date '+%Y-%m-%d %H:%M:%S') 由 ${CALLER:-$1} 拉起" >> "$ERRLOG" 2>/dev/null
+}
 # launch 照 rc.func 的 start:守护进程已经在跑就不再起(重复 start 没事);否则在后台拉起,等它出现,最多 10 秒,
 # 出现了才算起来了。整段拿着锁(见上)。开机自启的开关不在这里看(只有开机的 start 看,见上)。
 # "用户停了"的标记也在锁里看、在锁里去:看门狗($1 是 watchdog)拿到锁再看一次,有标记就不拉 —— 它在锁外看那一眼之后、
@@ -355,7 +373,9 @@ launch() {
 		echo " $DESC is already running."
 		return 0
 	fi
-	$PREARGS $PROCS $ARGS >/dev/null 2>&1 &
+	err=/dev/null
+	errlog "$1" && err=$ERRLOG
+	$PREARGS $PROCS $ARGS >/dev/null 2>>"$err" &
 	i=0
 	until [ -n "$(daemons)" ]; do
 		if [ $i -ge 10 ]; then
@@ -803,6 +823,36 @@ func entwareDaemons(proc string) []int {
 }
 
 func Status() string { return QueryStatus() }
+
+// crashStderr 换掉 os.Stderr 之后,原来那个(fd 2,接着崩溃记录文件)得有人引用着:os.File 有终结器,没人引用了垃圾回收
+// 就把 fd 2 关掉,运行时崩溃时就写不进去了(fd 2 还可能被别的文件、连接占去,崩溃输出写进别处)。
+var crashStderr *os.File
+
+// KeepStderrForCrashes 守护进程一启动就调(内核起来之前)。梅林(Entware)的启动脚本把标准错误接到 paths.EntwareStderrLog,
+// 为的是留下运行时崩溃时直接往 fd 2 写的原因和栈;可守护进程平时也往标准错误写 —— 内核(sing-box)在 info 级给每条连接
+// 记一行目标,写到它建日志那一刻的 os.Stderr,连接目标默认不落盘。所以标准错误接着这个文件时,把 Go 这一层写标准错误的
+// (os.Stderr、标准库 log)改去 /dev/null,返回 true;运行时崩溃时照样直接写 fd 2,进那个文件。
+// 别的情形(systemd / procd 收标准错误进系统日志、前台跑的接着终端)什么都不动。
+func KeepStderrForCrashes() bool { return keepStderrForCrashes(paths.EntwareStderrLog) }
+
+func keepStderrForCrashes(logPath string) bool {
+	cur, err := os.Stderr.Stat()
+	if err != nil {
+		return false
+	}
+	want, err := os.Stat(logPath)
+	if err != nil || !os.SameFile(cur, want) {
+		return false
+	}
+	null, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
+	if err != nil {
+		return false
+	}
+	crashStderr = os.Stderr
+	os.Stderr = null
+	log.SetOutput(null)
+	return true
+}
 
 // Enabled 是否开机自启。
 func Enabled() bool {

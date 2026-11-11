@@ -1,15 +1,19 @@
 package svc
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -18,7 +22,11 @@ import (
 	"testing"
 	"time"
 
+	sblog "github.com/sagernet/sing-box/log"
+	"github.com/sagernet/sing-box/option"
 	"golang.org/x/sys/unix"
+
+	"github.com/Maoyangui/godusevpn/internal/paths"
 )
 
 // fakeEnv 设了它,测试程序就不跑测试,而是冒充 godusevpn(见 fakeGodusevpn)。
@@ -42,12 +50,38 @@ func TestMain(m *testing.M) {
 //     跑完把退出码和输出写进 caller.out —— 自己被脚本杀了就写不出来。
 func fakeGodusevpn(dir string, args []string) int {
 	if len(args) > 0 && args[0] == "run" {
+		pid := strconv.Itoa(os.Getpid())
 		if p := os.Getenv("FAKE_REFRESH"); p != "" {
 			// 像真的守护进程那样启动时调 Refresh 在 Entware 上的那一段(p 是一份已装的脚本),做完留个记号(内容是返回的错误)
 			err := refreshEntware(p)
-			_ = os.WriteFile(filepath.Join(dir, "refreshed."+strconv.Itoa(os.Getpid())), []byte(fmt.Sprint(err)), 0o644)
+			_ = os.WriteFile(filepath.Join(dir, "refreshed."+pid), []byte(fmt.Sprint(err)), 0o644)
 		}
-		_ = os.WriteFile(filepath.Join(dir, "run."+strconv.Itoa(os.Getpid())), nil, 0o644)
+		var crash chan os.Signal
+		if p := os.Getenv("FAKE_STDERR_LOG"); p != "" {
+			// 像真的守护进程那样一启动就处理标准错误,再像内核那样往标准错误写连接目标;收到 USR1 就真的崩一次(fatal error)。
+			// 崩之前先让垃圾回收和终结器跑几遍:原来的标准错误(fd 2)要是没人引用着,终结器会把它关掉,崩溃输出就丢了。
+			// sing-box 的日志包初始化时建了一个包级日志(拿着原来的 os.Stderr),先把它换掉,别让它替我们引用着
+			sblog.SetStdLogger(sblog.NewNOPFactory().Logger())
+			kept := keepStderrForCrashes(p)
+			fakeEmitTargets()
+			for i := 0; i < 3; i++ {
+				runtime.GC()
+				time.Sleep(30 * time.Millisecond)
+			}
+			crash = make(chan os.Signal, 1)
+			signal.Notify(crash, syscall.SIGUSR1)
+			_ = os.WriteFile(filepath.Join(dir, "stderr."+pid), []byte(strconv.FormatBool(kept)), 0o644)
+		}
+		_ = os.WriteFile(filepath.Join(dir, "run."+pid), nil, 0o644)
+		if crash != nil {
+			select {
+			case <-crash:
+				var mu sync.Mutex
+				mu.Unlock() // fatal error:运行时直接往 fd 2 写原因和栈,recover 不了
+			case <-time.After(10 * time.Minute):
+			}
+			return 0
+		}
 		time.Sleep(10 * time.Minute) // 测试出了岔子也不会永远留着
 		return 0
 	}
@@ -71,6 +105,18 @@ func fakeGodusevpn(dir string, args []string) int {
 	}
 	_ = os.WriteFile(filepath.Join(dir, callerOutName()), []byte(fmt.Sprintf("%d\n%s", code, out)), 0o644)
 	return 0
+}
+
+// fakeEmitTargets 像守护进程正常跑着时那样往标准错误写连接目标:真的 sing-box 日志(内核在 info 级给每条连接记一行,
+// 写到建日志那一刻的 os.Stderr)、标准库 log、直接写 os.Stderr 各一行,都带 secret-target。
+func fakeEmitTargets() {
+	if f, err := sblog.New(sblog.Options{Context: context.Background(), Options: option.LogOptions{Level: "info", Timestamp: true}}); err == nil {
+		_ = f.Start()
+		f.NewLogger("inbound/tun[tun-in]").Info("inbound connection to secret-target-singbox.example:443")
+		_ = f.Close()
+	}
+	log.Printf("dial secret-target-stdlog.example:443")
+	fmt.Fprintln(os.Stderr, "connect secret-target-stderr.example:443")
 }
 
 // callerOutName 调用者把结果写进哪个文件:默认 caller.out,同时跑几个调用者时各用各的(FAKE_OUT)。
@@ -115,7 +161,7 @@ done
 `
 
 // busyboxApplets 梅林上脚本用到的这些都是 BusyBox 的;BusyBox 那一遍把它们换成测试机上的 busybox。
-var busyboxApplets = []string{"sh", "pidof", "tr", "sed", "kill", "sleep", "mkdir", "touch", "rm"}
+var busyboxApplets = []string{"sh", "pidof", "tr", "sed", "kill", "sleep", "mkdir", "touch", "rm", "cat", "wc", "mv", "chmod", "date"}
 
 // eachToolset 用系统自带的 sh / pidof / tr / sed … 跑一遍,再换成 BusyBox 的跑一遍(梅林上就是这些;没装 busybox 就跳过那一遍)。
 func eachToolset(t *testing.T, f func(t *testing.T, busybox bool)) {
@@ -203,7 +249,7 @@ func (r *entwareRig) render(enabled bool) {
 	r.write("S99godusevpn", r.localize(s), 0o755)
 }
 
-// localize 脚本里的程序名、rc.func、标记、拉起用的锁、PATH 换到替身环境。
+// localize 脚本里的程序名、rc.func、标记、拉起用的锁、标准错误接的日志、PATH 换到替身环境。
 func (r *entwareRig) localize(s string) string {
 	r.t.Helper()
 	orig := s
@@ -211,12 +257,16 @@ func (r *entwareRig) localize(s string) string {
 	s = strings.Replace(s, "/opt/etc/init.d/rc.func", filepath.Join(r.dir, "rc.func"), 1)
 	s = strings.Replace(s, "/opt/var/lib/godusevpn/stopped", r.stopped, 1)
 	s = strings.Replace(s, "/opt/var/run/godusevpn.lock", r.lockDir(), 1)
+	s = strings.Replace(s, paths.EntwareStderrLog, r.errLog(), 1)
 	s = strings.Replace(s, "PATH=/opt/bin:", "PATH="+r.bin+":/opt/bin:", 1)
-	if s == orig || strings.Count(s, r.dir) != 4 || !strings.Contains(s, "PROCS="+r.name+"\n") {
+	if s == orig || strings.Count(s, r.dir) != 4+strings.Count(orig, paths.EntwareStderrLog) || !strings.Contains(s, "PROCS="+r.name+"\n") {
 		r.t.Fatalf("脚本模板变了,测试里的替换要跟上:\n%s", s)
 	}
 	return s
 }
+
+// errLog 替身环境里守护进程标准错误接的日志(脚本里是 /opt/var/log/godusevpn.stderr.log;上一级目录一开始不在,脚本自己建)。
+func (r *entwareRig) errLog() string { return filepath.Join(r.dir, "log", "godusevpn.stderr.log") }
 
 // lockDir 替身环境里拉起用的锁目录(脚本里是 /opt/var/run/godusevpn.lock;上一级目录一开始不在,脚本自己建)。
 func (r *entwareRig) lockDir() string { return filepath.Join(r.dir, "run", "godusevpn.lock") }
@@ -1149,6 +1199,163 @@ func TestEntwareRefreshArmsWatchdogOnlyForScriptLaunch(t *testing.T) {
 			t.Fatalf("开机自启关着时守护进程不补挂: %q", armed)
 		}
 		stopAll()
+	})
+}
+
+// 梅林(Entware):守护进程的标准错误以前丢进 /dev/null,崩了看不到原因 —— 运行时崩溃时把原因和全部 goroutine 的栈直接写到
+// 标准错误,守护进程自己的 crash.log 只抄得到栈,fatal error 那一行原因不在里面。现在启动脚本把标准错误接到
+// /opt/var/log/godusevpn.stderr.log(0600,每次拉起先记一行"== 时间 由 谁 拉起";超过 256KB 下次拉起时整份挪成 .1,
+// 只留一份旧的;建不成就照旧接 /dev/null,照样起)。而守护进程平时也往标准错误写:内核(sing-box)在 info 级给每条连接
+// 记一行目标,写到建日志那一刻的 os.Stderr —— 连接目标默认不落盘,所以守护进程一启动(KeepStderrForCrashes)看到标准错误
+// 接着这个文件,就把 Go 这一层写标准错误的(os.Stderr、标准库 log)改去 /dev/null,文件里只剩崩溃信息。
+// 测试程序冒充的守护进程一启动就做这一步,再用真的 sing-box 日志、标准库 log、os.Stderr 各写一行连接目标,收到 USR1 就
+// 真的崩一次(fatal error,崩之前先跑几遍垃圾回收)。前台跑的(标准错误接着管道)什么都不改。
+func TestEntwareStderrKeepsCrashesOnly(t *testing.T) {
+	eachToolset(t, func(t *testing.T, busybox bool) {
+		r := newEntwareRig(t, "gverrl", busybox)
+		errLog := r.errLog()
+		env := []string{"FAKE_STDERR_LOG=" + errLog}
+		content := func() string { b, _ := os.ReadFile(errLog); return string(b) }
+		headers := func(s string) int { return strings.Count("\n"+s, "\n== ") }
+		// kept 等守护进程 pid 处理完标准错误,返回它是不是改了(true / false)
+		kept := func(pid int) string {
+			t.Helper()
+			f := filepath.Join(r.dir, "stderr."+strconv.Itoa(pid))
+			waitFor(t, "守护进程处理完标准错误", func() bool { _, err := os.Stat(f); return err == nil })
+			b, _ := os.ReadFile(f)
+			return string(b)
+		}
+		start := func(what string) int {
+			t.Helper()
+			if code, out, alive := r.caller("start", startAction(initEntware), env...); !alive || code != 0 {
+				t.Fatalf("%s:start alive=%v code=%d\n%s", what, alive, code, out)
+			}
+			waitFor(t, what+":守护进程起来", func() bool { return len(r.alive()) == 1 })
+			return r.alive()[0]
+		}
+		stopAll := func() {
+			t.Helper()
+			if out, err := r.run("stop"); err != nil {
+				t.Fatalf("stop: %v\n%s", err, out)
+			}
+			waitFor(t, "守护进程停掉", func() bool { return len(r.alive()) == 0 })
+		}
+		fd := func(pid, n int) string {
+			s, _ := os.Readlink(fmt.Sprintf("/proc/%d/fd/%d", pid, n))
+			return s
+		}
+		noTargets := func(what, s string) {
+			t.Helper()
+			if strings.Contains(s, "secret-target") {
+				t.Fatalf("%s:连接目标写进了 %s(默认不落盘):\n%s", what, errLog, s)
+			}
+		}
+
+		// 1. 起服务:标准错误接着日志文件(0600),标准输出是 /dev/null;先记了一行抬头;守护进程写的连接目标没进文件
+		//    (它把 Go 这一层的标准错误改走了)
+		pid := start("起服务")
+		if got := fd(pid, 2); got != errLog {
+			t.Fatalf("守护进程的标准错误要接到 %s,得 %q", errLog, got)
+		}
+		if got := fd(pid, 1); got != os.DevNull {
+			t.Fatalf("守护进程的标准输出照旧是 /dev/null,得 %q", got)
+		}
+		if m := perm(t, errLog); m != 0o600 {
+			t.Fatalf("%s 要是 0600,得 %o", errLog, m)
+		}
+		k := kept(pid)
+		s := content()
+		if headers(s) != 1 || !strings.Contains(s, " 由 "+startAction(initEntware)+" 拉起") {
+			t.Fatalf("拉起之前要记一行抬头:\n%s", s)
+		}
+		noTargets("正常跑着", s)
+		if k != "true" {
+			t.Fatalf("标准错误接着崩溃记录文件时,守护进程要把 Go 这一层的标准错误改去 /dev/null(得 %s)", k)
+		}
+
+		// 2. 崩了(fatal error):原因那一行和栈都进了文件,连接目标没有
+		_ = syscall.Kill(pid, syscall.SIGUSR1)
+		waitFor(t, "守护进程崩掉", func() bool { return !fakeAlive(pid, r.name) })
+		s = content()
+		if !strings.Contains(s, "fatal error: sync: unlock of unlocked mutex") || !strings.Contains(s, "goroutine ") {
+			t.Fatalf("崩溃的原因和栈要留在 %s:\n%s", errLog, s)
+		}
+		noTargets("崩了之后", s)
+
+		// 3. 看门狗拉起:没超过 256KB,接着往同一个文件写,多一行抬头,上次崩溃的记录还在
+		if out, err := r.runScript(env, r.script, "watchdog"); err != nil {
+			t.Fatalf("watchdog: %v\n%s", err, out)
+		}
+		waitFor(t, "看门狗拉起", func() bool { return len(r.alive()) == 1 })
+		kept(r.alive()[0])
+		s = content()
+		if headers(s) != 2 || !strings.Contains(s, " 由 watchdog 拉起") || !strings.Contains(s, "fatal error:") {
+			t.Fatalf("看门狗拉起要接着写,上次崩溃的记录留着:\n%s", s)
+		}
+		noTargets("看门狗拉起之后", s)
+		stopAll()
+
+		// 4. 超过 256KB:下次拉起时整份挪成 .1(崩溃那段的原因在最前面,不能只留尾巴),新文件只有这次的抬头;
+		//    权限被改过的改回 0600
+		f, err := os.OpenFile(errLog, os.O_APPEND|os.O_WRONLY, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _ = f.WriteString(strings.Repeat("goroutine 1 [running]: 填充\n", 12000))
+		_ = f.Close()
+		_ = os.Chmod(errLog, 0o644)
+		old := content()
+		kept(start("超过 256KB"))
+		if b, _ := os.ReadFile(errLog + ".1"); string(b) != old {
+			t.Fatalf("超过 256KB 要整份挪成 .1(%d 字节),.1 有 %d 字节", len(old), len(b))
+		}
+		if s := content(); headers(s) != 1 || strings.Contains(s, "fatal error") {
+			t.Fatalf("挪走之后新文件只有这次的抬头:\n%s", s)
+		}
+		for _, p := range []string{errLog, errLog + ".1"} {
+			if m := perm(t, p); m != 0o600 {
+				t.Fatalf("%s 要是 0600,得 %o", p, m)
+			}
+		}
+		stopAll()
+
+		// 5. 前台跑的(标准错误接着管道,像终端那样):什么都不改,内核的输出照旧出在标准错误上
+		var buf strings.Builder
+		c := exec.Command(r.fake, "run")
+		c.Env = r.envWith(env...)
+		c.Stdout, c.Stderr = &buf, &buf
+		if err := c.Start(); err != nil {
+			t.Fatal(err)
+		}
+		if got := kept(c.Process.Pid); got != "false" {
+			t.Fatalf("前台跑的标准错误不是那个文件,不该改(得 %s)", got)
+		}
+		_ = c.Process.Kill()
+		_ = c.Wait()
+		if out := buf.String(); !strings.Contains(out, "secret-target-singbox.example") || !strings.Contains(out, "secret-target-stdlog.example") {
+			t.Fatalf("前台跑的内核日志照旧出在标准错误上:\n%s", out)
+		}
+
+		// 6. 日志目录建不成(那里是个文件之类):照样起,标准错误照旧接 /dev/null
+		if err := os.RemoveAll(filepath.Dir(errLog)); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Dir(errLog), nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		pid = start("日志目录建不成")
+		if got := fd(pid, 2); got != os.DevNull {
+			t.Fatalf("日志建不成时标准错误照旧接 /dev/null,得 %q", got)
+		}
+		if got := kept(pid); got != "false" {
+			t.Fatalf("标准错误没接那个文件,不该改(得 %s)", got)
+		}
+		stopAll()
+
+		// 脚本里接的文件和守护进程认的(paths.EntwareStderrLog)是同一个
+		if !strings.Contains(entwareScript, "\nERRLOG="+paths.EntwareStderrLog+"\n") {
+			t.Fatalf("启动脚本里接标准错误的文件要和 paths.EntwareStderrLog 一致")
+		}
 	})
 }
 

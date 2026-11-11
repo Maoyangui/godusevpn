@@ -188,6 +188,9 @@ func main() {
 
 // runDaemon 守护进程 + 面板一起跑。
 func runDaemon(ctx context.Context) error {
+	// 梅林(Entware):启动脚本把标准错误接到了崩溃记录文件,内核日志之类(带连接目标)不往里写,只留崩溃信息。
+	// 要在内核起来之前做:sing-box 建日志时取的是那一刻的 os.Stderr
+	svc.KeepStderrForCrashes()
 	daemon.CaptureCrashes(true)
 	d, err := daemon.New()
 	if err != nil {
