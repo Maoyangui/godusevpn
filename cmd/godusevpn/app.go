@@ -67,6 +67,9 @@ type App struct {
 	trafficStop context.CancelFunc
 	tray        *trayUI
 	updating    bool
+	// viewGen 返回整份状态的方法(stateCall)每写一次缓存加一。后台 refresh 拿状态之前记下它,回来时变了就不拿
+	// 自己那份盖缓存:那份可能是在这次切换之前取的,盖上去节点列表又按旧选择打勾(mu 管)
+	viewGen uint64
 }
 
 func newApp(minimized bool, link string) *App {
@@ -181,12 +184,17 @@ func (a *App) loop() {
 func (a *App) refresh() {
 	ctx, cancel := context.WithTimeout(a.ctx, 3*time.Second)
 	defer cancel()
+	a.mu.Lock()
+	gen := a.viewGen
+	a.mu.Unlock()
 	var view ipc.StateView
 	err := ipc.Call(ctx, ipc.MGetState, nil, &view)
 	a.mu.Lock()
 	a.state.Service = err == nil
 	if err == nil {
-		a.state.View = view.ForPage() // 页面拿到的状态不带凭据(面板密码哈希、订阅地址),和网页面板一样;托盘也用不着它们
+		if a.viewGen == gen { // 这期间切换过(stateCall 写了更新的):不拿可能更旧的这份盖它,下一轮再取
+			a.state.View = view.ForPage() // 页面拿到的状态不带凭据(面板密码哈希、订阅地址),和网页面板一样;托盘也用不着它们
+		}
 	} else {
 		a.state.View.State.Status = "disconnected"
 		a.state.Up, a.state.Down = 0, 0
@@ -473,6 +481,7 @@ func (a *App) stateCall(method string, params any) (ipc.StateView, error) {
 	if err == nil {
 		a.mu.Lock()
 		a.state.View = v
+		a.viewGen++
 		a.mu.Unlock()
 	}
 	go a.refresh()
