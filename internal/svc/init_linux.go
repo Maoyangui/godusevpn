@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 
@@ -236,9 +237,10 @@ PATH=/opt/bin:/opt/sbin:/sbin:/bin:/usr/sbin:/usr/bin
 # 用户主动 stop 留个标记,定时看到它就不拉;再 start(开机也是 start)时去掉。
 STOPPED=/opt/var/lib/godusevpn/stopped
 
-# 起停都不交给 rc.func:它按名字 pidof / killall $PROCS,而 godusevpn install / start / stop / uninstall 这些正在调
-# 本脚本的命令也叫这个名字 —— start 把调用者当成"已经在跑"而不拉(装完服务没起来,梅林要等看门狗一分钟后拉,
-# 没有 cru 的要等重启);stop 把调用者一起杀掉(卸载做到一半自己没了,闸、自启脚本、看门狗定时全留着)。
+# 起停和 check 都不交给 rc.func:它按名字 pidof / killall $PROCS,而 godusevpn install / start / stop / uninstall 这些
+# 正在调本脚本的命令也叫这个名字 —— start 把调用者当成"已经在跑"而不拉(装完服务没起来,梅林要等看门狗一分钟后拉,
+# 没有 cru 的要等重启);stop 把调用者一起杀掉(卸载做到一半自己没了,闸、自启脚本、看门狗定时全留着);
+# check 只要有一条 godusevpn 命令在跑就说服务活着。
 # 这里只认守护进程(拉起来的 "$PROCS $ARGS",命令行第二项是 $ARGS),按进程号发信号,调用者一个都不碰。
 CALLER=$2
 arg2() { { tr '\0' '\n' < /proc/$1/cmdline; } 2>/dev/null | sed -n 2p; }
@@ -319,6 +321,14 @@ stop | kill)
 	mkdir -p "${STOPPED%/*}" && touch "$STOPPED"
 	if [ "$1" = kill ]; then halt KILL; else halt TERM; fi
 	exit $?
+	;;
+check)
+	if [ -n "$(daemons)" ]; then
+		echo " Checking $DESC... alive."
+		exit 0
+	fi
+	echo " Checking $DESC... dead."
+	exit 1
 	;;
 esac
 
@@ -624,12 +634,39 @@ func QueryStatus() string {
 		}
 		return "stopped"
 	case initEntware:
-		if _, err := sh("pidof", name); err == nil {
+		// 和启动脚本一样只认守护进程:只按名字 pidof 的话,正在跑 godusevpn status 的本进程自己就算一个,
+		// 服务没在跑也报"在跑"。
+		if len(entwareDaemons(name)) > 0 {
 			return "running"
 		}
 		return "stopped"
 	}
 	return "stopped"
+}
+
+// entwareDaemons 名字叫 proc、命令行第二项是 run 的进程号 —— Entware 启动脚本拉起来的守护进程,和脚本里的 daemons
+// 是同一个判断:名字照 rc.func 用 pidof 认,再只留命令行第二项是 run(脚本里的 ARGS)的。godusevpn status / start /
+// install 这些命令也叫这个名字,只按名字认就把它们也算成服务。退出了、还没收尸的(僵尸)命令行是空的,不算。
+func entwareDaemons(proc string) []int {
+	out, err := exec.Command("pidof", proc).Output()
+	if err != nil {
+		return nil // 一个都没有(pidof 退出码 1),或者没有 pidof
+	}
+	var pids []int
+	for _, f := range strings.Fields(string(out)) {
+		pid, err := strconv.Atoi(f)
+		if err != nil {
+			continue
+		}
+		b, err := os.ReadFile("/proc/" + f + "/cmdline")
+		if err != nil {
+			continue // 刚好退出了
+		}
+		if args := strings.Split(string(b), "\x00"); len(args) > 1 && args[1] == "run" {
+			pids = append(pids, pid)
+		}
+	}
+	return pids
 }
 
 func Status() string { return QueryStatus() }

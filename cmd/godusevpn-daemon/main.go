@@ -50,8 +50,7 @@ func main() {
 	case "repair":
 		// 界面的「修复」:不走 uninstall(那会撤闸、还原网卡 IPv6 与 DNS)。先停并等旧进程真的退出 ——
 		// launchctl bootout 是异步的,紧接着 bootstrap 可能撞上还没退的旧进程而失败,服务就停着没人拉起。
-		// 只在 macOS 上这么做。Linux 的 install 本来就只是注册并启动(界面也没有「修复」);而 Entware(梅林)上
-		// QueryStatus 是 pidof godusevpn —— 正在跑的这条 repair 自己也叫这个名字,永远"还在跑"。
+		// 只在 macOS 上这么做。Linux 的 install 本来就只是注册并启动(界面也没有「修复」),服务在跑时 start 什么都不动。
 		if runtime.GOOS == "darwin" {
 			_ = svc.Stop()
 			for i := 0; i < 30 && svc.QueryStatus() == "running"; i++ {

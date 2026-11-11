@@ -30,12 +30,20 @@ func TestMain(m *testing.M) {
 
 // fakeGodusevpn 冒充 godusevpn 的进程(把测试程序复制成那个名字来跑,进程名、argv[0] 都和真的一样):
 //   - run:守护进程。登记进程号(run.<pid>)后一直挂着,收到 TERM / KILL 就没了;
+//   - 设了 FAKE_QUERY:像 godusevpn status 那样问服务在不在跑。把自己的进程号、entwareDaemons(FAKE_QUERY)
+//     (QueryStatus 现在的判断)和只按名字 pidof 的结果(以前的判断)写进 query.out,各占一行;
 //   - 别的子命令:像 godusevpn install / start / uninstall / stop 那样调启动脚本(sh $FAKE_SCRIPT $FAKE_ACTION),
 //     跑完把退出码和输出写进 caller.out —— 自己被脚本杀了就写不出来。
 func fakeGodusevpn(dir string, args []string) int {
 	if len(args) > 0 && args[0] == "run" {
 		_ = os.WriteFile(filepath.Join(dir, "run."+strconv.Itoa(os.Getpid())), nil, 0o644)
 		time.Sleep(10 * time.Minute) // 测试出了岔子也不会永远留着
+		return 0
+	}
+	if q := os.Getenv("FAKE_QUERY"); q != "" {
+		byName, _ := exec.Command("pidof", q).Output()
+		res := fmt.Sprintf("%d\n%s\n%s\n", os.Getpid(), strings.Trim(fmt.Sprint(entwareDaemons(q)), "[]"), strings.TrimSpace(string(byName)))
+		_ = os.WriteFile(filepath.Join(dir, "query.out"), []byte(res), 0o644)
 		return 0
 	}
 	out, err := exec.Command("sh", os.Getenv("FAKE_SCRIPT"), os.Getenv("FAKE_ACTION")).CombinedOutput()
@@ -525,6 +533,111 @@ func TestEntwareWatchdog(t *testing.T) {
 			t.Fatalf("开机自启关着时定时不该拉: %v", got)
 		}
 	})
+}
+
+// query 像 godusevpn status 那样,由一个同名进程("名字 status",命令行第二项不是 run)问服务在不在跑。
+// 返回这个问的进程自己的进程号、现在的判断(entwareDaemons,QueryStatus 用它)认出的守护进程、以前那样只按名字 pidof 的结果。
+func (r *entwareRig) query() (self int, daemons, byName []int) {
+	r.t.Helper()
+	_ = os.Remove(filepath.Join(r.dir, "query.out"))
+	c := exec.Command(r.fake, "status")
+	c.Env = r.envWith("FAKE_QUERY=" + r.name)
+	if out, err := c.CombinedOutput(); err != nil {
+		r.t.Fatalf("问状态的同名进程出错: %v\n%s", err, out)
+	}
+	b, err := os.ReadFile(filepath.Join(r.dir, "query.out"))
+	if err != nil {
+		r.t.Fatal(err)
+	}
+	lines := strings.Split(string(b), "\n")
+	if len(lines) < 3 {
+		r.t.Fatalf("query.out 不对: %q", b)
+	}
+	ints := func(s string) []int {
+		var out []int
+		for _, f := range strings.Fields(s) {
+			n, err := strconv.Atoi(f)
+			if err != nil {
+				r.t.Fatalf("query.out 不对: %q", b)
+			}
+			out = append(out, n)
+		}
+		return out
+	}
+	self, _ = strconv.Atoi(lines[0])
+	return self, ints(lines[1]), ints(lines[2])
+}
+
+// 梅林(Entware)上 godusevpn status 问服务在不在跑(QueryStatus):以前按名字 pidof godusevpn,正在问的本进程自己就算
+// 一个,服务没在跑也报"在跑"。脚本的 check(rc.unslung check 走这条)以前交给 rc.func,同样只按名字认。
+// 现在两处都和起停一样只认守护进程。真起同名进程问一遍:没在跑时答没在跑(对照:只按名字的 pidof 确实把问的那个
+// 自己算进去、rc.func 的 check 确实说活着);守护进程在跑时认出的正是它;它退出了、还没收尸(僵尸)也不算。
+func TestEntwareStatusFromCaller(t *testing.T) {
+	eachToolset(t, func(t *testing.T, busybox bool) {
+		r := newEntwareRig(t, "gvstat", busybox)
+		check := func(want int) {
+			t.Helper()
+			r.clearLogs()
+			code, out, alive := r.caller("status", "check")
+			if !alive || code != want {
+				t.Fatalf("同名命令跑脚本的 check 应得 %d: alive=%v code=%d\n%s", want, alive, code, out)
+			}
+			if got := r.log("rc.log"); got != "" {
+				t.Fatalf("check 不该交给 rc.func(它按名字认进程),rc.func 收到 %q", got)
+			}
+		}
+
+		// 1. 没在跑:答没在跑;脚本的 check 返回 1。对照:只按名字的 pidof 把问的那个自己算进去,交给 rc.func 的 check 说活着
+		self, ds, byName := r.query()
+		if len(ds) != 0 {
+			t.Fatalf("服务没在跑,却认出了守护进程 %v(问的进程 %d)", ds, self)
+		}
+		if !containsInt(byName, self) {
+			t.Fatalf("对照失败:只按名字的 pidof 应把问的进程自己(%d)算进去,得 %v", self, byName)
+		}
+		check(1)
+		if code, out, alive := r.caller("status", "check", "FAKE_SCRIPT="+r.legacy()); !alive || code != 0 {
+			t.Fatalf("对照失败:交给 rc.func 的 check 应把调用者当成服务活着: alive=%v code=%d\n%s", alive, code, out)
+		}
+
+		// 2. 守护进程在跑:认出的正是它,check 返回 0
+		pid, done := r.startDaemon()
+		if self, ds, _ := r.query(); !reflect.DeepEqual(ds, []int{pid}) {
+			t.Fatalf("应只认出守护进程 %d,得 %v(问的进程 %d)", pid, ds, self)
+		}
+		check(0)
+		_ = syscall.Kill(pid, syscall.SIGTERM)
+		waitSignaled(t, done, syscall.SIGTERM)
+
+		// 3. 守护进程退出了、还没收尸(僵尸;BusyBox 的 pidof 照样列出来):不算在跑
+		c := exec.Command(r.fake, "run")
+		c.Env = r.env
+		if err := c.Start(); err != nil {
+			t.Fatal(err)
+		}
+		zombie := c.Process.Pid
+		waitFor(t, "守护进程登记进程号", func() bool { return containsInt(r.alive(), zombie) })
+		_ = c.Process.Kill()
+		waitFor(t, "守护进程成了僵尸", func() bool { return procState(zombie) == 'Z' })
+		if _, ds, _ := r.query(); len(ds) != 0 {
+			t.Fatalf("僵尸不算在跑,得 %v", ds)
+		}
+		check(1)
+		_ = c.Wait()
+	})
+}
+
+// procState /proc/<pid>/stat 里的进程状态(R / S / Z …);读不到给 0。
+func procState(pid int) byte {
+	b, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/stat")
+	if err != nil {
+		return 0
+	}
+	st := string(b)
+	if r := strings.LastIndexByte(st, ')'); r >= 0 && r+2 < len(st) {
+		return st[r+2]
+	}
+	return 0
 }
 
 // entwareDaemonsByScan 测试这边独立数一遍 "名字 run" 的守护进程(扫 /proc,不经 pidof):核对脚本说起来了的时候是不是真起来了。
