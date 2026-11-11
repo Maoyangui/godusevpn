@@ -1,0 +1,157 @@
+package builder
+
+import (
+	"encoding/json"
+	"reflect"
+	"testing"
+
+	"github.com/Maoyangui/godusevpn/internal/profile"
+	"github.com/Maoyangui/godusevpn/internal/settings"
+)
+
+func profileOf(t *testing.T, nodes ...string) *profile.Profile {
+	t.Helper()
+	p := &profile.Profile{}
+	for _, n := range nodes {
+		var m struct {
+			Tag string `json:"tag"`
+		}
+		if err := json.Unmarshal([]byte(n), &m); err != nil {
+			t.Fatal(err)
+		}
+		p.Outbounds = append(p.Outbounds, json.RawMessage(n))
+		p.Tags = append(p.Tags, m.Tag)
+	}
+	return p
+}
+
+// 地址只指向本机的才算提示节点:回环、未指定地址、localhost;局域网、链路本地、普通域名都不算。
+func TestLocalServer(t *testing.T) {
+	for host, want := range map[string]bool{
+		"127.0.0.1": true, " 127.0.0.1 ": true, "127.8.9.10": true, "::1": true, "[::1]": true, "::ffff:127.0.0.1": true,
+		"0.0.0.0": true, "::": true, "localhost": true, "LOCALHOST.": true, "hint.localhost": true,
+		"": false, "1.2.3.4": false, "10.0.0.1": false, "192.168.1.1": false, "169.254.1.1": false, "fe80::1": false,
+		"2001:db8::1": false, "example.com": false, "localhost.example.com": false, "127.0.0.1.example.com": false, "notlocalhost": false,
+	} {
+		if got := localServer(host); got != want {
+			t.Fatalf("localServer(%q) = %v,应 %v", host, got, want)
+		}
+	}
+}
+
+// 续费 / 到期 / 用量的提示节点(地址只指向本机)不进自动选择和线路组,报在 Report.Hints 里(按订阅里的顺序);
+// proxy 里照样列着,手动选它照样选得上(和以前一样)。成员全是提示节点的组原样留着(空的测速组整份配置起不来)。
+func TestHintNodesExcludedFromAutoSelection(t *testing.T) {
+	p := profileOf(t,
+		`{"type":"shadowsocks","tag":"00-勿选-流量:1.2/100GB 重置:12天","server":"127.0.0.1","server_port":1,"method":"aes-128-gcm","password":"dummy"}`,
+		`{"type":"socks","tag":"续费提示","server":"127.0.0.1","server_port":88}`,
+		`{"type":"trojan","tag":"香港1-A","server":"1.2.3.4","server_port":443,"password":"p"}`,
+		`{"type":"trojan","tag":"香港1-B","server":"hk-b.example","server_port":443,"password":"p"}`,
+		`{"type":"vmess","tag":"套餐到期:2026-12-01","server":"localhost","server_port":443,"uuid":"b831381d-6324-4d53-ad4f-8cda48b30811"}`,
+		`{"type":"trojan","tag":"剩余流量","server":"0.0.0.0","server_port":443,"password":"p"}`,
+		`{"type":"trojan","tag":"日本","server":"1.2.3.6","server_port":443,"password":"p"}`,
+	)
+	p.Groups = []profile.Group{
+		{Tag: "香港1", Members: []string{"续费提示", "香港1-A", "香港1-B"}},
+		{Tag: "全是提示", Members: []string{"00-勿选-流量:1.2/100GB 重置:12天", "续费提示"}},
+	}
+	hints := []string{"00-勿选-流量:1.2/100GB 重置:12天", "续费提示", "套餐到期:2026-12-01", "剩余流量"}
+	if got := HintNodes(p); !reflect.DeepEqual(got, hints) {
+		t.Fatalf("提示节点: %v", got)
+	}
+
+	for _, sel := range []string{"", "香港1", "续费提示"} {
+		s := settings.Default()
+		s.Selected = sel
+		raw, rep, err := BuildEx(Input{Profile: p, Settings: s, DataDir: "/data", ClashSecret: "sec", RuleSetDir: ruleSetRoot(t)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var c cfg
+		if err := json.Unmarshal(raw, &c); err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(rep.Hints, hints) {
+			t.Fatalf("Report.Hints: %v", rep.Hints)
+		}
+		by := outboundByTag(c)
+		if got := anyStrings(by["auto"]["outbounds"]); !reflect.DeepEqual(got, []string{"香港1-A", "香港1-B", "日本"}) {
+			t.Fatalf("选 %q:自动选择里不该有提示节点(测速前 urltest 先用第一个成员): %v", sel, got)
+		}
+		proxy := c.Outbounds[0]
+		if got := anyStrings(proxy["outbounds"]); !reflect.DeepEqual(got[len(got)-len(p.Tags):], p.Tags) {
+			t.Fatalf("proxy 里节点一个不少(手动选它照样选得上): %v", got)
+		}
+		if sel == "续费提示" && proxy["default"] != "续费提示" {
+			t.Fatalf("手动选了提示节点:和以前一样就用它: %v", proxy["default"])
+		}
+		if sel != "香港1" {
+			continue
+		}
+		if got := anyStrings(by["香港1"]["outbounds"]); !reflect.DeepEqual(got, []string{"香港1-A", "香港1-B"}) {
+			t.Fatalf("线路组里的提示节点同样剔掉: %v", got)
+		}
+		if got := anyStrings(by["全是提示"]["outbounds"]); !reflect.DeepEqual(got, []string{"00-勿选-流量:1.2/100GB 重置:12天", "续费提示"}) {
+			t.Fatalf("成员全是提示节点的组原样留着,配置才建得起来: %v", got)
+		}
+	}
+
+	// 订阅里只有提示节点(到期 / 用尽后有的面板只给一条提示):auto 原样留着,配置照样生成得出来
+	only := p.Subset([]string{"00-勿选-流量:1.2/100GB 重置:12天", "续费提示"})
+	c, _ := buildProfile(t, only, settings.Default())
+	if got := anyStrings(outboundByTag(c)["auto"]["outbounds"]); len(got) != 2 {
+		t.Fatalf("全是提示节点时 auto 原样留着: %v", got)
+	}
+}
+
+// 提示节点先于连不上的 IPv6 节点剔:剔完一个不剩时留 IPv6 节点(打开 IPv6、换个网络就能用),不留提示节点。
+func TestHintNodesYieldToV6Nodes(t *testing.T) {
+	p := profileOf(t,
+		`{"type":"socks","tag":"续费提示","server":"127.0.0.1","server_port":88}`,
+		`{"type":"trojan","tag":"v6","server":"2001:db8::1","server_port":443,"password":"p"}`,
+		`{"type":"trojan","tag":"v6b","server":"2001:db8::2","server_port":443,"password":"p"}`,
+	)
+	p.Groups = []profile.Group{{Tag: "线路", Members: []string{"续费提示", "v6"}}, {Tag: "线路2", Members: []string{"v6", "v6b"}}}
+	s := settings.Default() // 关着 IPv6、开着 TUN、开着「连接时停用网卡 IPv6」:写成 IPv6 地址的连不上
+	s.Selected = "线路"
+	raw, rep, err := BuildEx(Input{Profile: p, Settings: s, DataDir: "/data", ClashSecret: "sec", RuleSetDir: ruleSetRoot(t), Linux: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(rep.Hints, []string{"续费提示"}) || !reflect.DeepEqual(rep.V6Blocked, []string{"v6", "v6b"}) {
+		t.Fatalf("前提: %v %v", rep.Hints, rep.V6Blocked)
+	}
+	var c cfg
+	if err := json.Unmarshal(raw, &c); err != nil {
+		t.Fatal(err)
+	}
+	by := outboundByTag(c)
+	if got := anyStrings(by["auto"]["outbounds"]); !reflect.DeepEqual(got, []string{"v6", "v6b"}) {
+		t.Fatalf("只剩 IPv6 节点时留它们,不留提示节点: %v", got)
+	}
+	if got := anyStrings(by["线路"]["outbounds"]); !reflect.DeepEqual(got, []string{"v6"}) {
+		t.Fatalf("线路组同理: %v", got)
+	}
+}
+
+// 订阅里没有提示节点时什么都不变:Report.Hints 为空,auto 照旧是全部节点、顺序不变。
+func TestNoHintNodesNoChange(t *testing.T) {
+	p := groupProfile()
+	if h := HintNodes(p); h != nil {
+		t.Fatalf("没有提示节点: %v", h)
+	}
+	_, rep, err := BuildEx(Input{Profile: p, Settings: settings.Default(), DataDir: "/data", ClashSecret: "sec", RuleSetDir: ruleSetRoot(t)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.Hints != nil {
+		t.Fatalf("Report.Hints 应为空: %v", rep.Hints)
+	}
+	c, _ := buildProfile(t, p, settings.Default())
+	if got := anyStrings(outboundByTag(c)["auto"]["outbounds"]); !reflect.DeepEqual(got, p.Tags) {
+		t.Fatalf("auto 照旧是全部节点: %v", got)
+	}
+	if HintNodes(nil) != nil {
+		t.Fatal("没有订阅时没有提示节点")
+	}
+}

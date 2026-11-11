@@ -1100,6 +1100,12 @@ func (d *Daemon) prepare(ctx context.Context) ([]byte, error) {
 	if len(rep.V6Blocked) > 0 {
 		d.logf("这 %d 个节点只能走 IPv6,而「允许 IPv6」关着:这次连接不用它们(不进自动选择和线路组,手动选它也连不上): %s", len(rep.V6Blocked), strings.Join(rep.V6Blocked, "、"))
 	}
+	if len(rep.Hints) > 0 {
+		d.logf("这 %d 个节点的地址是本机(127.0.0.1 这类),是订阅里显示用量 / 到期 / 续费的提示,不是能连的节点;自动选择和线路组不会用它们: %s", len(rep.Hints), strings.Join(rep.Hints, "、"))
+		if slices.Contains(rep.Hints, s.Selected) {
+			d.logf("选中的「%s」就是这种提示节点,连上也不通:换一个节点,或改回自动选择", s.Selected)
+		}
+	}
 	// Do not publish a rendered config if a concurrent settings update raced
 	// with the long subscription/build phase. The state machine will retry with
 	// the current policy, keeping DNS/route/privacy settings coherent.
@@ -2672,7 +2678,7 @@ func (d *Daemon) registerHandlers() {
 		for try := 0; ; try++ {
 			snap := d.getSettings()
 			_, prof := d.activeProfile()
-			next = lineAutoSelection(prof, snap.Selected, in.On, d.groupNow, d.v6BlockedNow(snap), snap.SelectedNode)
+			next = lineAutoSelection(prof, snap.Selected, in.On, d.groupNow, d.autoSkippedNow(snap), snap.SelectedNode)
 			changed = next != snap.Selected
 			_, err = d.editSettings(func(cur *settings.Settings) error {
 				if cur.Selected != snap.Selected || cur.SelectedNode != snap.SelectedNode || cur.ActiveProfile != snap.ActiveProfile {

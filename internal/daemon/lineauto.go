@@ -64,7 +64,7 @@ func lineAutoAfterSelect(p *profile.Profile, sel string, cur bool) bool {
 // lineAutoSelection 翻「线路自动」时当前选择怎么换算:
 //   - 打开:选的是某个线路组里的节点 → 换成那个线路组;自动选择、不属于任何组的节点不变(只换列表的显示)。
 //   - 关闭:选的是线路组 → 固定到组里此刻在用的那台(now 给,内核在跑时才有);内核没跑、或那台已经不在组里,
-//     取第一台这一轮连得上的(blocked 是连不上的 IPv6 节点,全是的话照样取第一台)。
+//     取第一台这一轮连得上的(blocked 是自动选择不用的节点:提示节点、连不上的 IPv6 节点,见 autoSkippedNow;全是的话照样取第一台)。
 //     选的线路组在订阅里已经没了(线路只剩一台):固定到这一轮正在用的同线路那一台(fallback = settings.SelectedNode,
 //     选的是节点时为空;见 builder.Effective)。
 //     选的线路组成员成了全部节点(订阅里只剩这一条线路,见 profile.Profile.Whole):这一轮落在自动选择上,固定到它此刻在用的那台。
@@ -175,6 +175,13 @@ func (d *Daemon) v6BlockedNow(s settings.Settings) []string {
 	v6 := d.v6Only
 	d.mu.Unlock()
 	return builder.V6Blocked(p, s, v6)
+}
+
+// autoSkippedNow 当前订阅里自动选择不用的节点:提示节点(地址只指向本机,见 builder.HintNodes)在前,
+// 这一轮连不上的 IPv6 节点在后 —— 和配置里自动选择、线路组剔掉的是同一批。
+func (d *Daemon) autoSkippedNow(s settings.Settings) []string {
+	_, p := d.activeProfile()
+	return append(builder.HintNodes(p), d.v6BlockedNow(s)...)
 }
 
 // selectionBlocked 这一轮实际落到的选择(eff,见 builder.Effective)只能用关着 IPv6 时不用的节点:选的就是这种节点、

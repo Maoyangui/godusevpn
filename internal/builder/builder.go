@@ -177,6 +177,8 @@ type Report struct {
 	Missing []MissingRuleSet
 	// V6Blocked 这一轮连不上的 IPv6 节点(见 V6Blocked):已经从自动选择和线路组里摘掉,手动选它照样会选上,只是连不通。
 	V6Blocked []string
+	// Hints 订阅里的提示节点(地址只指向本机,见 HintNodes):同样不进自动选择和线路组,手动选它照样会选上,只是连不通。
+	Hints []string
 }
 
 // Build 渲染配置(带缩进的 JSON,便于放进诊断包看)。
@@ -224,6 +226,10 @@ func buildConfig(in Input, rep *Report) ([]byte, error) {
 	// 地址直接写成 IPv6 的还要改经 block 出站:手动选它时内核也不去拨,本机一个 IPv6 包都不发
 	rep.V6Blocked = V6Blocked(in.Profile, s, in.V6Only)
 	viaV6Block := v6Detours(in.Profile, rep.V6Blocked)
+	// 提示节点(地址只指向本机,见 HintNodes)同样不进,而且先于 IPv6 节点剔:剔完一个不剩时宁可留着 IPv6 节点
+	// (打开 IPv6、换个网络就能用),提示节点怎么都连不上。订阅里没有提示节点时 reachable 原样返回,配置一个字节都不变
+	rep.Hints = HintNodes(in.Profile)
+	members := func(list []string) []string { return reachable(reachable(list, rep.Hints), rep.V6Blocked) }
 	proxyList := make([]string, 0, 1+len(groups)+len(tags))
 	proxyList = append(proxyList, "auto")
 	for _, g := range groups {
@@ -232,10 +238,10 @@ func buildConfig(in Input, rep *Report) ([]byte, error) {
 	proxyList = append(proxyList, tags...)
 	outbounds := []any{
 		obj("type", "selector", "tag", "proxy", "outbounds", proxyList, "default", selected, "interrupt_exist_connections", true),
-		autoGroup(reachable(tags, rep.V6Blocked)),
+		autoGroup(members(tags)),
 	}
 	for _, g := range groups {
-		outbounds = append(outbounds, urltestGroup(g.Tag, reachable(g.Members, rep.V6Blocked)))
+		outbounds = append(outbounds, urltestGroup(g.Tag, members(g.Members)))
 	}
 	for i, raw := range in.Profile.Outbounds {
 		if i < len(tags) && viaV6Block[tags[i]] {
