@@ -397,8 +397,8 @@ esac
 // entwareLockSh 启动脚本里拉起那一段用的锁(lock / unlock),单独拿出来测试里好直接跑。
 const entwareLockSh = `# 拉起那一段(查有没有在跑 → 没有就拉起 → 等它出现)同一时间只让一个脚本做:不然守护进程刚崩时,用户手动起服务恰好
 # 撞上看门狗整分钟的那一下,两边都查到没在跑,就各拉起一个。stop / kill 也拿这把锁,写"用户停了"的标记和停守护进程
-# 都在锁里(见下面 stop 那段)。BusyBox 和 Entware 上不保证有 flock,用 mkdir 建锁目录
-# (建成了就是拿到了,是原子的),里面 owner 写持有者的进程号和开机秒数(/proc/uptime,不受改系统时间影响)。拿不到就
+# 都在锁里(见下面 stop 那段)。BusyBox 和 Entware 上不保证有 flock,用 mkdir 建锁目录,再在里面独占地建 owner
+# (两步都成才是拿到了,见 take),owner 里写持有者的进程号和开机秒数(/proc/uptime,不受改系统时间影响)。拿不到就
 # 隔一秒再试;持有者已经不在了、锁拿了超过 LOCKTTL 秒(正常最多十几秒)、或者是重启前留下的(锁在 /opt 上,重启不丢),
 # 当成没放掉的旧锁清掉(见 unstale)。旧锁清不掉(/opt 被重新挂成只读之类)就照锁目录建不成那样,试三回之后不加锁照以前
 # 那样起,不会一直等下去。拿着锁时被 TERM / INT / HUP 打断也先放锁。
@@ -420,13 +420,13 @@ stale() {
 }
 # unstale 清掉判定为旧锁的那一把($1 是判定时看到的记录)。"看记录"和"删"是两步:几个等锁的同时判定同一把旧锁时,
 # 先删的紧接着建好了自己的新锁,后删的还拿着判定时的结论,就会把这把新锁删掉,两边都进了锁里。所以清旧锁要先拿
-# 清理锁($LOCK.clean,也是 mkdir 建的),拿着它再看一眼:记录没变、本进程在这一把里留的记号(.w进程号,见 lock)
+# 清理锁($LOCK.clean,也是建目录再认领,见 take),拿着它再看一眼:记录没变、本进程在这一把里留的记号(.w进程号,见 lock)
 # 还在 —— 说明还是判定的那一把,不是别人清掉之后新建的 —— 才删。清理只要一眨眼,清理锁占着超过 5 秒就是清的那个
 # 被打断留下的,删掉它。
 # 返回 0:删掉了 / 那一把已经不在了,马上再建;1:换了一把或别人正在清,等一秒再看;2:清不掉(/opt 只读之类)。
 # 删不掉时再看一眼:锁目录已经没了算删掉了,记录变了算换了一把(别人放掉又建了),都不算清不掉。
 unstale() {
-	if ! mkdir "$LOCK.clean" 2>/dev/null; then
+	if ! take "$LOCK.clean" by; then
 		if [ ! -d "$LOCK.clean" ]; then
 			cantmk "$LOCK.clean" && return 2
 			return 1
@@ -449,9 +449,29 @@ unstale() {
 			rc=2
 		fi
 	fi
-	rmdir "$LOCK.clean" 2>/dev/null
+	unclean
 	CLEANING=
 	return $rc
+}
+# take 把目录 $1 当锁拿:mkdir 建成了还不算,还要在里面用 set -C(noclobber)的重定向独占地建成认领文件 $2 才算拿到。
+# 不能只看 mkdir 的返回值:Ubuntu 26.04 默认的 uutils coreutils 0.8.0 的 mkdir 先看目录在不在、不在才建,建的时候
+# 内核报 EEXIST(别人恰好在这中间建了)只要那里是个目录就当建成、返回 0(上游 issue 13970,2026 年 8 月才修),几个一起建同一个
+# 目录会有两个都"建成" —— 锁就不排他了,两边同时在锁里。set -C 的重定向是 shell 自己 O_CREAT|O_EXCL 打开(dash、
+# BusyBox ash 都是),不经外部命令,同一个名字只有一个能建成。认领文件由拿到的那个放锁时连目录一起挪走(锁目录,
+# 见 droplock)或者先删掉再 rmdir(清理锁,见 unclean),在那之前一直占着,后来的认领都建不成。
+# 返回 0:拿到了;认领不成,却既没有认领文件、目录也还在,就是这里写不进去(满了之类):也返回 0,由拿到之后写记录那步
+# 照写不进去处理(以前就是这样)。返回 1:没拿到(目录已经在了、别人先认领了、或者目录刚被挪走)。
+take() {
+	mkdir "$1" 2>/dev/null || return 1
+	(set -C; : > "$1/$2") 2>/dev/null && return 0
+	[ -e "$1/$2" ] || [ ! -d "$1" ] && return 1
+	return 0
+}
+# unclean 放掉清理锁:先删认领文件再 rmdir。不用 rm -rf:这中间要是有人刚认领了它(mkdir 谎报建成、晚一步才认领的),
+# 会连他的认领一起删掉;rmdir 碰上目录里有别人的认领就删不掉,清理锁照样归那个人。
+unclean() {
+	rm -f "$LOCK.clean/by" 2>/dev/null
+	rmdir "$LOCK.clean" 2>/dev/null
 }
 # droplock 删掉锁目录:先整个改名挪开(同一目录里改名是原子的),再删挪开的那一份。不直接 rm -rf "$LOCK":它是一项项
 # 删完最后才 rmdir,等锁的这时候正好往里留记号(.w进程号,见 lock;记号刚被删、或者记录刚被删读成换了一把,都会再留),
@@ -485,8 +505,8 @@ lock() {
 	trap 'unlock; exit 143' TERM
 	mkdir -p "${LOCK%/*}" 2>/dev/null
 	seen=- waited=0 tries=0 cleanwait=0
-	# 记录在每次建目录之前算好,建成了紧接着写进去:建好目录到写上记录之间越短,别人看到"没记录"的锁越少
-	until MYLOCK="$$ $(uptime_s)"; mkdir "$LOCK" 2>/dev/null; do
+	# 记录在每次建目录之前算好,拿到了紧接着写进去:认领到写上记录之间越短,别人看到"没记录"的锁越少
+	until MYLOCK="$$ $(uptime_s)"; take "$LOCK" owner; do
 		if [ ! -d "$LOCK" ]; then
 			# 锁目录不在却建不成:真建不了(/opt 只读之类,见 cantmk)就数一回,三回之后不加锁照以前那样起;
 			# 只是别人刚好在这中间建了又放掉的,不数,马上再建
@@ -522,7 +542,7 @@ lock() {
 	echo "$MYLOCK" > "$LOCK/owner" || { droplock; MYLOCK=; }
 }
 unlock() {
-	[ -n "$CLEANING" ] && rmdir "$LOCK.clean" 2>/dev/null
+	[ -n "$CLEANING" ] && unclean
 	CLEANING=
 	[ -n "$MYLOCK" ] && [ "$(cat "$LOCK/owner" 2>/dev/null)" = "$MYLOCK" ] && droplock
 	MYLOCK=

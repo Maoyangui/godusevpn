@@ -107,26 +107,85 @@ func TestEntwareLockUnremovable(t *testing.T) {
 	})
 }
 
-// lockHarness 只跑脚本里拉起那一段的锁(entwareLockSh):等 go 文件出现(几个一起起跑)→ 拿锁 → 在锁里建 inside 目录
-// (建不成说明别人也在锁里,打一行 OVERLAP)→ 待一会儿 → 删掉 → 放锁。
-func lockHarness(t *testing.T, r *entwareRig) string {
+// lockHarness 只跑脚本里拉起那一段的锁(entwareLockSh):等 go 文件出现(几个一起起跑)→ 拿锁 → 在锁里独占地建 inside
+// (建不成说明别人也在锁里,打一行 OVERLAP)→ 待一会儿 → 删掉 → 放锁。prelude 接在锁那一段后面(换掉里面用的命令之类)。
+// inside 用 set -C 的重定向建(shell 自己 O_EXCL 打开),不用 mkdir:uutils 0.8.0 的 mkdir 两个同时建会都返回 0
+// (见 uutilsMkdir),用它测重叠,恰好同时进锁的两个同时建 inside 时就看不出来;prelude 换掉的 mkdir 也碰不到它。
+func lockHarness(t *testing.T, r *entwareRig, prelude string) string {
 	t.Helper()
 	body := strings.Replace(entwareLockSh, "LOCK=/opt/var/run/godusevpn.lock\n", "LOCK="+r.lockDir()+"\n", 1)
 	if body == entwareLockSh {
 		t.Fatalf("锁那一段变了,测试里的替换要跟上:\n%s", entwareLockSh)
 	}
 	d := r.dir
-	r.write("harness", "#!/bin/sh\n"+body+`
+	r.write("harness", "#!/bin/sh\n"+body+prelude+`
 while [ ! -e "`+d+`/go" ]; do :; done
 lock
 [ -n "$MYLOCK" ] || echo NOLOCK
-mkdir "`+d+`/inside" 2>/dev/null || echo OVERLAP
+(set -C; : > "`+d+`/inside") 2>/dev/null || echo OVERLAP
 sleep 0.2 2>/dev/null || sleep 1
-rmdir "`+d+`/inside" 2>/dev/null
+rm -f "`+d+`/inside"
 unlock
 echo DONE
 `, 0o755)
 	return filepath.Join(d, "harness")
+}
+
+// staleLock 放一把持有者已经不在了的旧锁(持有者被 KILL 或断电留下的那种)。
+func staleLock(t *testing.T, r *entwareRig) {
+	t.Helper()
+	_ = os.RemoveAll(r.lockDir())
+	if err := os.MkdirAll(r.lockDir(), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	r.write("run/godusevpn.lock/owner", fmt.Sprintf("%d %d\n", deadPID(t), uptimeSeconds(t)), 0o644)
+}
+
+// lockRound n 个 harness(见 lockHarness)一起起跑抢锁:limit 内都要拿到锁做完,谁都不能和别人同时在锁里、
+// 不能没拿到锁就进去,做完锁和清理锁都要放掉。
+func lockRound(t *testing.T, r *entwareRig, harness, what string, n int, limit time.Duration) {
+	t.Helper()
+	sh := "sh"
+	if r.busybox {
+		sh = filepath.Join(r.bin, "sh")
+	}
+	_ = os.Remove(filepath.Join(r.dir, "go"))
+	outs := make([]string, n)
+	var wg sync.WaitGroup
+	ctx, cancel := context.WithTimeout(context.Background(), limit)
+	defer cancel()
+	for i := 0; i < n; i++ {
+		c := exec.CommandContext(ctx, sh, harness)
+		c.Env = r.env
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			b, err := c.CombinedOutput()
+			outs[i] = fmt.Sprintf("%s(%v)", b, err)
+		}(i)
+	}
+	time.Sleep(300 * time.Millisecond) // 都起来、都在等 go
+	r.write("go", "", 0o644)
+	wg.Wait()
+	if ctx.Err() != nil {
+		t.Fatalf("%s:%v 内没都拿到锁做完:\n%s", what, limit, strings.Join(outs, "\n"))
+	}
+	all := strings.Join(outs, "\n")
+	if strings.Contains(all, "NOLOCK") {
+		t.Fatalf("%s:锁目录建得了,却有没拿到锁就进去的:\n%s", what, all)
+	}
+	if strings.Contains(all, "OVERLAP") {
+		t.Fatalf("%s:有两个同时进了锁里:\n%s", what, all)
+	}
+	if strings.Count(all, "DONE") != n {
+		t.Fatalf("%s:不是每个都做完了:\n%s", what, all)
+	}
+	if r.locked() {
+		t.Fatalf("%s:做完要放锁", what)
+	}
+	if _, err := os.Stat(r.lockDir() + ".clean"); err == nil {
+		t.Fatalf("%s:清理锁要放掉", what)
+	}
 }
 
 // 梅林(Entware):几个脚本同时等同一把旧锁(持有者被 KILL 或断电留下的)时,以前清旧锁是"看记录对不对"和"删"两步:
@@ -137,72 +196,53 @@ echo DONE
 func TestEntwareLockStaleRace(t *testing.T) {
 	eachToolset(t, func(t *testing.T, busybox bool) {
 		r := newEntwareRig(t, "gvlkrc", busybox)
-		harness := lockHarness(t, r)
-		sh := "sh"
-		if busybox {
-			sh = filepath.Join(r.bin, "sh")
-		}
-		stale := func() {
-			t.Helper()
-			_ = os.RemoveAll(r.lockDir())
-			if err := os.MkdirAll(r.lockDir(), 0o755); err != nil {
-				t.Fatal(err)
-			}
-			r.write("run/godusevpn.lock/owner", fmt.Sprintf("%d %d\n", deadPID(t), uptimeSeconds(t)), 0o644)
-		}
-		round := func(what string, n int, limit time.Duration) {
-			t.Helper()
-			_ = os.Remove(filepath.Join(r.dir, "go"))
-			outs := make([]string, n)
-			var wg sync.WaitGroup
-			ctx, cancel := context.WithTimeout(context.Background(), limit)
-			defer cancel()
-			for i := 0; i < n; i++ {
-				c := exec.CommandContext(ctx, sh, harness)
-				c.Env = r.env
-				wg.Add(1)
-				go func(i int) {
-					defer wg.Done()
-					b, err := c.CombinedOutput()
-					outs[i] = fmt.Sprintf("%s(%v)", b, err)
-				}(i)
-			}
-			time.Sleep(300 * time.Millisecond) // 都起来、都在等 go
-			r.write("go", "", 0o644)
-			wg.Wait()
-			if ctx.Err() != nil {
-				t.Fatalf("%s:%v 内没都拿到锁做完:\n%s", what, limit, strings.Join(outs, "\n"))
-			}
-			all := strings.Join(outs, "\n")
-			if strings.Contains(all, "NOLOCK") {
-				t.Fatalf("%s:锁目录建得了,却有没拿到锁就进去的:\n%s", what, all)
-			}
-			if strings.Contains(all, "OVERLAP") {
-				t.Fatalf("%s:有两个同时进了锁里:\n%s", what, all)
-			}
-			if strings.Count(all, "DONE") != n {
-				t.Fatalf("%s:不是每个都做完了:\n%s", what, all)
-			}
-			if r.locked() {
-				t.Fatalf("%s:做完要放锁", what)
-			}
-			if _, err := os.Stat(r.lockDir() + ".clean"); err == nil {
-				t.Fatalf("%s:清理锁要放掉", what)
-			}
-		}
+		harness := lockHarness(t, r, "")
 		for i := 0; i < 6; i++ {
-			stale()
-			round(fmt.Sprintf("第 %d 轮", i+1), 8, 60*time.Second)
+			staleLock(t, r)
+			lockRound(t, r, harness, fmt.Sprintf("第 %d 轮", i+1), 8, 60*time.Second)
 		}
 		// 清理锁被打断留下:等一会儿(清理只要一眨眼)当它是留下的,删掉接着清旧锁
-		stale()
+		staleLock(t, r)
 		if err := os.Mkdir(r.lockDir()+".clean", 0o755); err != nil {
 			t.Fatal(err)
 		}
 		began := time.Now()
-		round("清理锁被打断留下", 2, 30*time.Second)
+		lockRound(t, r, harness, "清理锁被打断留下", 2, 30*time.Second)
 		if d := time.Since(began); d < 3*time.Second {
 			t.Fatalf("清理锁可能有人正拿着,要等一会儿才当它是留下的(只等了 %v)", d)
+		}
+	})
+}
+
+// uutilsMkdir 照 uutils coreutils 0.8.0(Ubuntu 26.04 默认的 /usr/bin/mkdir)不带 -p 时的做法换掉脚本里的 mkdir:
+// 先看在不在,在就报错;不在再建,建的时候内核报 EEXIST(别人恰好在这中间建了)只要那里是个目录就当建成、返回 0
+// (上游 issue 13970,0.8.0 之后才修)。"看"和"建"中间停一小会儿,把真机上几微秒的空当拉宽,好稳定地撞上。
+const uutilsMkdir = `
+mkdir() {
+	case "$1" in -*) command mkdir "$@"; return ;; esac
+	[ -e "$1" ] && return 1
+	sleep 0.02 2>/dev/null
+	command mkdir "$1" 2>/dev/null || [ -d "$1" ]
+}
+`
+
+// 梅林(Entware)的拉起锁是 mkdir 建锁目录:以前只看 mkdir 的返回值,建成了就算拿到。可 GitHub 的 ubuntu-latest
+// (Ubuntu 26.04)上 /usr/bin/mkdir 是 uutils coreutils 0.8.0,几个一起建同一个目录时会有两个都返回 0(见 uutilsMkdir),
+// TestEntwareLockStaleRace 在那里第 1 轮就报两个同时进了锁里(测试机是 Ubuntu 24.04 的 GNU mkdir,从来撞不上)。
+// 锁的对错不能押在外部 mkdir 的返回值上:现在 mkdir 之后还要在目录里用 set -C 独占地建成认领文件(锁目录是 owner,
+// 清理锁是 by)才算拿到。这里把脚本里的 mkdir 换成 uutils 那样的,8 个一起起跑:先抢一把持有者不在了的旧锁
+// (清理锁、锁目录都要抢),再从没有锁开始抢,谁都不能和别人同时在锁里。
+func TestEntwareLockMkdirLies(t *testing.T) {
+	eachToolset(t, func(t *testing.T, busybox bool) {
+		r := newEntwareRig(t, "gvlkml", busybox)
+		harness := lockHarness(t, r, uutilsMkdir)
+		for i := 0; i < 4; i++ {
+			staleLock(t, r)
+			lockRound(t, r, harness, fmt.Sprintf("旧锁第 %d 轮", i+1), 8, 60*time.Second)
+		}
+		for i := 0; i < 2; i++ {
+			_ = os.RemoveAll(r.lockDir())
+			lockRound(t, r, harness, fmt.Sprintf("没有锁第 %d 轮", i+1), 8, 60*time.Second)
 		}
 	})
 }
