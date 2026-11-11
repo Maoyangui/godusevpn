@@ -203,17 +203,6 @@ func TestProbeLocalChainProxy(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer ln.Close()
-	var accepted atomic.Int32
-	go func() {
-		for {
-			c, err := ln.Accept()
-			if err != nil {
-				return
-			}
-			accepted.Add(1)
-			c.Close()
-		}
-	}()
 	port := itoa(ln.Addr().(*net.TCPAddr).Port)
 	d := newPolicyTestDaemon(t)
 	d.settings.Profiles = []settings.Profile{{ID: "p1", Name: "测试", URL: "https://example.invalid/sub"}}
@@ -228,14 +217,22 @@ func TestProbeLocalChainProxy(t *testing.T) {
 		t.Fatal(err)
 	}
 	m, _ := res.(map[string]int)
-	if _, ok := m["本机代理"]; !ok {
-		t.Fatalf("本机的 socks 代理要测: %v", res)
+	if m["本机代理"] <= 0 {
+		t.Fatalf("本机的 socks 代理要测、而且连得上: %v", res)
 	}
-	if _, ok := m["本机转发"]; !ok {
-		t.Fatalf("回环高端口上的本机转发要测: %v", res)
+	if m["本机转发"] <= 0 {
+		t.Fatalf("回环高端口上的本机转发要测、而且连得上: %v", res)
 	}
-	if accepted.Load() == 0 {
-		t.Fatal("测速应真连到本机端口")
+	// 两条测速连接都真到了这个端口:测速返回时握手已经做完(拨号成功才有数),连接在监听队列里等着,这里直接收。
+	// 不在后台 goroutine 里收了数个数 —— 拨号一成功测速就返回,那个 goroutine 未必已经被调度去收,
+	// 测速一返回马上看计数会读到 0(GitHub 的 ubuntu runner 上就这么失败过)。期限只防挂住,正常是立刻收到。
+	_ = ln.(*net.TCPListener).SetDeadline(time.Now().Add(5 * time.Second))
+	for i := 0; i < 2; i++ {
+		c, err := ln.Accept()
+		if err != nil {
+			t.Fatalf("测速应真连到本机端口,第 %d 条没收到: %v", i+1, err)
+		}
+		c.Close()
 	}
 	if v := d.stateView(); len(v.Hints) != 0 {
 		t.Fatalf("它们不是提示节点: %v", v.Hints)
