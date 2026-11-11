@@ -186,7 +186,7 @@ func (a *App) refresh() {
 	a.mu.Lock()
 	a.state.Service = err == nil
 	if err == nil {
-		a.state.View = view
+		a.state.View = view.ForPage() // 页面拿到的状态不带凭据(面板密码哈希、订阅地址),和网页面板一样;托盘也用不着它们
 	} else {
 		a.state.View.State.Status = "disconnected"
 		a.state.Up, a.state.Down = 0, 0
@@ -448,29 +448,33 @@ func (a *App) GetState() UIState {
 }
 
 func (a *App) Connect() (ipc.StateView, error) {
-	var v ipc.StateView
-	err := a.call(ipc.MConnect, nil, &v)
-	go a.refresh()
-	return v, err
+	return a.stateCall(ipc.MConnect, nil)
 }
 
 func (a *App) Disconnect() (ipc.StateView, error) {
-	var v ipc.StateView
-	err := a.call(ipc.MDisconnect, nil, &v)
-	go a.refresh()
-	return v, err
+	return a.stateCall(ipc.MDisconnect, nil)
 }
 
 func (a *App) SetMode(mode string) (ipc.StateView, error) {
-	var v ipc.StateView
-	err := a.call(ipc.MSetMode, map[string]string{"mode": mode}, &v)
-	go a.refresh()
-	return v, err
+	return a.stateCall(ipc.MSetMode, map[string]string{"mode": mode})
 }
 
 func (a *App) SelectNode(tag string) (ipc.StateView, error) {
+	return a.stateCall(ipc.MSelectNode, map[string]string{"tag": tag})
+}
+
+// stateCall 调一个返回整份状态的方法(连接、切模式、选节点、线路自动、切订阅)。返回给页面的去掉凭据;
+// 成功了先把它写进缓存再返回 —— 页面拿到返回值马上就重画节点列表(GetNodes 读的就是这份缓存),
+// 只靠后台那次 refresh 的话,它可能还没回来,内核没跑时列表就按旧的选择打勾。
+func (a *App) stateCall(method string, params any) (ipc.StateView, error) {
 	var v ipc.StateView
-	err := a.call(ipc.MSelectNode, map[string]string{"tag": tag}, &v)
+	err := a.call(method, params, &v)
+	v = v.ForPage()
+	if err == nil {
+		a.mu.Lock()
+		a.state.View = v
+		a.mu.Unlock()
+	}
 	go a.refresh()
 	return v, err
 }
@@ -478,10 +482,7 @@ func (a *App) SelectNode(tag string) (ipc.StateView, error) {
 // SetLineAuto 节点面板顶上的「线路自动」开关:打开时按线路合并显示,选中的节点换成它所在的线路组;
 // 关掉时选中的线路组固定到组里此刻在用的那台。返回换算之后的状态,页面据此立刻重画。
 func (a *App) SetLineAuto(on bool) (ipc.StateView, error) {
-	var v ipc.StateView
-	err := a.call(ipc.MSetLineAuto, map[string]bool{"on": on}, &v)
-	go a.refresh()
-	return v, err
+	return a.stateCall(ipc.MSetLineAuto, map[string]bool{"on": on})
 }
 
 // NodeInfo 节点页一行。
@@ -629,10 +630,7 @@ func (a *App) RemoveProfile(id string) ([]ipc.ProfileView, error) {
 }
 
 func (a *App) SelectProfile(id string) (ipc.StateView, error) {
-	var v ipc.StateView
-	err := a.call(ipc.MSelectProfile, map[string]string{"id": id}, &v)
-	go a.refresh()
-	return v, err
+	return a.stateCall(ipc.MSelectProfile, map[string]string{"id": id})
 }
 
 // UpdateProfile 改名或改地址(空字段表示不改)。
@@ -643,17 +641,25 @@ func (a *App) UpdateProfile(id, name, url string) ([]ipc.ProfileView, error) {
 	return out, err
 }
 
+// GetSettings 给页面的设置不带凭据(面板密码哈希、订阅地址,见 settings.ForPage)。
 func (a *App) GetSettings() (settings.Settings, error) {
 	var s settings.Settings
 	err := a.call(ipc.MGetSettings, nil, &s)
-	return s, err
+	return s.ForPage(), err
 }
 
+// SaveSettings 页面拿到的设置不带面板密码哈希:原样存回去会把密码清掉,这里带上此刻的(密码另有途径改)。
+// 订阅列表服务那边不看页面给的(MSetSettings 沿用原来的)。
 func (a *App) SaveSettings(s settings.Settings) (settings.Settings, error) {
+	var cur settings.Settings
+	if err := a.call(ipc.MGetSettings, nil, &cur); err != nil {
+		return settings.Settings{}, err
+	}
+	s.WebPassword = cur.WebPassword
 	var out settings.Settings
 	err := a.call(ipc.MSetSettings, s, &out)
 	go a.refresh()
-	return out, err
+	return out.ForPage(), err
 }
 
 func (a *App) GetLogs(lines int, core bool) ([]string, error) {

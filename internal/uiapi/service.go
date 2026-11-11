@@ -120,10 +120,11 @@ type ConnRow struct {
 }
 
 type Service struct {
-	b   Backend
-	o   Options
-	mu  sync.Mutex
-	ctx context.Context
+	b    Backend
+	o    Options
+	mu   sync.Mutex
+	pwMu sync.Mutex // 保存设置与改面板密码串行(见 Call 的 SaveSettings)
+	ctx  context.Context
 
 	subs map[chan Event]struct{}
 
@@ -242,7 +243,7 @@ func (s *Service) dispatch(method string, params any, out any) error {
 	return json.Unmarshal(b, out)
 }
 
-// Settings 守护进程当前设置(含密码哈希;给页面前要抹掉)。
+// Settings 守护进程当前设置(含密码哈希、订阅地址;给页面前要过 ForPage)。
 func (s *Service) Settings() settings.Settings {
 	var st settings.Settings
 	_ = s.dispatch(ipc.MGetSettings, nil, &st)
@@ -270,7 +271,7 @@ func (s *Service) clashClient() (*clash.Client, error) {
 func (s *Service) State() State {
 	var view ipc.StateView
 	err := s.dispatch(ipc.MGetState, nil, &view)
-	view.Settings.WebPassword = "" // 和 GetSettings 一样不把面板密码哈希给页面:状态每 1.5 秒推一次,局域网明文访问时一路都带着它
+	view = view.ForPage() // 和 GetSettings 一样不把密码哈希、订阅地址给页面:状态每 1.5 秒推一次,局域网明文访问时一路都带着它
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	st := State{Service: err == nil, SvcState: "running", View: view, Up: s.up, Down: s.down, TotalUp: s.totUp, TotalDown: s.totDown, Lang: s.prefs.Lang, Theme: s.prefs.Theme,
@@ -362,10 +363,10 @@ func (s *Service) CallJSON(name, argsJSON string) (string, error) {
 // Call 执行一个页面方法(参数按位置)。
 func (s *Service) Call(name string, args []json.RawMessage) (any, error) {
 	ctx := s.ctx
-	view := func(method string, params any) (any, error) {
+	view := func(method string, params any) (any, error) { // 连接、切模式、选节点、线路自动、切订阅都返回新状态:同样去掉凭据
 		var v ipc.StateView
 		err := s.dispatch(method, params, &v)
-		return v, err
+		return v.ForPage(), err
 	}
 	profiles := func(method string, params any) (any, error) {
 		var out []ipc.ProfileView
@@ -450,17 +451,20 @@ func (s *Service) Call(name string, args []json.RawMessage) (any, error) {
 	case "RemoveDevice":
 		return devices(ipc.MRemoveDevice, map[string]string{"mac": arg[string](args, 0)})
 	case "GetSettings":
-		st := s.Settings()
-		st.WebPassword = "" // 不把哈希给页面
-		return st, nil
+		return s.Settings().ForPage(), nil // 不把密码哈希、订阅地址给页面
 	case "SaveSettings":
 		in := arg[settings.Settings](args, 0)
-		in.WebPassword = s.Settings().WebPassword // 密码另有接口改
+		// 页面拿到的是去掉密码哈希的那份:原样存回去会把密码清掉。密码另有接口改,这里带上此刻的;
+		// 和改密码串行,不然两边一交错,刚改的密码会被这次保存盖回旧的
+		s.pwMu.Lock()
+		in.WebPassword = s.Settings().WebPassword
 		var out settings.Settings
 		err := s.dispatch(ipc.MSetSettings, in, &out)
-		out.WebPassword = ""
-		return out, err
+		s.pwMu.Unlock()
+		return out.ForPage(), err
 	case "SetWebPassword":
+		s.pwMu.Lock()
+		defer s.pwMu.Unlock()
 		st := s.Settings()
 		if err := st.SetWebPassword(arg[string](args, 0)); err != nil {
 			return nil, err

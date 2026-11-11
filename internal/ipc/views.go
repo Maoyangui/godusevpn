@@ -105,6 +105,26 @@ type StateView struct {
 	SelNote *SelNote `json:"selNote,omitempty"`
 }
 
+// ForPage 给界面看的那份状态:设置里去掉凭据(见 settings.Settings.ForPage),订阅去掉带令牌的地址和续费地址
+// (状态里用不上:订阅管理另走 GetProfiles)。不改原来那份。
+func (v StateView) ForPage() StateView {
+	v.Settings = v.Settings.ForPage()
+	if v.Profile != nil {
+		p := *v.Profile
+		p.URL, p.WebPage = "", ""
+		v.Profile = &p
+	}
+	if v.Profiles != nil {
+		ps := make([]ProfileView, len(v.Profiles))
+		for i, p := range v.Profiles {
+			p.URL, p.WebPage = "", ""
+			ps[i] = p
+		}
+		v.Profiles = ps
+	}
+	return v
+}
+
 // SelNote 选的东西订阅里没了。
 type SelNote struct {
 	Gone  string `json:"gone"`            // 设置里选的(节点或线路组)
