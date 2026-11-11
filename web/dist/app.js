@@ -291,6 +291,10 @@ let sheetOnClose = null;
 // 就不往那块面板里写节点列表,也不把它关掉。
 let sheetSeq = 0, sheetKind = '';
 function sheetIs(kind, seq) { return sheetKind === kind && sheetSeq === seq && $('#sheet').classList.contains('show'); }
+// nodesOpen 节点面板开着(不管是哪一次打开的)。测速、翻「线路自动」、选节点回来时认它,不认发起时的那一次:等的时候关掉又重新打开
+// (电视上几秒没反应、按返回再进是常事),新开的这块也要拿到实时数字和结果;换成模式、订阅面板时照样不往里画。
+// 往里画的 drawNodes 自己还按 seq 防着:取节点列表那一下面板又换了,就不画。
+function nodesOpen() { return sheetKind === 'nodes' && $('#sheet').classList.contains('show'); }
 function openSheet(title, html, opts = {}) {
   sheetSeq++; sheetKind = opts.kind || '';
   $('#sheet-head').innerHTML = `<span class="grow">${esc(title)}</span>${opts.action ? `<button class="btn sm ghost" id="sheet-action">${esc(opts.action)}</button>` : ''}`;
@@ -850,7 +854,8 @@ let nodeTesting = false, nodeFilter = '', nodeRegion = '', nodeFetchTried = fals
 async function sheetNodes() {
   nodeFilter = ''; nodeRegion = '';
   openSheet(t('sheet.nodes'), `<div class="empty"><span class="spinner"></span></div>`, { kind: 'nodes', action: t('sheet.retest'), onAction: () => testNodes(true) });
-  await drawNodes(false);
+  testBtn(); // 上一轮测速还在跑(关掉面板又打开):按钮照样是「测速中」、点不了,还没轮到的照样转圈
+  await drawNodes(nodeTesting);
   testNodes(false);
 }
 // applyNodeFilter 搜索框与地区标签只是把行藏起来,不重画列表:测速正在跑时列表也不会闪。
@@ -965,7 +970,6 @@ let lineBusy = false;
 async function toggleLineAuto(el) {
   if (lineBusy) return;
   lineBusy = true;
-  const seq = sheetSeq;
   const on = el.checked, before = (state && state.view) || {}; // 下面会把新状态合进 state.view:先把要比的记下来
   const prevSel = (before.settings && before.settings.selected) || '';
   const wasOn = !!before.state && (before.state.status === 'connected' || before.state.status === 'degraded');
@@ -979,15 +983,16 @@ async function toggleLineAuto(el) {
     else if (!on && sel !== prevSel && wasGroup) toast(t('node.lineAutoPinned', { n: cleanName(sel) }), 'ok');
     nodeSig = ''; nodeFilter = ''; nodeRegion = ''; // 列表结构变了
     updateHome();
-    if (sheetIs('nodes', seq)) await drawNodes(false); // 等的时候面板关了、换成了别的面板:不往里画
+    if (nodesOpen()) await drawNodes(false); // 换成了别的面板就不往里画;关掉又重新打开的节点面板要按新状态重画
   } catch (e) {
     el.checked = !on;
     toast(errText(e), 'err');
     try {
       const st = await App().GetState();
-      if (st && st.view && state) { state.view = st.view; nodeSig = ''; updateHome(); }
+      if (st && st.view && state) { state.view = st.view; updateHome(); }
     } catch (e2) { /* 取不到就等下一次推送 */ }
-    if (sheetIs('nodes', seq)) await drawNodes(false);
+    nodeSig = '';
+    if (nodesOpen()) await drawNodes(false);
   } finally {
     lineBusy = false;
   }
@@ -1067,8 +1072,9 @@ async function drawNodes(testing) {
     + `<div class="list">${rows.map((n, i) => nodeRow(n, i, max, testing)).join('')}</div>`;
   $('#sheet-body').querySelectorAll('.item').forEach(it => it.addEventListener('click', async () => {
     if (it.dataset.unsupported) { toast(t('node.unsupportedWhy', { why: it.dataset.unsupported }), 'err'); return; }
-    // 上一下还没回来(头一回选线路组要重连,好几秒;电视上连按 OK)就吞掉:不然排着队再选一次,刚重连好的连接又被掐一次
-    if (nodePicking) return;
+    // 上一下还没回来(头一回选线路组要重连,好几秒;电视上连按 OK)就不再选:不然排着队再选一次,刚重连好的连接又被掐一次。
+    // 关掉面板再打开后点的也一样,但要说一声 —— 新开的这块上看不到上一下的转圈,不说就像界面卡死了
+    if (nodePicking) { toast(t('node.pickBusy')); return; }
     nodePicking = true;
     const ms = it.querySelector('.ms');
     if (ms) { ms.className = 'ms'; ms.innerHTML = '<span class="spinner"></span>'; } // 这一行在切换:给个反馈
@@ -1076,12 +1082,13 @@ async function drawNodes(testing) {
     try {
       const nv = await App().SelectNode(it.dataset.name);
       if (sheetIs('nodes', pickSeq)) closeSheet(); // 等的时候用户已经关掉、开了别的面板:别把那块关了
+      else if (nodesOpen()) { nodeSig = ''; await drawNodes(false); } // 关掉又重新打开了节点面板:按新的选择重画,不替人关
       const nst = nv && nv.state && nv.state.status;
       if (nv && nv.selectedV6) toast(v6HintText(nv) || t('node.v6Hint', { n: cleanName(it.dataset.name) }), 'err'); // 选的节点只能走 IPv6,而现在关着 IPv6
       else if (it.dataset.group && online && nst && nst !== 'connected' && nst !== 'degraded') toast(t('node.lineAutoReconnect'));
     } catch (e) {
       toast(errText(e), 'err');
-      if (sheetIs('nodes', pickSeq)) { nodeSig = ''; await drawNodes(false); } // 转圈换回数字
+      if (nodesOpen()) { nodeSig = ''; await drawNodes(false); } // 转圈换回数字(关掉又重新打开的那块也按实际状态画)
     } finally {
       nodePicking = false;
     }
@@ -1126,31 +1133,36 @@ function patchNodes(nodes, max, testing) {
 }
 
 let nodeTestAt = 0;
+// testBtn 节点面板顶上的「重新测速」按钮跟着测速走:测着的时候点不了。面板关了又开,新开的那块也一样。
+function testBtn() {
+  const act = $('#sheet-action');
+  if (!act || !nodesOpen()) return;
+  act.disabled = nodeTesting;
+  act.textContent = t(nodeTesting ? 'sheet.testing' : 'sheet.retest');
+}
 async function testNodes(force) {
-  if (nodeTesting && !force) return;
+  if (nodeTesting) return; // 一次只测一轮:关掉又打开的面板上,按钮在测完之前也点不了
   // 打开列表时的自动测速五分钟最多一次:每打开一回就把所有节点连一遍没必要,数字也变不了多少。点「重新测速」不受限
   if (!force && Date.now() - nodeTestAt < 300000) return;
   nodeTestAt = Date.now();
   nodeTesting = true;
-  const act = $('#sheet-action');
-  if (act) { act.disabled = true; act.textContent = t('sheet.testing'); }
+  testBtn();
   // 一边测一边刷:后端是测出一个记一个的,这里每 400 毫秒取一次就能让延迟自上而下一个个冒出来。
   // 原来是等 TestAll 整个返回再画,上百个节点要干等好几秒,那几秒里界面看着像卡住了。
+  // 画进此刻开着的节点面板(nodesOpen):测着测着关掉又打开,新开的那块照样一个个冒数字、最后拿到结果;换成别的面板时只是不画。
   let live = true;
-  const seq = sheetSeq; // 测完回来时节点面板可能已经关了、换成了别的面板
   const poll = (async () => {
     while (live) {
       await new Promise(r => setTimeout(r, 400));
-      if (!live || !sheetIs('nodes', seq)) break;
-      await drawNodes(true);
+      if (live && nodesOpen()) await drawNodes(true);
     }
   })();
   try { await App().TestAll(); } catch (e) { toast(errText(e), 'err'); } // 闸开着、隧道没起来时后端会拒绝直连测速,要让人看见原因
   live = false;
   await poll;
   nodeTesting = false;
-  if (act && sheetIs('nodes', seq)) { act.disabled = false; act.textContent = t('sheet.retest'); }
-  if (sheetIs('nodes', seq)) await drawNodes(false);
+  testBtn();
+  if (nodesOpen()) await drawNodes(false);
   try { lastPing = await App().TestLatency('proxy'); } catch (e) { lastPing = 0; }
   updateHome();
 }
