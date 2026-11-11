@@ -3,7 +3,11 @@ package core
 import (
 	"context"
 	"encoding/json"
+	"net"
 	"os"
+	"strconv"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -105,5 +109,63 @@ func TestQuietAutoSkipsFirstRound(t *testing.T) {
 	}
 	if took, err := c.DialDirect(context.Background(), "127.0.0.1", 1); err == nil {
 		t.Fatalf("没人听的端口不该连得上: %v", took)
+	}
+}
+
+// 带中转的节点(detour)没连接时也得测得出来:临时实例里要连它链上的中转一起放 —— 只放它自己,内核找不到中转,
+// 整个实例起不来,这一批一个数都没有。链断了(指向订阅里没有的出站)、成环的只有它自己报 -1,别的照测;中转只是放进去拨号用,不单独测。
+func TestProbeChainedNodeViaRelay(t *testing.T) {
+	relay, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer relay.Close()
+	var greetings atomic.Int32
+	go func() {
+		for {
+			c, err := relay.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer c.Close()
+				_ = c.SetReadDeadline(time.Now().Add(3 * time.Second))
+				b := make([]byte, 1)
+				if n, _ := c.Read(b); n == 1 && b[0] == 0x05 { // 经它拨出去的才会发 SOCKS 握手;收到就关,链测出来是不通
+					greetings.Add(1)
+				}
+			}()
+		}
+	}()
+	port := strconv.Itoa(relay.Addr().(*net.TCPAddr).Port)
+	outbounds := []json.RawMessage{
+		json.RawMessage(`{"type":"socks","tag":"中转","server":"127.0.0.1","server_port":` + port + `}`),
+		json.RawMessage(`{"type":"socks","tag":"落地","server":"2001:db8::1","server_port":1080,"detour":"中转"}`),
+		json.RawMessage(`{"type":"socks","tag":"两跳","server":"192.0.2.9","server_port":1080,"detour":"落地"}`),
+		json.RawMessage(`{"type":"socks","tag":"断链","server":"192.0.2.10","server_port":1080,"detour":"没有这个"}`),
+		json.RawMessage(`{"type":"socks","tag":"环A","server":"192.0.2.11","server_port":1080,"detour":"环B"}`),
+		json.RawMessage(`{"type":"socks","tag":"环B","server":"192.0.2.12","server_port":1080,"detour":"环A"}`),
+		json.RawMessage(`{"type":"socks","tag":"坏中转的","server":"192.0.2.13","server_port":1080,"detour":"坏的"}`),
+		json.RawMessage(`{"type":"这个类型内核不认识","tag":"坏的","server":"192.0.2.14","server_port":443}`),
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	res, err := Probe(ctx, outbounds, []string{"落地", "两跳", "断链", "环A", "坏中转的"}, "http://example.invalid/", "", false, nil)
+	if err == nil || !strings.Contains(err.Error(), "断链") || !strings.Contains(err.Error(), "环A") || !strings.Contains(err.Error(), "坏中转的") {
+		t.Fatalf("中转接不上的几个要报上来: %v", err)
+	}
+	for deadline := time.Now().Add(3 * time.Second); greetings.Load() < 2 && time.Now().Before(deadline); {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if greetings.Load() < 2 {
+		t.Fatalf("两条链(一跳、两跳)都该经中转拨出去: 中转收到 %d 次握手,结果 %v", greetings.Load(), res)
+	}
+	for _, tag := range []string{"落地", "两跳", "断链", "环A", "坏中转的"} {
+		if v, ok := res[tag]; !ok || v != -1 {
+			t.Fatalf("%s 该有结果(中转一握手就关,测出来是不通;接不上中转的直接 -1): %v", tag, res)
+		}
+	}
+	if _, ok := res["中转"]; ok {
+		t.Fatalf("中转只是放进去给链拨号用,没要测它就不出结果: %v", res)
 	}
 }

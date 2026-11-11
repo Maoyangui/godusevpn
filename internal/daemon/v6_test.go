@@ -10,6 +10,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"golang.org/x/net/dns/dnsmessage"
 
@@ -167,6 +168,110 @@ func TestLookupNodeIPv4Only(t *testing.T) {
 	}
 	if got, _ := lookupNode(context.Background(), "dual.example", resolve, true); got != "1.2.3.4" {
 		t.Fatalf("开着 IPv6 也是 IPv4 优先(和内核的 prefer_ipv4 一样): %q", got)
+	}
+	// 本来就写成 IPv6 地址的:关着 IPv6 时同样不去连(连着时拨号走内核的直连出站,没有 tcp4 兜着),有没有解析器、带不带方括号都一样
+	for _, host := range []string{"::1", "[2001:db8::1]", " 2001:db8::3 "} {
+		for _, r := range []func(context.Context, string) ([]string, error){nil, resolve} {
+			if got, err := lookupNode(context.Background(), host, r, false); err == nil {
+				t.Fatalf("关着 IPv6,写成 IPv6 地址的 %q 不该拿去连: %q", host, got)
+			}
+		}
+	}
+	if got, err := lookupNode(context.Background(), "[2001:db8::1]", nil, true); err != nil || got != "2001:db8::1" {
+		t.Fatalf("开着 IPv6 时 IPv6 地址照用(去掉方括号): %q %v", got, err)
+	}
+	if got, err := lookupNode(context.Background(), "::ffff:1.2.3.4", nil, false); err != nil || got != "1.2.3.4" {
+		t.Fatalf("IPv4 映射地址就是 IPv4: %q %v", got, err)
+	}
+	if got, err := lookupNode(context.Background(), "5.6.7.8", resolve, false); err != nil || got != "5.6.7.8" {
+		t.Fatalf("IPv4 地址原样用,不去解析: %q %v", got, err)
+	}
+}
+
+// 带中转的节点(detour):节点列表测速不从本机直接碰落地。落地写成 IPv6 的,从本机拨它就是走 IPv6(关着 IPv6 也一样,
+// Android、桌面不开 TUN 时 SYN 真的经网卡发出去);写成 IPv4 的,落地服务器也会直接看到本机地址 —— 用中转往往正是为了不让它看到,
+// 量出来的也不是经中转的延迟。连着、没连着都经它自己的出站(经中转)真连一次。
+func TestProbeChainedNodesGoViaRelay(t *testing.T) {
+	serve := func(ln net.Listener, onConn func(net.Conn)) {
+		go func() {
+			for {
+				c, err := ln.Accept()
+				if err != nil {
+					return
+				}
+				go func() { onConn(c); _ = c.Close() }()
+			}
+		}()
+	}
+	ln6, err := net.Listen("tcp", "[::1]:0")
+	if err != nil {
+		t.Skip("这台机器没有 IPv6 回环")
+	}
+	defer ln6.Close()
+	var land6Hits, land4Hits, greetings atomic.Int32
+	serve(ln6, func(net.Conn) { land6Hits.Add(1) })
+	ln4, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln4.Close()
+	serve(ln4, func(net.Conn) { land4Hits.Add(1) })
+	// 中转:只记 SOCKS 握手(经它拨出去的才会发 0x05;本机测它自己的握手连上就关,什么都不发),然后就关 —— 链测出来是不通,
+	// 要看的是有没有经它
+	relay, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer relay.Close()
+	serve(relay, func(c net.Conn) {
+		_ = c.SetReadDeadline(time.Now().Add(3 * time.Second))
+		b := make([]byte, 1)
+		if n, _ := c.Read(b); n == 1 && b[0] == 0x05 {
+			greetings.Add(1)
+		}
+	})
+	port := func(ln net.Listener) string { return strconv.Itoa(ln.Addr().(*net.TCPAddr).Port) }
+	relayNode := `{"type":"socks","tag":"relay","server":"127.0.0.1","server_port":` + port(relay) + `}`
+	land6 := `{"type":"socks","tag":"land6","server":"::1","server_port":` + port(ln6) + `,"detour":"relay"}`
+	land4 := `{"type":"socks","tag":"land4","server":"127.0.0.1","server_port":` + port(ln4) + `,"detour":"relay"}`
+	d := lineDaemon(t)
+	d.settings.NoExitLookup = true
+	d.profiles["p1"] = prof(t, relayNode, land6, land4)
+	if b := d.v6BlockedNow(d.getSettings()); len(b) != 0 {
+		t.Fatalf("前提:中转是 IPv4 的,落地写成 IPv6 也照样能用,不在不用的那批里: %v", b)
+	}
+	probe := func() map[string]int {
+		t.Helper()
+		res, err := d.Dispatch(ipc.MProbeNodes, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return res.(map[string]int)
+	}
+	waitGreetings := func(n int32) {
+		t.Helper()
+		for deadline := time.Now().Add(3 * time.Second); greetings.Load() < n && time.Now().Before(deadline); {
+			time.Sleep(20 * time.Millisecond)
+		}
+	}
+	res := probe()
+	waitGreetings(2)
+	if land6Hits.Load() != 0 || land4Hits.Load() != 0 {
+		t.Fatalf("没连接时:落地一次都不该从本机直接连(IPv6 落地 %d 次、IPv4 落地 %d 次): %v", land6Hits.Load(), land4Hits.Load(), res)
+	}
+	if greetings.Load() < 2 || res["relay"] <= 0 || res["land6"] != -1 || res["land4"] != -1 {
+		t.Fatalf("没连接时:两条链都经中转真连一次(中转收到 %d 次握手),中转自己照常量握手: %v", greetings.Load(), res)
+	}
+
+	startCore(t, d, `{"type":"selector","tag":"proxy","outbounds":["relay","land6","land4"],"default":"relay"},`+relayNode+`,`+land6+`,`+land4)
+	before := greetings.Load()
+	res = probe()
+	waitGreetings(before + 2)
+	if land6Hits.Load() != 0 || land4Hits.Load() != 0 {
+		t.Fatalf("连着时:落地一次都不该从本机直接连(IPv6 落地 %d 次、IPv4 落地 %d 次): %v", land6Hits.Load(), land4Hits.Load(), res)
+	}
+	if greetings.Load()-before < 2 || res["relay"] <= 0 || res["land6"] != -1 || res["land4"] != -1 {
+		t.Fatalf("连着时:两条链经内核里它们自己的出站(经中转)测(中转收到 %d 次握手): %v", greetings.Load()-before, res)
 	}
 }
 

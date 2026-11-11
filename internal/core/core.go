@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -609,32 +610,77 @@ func (c *Core) ProbeRunning(ctx context.Context, tags []string, link string, onE
 //   - **只放要测的那几个出站,而且逐个先验一遍。** 原来是把订阅里全部出站一股脑塞进去,
 //     只要有一个内核解不动(比如 1.14 已经把 wireguard 从 outbounds 挪走了),整份配置解析失败,
 //     **所有**节点都测不出来。现在坏的那个自己跳过,别的照测。
+//   - **带中转的节点(detour)连它链上的中转一起放。** 只放它自己的话内核找不到中转,整个实例起不来;
+//     中转只是放进去给它拨号用,不测(要测的话它自己也在 tags 里)。链断了(指向订阅里没有的出站、成环)
+//     或者链上有一个解不动,只有这个节点测不了。
 //
 // 返回的 error 只表示"这一轮整个没跑起来";单个节点测不通体现为结果里的 -1。
 //
 // doh 不为空时节点域名经这台 DoH 解析(按地址连),不交给系统解析器:这个临时实例在隧道外,系统解析就是明文问运营商。
 func Probe(ctx context.Context, outbounds []json.RawMessage, tags []string, link, doh string, allow6 bool, onEach func(tag string, ms int)) (map[string]int, error) {
-	want := make(map[string]bool, len(tags))
-	for _, t := range tags {
-		want[t] = true
-	}
 	bctx, cancel := newContext(nil)
 	defer cancel()
 
-	list := make([]any, 0, len(tags)+1)
-	var bad []string
+	type node struct {
+		raw    json.RawMessage
+		detour string
+		err    error
+		parsed bool
+	}
+	byTag := make(map[string]*node, len(outbounds))
+	var order []string
 	for _, o := range outbounds {
 		var head struct {
-			Tag string `json:"tag"`
+			Tag    string `json:"tag"`
+			Detour string `json:"detour"`
 		}
-		if json.Unmarshal(o, &head) != nil || !want[head.Tag] {
+		if json.Unmarshal(o, &head) != nil || head.Tag == "" || byTag[head.Tag] != nil {
 			continue
 		}
-		if err := parseOutbound(bctx, o); err != nil {
-			bad = append(bad, head.Tag)
+		byTag[head.Tag] = &node{raw: o, detour: head.Detour}
+		order = append(order, head.Tag)
+	}
+	buildable := func(n *node) bool {
+		if !n.parsed {
+			n.err, n.parsed = parseOutbound(bctx, n.raw), true
+		}
+		return n.err == nil
+	}
+	include := map[string]bool{} // 放进临时实例的:要测的,和它们链上的中转
+	var probe, bad, broken []string
+	for _, tag := range tags {
+		n := byTag[tag]
+		if n == nil {
 			continue
 		}
-		list = append(list, o)
+		if !buildable(n) {
+			bad = append(bad, tag)
+			continue
+		}
+		chain, ok := []string{tag}, true
+		for cur := n; cur.detour != "" && cur.detour != "direct"; {
+			next := byTag[cur.detour]
+			if next == nil || slices.Contains(chain, cur.detour) || !buildable(next) {
+				ok = false
+				break
+			}
+			chain = append(chain, cur.detour)
+			cur = next
+		}
+		if !ok {
+			broken = append(broken, tag)
+			continue
+		}
+		for _, t := range chain {
+			include[t] = true
+		}
+		probe = append(probe, tag)
+	}
+	list := make([]any, 0, len(include)+1)
+	for _, tag := range order {
+		if include[tag] {
+			list = append(list, byTag[tag].raw)
+		}
 	}
 	list = append(list, map[string]any{"type": "direct", "tag": "direct"})
 
@@ -672,8 +718,9 @@ func Probe(ctx context.Context, outbounds []json.RawMessage, tags []string, link
 		return map[string]int{}, fmt.Errorf("启动测速实例: %w", err)
 	}
 	defer box.Close()
-	res := probeBox(ctx, box, tags, link, onEach)
-	for _, tag := range bad { // 内核解不动的节点报 -1,而不是在界面上留个空白让人以为"还没测"
+	res := probeBox(ctx, box, probe, link, onEach)
+	// 内核解不动的、中转接不上的节点报 -1,而不是在界面上留个空白让人以为"还没测"
+	for _, tag := range append(slices.Clone(bad), broken...) {
 		if _, ok := res[tag]; !ok {
 			res[tag] = -1
 			if onEach != nil {
@@ -681,8 +728,15 @@ func Probe(ctx context.Context, outbounds []json.RawMessage, tags []string, link
 			}
 		}
 	}
+	var why []string
 	if len(bad) > 0 {
-		return res, fmt.Errorf("这些节点内核解不动,已跳过: %s", strings.Join(bad, "、"))
+		why = append(why, "这些节点内核解不动,已跳过: "+strings.Join(bad, "、"))
+	}
+	if len(broken) > 0 {
+		why = append(why, "这些节点的中转(detour)在订阅里找不到、成环或建不起来,已跳过: "+strings.Join(broken, "、"))
+	}
+	if len(why) > 0 {
+		return res, errors.New(strings.Join(why, ";"))
 	}
 	return res, nil
 }
