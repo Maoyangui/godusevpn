@@ -27,7 +27,8 @@ func TestRestartHandsOffToInitSystem(t *testing.T) {
 }
 
 // 梅林(Entware)的看门狗:真跑一遍脚本(rc.func / pidof / cru 换成临时目录里的假货)。
-// 起服务时挂上定时、去掉"用户停了"的标记;stop 留标记;定时看到标记、或服务在跑、或自启关着就不拉,否则拉起来。
+// 起服务时挂上定时、去掉"用户停了"的标记;stop 留标记(停进程由脚本自己按进程号做,不交给 rc.func,
+// 见 TestEntwareStopSparesCaller);定时看到标记、或服务在跑、或自启关着就不拉,否则拉起来。
 func TestEntwareWatchdog(t *testing.T) {
 	sh, err := exec.LookPath("sh")
 	if err != nil {
@@ -71,8 +72,8 @@ func TestEntwareWatchdog(t *testing.T) {
 	marked := func() bool { _, err := os.Stat(stopped); return err == nil }
 	on := render(true)
 
-	if rc, _ := run(on, "stop"); rc != "stop" || !marked() {
-		t.Fatalf("stop 要照常交给 rc.func 并留下标记: rc=%q 标记=%v", rc, marked())
+	if rc, _ := run(on, "stop"); rc != "" || !marked() {
+		t.Fatalf("stop 留下标记,停进程不交给 rc.func(它按名字 killall,会连调用者一起杀): rc=%q 标记=%v", rc, marked())
 	}
 	if rc, _ := run(on, "watchdog"); rc != "" {
 		t.Fatalf("用户停了的服务定时不该拉起来,rc.func 收到 %q", rc)
@@ -93,8 +94,8 @@ func TestEntwareWatchdog(t *testing.T) {
 		t.Fatalf("服务没在跑、也不是用户停的(崩了):定时要拉起来,rc.func 收到 %q", rc)
 	}
 	run(on, "stop")
-	if rc, _ := run(on, "restart"); rc != "restart" || marked() {
-		t.Fatalf("restart(面板升级走这条)要去掉标记: rc=%q 标记=%v", rc, marked())
+	if rc, _ := run(on, "restart"); rc != "start" || marked() {
+		t.Fatalf("restart(面板升级走这条)要去掉标记,脚本自己停了守护进程后交给 rc.func 的是 start: rc=%q 标记=%v", rc, marked())
 	}
 	if rc, _ := run(render(false), "watchdog"); rc != "" {
 		t.Fatalf("开机自启关着时定时不该拉,rc.func 收到 %q", rc)
@@ -110,6 +111,31 @@ func TestEntwareScriptRefreshKeepsEnabled(t *testing.T) {
 	}
 	if s, on := entwareScriptLike(strings.Replace(old, "ENABLED=no", "ENABLED=yes", 1)); !on || s != entwareScript {
 		t.Fatal("自启开着的直接换成当前模板")
+	}
+}
+
+// 停服务前先把旧版本写的脚本换成当前模板(旧脚本的 stop 交给 rc.func 按名字 killall,会连调 stop 的本进程一起杀),
+// 开机自启的开关照抄;已经是当前模板的不动。
+func TestRefreshEntwareScriptBeforeStop(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "S99godusevpn")
+	old := "#!/bin/sh\nENABLED=no\nPROCS=godusevpn\nARGS=\"run\"\ncase \"$1\" in\nstop | kill)\n\ttouch /opt/var/lib/godusevpn/stopped\n\t;;\nesac\n. /opt/etc/init.d/rc.func\n"
+	if err := os.WriteFile(p, []byte(old), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	on, err := refreshEntwareScript(p)
+	b, _ := os.ReadFile(p)
+	want, _ := entwareScriptLike(old)
+	if err != nil || on || string(b) != want || !strings.Contains(string(b), "halt TERM") {
+		t.Fatalf("旧脚本应换成当前模板、自启保持关着: on=%v err=%v\n%s", on, err, b)
+	}
+	if _, err := os.Stat(p + ".tmp"); !os.IsNotExist(err) {
+		t.Fatal("临时文件应已改名掉")
+	}
+	if on, err := refreshEntwareScript(p); err != nil || on {
+		t.Fatalf("再来一次不该出错: %v %v", on, err)
+	}
+	if _, err := refreshEntwareScript(filepath.Join(t.TempDir(), "没有")); err == nil {
+		t.Fatal("脚本不在时要报出来")
 	}
 }
 

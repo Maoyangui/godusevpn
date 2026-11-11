@@ -235,6 +235,42 @@ PATH=/opt/bin:/opt/sbin:/sbin:/bin:/usr/sbin:/usr/bin
 # 梅林没有 systemd / procd 那样的崩溃重拉:start 时挂一条每分钟的 cru 定时,服务没在跑就拉起来。
 # 用户主动 stop 留个标记,定时看到它就不拉;再 start(开机也是 start)时去掉。
 STOPPED=/opt/var/lib/godusevpn/stopped
+
+# stop / restart 不交给 rc.func:它按名字 killall $PROCS,而 godusevpn uninstall / stop 这些正在调本脚本的命令
+# 也叫这个名字,会被一起杀掉 —— 卸载做到一半自己没了,闸、自启脚本、看门狗定时全留着。
+# 这里只停守护进程(rc.func 拉起来的 "$PROCS $ARGS",命令行第二项是 $ARGS),按进程号发信号,调用者一个都不碰。
+arg2() { { tr '\0' '\n' < /proc/$1/cmdline; } 2>/dev/null | sed -n 2p; }
+daemons() {
+	for p in $(pidof $PROCS); do
+		[ "$(arg2 $p)" = "$ARGS" ] && echo $p
+	done
+}
+# gone 停掉的这些进程都没了:/proc 里没有了,或者进程号已经给了别的程序。退出了、还没收尸的(僵尸)不算 ——
+# 有的 pidof 把僵尸也当成在跑,restart 紧接着交给 rc.func 的 start 会以为"已经在跑"而不拉。
+gone() {
+	for p in "$@"; do
+		[ -d /proc/$p ] || continue
+		[ "$(sed -n 's/.*) \(.\) .*/\1/p' /proc/$p/stat 2>/dev/null)" = Z ] && return 1
+		[ "$(arg2 $p)" = "$ARGS" ] && return 1
+	done
+	return 0
+}
+halt() {
+	echo " Shutting down $DESC..."
+	pids=$(daemons)
+	[ -z "$pids" ] || kill -$1 $pids 2>/dev/null
+	i=0
+	until gone $pids; do
+		if [ $i -ge 15 ]; then
+			echo " $DESC is still running ($pids), failed."
+			return 255
+		fi
+		sleep 1
+		i=$((i + 1))
+	done
+	echo " done."
+}
+
 case "$1" in
 watchdog)
 	[ "$ENABLED" = yes ] || exit 0
@@ -245,9 +281,15 @@ watchdog)
 start | restart)
 	rm -f "$STOPPED"
 	command -v cru >/dev/null 2>&1 && cru a $PROCS "* * * * * /opt/etc/init.d/S99godusevpn watchdog"
+	if [ "$1" = restart ]; then
+		halt TERM || exit $?
+		set -- start "$2"
+	fi
 	;;
 stop | kill)
 	mkdir -p "${STOPPED%/*}" && touch "$STOPPED"
+	if [ "$1" = kill ]; then halt KILL; else halt TERM; fi
+	exit $?
 	;;
 esac
 
@@ -361,26 +403,37 @@ func Refresh() error {
 	if k != initEntware {
 		return nil
 	}
-	b, err := os.ReadFile(unitPath())
+	enabled, err := refreshEntwareScript(unitPath())
 	if err != nil {
 		return err
-	}
-	want, enabled := entwareScriptLike(string(b))
-	if string(b) != want {
-		tmp := unitPath() + ".tmp"
-		if err := os.WriteFile(tmp, []byte(want), 0o755); err != nil {
-			return err
-		}
-		if err := os.Rename(tmp, unitPath()); err != nil {
-			_ = os.Remove(tmp)
-			return err
-		}
 	}
 	if _, err := exec.LookPath("cru"); err != nil || !enabled {
 		return nil // 不是梅林(没有 cru),或者自启关着
 	}
 	_, err = sh("cru", entwareWatchdog...)
 	return err
+}
+
+// refreshEntwareScript 已装的 Entware 脚本(p)和当前模板不同就按原来的开关状态重写(先写临时文件再改名:脚本可能正被 sh 读着)。
+// 返回开机自启开着没有。
+func refreshEntwareScript(p string) (enabled bool, err error) {
+	b, err := os.ReadFile(p)
+	if err != nil {
+		return false, err
+	}
+	want, enabled := entwareScriptLike(string(b))
+	if string(b) == want {
+		return enabled, nil
+	}
+	tmp := p + ".tmp"
+	if err := os.WriteFile(tmp, []byte(want), 0o755); err != nil {
+		return enabled, err
+	}
+	if err := os.Rename(tmp, p); err != nil {
+		_ = os.Remove(tmp)
+		return enabled, err
+	}
+	return enabled, nil
 }
 
 // mainUnitText 当前版本的服务单元。
@@ -463,7 +516,7 @@ func Restart() error {
 		return err
 	}
 	// procd / Entware 的 restart 是脚本里的 stop 再 start:脱离本进程跑(自成一个会话),本进程被停掉它也跑得完。
-	// Entware 的 stop 按进程名 killall godusevpn,这个脚本进程不叫这个名字,杀不到它。
+	// Entware 脚本的 stop 只按进程号停 "godusevpn run" 那个守护进程(就是发起重启的本进程),脚本进程不受影响。
 	c := exec.Command(argv[0], argv[1:]...)
 	c.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	if err := c.Start(); err != nil {
@@ -495,6 +548,11 @@ func Stop() error {
 	}
 	if unitPath() == "" || !exists(unitPath()) {
 		return nil
+	}
+	if detect() == initEntware {
+		// 已装的可能还是旧版本写的脚本:stop 交给 rc.func 按名字 killall godusevpn,正在调它的本进程
+		// (godusevpn uninstall / stop)会被一起杀掉。先换成当前模板再停;换不了也照样停,结果和以前一样。
+		_, _ = refreshEntwareScript(unitPath())
 	}
 	return ctl("stop")
 }
