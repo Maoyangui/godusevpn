@@ -122,16 +122,18 @@ type Daemon struct {
 	server       *ipc.Server
 	secret       string
 	http         *http.Client
-	delays       map[string]int // 最近一次全节点测速结果
-	ping         int            // 当前节点最近一次测得的延迟(毫秒):健康检查本来就要测一次,顺手记下来给界面用
-	exitIP       string         // 经当前节点出去时对外露出的地址
-	exitLoc      string         // 出口所在国家的两位代码
-	exitCity     string         // 出口所在城市
-	exitRegion   string         // 出口所在一级行政区
-	exitISP      string         // 出口那条线路的运营商 / 机房
-	exitNode     string         // 上面那些是哪个节点测出来的:自动选择在后台换了节点就得重测
-	exitAt       time.Time      // 上次测出口的时间:节点没变也隔一阵子复查一次
-	exitGen      uint64         // 出口查询的代数:换节点 / 重连就加一,慢的旧查询回来发现代数变了就丢弃,不会把旧节点的出口盖到新节点上
+	plainOnce    sync.Once       // plainTr 第一次用时建
+	plainTr      *http.Transport // 闸没开时服务自己直连共用的 Transport(关着 IPv6 只拨 IPv4,见 plainHTTP)
+	delays       map[string]int  // 最近一次全节点测速结果
+	ping         int             // 当前节点最近一次测得的延迟(毫秒):健康检查本来就要测一次,顺手记下来给界面用
+	exitIP       string          // 经当前节点出去时对外露出的地址
+	exitLoc      string          // 出口所在国家的两位代码
+	exitCity     string          // 出口所在城市
+	exitRegion   string          // 出口所在一级行政区
+	exitISP      string          // 出口那条线路的运营商 / 机房
+	exitNode     string          // 上面那些是哪个节点测出来的:自动选择在后台换了节点就得重测
+	exitAt       time.Time       // 上次测出口的时间:节点没变也隔一阵子复查一次
+	exitGen      uint64          // 出口查询的代数:换节点 / 重连就加一,慢的旧查询回来发现代数变了就丢弃,不会把旧节点的出口盖到新节点上
 	noListen     bool
 
 	missingSets []builder.MissingRuleSet // 上一次生成配置时本地没有、因此摘掉了的规则集(界面要提示,连上之后要去补)
@@ -181,10 +183,10 @@ func NewWithOptions(o Options) (*Daemon, error) {
 		noListen: o.NoListen, releaseTun: o.ReleaseTun,
 		log:      logx.New(filepath.Join(paths.Logs(), "service.log"), 5<<20, 3),
 		coreLog:  logx.New(filepath.Join(paths.Logs(), "core.log"), 5<<20, 3),
-		http:     &http.Client{Timeout: 30 * time.Second},
 		profiles: map[string]*profile.Profile{},
 		fetchErr: map[string]string{}, fetchLink: map[string]string{},
 	}
+	d.http = d.plainHTTP(30 * time.Second) // 关着 IPv6 只拨 IPv4
 	if installErr != nil {
 		d.logf("内置规则集铺不下去(少几条规则,连接不受影响): %v", installErr)
 	}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -204,5 +205,70 @@ func TestGuardArmedOnlySealed(t *testing.T) {
 	d.guardOn, d.guardArming, d.settings.Mode = false, true, settings.ModeRule
 	if !d.guardArmed() {
 		t.Fatal("正在装严格全局的闸时也要拦")
+	}
+}
+
+// 关着 IPv6 时,服务自己不经代理发出的请求只走 IPv4:没连接时拉订阅(闸开没开两种)、手动检查更新 / 下载安装包 / 补规则集
+// (SelfHTTP)、DoH 解析,地址写成 IPv6 的在拨号这一步就被拒(*net.AddrError,一个包都不发)。开着 IPv6 时照常去拨。
+// 拨的都是本机回环上没人听的端口,不出本机。
+func TestDirectRequestsIPv4OnlyWhenIPv6Off(t *testing.T) {
+	d := newPolicyTestDaemon(t)
+	d.http = d.plainHTTP(5 * time.Second) // NewWithOptions 里就是这样装的
+	get := func(name string, c *http.Client, url string) error {
+		t.Helper()
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+		resp, err := c.Do(req)
+		if err == nil {
+			resp.Body.Close()
+			t.Fatalf("%s:回环 9 端口不该有人应答", name)
+		}
+		return err
+	}
+	clients := func() map[string]*http.Client {
+		self, err := d.SelfHTTP(5 * time.Second)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return map[string]*http.Client{"directHTTP(闸没开)": d.directHTTP(), "SelfHTTP": self}
+	}
+	var ae *net.AddrError
+	for _, allow6 := range []bool{false, true} {
+		d.mu.Lock()
+		d.settings.IPv6 = allow6
+		d.mu.Unlock()
+		for name, c := range clients() {
+			err := get(name, c, "http://[::1]:9/")
+			if !allow6 && !errors.As(err, &ae) {
+				t.Fatalf("%s:关着 IPv6 还去拨 IPv6 地址了:%v", name, err)
+			}
+			if allow6 && errors.As(err, &ae) {
+				t.Fatalf("%s:开着 IPv6 应当照常去拨:%v", name, err)
+			}
+		}
+	}
+
+	// 闸开着时那一份(按地址拨号、域名经 DoH)同样只拨 IPv4
+	d.mu.Lock()
+	d.settings.IPv6 = false
+	d.settings.NoDirect, d.settings.Mode, d.settings.LocalDNS = true, settings.ModeGlobal, "127.0.0.1"
+	d.guardOn = true
+	d.mu.Unlock()
+	if err := get("directHTTP(闸开着)", d.directHTTP(), "http://[::1]:9/"); !errors.As(err, &ae) {
+		t.Fatalf("闸开着:关着 IPv6 还去拨 IPv6 地址了:%v", err)
+	}
+
+	// DoH 服务器自己写成 IPv6 地址:关着 IPv6 时不去连它
+	d.mu.Lock()
+	d.settings.LocalDNS = "::1"
+	d.mu.Unlock()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, err := d.bootResolver(d.getSettings())(ctx, "example.com"); !errors.As(err, &ae) {
+		t.Fatalf("关着 IPv6 还去连 IPv6 地址的 DoH:%v", err)
+	}
+	if _, err := d.bootLookup6(d.getSettings())(ctx, "example.com"); !errors.As(err, &ae) {
+		t.Fatalf("关着 IPv6 还去连 IPv6 地址的 DoH(问 AAAA 那一路):%v", err)
 	}
 }

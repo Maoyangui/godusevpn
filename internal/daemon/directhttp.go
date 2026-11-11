@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/Maoyangui/godusevpn/internal/builder"
+	"github.com/Maoyangui/godusevpn/internal/directnet"
 	"github.com/Maoyangui/godusevpn/internal/netmode"
 	"github.com/Maoyangui/godusevpn/internal/settings"
 )
@@ -26,7 +27,9 @@ var sealedDoH = builder.SealedBootstrapDoH
 // macOS 上守护进程是 root,闸放行它,明文查询会直接出去(Linux 上它没带闸放行的标记,会被拦下、解析不了)。
 // 所以闸开着时改用 DoH:按地址连「本地 DNS」那台
 // (没有可用的就用 sealedDoH),从本服务进程发出,解出地址后按地址拨号;TLS 仍按 URL 里的主机名校验。
-// 闸没开时行为不变。
+// 闸没开时用 d.http(系统解析器、系统网络栈,见 plainHTTP)。
+//
+// 两种都按「允许 IPv6」拨号:关着时只走 IPv4(见 directnet)。
 //
 // 规则模式的闸同样要这样:只判严格全局的话,这里给的是没带标记的客户端,Linux 上被自己的闸拦下,
 // 没有缓存时连接一直卡在拉订阅、永远连不上。
@@ -37,10 +40,11 @@ func (d *Daemon) directHTTP() *http.Client {
 	s := d.getSettings()
 	resolve := d.bootResolver(s)
 	if !settings.IsIP(s.LocalDNS) { // system 或域名 DoH:都要先走系统解析器,闸开着时不走
-		server := sealedDoH
-		resolve = func(ctx context.Context, host string) ([]string, error) { return lookupDoH(ctx, server, host) }
+		server, allow6 := sealedDoH, s.IPv6
+		resolve = func(ctx context.Context, host string) ([]string, error) { return lookupDoH(ctx, server, host, allow6) }
 	}
-	dialer := &net.Dialer{Timeout: 10 * time.Second, Control: netmode.SelfControl} // Linux 的闸按这个标记放行本服务
+	// Linux 的闸按这个标记放行本服务;关着 IPv6 只拨 IPv4(DoH 本来只问 A,写成 IPv6 的地址在这里挡住)
+	dialer := directnet.Dial((&net.Dialer{Timeout: 10 * time.Second, Control: netmode.SelfControl}).DialContext, d.allowIPv6)
 	tr := &http.Transport{
 		Proxy: nil, // 不走环境变量里的代理
 		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
@@ -49,7 +53,7 @@ func (d *Daemon) directHTTP() *http.Client {
 				return nil, err
 			}
 			if net.ParseIP(host) != nil {
-				return dialer.DialContext(ctx, network, addr)
+				return dialer(ctx, network, addr)
 			}
 			ips, err := resolve(ctx, host)
 			if err != nil {
@@ -57,7 +61,7 @@ func (d *Daemon) directHTTP() *http.Client {
 			}
 			last := fmt.Errorf("经 DoH 解析 %s:没有 IPv4 地址", host)
 			for _, ip := range ips {
-				c, err := dialer.DialContext(ctx, network, net.JoinHostPort(ip, port))
+				c, err := dialer(ctx, network, net.JoinHostPort(ip, port))
 				if err == nil {
 					return c, nil
 				}
@@ -70,6 +74,25 @@ func (d *Daemon) directHTTP() *http.Client {
 		DisableKeepAlives:   true, // 拉一次就完:不在隧道外留一条空闲连接
 	}
 	return &http.Client{Timeout: d.http.Timeout, Transport: tr}
+}
+
+// allowIPv6 此刻「允许 IPv6」开没开:每次拨号前问一次,设置刚改过也算数。
+func (d *Daemon) allowIPv6() bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.settings.IPv6
+}
+
+// plainHTTP 闸没开时服务自己直连用的客户端:系统解析器、系统网络栈(和以前用的默认客户端一样认环境变量里的代理);关着 IPv6 时只拨 IPv4
+// (域名只解析 A、写成 IPv6 的地址拨不出去,见 directnet)。NewWithOptions 用它装 d.http。
+func (d *Daemon) plainHTTP(timeout time.Duration) *http.Client {
+	return &http.Client{Timeout: timeout, Transport: d.plainTransport()}
+}
+
+// plainTransport 同一个守护进程共用一个(连接池随它),第一次用时建。
+func (d *Daemon) plainTransport() *http.Transport {
+	d.plainOnce.Do(func() { d.plainTr = directnet.Transport(d.allowIPv6, nil) })
+	return d.plainTr
 }
 
 // errSealed 闸开着、隧道没起来时,服务自己不从本机直连出去。
@@ -117,7 +140,7 @@ func (t unarmedTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 		}
 		return nil, errArmedMidway
 	}
-	resp, err := http.DefaultTransport.RoundTrip(req)
+	resp, err := t.d.plainTransport().RoundTrip(req) // 关着 IPv6 只拨 IPv4
 	if err != nil {
 		return nil, err
 	}

@@ -20,6 +20,7 @@ import (
 	"github.com/Maoyangui/godusevpn/internal/autostart"
 	"github.com/Maoyangui/godusevpn/internal/buildinfo"
 	"github.com/Maoyangui/godusevpn/internal/clash"
+	"github.com/Maoyangui/godusevpn/internal/directnet"
 	"github.com/Maoyangui/godusevpn/internal/ipc"
 	"github.com/Maoyangui/godusevpn/internal/paths"
 	"github.com/Maoyangui/godusevpn/internal/settings"
@@ -347,9 +348,17 @@ func (a *App) pokeUpdate(force bool) {
 // PokeUpdate 页面打开抽屉时戳一下(有节流)。
 func (a *App) PokeUpdate() { go a.pokeUpdate(false) }
 
+// allowIPv6 服务给的设置里「允许 IPv6」开没开;服务连不上(拿不到此刻的设置)时按关着算。
+func (a *App) allowIPv6() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.state.Service && a.state.View.Settings.IPv6
+}
+
 // checkUpdate 先直连 GitHub;不通而内核在跑时改走本机混合端口再试一次(TUN 关着的场合)。
+// 直连那一次关着 IPv6 时只走 IPv4(见 directnet):界面进程自己发的请求同样守「关着 IPv6 就不走 IPv6」。
 func (a *App) checkUpdate(ctx context.Context) (*update.Release, error) {
-	rel, err := update.Check(ctx, buildinfo.Version, true, nil)
+	rel, err := update.Check(ctx, buildinfo.Version, true, directnet.Client(20*time.Second, a.allowIPv6))
 	if err == nil {
 		return rel, nil
 	}
@@ -392,7 +401,7 @@ func (a *App) ApplyUpdate() error {
 	a.mu.Unlock()
 	defer func() { a.mu.Lock(); a.updating = false; a.mu.Unlock() }()
 	dir := filepath.Join(os.TempDir(), "godusevpn-update")
-	path, err := update.Download(a.ctx, rel, dir, nil, func(done, total int64) {
+	path, err := update.Download(a.ctx, rel, dir, directnet.Client(30*time.Minute, a.allowIPv6), func(done, total int64) {
 		runtime.EventsEmit(a.ctx, "update-progress", map[string]int64{"done": done, "total": total})
 	})
 	if err != nil {

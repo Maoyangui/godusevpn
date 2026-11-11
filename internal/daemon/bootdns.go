@@ -16,6 +16,7 @@ import (
 
 	"golang.org/x/net/dns/dnsmessage"
 
+	"github.com/Maoyangui/godusevpn/internal/directnet"
 	"github.com/Maoyangui/godusevpn/internal/netmode"
 	"github.com/Maoyangui/godusevpn/internal/profile"
 	"github.com/Maoyangui/godusevpn/internal/settings"
@@ -49,8 +50,8 @@ func (d *Daemon) bootResolver(s settings.Settings) func(ctx context.Context, hos
 			return net.DefaultResolver.LookupHost(ctx, host)
 		}
 	}
-	server := s.LocalDNS
-	return func(ctx context.Context, host string) ([]string, error) { return lookupDoH(ctx, server, host) }
+	server, allow6 := s.LocalDNS, s.IPv6
+	return func(ctx context.Context, host string) ([]string, error) { return lookupDoH(ctx, server, host, allow6) }
 }
 
 // bootLookup6 返回一个"这个域名有没有 IPv6 地址"的查询,只给 v6OnlyHosts 分类用;返回 nil 表示不查。
@@ -60,9 +61,9 @@ func (d *Daemon) bootLookup6(s settings.Settings) func(ctx context.Context, host
 	if !settings.IsIP(s.LocalDNS) {
 		return nil
 	}
-	server := s.LocalDNS
+	server, allow6 := s.LocalDNS, s.IPv6
 	return func(ctx context.Context, host string) ([]string, error) {
-		return queryDoH(ctx, server, host, dnsmessage.TypeAAAA)
+		return queryDoH(ctx, server, host, dnsmessage.TypeAAAA, allow6)
 	}
 }
 
@@ -70,8 +71,8 @@ func (d *Daemon) bootLookup6(s settings.Settings) func(ctx context.Context, host
 // 超时、上游出错都是别的错误(不下结论)。和 bootResolver 用同一台解析器;防逃逸下不解析的那几种情况返回 nil。
 func (d *Daemon) bootLookup4(s settings.Settings) func(ctx context.Context, host string) ([]string, error) {
 	if settings.IsIP(s.LocalDNS) {
-		server := s.LocalDNS
-		return func(ctx context.Context, host string) ([]string, error) { return lookupDoH(ctx, server, host) }
+		server, allow6 := s.LocalDNS, s.IPv6
+		return func(ctx context.Context, host string) ([]string, error) { return lookupDoH(ctx, server, host, allow6) }
 	}
 	if s.NoDirect && s.Mode == settings.ModeGlobal {
 		return nil // 同 bootResolver:明文系统解析在防逃逸下一个包都不该发
@@ -189,8 +190,9 @@ var errNoARecord = errors.New("没有 A 记录")
 // lookupDoH RFC 8484:POST application/dns-message 到 https://<ip>/dns-query,只查 A(IPv6 全程禁用)。
 // 服务器按地址连,证书按地址校验(223.5.5.5、1.1.1.1 这些公共 DoH 的证书都带地址),不经任何代理。
 // 答复是 NOERROR 而里面没有 A 记录(NODATA)才返回 errNoARecord;SERVFAIL、REFUSED、NXDOMAIN 是别的错(见 parseDoHAnswer)。
-func lookupDoH(ctx context.Context, server, host string) ([]string, error) {
-	addrs, err := queryDoH(ctx, server, host, dnsmessage.TypeA)
+// allow6 是「允许 IPv6」:关着时 DoH 服务器自己写成 IPv6 地址也不去连(见 queryDoH)。
+func lookupDoH(ctx context.Context, server, host string, allow6 bool) ([]string, error) {
+	addrs, err := queryDoH(ctx, server, host, dnsmessage.TypeA, allow6)
 	if err == nil && len(addrs) == 0 {
 		return nil, errNoARecord
 	}
@@ -198,7 +200,8 @@ func lookupDoH(ctx context.Context, server, host string) ([]string, error) {
 }
 
 // queryDoH 问一种记录(A 或 AAAA),返回地址;答复是 NOERROR 而没有这种记录时返回空列表。
-func queryDoH(ctx context.Context, server, host string, qtype dnsmessage.Type) ([]string, error) {
+// 问 AAAA 只是问,不拿它去连;连 DoH 服务器本身在关着 IPv6(allow6 为假)时只拨 IPv4 —— 服务器写成 IPv6 地址就不去连。
+func queryDoH(ctx context.Context, server, host string, qtype dnsmessage.Type, allow6 bool) ([]string, error) {
 	name, err := dnsmessage.NewName(host + ".")
 	if err != nil {
 		return nil, err
@@ -218,7 +221,7 @@ func queryDoH(ctx context.Context, server, host string, qtype dnsmessage.Type) (
 	req.Header.Set("Content-Type", "application/dns-message")
 	req.Header.Set("Accept", "application/dns-message")
 	tr := &http.Transport{
-		DialContext:       (&net.Dialer{Timeout: 4 * time.Second, Control: netmode.SelfControl}).DialContext, // Linux 的闸按标记放行本服务
+		DialContext:       directnet.Dial((&net.Dialer{Timeout: 4 * time.Second, Control: netmode.SelfControl}).DialContext, func() bool { return allow6 }), // Linux 的闸按标记放行本服务
 		TLSClientConfig:   &tls.Config{MinVersion: tls.VersionTLS12},
 		Proxy:             nil,  // 绝不走环境变量里的代理
 		DisableKeepAlives: true, // 一问一答就完:不留一条空闲连接在隧道外挂着发 keepalive
