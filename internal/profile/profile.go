@@ -62,8 +62,9 @@ type Group struct {
 	Members []string `json:"members"`
 }
 
-// parserVersion 见 Profile.Parser。1 = 认线路组;2 = 也记下成员是全部节点的线路组(Profile.Whole)。
-const parserVersion = 2
+// parserVersion 见 Profile.Parser。1 = 认线路组;2 = 也记下成员是全部节点的线路组(Profile.Whole);
+// 3 = 节点改名时别的节点 detour 里的旧名跟着改(见 rewriteDetours)。
+const parserVersion = 3
 
 // 这些 tag 是客户端自己用的,节点不能撞;这些类型不是节点,直接丢(urltest 另外收成线路组,见 Parse)
 var reservedTags = map[string]bool{"proxy": true, "auto": true, "direct": true, "block": true, "dns-out": true}
@@ -122,7 +123,20 @@ func Parse(body []byte, hdr http.Header) (*Profile, error) {
 		used[k] = true
 	}
 	renamed := map[string]string{} // 订阅里节点原来的 tag → 清洗后的 tag(线路组的成员按原 tag 写)
+	origCount := map[string]int{}  // 订阅里每个原 tag 出现几次(不管什么类型):只出现一次的,detour 写它才说得清指的是谁
 	var urltests []json.RawMessage
+	for _, raw := range doc.Outbounds {
+		var meta struct {
+			Type string `json:"type"`
+			Tag  string `json:"tag"`
+		}
+		if json.Unmarshal(raw, &meta) != nil || meta.Type == "" {
+			continue
+		}
+		if meta.Tag != "" {
+			origCount[meta.Tag]++
+		}
+	}
 	for _, raw := range doc.Outbounds {
 		var meta struct {
 			Type string `json:"type"`
@@ -161,6 +175,7 @@ func Parse(body []byte, hdr http.Header) (*Profile, error) {
 	if len(p.Outbounds) == 0 {
 		return nil, ErrNoNodes
 	}
+	rewriteDetours(p.Outbounds, renamed, origCount)
 	p.Groups, p.Whole = parseGroups(urltests, renamed, len(p.Tags), used)
 	if hdr != nil {
 		p.Title = decodeTitle(hdr.Get("Profile-Title"))
@@ -168,6 +183,40 @@ func Parse(body []byte, hdr http.Header) (*Profile, error) {
 		p.WebPage = safeWebPage(hdr.Get("Profile-Web-Page-Url"))
 	}
 	return p, nil
+}
+
+// rewriteDetours 节点为避免重名改了名(撞保留名、重名加序号、去首尾空白),别的节点 detour 里写的还是旧名:
+// 不改的话,中转指向的要么是不存在的出站(内核起不来),要么正好是重名改出来的另一台(经第三方节点中转)。
+// 只改真正指向被改名节点的那些:订阅里只有这一个出站叫这个旧名(sing-box 的 tag 本来唯一)。同名的有好几个时说不清指的是谁,
+// 原样留着 —— 留着的名字归第一个(它没改名)。只动 detour 一项,别的字节不变。
+func rewriteDetours(outbounds []json.RawMessage, renamed map[string]string, origCount map[string]int) {
+	moved := map[string]string{}
+	for old, now := range renamed {
+		if old != now && origCount[old] == 1 {
+			moved[old] = now
+		}
+	}
+	if len(moved) == 0 {
+		return
+	}
+	for i, raw := range outbounds {
+		var m map[string]json.RawMessage
+		if json.Unmarshal(raw, &m) != nil {
+			continue
+		}
+		var detour string
+		if json.Unmarshal(m["detour"], &detour) != nil {
+			continue
+		}
+		now, ok := moved[detour]
+		if !ok {
+			continue
+		}
+		m["detour"], _ = json.Marshal(now)
+		if b, err := json.Marshal(m); err == nil {
+			outbounds[i] = b
+		}
+	}
 }
 
 // parseGroups 从订阅的 urltest 出站里收线路组。outbounds 那一项单独解,不和节点共用一份 meta:
