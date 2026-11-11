@@ -258,7 +258,7 @@ function renderDrawerState() {
   const grp = groupByTag(v, v.node); // 选的是线路组:连着时显示组里实际那台,没连时显示线路名
   const auto = !grp && (v.node === 'auto' || !v.node);
   const name = auto ? (v.autoNow || t('node.auto')) : grp ? (v.autoNow || v.node) : v.node;
-  setFlag($('#ds-flag'), geoCode(name));
+  setFlag($('#ds-flag'), grp ? groupGeo(grp.tag, grp.members) : geoCode(name)); // 线路组:旗帜按线路,和节点列表那一行一样;大字是实际那台
   $('#ds-name').textContent = cleanName(name);
   const ping = v.ping || lastPing;
   $('#ds-sub').textContent = !on ? (grp ? t('pick.lineAuto') : t('home.pickNode'))
@@ -286,7 +286,13 @@ function releaseFocus(layer) {
   tvFocus(); // 焦点落回当前页面的第一个可选项
 }
 let sheetOnClose = null;
+// sheetSeq 每开 / 关一次面板加一,sheetKind 是这一次开的是哪种面板(nodes / mode / profiles)。耗时的调用(第一次进线路组要重连、
+// 选节点要重建配置、测速、刷新订阅)回来时核对一下:等的时候用户按返回关掉了面板、又开了别的面板(电视上几秒没反应是常事),
+// 就不往那块面板里写节点列表,也不把它关掉。
+let sheetSeq = 0, sheetKind = '';
+function sheetIs(kind, seq) { return sheetKind === kind && sheetSeq === seq && $('#sheet').classList.contains('show'); }
 function openSheet(title, html, opts = {}) {
+  sheetSeq++; sheetKind = opts.kind || '';
   $('#sheet-head').innerHTML = `<span class="grow">${esc(title)}</span>${opts.action ? `<button class="btn sm ghost" id="sheet-action">${esc(opts.action)}</button>` : ''}`;
   $('#sheet-body').innerHTML = html;
   $('#sheet').classList.add('show'); $('#sheet-backdrop').classList.add('show');
@@ -295,6 +301,7 @@ function openSheet(title, html, opts = {}) {
   tvFocus();
 }
 function closeSheet() {
+  sheetSeq++; sheetKind = '';
   $('#sheet').classList.remove('show'); $('#sheet-backdrop').classList.remove('show');
   releaseFocus($('#sheet'));
   if (sheetOnClose) { const f = sheetOnClose; sheetOnClose = null; f(); }
@@ -585,6 +592,7 @@ function renderHome(el) {
       <div class="guard-pill warn" id="nic-pill" hidden></div>
       <div class="guard-pill warn" id="privacy-pill" hidden></div>
       <div class="guard-pill warn" id="v6-pill" hidden></div>
+      <div class="guard-pill warn" id="sel-pill" hidden></div>
     </div>
     <button class="idcard" id="id-card">
       <span class="flag none" id="id-flag">${ICON_GLOBE}</span>
@@ -642,8 +650,11 @@ function updateHome() {
   const quiet = on && !err;
   $('#status').hidden = quiet;
   $('#status').textContent = state.service ? t('st.' + st) : svcText(state);
-  $('#status-sub').hidden = !err;
-  $('#status-sub').textContent = err;
+  // 下面那条 IPv6 提示挂着时,同一个原因(E_NODE_V6)不在状态行再说一遍:提示条里已经点了名、说了去哪儿改
+  const v6Text = v6HintText(v);
+  const errSub = v6Text && v.state.code === 'E_NODE_V6' ? '' : err;
+  $('#status-sub').hidden = !errSub;
+  $('#status-sub').textContent = errSub;
   // 防流量逃逸的闸:开着就亮一颗小盾;该开却没开成(防火墙不可用之类)标成警告
   const gp = $('#guard-pill');
   // 闸开着但有异常(比如转发层没放行隧道网卡)和闸根本没开成是两回事,标题要分开说
@@ -674,25 +685,17 @@ function updateHome() {
     pp.innerHTML = warns.length ? ICON_WARN + `<span>${esc(warns.join('; '))}</span>` : '';
     pp.title = warns.join('\n'); // 胶囊里放不下全文时,悬停可以看全
   }
-  // 选的节点只能走 IPv6、而现在关着 IPv6:一直挂着说清楚,不让人对着「节点不稳」猜
-  const vp = $('#v6-pill');
-  if (vp) {
-    const key = v.selectedV6 ? LANG : '';
-    if (vp.dataset.key !== key) {
-      vp.dataset.key = key;
-      vp.hidden = !key;
-      // 后半句"去哪儿改"是要紧的:手机、电视上没有悬停提示,这一条折行显示全,不像别的胶囊那样截断
-      vp.style.borderRadius = '12px';
-      vp.innerHTML = key ? ICON_WARN + `<span style="white-space:normal;text-align:left">${esc(t('node.v6Hint'))}</span>` : '';
-      vp.title = key ? t('node.v6Hint') : '';
-    }
-  }
+  // 选的节点只能走 IPv6、而现在关着 IPv6:一直挂着说清楚(点名是哪个节点 / 哪条线路),不让人对着「节点不稳」猜
+  wrapPill($('#v6-pill'), v6Text);
+  // 选的节点 / 线路组在订阅里没了:这一轮实际用的是什么(线路只剩一台时用同线路那台;一台不剩才回落自动选择)
+  wrapPill($('#sel-pill'), selNoteText(v));
 
   // 出口卡片:自动选择时显示实际落到的那个节点,底下是这条线路真正的出口地址;线路组同样显示组里实际那台
   const grp = groupByTag(v, v.node);
   const auto = !grp && (v.node === 'auto' || !v.node);
   const name = auto ? (v.autoNow || t('node.auto')) : grp ? (v.autoNow || v.node) : v.node;
-  setFlag($('#id-flag'), on || !auto ? geoCode(name) : geoCode(v.node));
+  // 线路组:旗帜按线路(和节点列表那一行一样;入口服务器的地名不该盖过线路),大字照旧是实际那台
+  setFlag($('#id-flag'), grp ? groupGeo(grp.tag, grp.members) : on || !auto ? geoCode(name) : geoCode(v.node));
   $('#id-name').textContent = cleanName(name);
   $('#id-auto').hidden = !auto && !grp;
   $('#id-auto').textContent = t(grp ? 'pick.lineAuto' : 'pick.auto');
@@ -734,6 +737,38 @@ function updateHome() {
   }
 }
 
+// wrapPill 首页的折行提示条(IPv6 节点、选的东西没了):后半句"去哪儿改"是要紧的,手机、电视上没有悬停提示,
+// 这几条折行显示全,不像别的胶囊那样截断。文字变了才重画。
+function wrapPill(el, text) {
+  if (!el) return;
+  const key = text ? LANG + '|' + text : '';
+  if (el.dataset.key === key) return;
+  el.dataset.key = key;
+  el.hidden = !key;
+  el.style.borderRadius = '12px';
+  el.innerHTML = key ? ICON_WARN + `<span style="white-space:normal;text-align:left">${esc(text)}</span>` : '';
+  el.title = text || '';
+}
+// v6HintText 选的(节点、线路,或自动选择而节点全是这种)只能走 IPv6、而「允许 IPv6」关着时的提示:点名是哪个,说清楚去哪儿改。
+// 直连模式下流量不经节点,不挂;自救临时借了别的线路时(连着、实际在用的不是选的那个)补一句现在用的是哪台,
+// 不然挂在一个正常的节点上方,读起来像在说它。
+function v6HintText(v) {
+  if (!v || !v.selectedV6 || v.mode === 'direct') return '';
+  const s = v.settings || {}, note = v.selNote;
+  const sel = note ? (note.now || '') : (s.selected || ''); // 选的没了时这一轮落在同线路那台,或者自动选择
+  let text = !sel ? t('node.v6HintAuto') : groupByTag(v, sel) ? t('node.v6HintLine', { n: cleanName(sel) }) : t('node.v6Hint', { n: cleanName(sel) });
+  const st = v.state && v.state.status, on = st === 'connected' || st === 'degraded';
+  if (on && v.node && v.node !== (sel || 'auto')) text += t('node.v6Borrowed', { n: cleanName(v.node) });
+  return text;
+}
+// selNoteText 设置里选的节点 / 线路组在订阅里没了时写明这一轮用的是什么。
+function selNoteText(v) {
+  const n = v && v.selNote;
+  if (!n) return '';
+  if (n.now) return t('node.selGoneLine', { g: cleanName(n.gone), n: cleanName(n.now) });
+  return t(n.group ? 'node.selGoneLineAuto' : 'node.selGone', { g: cleanName(n.gone) });
+}
+
 // openExternal 打开外部地址:桌面壳与安卓交给系统浏览器,网页面板自己开新标签。
 // 只放行 http(s) —— 续费地址来自订阅响应,不能让它塞别的协议进来交给系统去开。
 const ICON_SHIELD = '<svg viewBox="0 0 24 24"><path d="M12 3l7 3v5c0 4.6-3 8.6-7 10-4-1.4-7-5.4-7-10V6z"/><path d="M9.3 12.2l2 2 3.6-4"/></svg>';
@@ -763,9 +798,10 @@ async function registerController() {
 // ---- 首页三个面板 ----
 function sheetMode() {
   const cur = state.view.mode;
-  openSheet(t('sheet.mode'), `<div class="list">${['rule', 'global', 'direct'].map(m => `<div class="item ${m === cur ? 'current' : ''}" data-mode="${m}"><span class="check"></span><div class="name"><b>${t('mode.' + m)}</b><span>${t('mode.' + m + '.d')}</span></div></div>`).join('')}</div>`);
+  openSheet(t('sheet.mode'), `<div class="list">${['rule', 'global', 'direct'].map(m => `<div class="item ${m === cur ? 'current' : ''}" data-mode="${m}"><span class="check"></span><div class="name"><b>${t('mode.' + m)}</b><span>${t('mode.' + m + '.d')}</span></div></div>`).join('')}</div>`, { kind: 'mode' });
+  const seq = sheetSeq;
   $('#sheet-body').querySelectorAll('.item').forEach(it => it.addEventListener('click', async () => {
-    try { await App().SetMode(it.dataset.mode); closeSheet(); } catch (e) { toast(errText(e), 'err'); }
+    try { await App().SetMode(it.dataset.mode); if (sheetIs('mode', seq)) closeSheet(); } catch (e) { toast(errText(e), 'err'); }
   }));
 }
 function profileLine(p) {
@@ -777,7 +813,7 @@ function profileLine(p) {
 }
 const ICON_REFRESH = '<svg viewBox="0 0 24 24"><path d="M20 12a8 8 0 1 1-2.3-5.7"/><path d="M20 4v5h-5"/></svg>';
 function sheetProfiles() {
-  openSheet(t('sheet.profile'), '', { action: t('sheet.manage'), onAction: () => { closeSheet(); nav('profiles'); } });
+  openSheet(t('sheet.profile'), '', { kind: 'profiles', action: t('sheet.manage'), onAction: () => { closeSheet(); nav('profiles'); } });
   drawProfiles(state.view.profiles || []);
 }
 // 订阅面板的列表:点整行切换,右侧小图标刷新这一条(不换当前订阅)
@@ -787,14 +823,15 @@ function drawProfiles(list) {
   body.innerHTML = list.length ? `<div class="list">${list.map(p => `<div class="item ${p.active ? 'current' : ''}" data-id="${esc(p.id)}"><span class="check"></span>
     <div class="name"><b>${esc(p.name)}</b><span>${esc(profileLine(p))}${p.fetchedAt && !p.manual ? ' · ' + esc(t('prof.updated', { t: fmtTime(p.fetchedAt) })) : ''}${p.error ? ' · <span style="color:var(--danger)">' + esc(p.error) + '</span>' : ''}</span></div>
     ${p.manual ? '' : `<button class="icon-btn xs muted" data-refresh="${esc(p.id)}" title="${t('prof.refresh')}">${ICON_REFRESH}</button>`}</div>`).join('')}</div>` : `<div class="empty">${t('prof.empty')}</div>`;
+  const seq = sheetSeq;
   body.querySelectorAll('.item').forEach(it => it.addEventListener('click', async () => {
-    try { await App().SelectProfile(it.dataset.id); closeSheet(); } catch (e) { toast(errText(e), 'err'); }
+    try { await App().SelectProfile(it.dataset.id); if (sheetIs('profiles', seq)) closeSheet(); } catch (e) { toast(errText(e), 'err'); }
   }));
   body.querySelectorAll('button[data-refresh]').forEach(b => b.addEventListener('click', async e => {
     e.stopPropagation();
     b.disabled = true; b.querySelector('svg').classList.add('spin');
     try { await refreshProfileBg(b.dataset.refresh); toast(t('prof.refreshed'), 'ok'); } catch (err) { toast(errText(err), 'err'); }
-    if (!$('#sheet').classList.contains('show')) return;
+    if (!sheetIs('profiles', seq)) return; // 等的时候面板关了、换成了别的面板:不往里画
     let l = [];
     try { l = await App().GetProfiles() || []; } catch (err) { l = state.view.profiles || []; }
     drawProfiles(l);
@@ -807,10 +844,10 @@ function msText(d, testing) {
   if (d < 0) return t('node.fail');
   return d ? d + ' ms' : '–';
 }
-let nodeTesting = false, nodeFilter = '', nodeRegion = '', nodeFetchTried = false, nodeSig = '';
+let nodeTesting = false, nodeFilter = '', nodeRegion = '', nodeFetchTried = false, nodeSig = '', nodePicking = false;
 async function sheetNodes() {
   nodeFilter = ''; nodeRegion = '';
-  openSheet(t('sheet.nodes'), `<div class="empty"><span class="spinner"></span></div>`, { action: t('sheet.retest'), onAction: () => testNodes(true) });
+  openSheet(t('sheet.nodes'), `<div class="empty"><span class="spinner"></span></div>`, { kind: 'nodes', action: t('sheet.retest'), onAction: () => testNodes(true) });
   await drawNodes(false);
   testNodes(false);
 }
@@ -828,19 +865,37 @@ function applyNodeFilter() {
   });
   body.querySelectorAll('.chip').forEach(c => c.classList.toggle('on', (c.dataset.geo || '') === nodeRegion));
 }
-// regionChips 按地区归堆,节点多的排前面;点一下只是筛选,不碰后端
-function regionChips(nodes) {
+// regionList 按地区归堆,节点多的排前面(最多 8 个,换行排布,太多会把列表挤下去);只有一个地区就不用筛了
+function regionList(nodes) {
   const n = new Map();
   for (const x of nodes) {
     if (x.name === 'auto') continue;
-    const c = geoCode(x.name);
+    const c = rowGeo(x);
     if (c) n.set(c, (n.get(c) || 0) + 1);
   }
-  const list = [...n.entries()].sort((a, b) => b[1] - a[1]).slice(0, 8); // 换行排布,太多会把列表挤下去
-  if (list.length < 2) return ''; // 只有一个地区就不用筛了
+  const list = [...n.entries()].sort((a, b) => b[1] - a[1]).slice(0, 8);
+  return list.length < 2 ? [] : list;
+}
+// regionChips 地区标签;点一下只是筛选,不碰后端
+function regionChips(list) {
+  if (!list.length) return '';
   return `<div class="chips"><button class="chip on" data-geo="">${t('node.all')}</button>`
     + list.map(([c, k]) => `<button class="chip" data-geo="${c}">${esc(regionName(c))} ${k}</button>`).join('') + '</div>';
 }
+// groupGeo 一条线路组的地区:先按线路名认;线路名里认不出(按协议起名的线路、第三方的混合组)时,成员都在同一个地区才算那个地区。
+// 不按入口服务器的地名算 —— 出口跟的是线路,「日本-香港」这台的入口在香港,出口还是日本。首页、抽屉、列表那一行都用它,三处一致。
+function groupGeo(tag, members) {
+  const own = geoCode(tag);
+  if (own) return own;
+  let c = null;
+  for (const m of members || []) {
+    const g = geoCode(m);
+    if (c === null) c = g;
+    else if (c !== g) return '';
+  }
+  return c || '';
+}
+function rowGeo(n) { return n.group ? groupGeo(n.name, n.members) : geoCode(n.name); }
 
 // ---- 线路自动:同一条线路部署在多台服务器上时合成一项,选它就在这几台里自动用最快的 ----
 // groupsOf 当前订阅里的线路组(服务没报 = 没有:旧服务,或订阅里没有部署在多台服务器上的线路)
@@ -903,9 +958,12 @@ function lineRows(nodes, v, v6) {
 let lineBusy = false;
 // toggleLineAuto 翻「线路自动」。正在翻的时候再按(电视上连按 OK)直接吞掉;不用 disabled —— 禁用了焦点就掉了,遥控器没有落点。
 // 服务按开关换算当前选择后返回新状态,立刻合进来整块重画;焦点按 data-name 落回开关上。
+// 列表的结构整个变了(按节点 ↔ 按线路),地区标签和搜索框可能都不在了:筛选一并清掉,不留一个看不见、清不掉的过滤。
+// 失败时服务已经把选择退回去(见 MSetLineAuto):开关拨回去,再按服务那边的实际状态重画一次。
 async function toggleLineAuto(el) {
   if (lineBusy) return;
   lineBusy = true;
+  const seq = sheetSeq;
   const on = el.checked, before = (state && state.view) || {}; // 下面会把新状态合进 state.view:先把要比的记下来
   const prevSel = (before.settings && before.settings.selected) || '';
   const wasOn = !!before.state && (before.state.status === 'connected' || before.state.status === 'degraded');
@@ -917,12 +975,17 @@ async function toggleLineAuto(el) {
     const sel = (nv && nv.settings && nv.settings.selected) || '';
     if (on && wasOn && st && st !== 'connected' && st !== 'degraded') toast(t('node.lineAutoReconnect')); // 头一回选线路组要重连一次
     else if (!on && sel !== prevSel && wasGroup) toast(t('node.lineAutoPinned', { n: cleanName(sel) }), 'ok');
-    nodeSig = ''; // 列表结构变了
+    nodeSig = ''; nodeFilter = ''; nodeRegion = ''; // 列表结构变了
     updateHome();
-    if ($('#sheet').classList.contains('show')) await drawNodes(false);
+    if (sheetIs('nodes', seq)) await drawNodes(false); // 等的时候面板关了、换成了别的面板:不往里画
   } catch (e) {
     el.checked = !on;
     toast(errText(e), 'err');
+    try {
+      const st = await App().GetState();
+      if (st && st.view && state) { state.view = st.view; nodeSig = ''; updateHome(); }
+    } catch (e2) { /* 取不到就等下一次推送 */ }
+    if (sheetIs('nodes', seq)) await drawNodes(false);
   } finally {
     lineBusy = false;
   }
@@ -934,7 +997,7 @@ function nodeRow(n, i, max, testing) {
       <span class="ms ${msClass(n.delay)}"></span></div>`;
   }
   if (n.group) { // 线路组:和自动选择一样是粗体名字 + 小字;成员里有倍率不是 1 的服务器就挂「含倍率」
-    const gc = geoCode(n.name);
+    const gc = groupGeo(n.name, n.members);
     return `<div class="item ${n.current ? 'current' : ''}" data-name="${esc(n.name)}" data-group="1" data-search="${esc(n.members.join(' '))}" data-geo="${gc}" style="animation-delay:${Math.min(i, 12) * 25}ms"><span class="check"></span>
     ${flagHTML(gc, 'sm')}
     <div class="name">
@@ -955,14 +1018,19 @@ function nodeRow(n, i, max, testing) {
     <span class="ms ${msClass(n.delay)}">${n.unsupported || n.pending ? '' : msText(n.delay, testing)}</span></div>`;
 }
 async function drawNodes(testing) {
+  // 节点面板是不是还开着、还是开它那一次(取节点列表要等,这期间用户可能关了面板、开了模式 / 订阅面板):不是就什么都不画
+  const seq = sheetSeq;
+  const mine = () => sheetIs('nodes', seq);
   let nodes = [];
-  try { nodes = await App().GetNodes() || []; } catch (e) { $('#sheet-body').innerHTML = `<div class="empty">${esc(errText(e))}</div>`; return; }
+  try { nodes = await App().GetNodes() || []; } catch (e) { if (mine()) $('#sheet-body').innerHTML = `<div class="empty">${esc(errText(e))}</div>`; return; }
+  if (!mine()) return;
   if (!nodes.length) {
     const p = state && state.view.profile;
     if (p && !nodeFetchTried) { // 有订阅却没有节点 = 还没拉取过(比如刚导入设置),拉一次再画
       nodeFetchTried = true;
       $('#sheet-body').innerHTML = `<div class="empty"><span class="spinner"></span> ${t('node.fetching')}</div>`;
-      try { await refreshProfileBg(p.id); } catch (e) { $('#sheet-body').innerHTML = `<div class="empty">${esc(errText(e))}</div>`; return; }
+      try { await refreshProfileBg(p.id); } catch (e) { if (mine()) $('#sheet-body').innerHTML = `<div class="empty">${esc(errText(e))}</div>`; return; }
+      if (!mine()) return;
       return drawNodes(testing);
     }
     $('#sheet-body').innerHTML = `<div class="empty">${p ? t('node.notFetched') : t('prof.empty')}</div>`; return;
@@ -980,23 +1048,41 @@ async function drawNodes(testing) {
   if (sig === nodeSig && patchNodes(rows, max, testing)) return;
   nodeSig = sig;
   const st = v.state && v.state.status, online = st === 'connected' || st === 'degraded';
-  const hint = online ? '' : `<div class="small muted" style="padding:0 4px 8px">${t('node.offlineHint')}</div>`;
+  const note = selNoteText(v); // 选的节点 / 线路组订阅里没了:列表里也写明这一轮用的是什么
+  const hint = (online ? '' : `<div class="small muted" style="padding:0 4px 8px">${t('node.offlineHint')}</div>`)
+    + (note ? `<div class="small muted" style="padding:0 4px 8px">${esc(note)}</div>` : '');
+  // 筛选只认这一次画出来的控件:选过的地区标签这次不在了(翻了「线路自动」、订阅变了)、搜索框这次不画(行数不多),
+  // 留着它们就是一个看不见、也清不掉的过滤,列表只剩「自动选择」
+  const regions = regionList(rows);
+  if (nodeRegion && !regions.some(r => r[0] === nodeRegion)) nodeRegion = '';
+  if (rows.length <= 8) nodeFilter = '';
   // 「线路自动」开关:订阅里有线路组才出现,排在最上面。data-name 让重画之后焦点落回它(电视遥控器)
   const sw = hasGroups ? `<div class="srow"><div class="lbl">${t('node.lineAuto')}<div>${t('node.lineAutoHelp')}</div></div><label class="switch"><input type="checkbox" id="node-lineauto" data-name="__lineauto" data-tvskip ${lineOn ? 'checked' : ''}></label></div>` : '';
   const keep = focusKey($('#sheet-body'), 'data-name');
   $('#sheet-body').innerHTML = sw + hint
     + (rows.length > 8 ? `<div class="sheet-filter"><input type="text" id="node-filter" placeholder="${t('node.filter')}" value="${esc(nodeFilter)}"></div>` : '')
-    + regionChips(rows)
+    + regionChips(regions)
     + `<div class="list">${rows.map((n, i) => nodeRow(n, i, max, testing)).join('')}</div>`;
   $('#sheet-body').querySelectorAll('.item').forEach(it => it.addEventListener('click', async () => {
     if (it.dataset.unsupported) { toast(t('node.unsupportedWhy', { why: it.dataset.unsupported }), 'err'); return; }
+    // 上一下还没回来(头一回选线路组要重连,好几秒;电视上连按 OK)就吞掉:不然排着队再选一次,刚重连好的连接又被掐一次
+    if (nodePicking) return;
+    nodePicking = true;
+    const ms = it.querySelector('.ms');
+    if (ms) { ms.className = 'ms'; ms.innerHTML = '<span class="spinner"></span>'; } // 这一行在切换:给个反馈
+    const pickSeq = sheetSeq;
     try {
       const nv = await App().SelectNode(it.dataset.name);
-      closeSheet();
+      if (sheetIs('nodes', pickSeq)) closeSheet(); // 等的时候用户已经关掉、开了别的面板:别把那块关了
       const nst = nv && nv.state && nv.state.status;
-      if (nv && nv.selectedV6) toast(t('node.v6Hint'), 'err'); // 选的节点只能走 IPv6,而现在关着 IPv6
+      if (nv && nv.selectedV6) toast(v6HintText(nv) || t('node.v6Hint', { n: cleanName(it.dataset.name) }), 'err'); // 选的节点只能走 IPv6,而现在关着 IPv6
       else if (it.dataset.group && online && nst && nst !== 'connected' && nst !== 'degraded') toast(t('node.lineAutoReconnect'));
-    } catch (e) { toast(errText(e), 'err'); }
+    } catch (e) {
+      toast(errText(e), 'err');
+      if (sheetIs('nodes', pickSeq)) { nodeSig = ''; await drawNodes(false); } // 转圈换回数字
+    } finally {
+      nodePicking = false;
+    }
   }));
   const la = $('#node-lineauto');
   if (la) {
@@ -1049,10 +1135,11 @@ async function testNodes(force) {
   // 一边测一边刷:后端是测出一个记一个的,这里每 400 毫秒取一次就能让延迟自上而下一个个冒出来。
   // 原来是等 TestAll 整个返回再画,上百个节点要干等好几秒,那几秒里界面看着像卡住了。
   let live = true;
+  const seq = sheetSeq; // 测完回来时节点面板可能已经关了、换成了别的面板
   const poll = (async () => {
     while (live) {
       await new Promise(r => setTimeout(r, 400));
-      if (!live || !$('#sheet').classList.contains('show')) break;
+      if (!live || !sheetIs('nodes', seq)) break;
       await drawNodes(true);
     }
   })();
@@ -1060,8 +1147,8 @@ async function testNodes(force) {
   live = false;
   await poll;
   nodeTesting = false;
-  if (act) { act.disabled = false; act.textContent = t('sheet.retest'); }
-  if ($('#sheet').classList.contains('show')) await drawNodes(false);
+  if (act && sheetIs('nodes', seq)) { act.disabled = false; act.textContent = t('sheet.retest'); }
+  if (sheetIs('nodes', seq)) await drawNodes(false);
   try { lastPing = await App().TestLatency('proxy'); } catch (e) { lastPing = 0; }
   updateHome();
 }
@@ -2324,6 +2411,8 @@ document.addEventListener('keydown', e => {
     if ((dir === 'up' || dir === 'down') && el && scrollBox(el, dir)) { e.preventDefault(); return; }
     e.preventDefault(); spatialMove(dir);
   } else if (e.key === 'Enter' && el && el !== document.body) {
+    // 按住 OK 时遥控器会一直发自动重复的按键:那不是"又按了一次",不然一按就把节点 / 开关连点好几下
+    if (e.repeat && !editing) { e.preventDefault(); return; }
     const native = tag === 'BUTTON' || (tag === 'A' && el.href) || editing;
     if (!native) { e.preventDefault(); el.click(); }
   }
