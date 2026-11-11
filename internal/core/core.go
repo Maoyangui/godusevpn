@@ -41,6 +41,7 @@ type Core struct {
 	box       *sb.Box
 	ctx       context.Context
 	cancel    context.CancelFunc
+	history   *urltest.HistoryStorage // 测速组的测速记录(sing-box 各组共用的那一份),见 Untested
 	running   bool
 	logw      log.PlatformWriter
 	started   time.Time
@@ -273,13 +274,12 @@ func (c *Core) Start(raw []byte) error {
 		return errors.New("内核已在运行")
 	}
 	ctx, cancel := c.newContext()
-	if len(c.quietAuto) > 0 {
-		history := urltest.NewHistoryStorage()
-		for _, tag := range c.quietAuto {
-			history.StoreURLTestHistory(tag, &adapter.URLTestHistory{Time: time.Now()})
-		}
-		ctx = service.ContextWithPtr(ctx, history)
+	// 测速记录自己建一份放进上下文(不放 sing-box 也是这样建一份):QuietAuto 要往里预记,Untested 要读它
+	history := urltest.NewHistoryStorage()
+	for _, tag := range c.quietAuto {
+		history.StoreURLTestHistory(tag, &adapter.URLTestHistory{Time: time.Now()})
 	}
+	ctx = service.ContextWithPtr(ctx, history)
 	opt, err := parse(ctx, raw)
 	if err != nil {
 		cancel()
@@ -295,7 +295,7 @@ func (c *Core) Start(raw []byte) error {
 		cancel()
 		return fmt.Errorf("启动内核: %w", err)
 	}
-	c.box, c.ctx, c.cancel, c.running, c.started = box, ctx, cancel, true, time.Now()
+	c.box, c.ctx, c.cancel, c.history, c.running, c.started = box, ctx, cancel, history, true, time.Now()
 	return nil
 }
 
@@ -303,7 +303,7 @@ func (c *Core) Start(raw []byte) error {
 func (c *Core) Stop() error {
 	c.mu.Lock()
 	box, cancel := c.box, c.cancel
-	c.box, c.ctx, c.cancel, c.running = nil, nil, nil, false
+	c.box, c.ctx, c.cancel, c.history, c.running = nil, nil, nil, nil, false
 	c.mu.Unlock()
 	if box == nil {
 		return nil
@@ -436,6 +436,33 @@ func (c *Core) Members(tag string) ([]string, bool) {
 		return nil, false
 	}
 	return g.All(), true
+}
+
+// Untested 测速组此刻落在哪台(member),以及那台眼下有没有测速记录(untested = 没有)。
+// sing-box 的测速组经某台连接失败(拨号出错:服务器连不上、握手超时)、或者一轮测速里它没测通,就把它的记录删掉,
+// 但不会因此换到别的成员 —— 要等下一轮测速才换(配置里关了它自己的定时测速)。所以"组落在一台没有记录的成员上"
+// 就是这台刚刚连不上的证据;只读内存,不发任何网络请求。不是测速组、内核没跑:ok 为假。
+// 启动时预记的"刚测过"(QuietAuto)也算有记录。
+func (c *Core) Untested(tag string) (member string, untested, ok bool) {
+	c.mu.Lock()
+	box, history, running := c.box, c.history, c.running
+	c.mu.Unlock()
+	if !running || box == nil || history == nil {
+		return "", false, false
+	}
+	ob, found := box.Outbound().Outbound(tag)
+	if !found {
+		return "", false, false
+	}
+	g, isURLTest := ob.(adapter.URLTestGroup)
+	if !isURLTest {
+		return "", false, false
+	}
+	member = g.Now()
+	if member == "" {
+		return "", false, false
+	}
+	return member, history.LoadURLTestHistory(member) == nil, true
 }
 
 // Select 在选择组里选一个节点。

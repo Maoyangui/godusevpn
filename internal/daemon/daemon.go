@@ -64,6 +64,8 @@ type Daemon struct {
 	lastNICWarn string
 	probeMu     sync.Mutex
 	probeAt     time.Time // auto 组上次测完一轮全部节点的时间,autoProbeLoop 按它算下一次
+	failoverAt  time.Time // 上一次线路组组内换线(lineFailover)开测的时间,probeMu 管
+	lostKicked  string    // 线路组在用的那台连接失败、巡检已为它敲过健康检查的那一次(组名和成员名),probeMu 管
 	core        *core.Core
 	settings    settings.Settings
 	// settingsGeneration changes on every persisted settings update. A prepare
@@ -338,6 +340,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 	d.reconcileGuard()
 	d.reconcileNICIPv6()
 	go d.autoProbeLoop(ctx)
+	go d.lineWatchLoop(ctx)
 	if netmode.GuardInstallable() {
 		go d.guardWatchLoop(ctx)
 	}
@@ -1343,7 +1346,7 @@ func (d *Daemon) health(ctx context.Context) error {
 		// 隐私没过也要探一次节点:节点挂了照样要走正常的阶梯(降级 → 换线 → 重建),
 		// 不能被隐私 Degraded 挡住,否则闸修不好的那段时间节点死了也没人管。
 		if !direct {
-			if _, err := d.core.URLTest(ctx, "proxy", builder.TestURL); err != nil {
+			if _, err := d.probeProxy(ctx); err != nil {
 				d.setPing(0)
 				return d.nodeDown(err)
 			}
@@ -1353,7 +1356,7 @@ func (d *Daemon) health(ctx context.Context) error {
 	if direct {
 		return nil
 	}
-	ms, err := d.core.URLTest(ctx, "proxy", builder.TestURL)
+	ms, err := d.probeProxy(ctx)
 	if err != nil {
 		d.setPing(0)
 		return d.nodeDown(err)
