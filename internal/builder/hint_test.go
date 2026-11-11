@@ -155,3 +155,24 @@ func TestNoHintNodesNoChange(t *testing.T) {
 		t.Fatal("没有订阅时没有提示节点")
 	}
 }
+
+// 带 detour 的出站经 detour 那一头出去:detour 是 shadowtls 时它的拨号器不看目标地址,自己的 server 只是个占位;
+// detour 是别的代理时,server 是交给那一头去连的(写 127.0.0.1 连的是那台服务器自己身上的服务)。两种都和本机无关,
+// 写成 127.0.0.1 照样能用 —— 不是提示节点:进自动选择和线路组、照常测速、不标"不能上网"。
+// 所以照 detour 一路找下去,按真正从本机拨出去的那一个判:它写着本机地址的(连同经它出去的)才是提示节点。
+// detour 指向订阅外的出站(内置的 direct 之类)时,自己的 server 就是从本机拨的,照旧按它判;绕成圈的不当提示节点。
+func TestHintNodesSkipDetour(t *testing.T) {
+	p := profileOf(t,
+		`{"type":"shadowsocks","tag":"日本-stls","server":"127.0.0.1","server_port":8388,"method":"2022-blake3-aes-128-gcm","password":"cGFzc3dvcmRwYXNzd29yZA==","detour":"stls-out"}`,
+		`{"type":"shadowtls","tag":"stls-out","server":"1.2.3.4","server_port":443,"version":3,"password":"p","tls":{"enabled":true,"server_name":"www.example.com"}}`,
+		`{"type":"shadowsocks","tag":"续费提示","server":"127.0.0.1","server_port":1,"method":"aes-128-gcm","password":"dummy"}`,
+		`{"type":"trojan","tag":"本机占位链","server":"localhost","server_port":443,"password":"p","detour":"本机出口"}`,
+		`{"type":"socks","tag":"本机出口","server":"127.0.0.1","server_port":1}`,
+		`{"type":"trojan","tag":"经 direct","server":"127.0.0.1","server_port":443,"password":"p","detour":"direct"}`,
+		`{"type":"trojan","tag":"圈A","server":"127.0.0.1","server_port":443,"password":"p","detour":"圈B"}`,
+		`{"type":"trojan","tag":"圈B","server":"127.0.0.1","server_port":443,"password":"p","detour":"圈A"}`,
+	)
+	if got, want := HintNodes(p), []string{"续费提示", "本机占位链", "本机出口", "经 direct"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("带 detour 的出站不按自己的 server 判提示节点: 得 %v,应 %v", got, want)
+	}
+}

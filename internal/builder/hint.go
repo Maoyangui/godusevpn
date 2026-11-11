@@ -15,23 +15,51 @@ import (
 // 它们连不到任何远端服务器:放进测速组是白测;放进自动选择更糟 —— 测速结果出来之前 urltest 先用排第一的成员,
 // 而提示节点常排第一,全局模式下这段时间整机没网。所以不进自动选择与线路组(见 buildConfig);
 // 节点列表里照常显示,手动选它和以前一样能选上。
+//
+// 带 detour 的出站经 detour 那一头出去,自己的 server 不是从本机拨的:detour 是 shadowtls 时它的拨号器不看目标地址,
+// server 只是个占位;是别的代理时 server 交给那一头去连(127.0.0.1 是那台服务器自己身上的服务)。写成本机地址也照样能用,
+// 不能按它判。所以照 detour 一路找下去,按真正从本机拨出去的那一个判:它的地址只指向本机,这条(连同经它出去的)才是
+// 提示节点。detour 指向订阅外的出站(内置的 direct 之类)时自己的 server 就是从本机拨的,照旧按它判;绕成圈的不算。
 func HintNodes(p *profile.Profile) []string {
 	if p == nil {
 		return nil
 	}
-	var out []string
+	type hop struct{ server, detour string }
+	hops := make(map[string]hop, len(p.Tags))
 	for i, raw := range p.Outbounds {
 		if i >= len(p.Tags) {
 			break
 		}
 		var m struct {
 			Server string `json:"server"`
+			Detour string `json:"detour"`
 		}
 		if json.Unmarshal(raw, &m) != nil {
 			continue
 		}
-		if localServer(m.Server) {
-			out = append(out, p.Tags[i])
+		hops[p.Tags[i]] = hop{m.Server, strings.TrimSpace(m.Detour)}
+	}
+	var out []string
+	for _, tag := range p.Tags {
+		h, ok := hops[tag]
+		if !ok {
+			continue
+		}
+		seen := map[string]bool{tag: true}
+		for h.detour != "" {
+			next, ok := hops[h.detour]
+			if !ok {
+				break // 订阅外的出站:自己的 server 从本机拨
+			}
+			if seen[h.detour] {
+				h = hop{} // 绕成圈:配置本身起不来,不当提示节点
+				break
+			}
+			seen[h.detour] = true
+			h = next
+		}
+		if localServer(h.server) {
+			out = append(out, tag)
 		}
 	}
 	return out
