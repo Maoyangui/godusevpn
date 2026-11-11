@@ -88,6 +88,9 @@ func Main(args []string) int {
 		var v ipc.StateView
 		if err = call(ctx, ipc.MSelectNode, map[string]string{"tag": args[0]}, &v); err == nil {
 			fmt.Println("当前节点:", v.Node)
+			for _, l := range selectionNotes(v) {
+				fmt.Println("提示:", l)
+			}
 		}
 	case "test":
 		if len(args) == 1 && args[0] == "all" {
@@ -326,8 +329,8 @@ func status(ctx context.Context) error {
 		node += "(实际在用 " + v.AutoNow + ")"
 	}
 	fmt.Println("节点:  ", node, fmt.Sprintf("(共 %d 个)", len(v.Nodes)))
-	if v.SelectedV6 {
-		fmt.Println("提示:  ", v6Hint(v))
+	for _, l := range selectionNotes(v) {
+		fmt.Println("提示:  ", l)
 	}
 	s := v.Settings
 	fmt.Printf("设置:   TUN=%v(%s, strict=%v) 混合端口=%d DoH=%s/%s fake-ip=%v IPv6=%v\n", s.TUN, s.TUNStack, s.StrictRoute, s.MixedPort, s.RemoteDNS, s.LocalDNS, s.FakeIP, s.IPv6)
@@ -364,6 +367,20 @@ func nodeLine(v ipc.StateView, n string) string {
 		}
 	}
 	return mark + n + ms
+}
+
+// selectionNotes 选中的节点(或线路组)这一轮连不上时的说明,一条一行:status 和 select 都打(和网页界面一样)。
+// 关着 IPv6 时选了 IPv6 节点;选了提示节点(订阅放来显示续费 / 用量信息的,地址指向本机)—— 手动选它照样选得上、
+// 状态照样显示已连接,却上不了网,不说一句的话要等健康检查失败才看到一句笼统的"节点不可用"。
+func selectionNotes(v ipc.StateView) []string {
+	var out []string
+	if v.SelectedHint {
+		out = append(out, "选中的是提示节点(订阅用来显示续费 / 用量信息的,地址指向本机),不能上网;换一个节点(godusevpn nodes 看列表)")
+	}
+	if v.SelectedV6 {
+		out = append(out, v6Hint(v))
+	}
+	return out
 }
 
 // printGroups nodes 命令的后半:订阅里的线路组和各自的成员(当前选中的带 *)。没有就什么都不打。
