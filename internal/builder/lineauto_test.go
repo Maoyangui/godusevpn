@@ -177,3 +177,34 @@ func TestEffectiveSelection(t *testing.T) {
 		t.Fatalf("组没了时配置按同线路那一台连: %v", c.Outbounds[0]["default"])
 	}
 }
+
+// 选的线路组成员成了全部节点(订阅里只剩这一条线路:面板停了别的线路、或把它们从这个用户名下拿掉),订阅解析时不把它当线路组
+// (它就是自动选择,见 profile.Profile.Whole)。这不算"线路减到一台":用自动选择 —— 就是这条线路的这几台,组里照样挑最快的,
+// 不把人固定在记着的那一台上。
+func TestEffectiveWholeLineGroup(t *testing.T) {
+	full := groupProfile()
+	p := full.Subset([]string{"香港1-A", "香港1-B x2"})
+	p.Groups, p.Whole = nil, []string{"香港1"}
+	s := settings.Default()
+	s.Selected, s.SelectedNode = "香港1", "香港1-A"
+	if got := Effective(p, s); got != "auto" {
+		t.Fatalf("订阅里只剩这条线路:用自动选择(就是这条线路),不固定到 %q: 得 %q", s.SelectedNode, got)
+	}
+	c, _ := buildProfile(t, p, s)
+	if c.Outbounds[0]["default"] != "auto" || !reflect.DeepEqual(anyStrings(c.Outbounds[1]["outbounds"]), []string{"香港1-A", "香港1-B x2"}) {
+		t.Fatalf("配置落在自动选择上、成员是这条线路的两台: %v / %v", c.Outbounds[0]["default"], c.Outbounds[1]["outbounds"])
+	}
+	// 节点里有同名的:选的是那个节点
+	q := groupProfile()
+	q.Whole = []string{"美国"}
+	s.Selected, s.SelectedNode = "美国", ""
+	if got := Effective(q, s); got != "美国" {
+		t.Fatalf("和节点同名时选的是节点: %q", got)
+	}
+	// 别的名字不受影响:记着的那台还在就用它
+	p.Whole = []string{"别的线路"}
+	s.Selected, s.SelectedNode = "香港1", "香港1-A"
+	if got := Effective(p, s); got != "香港1-A" {
+		t.Fatalf("不是这条线路的 Whole 不影响: %q", got)
+	}
+}

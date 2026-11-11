@@ -191,6 +191,111 @@ func TestVanishedLineGroupKeepsLine(t *testing.T) {
 	}
 }
 
+// 订阅里只剩选着的这条线路(面板停了别的线路、或把它们从这个用户名下拿掉):m-ui 照样给这条线路出组,可组成员就是全部节点,
+// 解析时不当线路组(它和自动选择是一回事,见 profile.Profile.Whole)。这不是"线路减到一台":这一轮用自动选择 —— 就是这条线路的
+// 两台,照样挑最快的、照样定时测 —— 不把人固定到记着的那一台上,也不说"只剩一台"。之后这条线路真减到一台、又加回别的线路,
+// 还认得它原来是哪几台(固定到同线路剩下的那台,不跨线路);组回来了自动回到线路自动。
+func TestLineGroupCoveringAllNodesStaysAuto(t *testing.T) {
+	var body atomic.Value
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(body.Load().(string))) }))
+	defer srv.Close()
+	node := func(tag string, port int) string {
+		return `{"type":"socks","tag":"` + tag + `","server":"127.0.0.1","server_port":` + itoa(port) + `}`
+	}
+	group := func(tag string, members ...string) string {
+		return `{"type":"urltest","tag":"` + tag + `","outbounds":["` + strings.Join(members, `","`) + `"]}`
+	}
+	sub := func(outs ...string) string { return `{"outbounds":[` + strings.Join(outs, ",") + `]}` }
+	// 和 m-ui 出的一样:auto 组是全部节点,多服务器的线路另出一组,只有一台的线路不出组
+	both := sub(node("hk-A", 1), node("hk-B", 2), node("jp", 3), group("auto", "hk-A", "hk-B", "jp"), group("hk", "hk-A", "hk-B"))
+	onlyHK := sub(node("hk-A", 1), node("hk-B", 2), group("auto", "hk-A", "hk-B"), group("hk", "hk-A", "hk-B"))
+	hkAPlusJP := sub(node("hk-A", 1), node("jp-A", 3), node("jp-B", 4), group("auto", "hk-A", "jp-A", "jp-B"), group("jp", "jp-A", "jp-B"))
+
+	d := profileOpsDaemon(t)
+	d.settings.Profiles = []settings.Profile{{ID: "p1", Name: "一", URL: srv.URL + "/sub"}}
+	d.settings.ActiveProfile = "p1"
+	refresh := func(b string) {
+		t.Helper()
+		body.Store(b)
+		if _, err := d.refreshProfile(context.Background(), "p1"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	refresh(both)
+	if err := call(t, d, ipc.MSelectNode, map[string]string{"tag": "hk-B"}); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := json.Marshal(map[string]bool{"on": true})
+	if _, err := d.Dispatch(ipc.MSetLineAuto, raw); err != nil {
+		t.Fatal(err)
+	}
+	if s := d.getSettings(); s.Selected != "hk" || !s.LineAuto || s.SelectedNode != "hk-B" {
+		t.Fatalf("前提: 选的是 hk 线路(记着 hk-B): %q %q", s.Selected, s.SelectedNode)
+	}
+
+	// 日本那台停了:订阅里只剩 hk 的两台,hk 组成员就是全部节点
+	refresh(onlyHK)
+	s := d.getSettings()
+	_, p := d.activeProfile()
+	if len(p.Groups) != 0 || len(p.Whole) == 0 {
+		t.Fatalf("前提: hk 组成员是全部节点,不当线路组、记进 Whole: %+v / %v", p.Groups, p.Whole)
+	}
+	if s.Selected != "hk" || !s.LineAuto || builder.Effective(p, s) != "auto" {
+		t.Fatalf("只剩这条线路:用自动选择(就是这条线路的两台),不固定到一台: 选 %q,实际 %q", s.Selected, builder.Effective(p, s))
+	}
+	if q := quietTags(p, builder.Effective(p, s), false); len(q) != 0 {
+		t.Fatalf("自动选择启动那一轮照常测这条线路的两台,不预记成测过: %v", q)
+	}
+	v := d.stateView()
+	if v.Node != "auto" || v.SelNote == nil || !v.SelNote.Whole || v.SelNote.Gone != "hk" || v.SelNote.Now != "" {
+		t.Fatalf("状态里写明是只剩这条线路、用的是自动选择(不是只剩一台): node=%q note=%+v", v.Node, v.SelNote)
+	}
+	if _, old := oldSettingsFile(t); old != "hk-A" && old != "hk-B" {
+		t.Fatalf("退回旧版时那一台仍是这条线路上的: %q", old)
+	}
+	// 刷新时什么都不用记:设置原样
+	if s2 := d.getSettings(); s2.SelectedNode != s.SelectedNode || s2.Selected != "hk" {
+		t.Fatalf("只剩这条线路时不该改记着的那台: %q → %q", s.SelectedNode, s2.SelectedNode)
+	}
+
+	// 再刷新一次还是这样:照旧自动选择
+	refresh(onlyHK)
+	s = d.getSettings()
+	_, p = d.activeProfile()
+	if builder.Effective(p, s) != "auto" {
+		t.Fatalf("还是只剩这条线路:照旧自动选择: %q", builder.Effective(p, s))
+	}
+
+	// 这条线路真减到一台、又加回了日本线路:还认得 hk 原来是哪两台,固定到剩下的 hk-A,不跨线路回落自动选择
+	refresh(hkAPlusJP)
+	s = d.getSettings()
+	_, p = d.activeProfile()
+	if builder.Effective(p, s) != "hk-A" {
+		t.Fatalf("线路减到一台:固定到同线路剩下的 hk-A,不跨线路: %q", builder.Effective(p, s))
+	}
+	if v := d.stateView(); v.SelNote == nil || v.SelNote.Whole || v.SelNote.Now != "hk-A" {
+		t.Fatalf("这回是只剩一台,写明用的是哪台: %+v", v.SelNote)
+	}
+
+	// 面板恢复了:线路组回来,回到线路自动,提示消失
+	refresh(both)
+	s = d.getSettings()
+	_, p = d.activeProfile()
+	if builder.Effective(p, s) != "hk" || d.stateView().SelNote != nil {
+		t.Fatalf("线路组回来了就回到线路自动: %q", builder.Effective(p, s))
+	}
+
+	// 只剩这条线路时用命令行关掉「线路自动」:固定到这一轮自动选择落在的、这条线路上的一台
+	refresh(onlyHK)
+	raw, _ = json.Marshal(map[string]bool{"on": false})
+	if _, err := d.Dispatch(ipc.MSetLineAuto, raw); err != nil {
+		t.Fatal(err)
+	}
+	if s := d.getSettings(); (s.Selected != "hk-A" && s.Selected != "hk-B") || s.LineAuto {
+		t.Fatalf("关掉线路自动:固定到这条线路上的一台: %q", s.Selected)
+	}
+}
+
 // 旧版本存的订阅缓存(只是没认出线路组)的补拉:只经隧道拉一次。拉不到不强测全部节点、不在隧道外直连面板,
 // 也不每 10 分钟重来 —— 每次连接只补一次(为了认出线路组这种可有可无的东西,不值得付出全量测速和隧道外直连)。
 func TestOutdatedRefetchTunnelOnlyOnce(t *testing.T) {

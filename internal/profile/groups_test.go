@@ -52,6 +52,9 @@ func TestParseLineGroups(t *testing.T) {
 	if !reflect.DeepEqual(p.Groups, want) {
 		t.Fatalf("线路组不对:\n得 %+v\n应 %+v", p.Groups, want)
 	}
+	if !reflect.DeepEqual(p.Whole, []string{"自动选择"}) {
+		t.Fatalf("成员是全部节点的组不当线路组,只记下名字(auto 是保留名,不记): %v", p.Whole)
+	}
 	b, _ := json.Marshal(p)
 	if s := string(b); strings.Contains(s, "evil.example") || strings.Contains(s, "interval") || strings.Contains(s, "tolerance") {
 		t.Fatalf("订阅给的测速地址、间隔不能存下来: %s", s)
@@ -150,8 +153,8 @@ func TestCacheGroupsCompat(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(back.Groups, fresh.Groups) || back.Parser != parserVersion {
-		t.Fatalf("线路组来回读写不一致: %+v / %d", back.Groups, back.Parser)
+	if !reflect.DeepEqual(back.Groups, fresh.Groups) || !reflect.DeepEqual(back.Whole, fresh.Whole) || back.Parser != parserVersion {
+		t.Fatalf("线路组来回读写不一致: %+v %v / %d", back.Groups, back.Whole, back.Parser)
 	}
 	if back.Stale(24*time.Hour) || back.Outdated() {
 		t.Fatal("新版刚拉的缓存不该算过期或陈旧")
@@ -161,4 +164,59 @@ func TestCacheGroupsCompat(t *testing.T) {
 func itoa64(n int64) string {
 	b, _ := json.Marshal(n)
 	return string(b)
+}
+
+// 订阅里只剩一条线路(m-ui 照样给它出组,可成员就是全部节点):不当线路组(它和自动选择是一回事,界面不单列),
+// 只把名字记进 Whole —— 选着这条线路的人,刷新后还认得出"线路还在,只是只剩它了"(见 builder.Effective)。
+// 起名在正常的线路组之后,和节点、保留名撞了照样加序号;保留名、不到两个成员的不记;和节点同名的按节点算。
+func TestParseWholeGroups(t *testing.T) {
+	body := `{"outbounds":[
+	  {"type":"urltest","tag":"auto","outbounds":["hk-A","hk-B"]},
+	  {"type":"urltest","tag":"香港1","outbounds":["hk-A","hk-B"]},
+	  {"type":"urltest","tag":"hk-A","outbounds":["hk-B","hk-A","direct"]},
+	  {"type":"urltest","tag":"单成员","outbounds":["hk-A"]},
+	  {"type":"hysteria2","tag":"hk-A","server":"1.1.1.1","server_port":443,"password":"p"},
+	  {"type":"hysteria2","tag":"hk-B","server":"2.2.2.2","server_port":443,"password":"p"}
+	]}`
+	p, err := Parse([]byte(body), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(p.Groups) != 0 || !reflect.DeepEqual(p.Whole, []string{"香港1", "hk-A 2"}) {
+		t.Fatalf("成员是全部节点的组只记名字: groups=%+v whole=%v", p.Groups, p.Whole)
+	}
+	if _, ok := p.Group("香港1"); ok {
+		t.Fatal("它不是线路组(界面不单列、配置里不放)")
+	}
+	g, ok := p.WholeGroup("香港1")
+	if !ok || !reflect.DeepEqual(g.Members, p.Tags) {
+		t.Fatalf("成员就是全部节点: %+v %v", g, ok)
+	}
+	for _, tag := range []string{"hk-A", "auto", "单成员", "", "不存在"} {
+		if _, ok := p.WholeGroup(tag); ok {
+			t.Fatalf("%q 不是成员为全部节点的组(节点、保留名、不到两个成员的、没有的)", tag)
+		}
+	}
+	// 剔掉建不起来的节点时照抄(成员就是子集的全部节点)
+	if q := p.Subset([]string{"hk-A"}); !reflect.DeepEqual(q.Whole, p.Whole) {
+		t.Fatalf("子集里照抄: %v", q.Whole)
+	}
+	var nilP *Profile
+	if _, ok := nilP.WholeGroup("香港1"); ok {
+		t.Fatal("nil 订阅里什么都没有")
+	}
+	// 正常的线路组起名不受它影响:同名的正常组照旧叫原名
+	p, err = Parse([]byte(`{"outbounds":[
+	  {"type":"urltest","tag":"组","outbounds":["a","b","c"]},
+	  {"type":"urltest","tag":"组","outbounds":["a","b"]},
+	  {"type":"socks","tag":"a","server":"1.1.1.1","server_port":1},
+	  {"type":"socks","tag":"b","server":"1.1.1.2","server_port":1},
+	  {"type":"socks","tag":"c","server":"1.1.1.3","server_port":1}
+	]}`), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(p.Groups) != 1 || p.Groups[0].Tag != "组" || !reflect.DeepEqual(p.Whole, []string{"组 2"}) {
+		t.Fatalf("正常的线路组先起名: groups=%+v whole=%v", p.Groups, p.Whole)
+	}
 }

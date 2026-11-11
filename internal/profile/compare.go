@@ -1,6 +1,9 @@
 package profile
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"slices"
+)
 
 // canonical 把一条出站的 JSON 规整成键序固定的紧凑形式。同样的内容,面板发来的、缓存里存过一遍的、
 // 改过名字重新编码的,字节都可能不一样,比内容得先规整;规整不了(不是合法 JSON)就原样比。
@@ -81,6 +84,7 @@ func (p *Profile) Subset(tags []string) *Profile {
 	}
 	q := *p
 	q.Outbounds, q.Tags, q.Groups = nil, nil, nil
+	q.Whole = slices.Clone(p.Whole) // 名字而已,照抄(它的成员就是子集的全部节点)
 	kept := make(map[string]bool, len(tags))
 	for i, t := range p.Tags {
 		if want[t] && i < len(p.Outbounds) {

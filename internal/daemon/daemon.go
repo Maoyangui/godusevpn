@@ -540,7 +540,8 @@ func (d *Daemon) rollbackSelection(prev, wrote settings.Settings) {
 // 线路组从订阅里没了时这一轮也用它)。已经记着的还在组里就留着 —— 调用方可以先填上更合适的(用户原来在用的那台、
 // 组里此刻在用的那台);不然取第一台这一轮能用的。经控制口来的整份设置里没有它:选择没变就沿用原来记的。
 // 选的是节点、自动选择就清空;选的东西在订阅里已经没有了(线路组没了)就保留 —— 这时候正要靠它(见 builder.Effective)。
-// 换了订阅时不沿用别的订阅里记的那台。
+// 选的线路组成员成了全部节点(订阅里只剩这一条线路,见 profile.Profile.Whole)照线路组算:这一轮用的是自动选择,
+// 记着的这台只给退回旧版本时用,也得是这条线路上的。换了订阅时不沿用别的订阅里记的那台。
 func fillSelectedNode(s *settings.Settings, cur settings.Settings, p *profile.Profile, blocked []string) {
 	s.SelectedGroup = "" // 只在磁盘上用(见 settings.Save)
 	if s.SelectedNode == "" && s.Selected == cur.Selected && s.ActiveProfile == cur.ActiveProfile {
@@ -553,7 +554,11 @@ func fillSelectedNode(s *settings.Settings, cur settings.Settings, p *profile.Pr
 	if p == nil {
 		return
 	}
-	if g, ok := p.Group(s.Selected); ok {
+	g, ok := p.Group(s.Selected)
+	if !ok {
+		g, ok = p.WholeGroup(s.Selected)
+	}
+	if ok {
 		if slices.Contains(g.Members, s.SelectedNode) {
 			return
 		}

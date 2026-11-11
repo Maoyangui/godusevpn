@@ -109,9 +109,17 @@ func SelectedFor(p *profile.Profile, selected string) string {
 
 // Effective 这一轮 proxy 组实际落在哪:同 SelectedFor,只是选的线路组在订阅里没了(线路改成只部署一台:服务器下线、
 // 入口停用、只分到一台)时,用记着的同线路那一台(settings.SelectedNode),线路、出口不变;那台也不在了才回落自动选择。
+// 选的线路组成员成了全部节点(订阅里只剩这一条线路,见 profile.Profile.Whole)不算没了:自动选择就是这条线路,用它 ——
+// 组里照样自动挑最快的、照样定时测,不把人固定在一台上。
 func Effective(p *profile.Profile, s settings.Settings) string {
 	sel := SelectedFor(p, s.Selected)
-	if sel == "auto" && s.Selected != "" && s.SelectedNode != "" && p != nil && slices.Contains(p.Tags, s.SelectedNode) {
+	if sel != "auto" || s.Selected == "" || p == nil {
+		return sel
+	}
+	if _, whole := p.WholeGroup(s.Selected); whole {
+		return "auto"
+	}
+	if s.SelectedNode != "" && slices.Contains(p.Tags, s.SelectedNode) {
 		return s.SelectedNode
 	}
 	return sel

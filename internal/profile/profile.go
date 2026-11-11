@@ -44,8 +44,13 @@ type Profile struct {
 	Manual    bool              `json:"manual,omitempty"` // 手动添加的节点,不用刷新
 	// Groups 订阅里的线路组(见 Group),按订阅里的顺序。旧版本存的缓存没有这一项,刷新一次就有了。
 	Groups []Group `json:"groups,omitempty"`
+	// Whole 成员正好是全部节点、所以没收进 Groups 的线路组的名字(见 parseGroups):它和自动选择是一回事,界面上不单列。
+	// 只用来认出"选着的线路组还在,只是订阅里只剩这一条线路了"(面板停了别的线路、把别的线路从这个用户名下拿掉):
+	// 这时这一轮就用自动选择(它就是这条线路,见 builder.Effective),而不是当成线路减到一台、把人固定在一台服务器上;
+	// 之后这条线路再减到一台、又加回别的线路时,也还知道它原来是哪几台(就是这份订阅的全部节点)。
+	Whole []string `json:"whole,omitempty"`
 	// Parser 这份缓存是哪一版解析器读出来的。比 parserVersion 旧的(包括没有这一项的)算陈旧(Outdated):
-	// 升级后连上就经隧道补拉一次,新版本多认出来的东西(线路组)不用等满刷新间隔。
+	// 升级后连上就经隧道补拉一次,新版本多认出来的东西(线路组、Whole)不用等满刷新间隔。
 	Parser int `json:"parser,omitempty"`
 }
 
@@ -57,8 +62,8 @@ type Group struct {
 	Members []string `json:"members"`
 }
 
-// parserVersion 见 Profile.Parser。1 = 认线路组。
-const parserVersion = 1
+// parserVersion 见 Profile.Parser。1 = 认线路组;2 = 也记下成员是全部节点的线路组(Profile.Whole)。
+const parserVersion = 2
 
 // 这些 tag 是客户端自己用的,节点不能撞;这些类型不是节点,直接丢(urltest 另外收成线路组,见 Parse)
 var reservedTags = map[string]bool{"proxy": true, "auto": true, "direct": true, "block": true, "dns-out": true}
@@ -156,7 +161,7 @@ func Parse(body []byte, hdr http.Header) (*Profile, error) {
 	if len(p.Outbounds) == 0 {
 		return nil, ErrNoNodes
 	}
-	p.Groups = parseGroups(urltests, renamed, len(p.Tags), used)
+	p.Groups, p.Whole = parseGroups(urltests, renamed, len(p.Tags), used)
 	if hdr != nil {
 		p.Title = decodeTitle(hdr.Get("Profile-Title"))
 		p.Usage = parseUserinfo(hdr.Get("Subscription-Userinfo"))
@@ -169,12 +174,21 @@ func Parse(body []byte, hdr http.Header) (*Profile, error) {
 // 第三方出站里要是有个同名、类型却不对的字段,不能连累节点被丢掉。
 //
 //   - 成员按 renamed 换成清洗后的节点名;对不上的(direct、别的组、不存在的)丢掉,组内去重;
-//   - 剩不到 2 个成员的不要;成员正好是全部节点的不要(那就是全局自动:m-ui 的 auto、别家的"自动选择");
-//   - tag 是客户端保留名的不要;成员集合和前面某个组一模一样的不要;
+//   - 剩不到 2 个成员的不要;tag 是客户端保留名的不要;成员集合和前面某个组一模一样的不要;
+//   - 成员正好是全部节点的不收进线路组(那就是全局自动:别家的"自动选择",或者 m-ui 的订阅里只剩这一条线路),
+//     只把名字记进 whole(见 Profile.Whole)。它们等正常的线路组都起完名字再起,不影响那些组叫什么;
 //   - 组名去掉首尾空白,和节点、保留名、前面的组撞了加序号,保证全局唯一(used 会被改)。
-func parseGroups(urltests []json.RawMessage, renamed map[string]string, nodes int, used map[string]bool) []Group {
-	var out []Group
+func parseGroups(urltests []json.RawMessage, renamed map[string]string, nodes int, used map[string]bool) (out []Group, whole []string) {
 	seen := map[string]bool{} // 成员集合(排序后拼起来)
+	var wholeTags []string
+	name := func(base string) string {
+		tag := base
+		for i := 2; used[tag]; i++ {
+			tag = fmt.Sprintf("%s %d", base, i)
+		}
+		used[tag] = true
+		return tag
+	}
 	for _, raw := range urltests {
 		var g struct {
 			Tag       string   `json:"tag"`
@@ -195,7 +209,11 @@ func parseGroups(urltests []json.RawMessage, renamed map[string]string, nodes in
 				members = append(members, t)
 			}
 		}
-		if len(members) < 2 || len(members) == nodes {
+		if len(members) < 2 {
+			continue
+		}
+		if len(members) == nodes {
+			wholeTags = append(wholeTags, tag)
 			continue
 		}
 		key := slices.Clone(members)
@@ -205,14 +223,12 @@ func parseGroups(urltests []json.RawMessage, renamed map[string]string, nodes in
 		} else {
 			seen[k] = true
 		}
-		base := tag
-		for i := 2; used[tag]; i++ {
-			tag = fmt.Sprintf("%s %d", base, i)
-		}
-		used[tag] = true
-		out = append(out, Group{Tag: tag, Members: members})
+		out = append(out, Group{Tag: name(tag), Members: members})
 	}
-	return out
+	for _, tag := range wholeTags {
+		whole = append(whole, name(tag))
+	}
+	return out, whole
 }
 
 // Group 按 tag 找线路组。
@@ -226,6 +242,15 @@ func (p *Profile) Group(tag string) (Group, bool) {
 		}
 	}
 	return Group{}, false
+}
+
+// WholeGroup 按 tag 找成员是全部节点的线路组(见 Profile.Whole):成员就是这份订阅的全部节点。Group 找不到它。
+// 节点里有同名的不算(选的是那个节点)。
+func (p *Profile) WholeGroup(tag string) (Group, bool) {
+	if p == nil || tag == "" || !slices.Contains(p.Whole, tag) || slices.Contains(p.Tags, tag) {
+		return Group{}, false
+	}
+	return Group{Tag: tag, Members: slices.Clone(p.Tags)}, true
 }
 
 // GroupOf 第一个包含这个节点的线路组的 tag;不在任何组里返回空串。
@@ -440,7 +465,7 @@ func (p *Profile) Stale(every time.Duration) bool {
 	return p == nil || time.Since(time.Unix(p.FetchedAt, 0)) > every
 }
 
-// Outdated 旧版本的解析器读出来的缓存(见 Profile.Parser):节点照样能用,只是少了新版本才认得出来的东西(线路组),
+// Outdated 旧版本的解析器读出来的缓存(见 Profile.Parser):节点照样能用,只是少了新版本才认得出来的东西(线路组、成员是全部节点的线路组),
 // 值得补拉一次。不算过期 —— 不能为它在连上之前先直连拉一次订阅、挡着第一次连接;连上之后经隧道补拉(见 daemon.maybeRefresh)。
 // 手动节点没有地方可拉,永远不算。
 func (p *Profile) Outdated() bool {

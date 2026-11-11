@@ -66,6 +66,7 @@ func lineAutoAfterSelect(p *profile.Profile, sel string, cur bool) bool {
 //   - 关闭:选的是线路组 → 固定到组里此刻在用的那台(now 给,内核在跑时才有);内核没跑、或那台已经不在组里,
 //     取第一台这一轮连得上的(blocked 是连不上的 IPv6 节点,全是的话照样取第一台)。
 //     选的线路组在订阅里已经没了(线路只剩一台):固定到这一轮正在用的同线路那一台(fallback,见 builder.Effective)。
+//     选的线路组成员成了全部节点(订阅里只剩这一条线路,见 profile.Profile.Whole):这一轮落在自动选择上,固定到它此刻在用的那台。
 func lineAutoSelection(p *profile.Profile, sel string, on bool, now func(group string) string, blocked []string, fallback string) string {
 	if p == nil || sel == "" {
 		return sel
@@ -77,6 +78,12 @@ func lineAutoSelection(p *profile.Profile, sel string, on bool, now func(group s
 		return sel
 	}
 	g, ok := p.Group(sel)
+	nowOf := sel
+	if !ok {
+		if w, whole := p.WholeGroup(sel); whole {
+			g, ok, nowOf = w, true, "auto" // 订阅里只剩这条线路:这一轮落在自动选择上,"此刻在用的那台"看它
+		}
+	}
 	if !ok && fallback != "" && !slices.Contains(p.Tags, sel) && slices.Contains(p.Tags, fallback) {
 		return fallback
 	}
@@ -84,7 +91,7 @@ func lineAutoSelection(p *profile.Profile, sel string, on bool, now func(group s
 		return sel
 	}
 	if now != nil {
-		if n := now(sel); n != "" && slices.Contains(g.Members, n) {
+		if n := now(nowOf); n != "" && slices.Contains(g.Members, n) {
 			return n
 		}
 	}
@@ -198,9 +205,14 @@ func (d *Daemon) selectedV6(s settings.Settings) bool {
 }
 
 // selNote 设置里选的节点 / 线路组在当前订阅里已经没有了:这一轮实际用的是什么(见 builder.Effective)。还在就返回 nil。
+// 选的线路组成员成了全部节点(订阅里只剩这一条线路,见 profile.Profile.Whole)也写一句:这一轮用的是自动选择,
+// 不然首页从线路名变成「自动选择」,看着像选择丢了。
 func selNote(p *profile.Profile, s settings.Settings) *ipc.SelNote {
 	if p == nil || s.Selected == "" || builder.SelectedFor(p, s.Selected) != "auto" {
 		return nil
+	}
+	if _, whole := p.WholeGroup(s.Selected); whole {
+		return &ipc.SelNote{Gone: s.Selected, Group: true, Whole: true}
 	}
 	n := &ipc.SelNote{Gone: s.Selected, Group: s.SelectedNode != ""}
 	if eff := builder.Effective(p, s); eff != "auto" {
@@ -213,14 +225,28 @@ func selNote(p *profile.Profile, s settings.Settings) *ipc.SelNote {
 // 就给它记一台同线路、还在新订阅里的服务器 —— 优先此刻正在用的那台 —— 这一轮连接就用它(见 builder.Effective),
 // 线路、出口不变,不回落到全局自动选择(那会跨线路换出口、换倍率)。设置里选的仍是这条线路:面板恢复多台、组回来了就自动回到线路自动。
 // 同线路一台都不剩了才回落自动选择;两种情况界面都写明(见 selNote)。old 是刷新前的那份(知道这条线路原来有哪几台)。
+//
+// 组成员成了全部节点(订阅里只剩这一条线路:别的线路停了、从这个用户名下拿掉了)的不算没了:解析订阅时不把它当线路组
+// (它和自动选择是一回事,见 profile.Profile.Whole),这一轮用自动选择,也就是这条线路的这几台,什么都不用记。
 func (d *Daemon) reconcileLineGroup(id string, old, fresh *profile.Profile) {
 	s := d.getSettings()
 	if id != s.ActiveProfile || old == nil || fresh == nil {
 		return
 	}
 	og, ok := old.Group(s.Selected)
+	wasWhole := false
+	if !ok {
+		og, ok = old.WholeGroup(s.Selected) // 上一份里就已经只剩这一条线路:成员就是那份的全部节点
+		wasWhole = ok
+	}
 	if !ok || builder.SelectedFor(fresh, s.Selected) != "auto" {
 		return // 选的不是线路组,或者它(线路组、同名节点)还在
+	}
+	if _, whole := fresh.WholeGroup(s.Selected); whole {
+		if !wasWhole {
+			d.logf("订阅里只剩线路「%s」这一条了:这一轮用自动选择,就是在这条线路的服务器里挑;别的线路加回来后自动回到线路自动", s.Selected)
+		}
+		return
 	}
 	alive := func(m string) bool { return slices.Contains(og.Members, m) && slices.Contains(fresh.Tags, m) }
 	pick := ""

@@ -130,6 +130,9 @@ type SelNote struct {
 	Gone  string `json:"gone"`            // 设置里选的(节点或线路组)
 	Group bool   `json:"group,omitempty"` // 选的是线路组
 	Now   string `json:"now,omitempty"`   // 线路组没了时改用的同线路那一台;空 = 回落自动选择
+	// Whole 线路组其实还在,只是订阅里只剩这一条线路(组成员就是全部节点,见 profile.Profile.Whole):这一轮用自动选择,
+	// 也就是在这条线路的几台里挑;面板加回别的线路后自动回到线路自动。
+	Whole bool `json:"whole,omitempty"`
 }
 
 // TunnelView 隧道会话的看护记录,本次服务运行期间累计。

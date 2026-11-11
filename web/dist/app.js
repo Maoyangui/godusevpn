@@ -761,10 +761,12 @@ function v6HintText(v) {
   if (on && v.node && v.node !== (sel || 'auto')) text += t('node.v6Borrowed', { n: cleanName(v.node) });
   return text;
 }
-// selNoteText 设置里选的节点 / 线路组在订阅里没了时写明这一轮用的是什么。
+// selNoteText 设置里选的节点 / 线路组在订阅里没了时写明这一轮用的是什么。订阅里只剩选的这条线路(组成员就是全部节点)时
+// 用的是自动选择,也写一句:不然首页从线路名变成「自动选择」,看着像选择丢了。
 function selNoteText(v) {
   const n = v && v.selNote;
   if (!n) return '';
+  if (n.whole) return t('node.selWholeLine', { g: cleanName(n.gone) });
   if (n.now) return t('node.selGoneLine', { g: cleanName(n.gone), n: cleanName(n.now) });
   return t(n.group ? 'node.selGoneLineAuto' : 'node.selGone', { g: cleanName(n.gone) });
 }
