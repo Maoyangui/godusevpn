@@ -615,12 +615,14 @@ func (d *Daemon) rollbackSelection(prev, wrote settings.Settings) {
 // 选的是节点、自动选择就清空;选的东西在订阅里已经没有了(线路组没了)就保留 —— 这时候正要靠它(见 builder.Effective)。
 // 选的线路组成员成了全部节点(订阅里只剩这一条线路,见 profile.Profile.Whole)照线路组算:这一轮用的是自动选择,
 // 记着的这台只给退回旧版本时用,也得是这条线路上的。换了订阅时不沿用别的订阅里记的那台。
+//
+// SelectedNode 和 Selected 写成同一个名字,是"明说了选的就是这个节点"(见 MSelectNode):清空。
 func fillSelectedNode(s *settings.Settings, cur settings.Settings, p *profile.Profile, blocked []string) {
 	s.SelectedGroup = "" // 只在磁盘上用(见 settings.Save)
 	if s.SelectedNode == "" && s.Selected == cur.Selected && s.ActiveProfile == cur.ActiveProfile {
 		s.SelectedNode = cur.SelectedNode
 	}
-	if s.Selected == "" {
+	if s.Selected == "" || s.SelectedNode == s.Selected {
 		s.SelectedNode = ""
 		return
 	}
@@ -647,7 +649,17 @@ func fillSelectedNode(s *settings.Settings, cur settings.Settings, p *profile.Pr
 		}
 		return
 	}
-	if slices.Contains(p.Tags, s.Selected) || s.ActiveProfile != cur.ActiveProfile {
+	if s.ActiveProfile != cur.ActiveProfile {
+		s.SelectedNode = ""
+		return
+	}
+	if slices.Contains(p.Tags, s.Selected) {
+		// 选的名字现在是个普通节点。原来选的是线路组(记着同线路那一台)、这次也没改选择:留着 —— 服务器端不再出这个组、
+		// 订阅里冒出个同名节点(外部订阅的第三方节点)时,不按名字跟过去,这一轮用记着的那台(见 builder.Effective)。
+		// 用户在列表里明点了这个节点,MSelectNode 会把 SelectedNode 写成它自己,在上面就清掉了。
+		if s.Selected == cur.Selected && s.SelectedNode != "" && s.SelectedNode == cur.SelectedNode && builder.LineSelected(cur) {
+			return
+		}
 		s.SelectedNode = ""
 	}
 }
@@ -2557,6 +2569,10 @@ func (d *Daemon) registerHandlers() {
 			if now := d.groupNow(s.Selected); now != "" {
 				s.SelectedNode = now
 			}
+		} else {
+			// 选的是节点(或自动选择):明说了就是它。不这样的话,原来选的线路组没了、冒出个同名节点之后,
+			// 用户明点这个节点也还当成"线路组没了、用记着的那台"(见 fillSelectedNode)
+			s.SelectedNode = s.Selected
 		}
 		if err := d.setSettings(s); err != nil {
 			return nil, err

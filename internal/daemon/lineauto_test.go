@@ -564,3 +564,14 @@ func TestOutdatedCacheRefreshesAfterConnect(t *testing.T) {
 		t.Fatal("连上之前不为陈旧的缓存拉订阅")
 	}
 }
+
+// 选的线路组没了、订阅里冒出个同名的普通节点(第三方):关掉「线路自动」时固定到记着的同线路那台,不固定到同名节点上。
+func TestLineAutoOffGroupTurnedNode(t *testing.T) {
+	p := &profile.Profile{Tags: []string{"hy", "hy-A", "jp"}}
+	if got := lineAutoSelection(p, "hy", false, nil, nil, "hy-A"); got != "hy-A" {
+		t.Fatalf("固定到 %q,应当是记着的 hy-A", got)
+	}
+	if got := lineAutoSelection(p, "hy", false, nil, nil, ""); got != "hy" {
+		t.Fatalf("选的本来就是节点 hy:不变,得到 %q", got)
+	}
+}

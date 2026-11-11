@@ -107,12 +107,31 @@ func SelectedFor(p *profile.Profile, selected string) string {
 	return "auto"
 }
 
+// LineSelected 设置里选的是线路组(选的时候是):SelectedNode 记着组里的一台(见 settings.SelectedNode;选节点、自动选择时是空的)。
+func LineSelected(s settings.Settings) bool {
+	return s.Selected != "" && s.SelectedNode != "" && s.SelectedNode != s.Selected
+}
+
+// Present 设置里选的东西这一轮在订阅里还在不在:在就是它自己,不在返回 "auto"。同 SelectedFor,只是选的是线路组时只认同名的线路组 ——
+// 服务器端不再出这个组、订阅里(外部订阅并进来的第三方节点)又冒出个同名的普通节点时,那不是用户选的这条线路,不算还在。
+func Present(p *profile.Profile, s settings.Settings) string {
+	if p != nil && LineSelected(s) {
+		if _, ok := p.Group(s.Selected); ok {
+			return s.Selected
+		}
+		return "auto"
+	}
+	return SelectedFor(p, s.Selected)
+}
+
 // Effective 这一轮 proxy 组实际落在哪:同 SelectedFor,只是选的线路组在订阅里没了(线路改成只部署一台:服务器下线、
 // 入口停用、只分到一台)时,用记着的同线路那一台(settings.SelectedNode),线路、出口不变;那台也不在了才回落自动选择。
 // 选的线路组成员成了全部节点(订阅里只剩这一条线路,见 profile.Profile.Whole)不算没了:自动选择就是这条线路,用它 ——
 // 组里照样自动挑最快的、照样定时测,不把人固定在一台上。
+//
+// 选的线路组没了、订阅里却有个同名的普通节点时,不按名字跟过去(见 Present):照样用记着的那一台,那台也不在就自动选择。
 func Effective(p *profile.Profile, s settings.Settings) string {
-	sel := SelectedFor(p, s.Selected)
+	sel := Present(p, s)
 	if sel != "auto" || s.Selected == "" || p == nil {
 		return sel
 	}

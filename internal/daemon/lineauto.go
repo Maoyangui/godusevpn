@@ -65,7 +65,8 @@ func lineAutoAfterSelect(p *profile.Profile, sel string, cur bool) bool {
 //   - 打开:选的是某个线路组里的节点 → 换成那个线路组;自动选择、不属于任何组的节点不变(只换列表的显示)。
 //   - 关闭:选的是线路组 → 固定到组里此刻在用的那台(now 给,内核在跑时才有);内核没跑、或那台已经不在组里,
 //     取第一台这一轮连得上的(blocked 是连不上的 IPv6 节点,全是的话照样取第一台)。
-//     选的线路组在订阅里已经没了(线路只剩一台):固定到这一轮正在用的同线路那一台(fallback,见 builder.Effective)。
+//     选的线路组在订阅里已经没了(线路只剩一台):固定到这一轮正在用的同线路那一台(fallback = settings.SelectedNode,
+//     选的是节点时为空;见 builder.Effective)。
 //     选的线路组成员成了全部节点(订阅里只剩这一条线路,见 profile.Profile.Whole):这一轮落在自动选择上,固定到它此刻在用的那台。
 func lineAutoSelection(p *profile.Profile, sel string, on bool, now func(group string) string, blocked []string, fallback string) string {
 	if p == nil || sel == "" {
@@ -84,7 +85,9 @@ func lineAutoSelection(p *profile.Profile, sel string, on bool, now func(group s
 			g, ok, nowOf = w, true, "auto" // 订阅里只剩这条线路:这一轮落在自动选择上,"此刻在用的那台"看它
 		}
 	}
-	if !ok && fallback != "" && !slices.Contains(p.Tags, sel) && slices.Contains(p.Tags, fallback) {
+	// 选的线路组没了:固定到这一轮在用的同线路那台。订阅里冒出个和组同名的普通节点(第三方)也一样,不固定到它上面(见 builder.Present);
+	// 选的是节点时调用方给的 fallback 是空的
+	if !ok && fallback != "" && fallback != sel && slices.Contains(p.Tags, fallback) {
 		return fallback
 	}
 	if !ok || len(g.Members) == 0 {
@@ -208,7 +211,7 @@ func (d *Daemon) selectedV6(s settings.Settings) bool {
 // 选的线路组成员成了全部节点(订阅里只剩这一条线路,见 profile.Profile.Whole)也写一句:这一轮用的是自动选择,
 // 不然首页从线路名变成「自动选择」,看着像选择丢了。
 func selNote(p *profile.Profile, s settings.Settings) *ipc.SelNote {
-	if p == nil || s.Selected == "" || builder.SelectedFor(p, s.Selected) != "auto" {
+	if p == nil || s.Selected == "" || builder.Present(p, s) != "auto" {
 		return nil
 	}
 	if _, whole := p.WholeGroup(s.Selected); whole {
@@ -239,8 +242,8 @@ func (d *Daemon) reconcileLineGroup(id string, old, fresh *profile.Profile) {
 		og, ok = old.WholeGroup(s.Selected) // 上一份里就已经只剩这一条线路:成员就是那份的全部节点
 		wasWhole = ok
 	}
-	if !ok || builder.SelectedFor(fresh, s.Selected) != "auto" {
-		return // 选的不是线路组,或者它(线路组、同名节点)还在
+	if !ok || builder.Present(fresh, s) != "auto" {
+		return // 选的不是线路组,或者这个线路组还在(冒出来的同名普通节点不算,见 builder.Present)
 	}
 	if _, whole := fresh.WholeGroup(s.Selected); whole {
 		if !wasWhole {

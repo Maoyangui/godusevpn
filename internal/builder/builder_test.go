@@ -840,3 +840,32 @@ func TestLANNamesAskRouter(t *testing.T) {
 		t.Fatal("局域网不直通就不加")
 	}
 }
+
+// 选的线路组没了、订阅里冒出个同名的普通节点:不按名字跟过去,用记着的同线路那台;那台也不在就自动选择。选的是节点照旧按名字。
+func TestEffectiveGroupTurnedNode(t *testing.T) {
+	line := settings.Settings{Selected: "hy", SelectedNode: "hy-A"}
+	for _, c := range []struct {
+		tags []string
+		want string
+	}{
+		{[]string{"hy-A", "hy"}, "hy-A"},
+		{[]string{"hy", "hy-A"}, "hy-A"},
+		{[]string{"jp", "hy"}, "auto"},
+	} {
+		p := &profile.Profile{Tags: c.tags}
+		if got := Effective(p, line); got != c.want {
+			t.Errorf("%v:得到 %q,要 %q", c.tags, got, c.want)
+		}
+		if got := Present(p, line); got != "auto" {
+			t.Errorf("%v:同名普通节点不算线路组还在,得到 %q", c.tags, got)
+		}
+	}
+	withGroup := &profile.Profile{Tags: []string{"hy-A", "hy-B", "jp"}, Groups: []profile.Group{{Tag: "hy", Members: []string{"hy-A", "hy-B"}}}}
+	if got := Effective(withGroup, line); got != "hy" {
+		t.Fatalf("线路组在:就是它,得到 %q", got)
+	}
+	node := settings.Settings{Selected: "hy"}
+	if got := Effective(&profile.Profile{Tags: []string{"hy"}}, node); got != "hy" {
+		t.Fatalf("选的本来就是节点:按名字,得到 %q", got)
+	}
+}

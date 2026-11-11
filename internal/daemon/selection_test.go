@@ -375,3 +375,95 @@ func TestSelectionRollsBackWhenSwitchFails(t *testing.T) {
 		t.Fatalf("选择退回去,别的设置照存: %q %d", s.Selected, s.LogDays)
 	}
 }
+
+// 选的是线路组,后来服务器端不再出这个组、订阅里(外部订阅并进来的第三方节点)又冒出个同名的普通节点:
+// 不按名字跟过去落到第三方节点上 —— 用记着的同线路那台(SelectedNode);那台也没了就回落自动选择,也不去碰同名节点。
+// 之后随便保存一次设置,记着的那台也不能被当成"选的是节点"清掉;用户在列表里明点了那个同名节点才算选了它。
+func TestLineGroupTurnedNodeKeepsLine(t *testing.T) {
+	var body atomic.Value
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(body.Load().(string))) }))
+	defer srv.Close()
+	node := func(tag string, port int) string {
+		return `{"type":"socks","tag":"` + tag + `","server":"127.0.0.1","server_port":` + itoa(port) + `}`
+	}
+	group := func(tag string, members ...string) string {
+		return `{"type":"urltest","tag":"` + tag + `","outbounds":["` + strings.Join(members, `","`) + `"]}`
+	}
+	sub := func(outs ...string) string { return `{"outbounds":[` + strings.Join(outs, ",") + `]}` }
+	// 起点:hy 线路两台(hy-A、hy-B,组 hy),外部订阅一台叫 hy 2
+	start := sub(node("hy-A", 1), node("hy-B", 2), node("jp", 3), node("hy 2", 9), group("hy", "hy-A", "hy-B"))
+	cases := []struct {
+		name string
+		body string
+		want string // 这一轮实际用的
+	}{
+		// hy 线路只剩一台(不出组了),外部订阅冒出个 hy
+		{"hy 单节点 + 外部 hy", sub(node("hy-A", 1), node("jp", 3), node("hy", 9)), "hy-A"},
+		{"外部 hy 排在前面", sub(node("hy", 9), node("hy-A", 1), node("jp", 3)), "hy-A"},
+		// hy 线路一台都不剩,只有外部的 hy:回落自动选择,不落到第三方节点上
+		{"外部 hy", sub(node("jp", 3), node("hy", 9)), "auto"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			d := profileOpsDaemon(t)
+			d.settings.Profiles = []settings.Profile{{ID: "p1", Name: "一", URL: srv.URL + "/sub"}}
+			d.settings.ActiveProfile = "p1"
+			refresh := func(b string) {
+				t.Helper()
+				body.Store(b)
+				if _, err := d.refreshProfile(context.Background(), "p1"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			refresh(start)
+			if err := call(t, d, ipc.MSelectNode, map[string]string{"tag": "hy"}); err != nil {
+				t.Fatal(err)
+			}
+			if s := d.getSettings(); s.Selected != "hy" || s.SelectedNode != "hy-A" {
+				t.Fatalf("前提:选了线路组 hy,记着 hy-A: %q %q", s.Selected, s.SelectedNode)
+			}
+			refresh(c.body)
+			check := func(when string) {
+				t.Helper()
+				s := d.getSettings()
+				_, p := d.activeProfile()
+				if got := builder.Effective(p, s); got != c.want {
+					t.Fatalf("%s:这一轮应当用 %q,实际 %q(选 %q,记着 %q)", when, c.want, got, s.Selected, s.SelectedNode)
+				}
+				v := d.stateView()
+				if v.Node != c.want || v.SelNote == nil || v.SelNote.Gone != "hy" || !v.SelNote.Group {
+					t.Fatalf("%s:状态里写明线路组没了、现在用的是哪台: node=%q note=%+v", when, v.Node, v.SelNote)
+				}
+				if c.want == "hy-A" && v.SelNote.Now != "hy-A" {
+					t.Fatalf("%s:现在用的是 hy-A: %+v", when, v.SelNote)
+				}
+			}
+			check("刷新之后")
+			// 随便保存一次设置(设置页拿着读到的那份存回来)
+			cur := getSettings(t, d)
+			cur.LogDays = 9
+			raw, _ := json.Marshal(cur)
+			if _, err := d.Dispatch(ipc.MSetSettings, raw); err != nil {
+				t.Fatal(err)
+			}
+			check("保存设置之后")
+			// 线路组回来了:回到线路自动
+			refresh(start)
+			s := d.getSettings()
+			_, p := d.activeProfile()
+			if builder.Effective(p, s) != "hy" {
+				t.Fatalf("线路组回来了就回到线路自动: %q", builder.Effective(p, s))
+			}
+			// 明点同名节点才算选了它
+			refresh(c.body)
+			if err := call(t, d, ipc.MSelectNode, map[string]string{"tag": "hy"}); err != nil {
+				t.Fatal(err)
+			}
+			s = d.getSettings()
+			_, p = d.activeProfile()
+			if builder.Effective(p, s) != "hy" || s.SelectedNode != "" || d.stateView().SelNote != nil {
+				t.Fatalf("明点了同名节点:就是它: %q 记着 %q", builder.Effective(p, s), s.SelectedNode)
+			}
+		})
+	}
+}
