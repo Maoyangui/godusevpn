@@ -3,7 +3,7 @@
 //	status                 当前状态、模式、节点、订阅
 //	connect / disconnect
 //	mode rule|global|direct
-//	nodes                  节点列表(当前项带 *),订阅里有线路组时后面再列线路组与成员
+//	nodes                  节点列表(当前项带 *;提示节点、关着 IPv6 时的 IPv6 节点标出来),订阅里有线路组时后面再列线路组与成员
 //	select <节点名|线路组名|auto>
 //	test [节点名]          经该节点(默认当前 proxy 组)测延迟
 //	profile [订阅地址]     查看或设置订阅
@@ -96,13 +96,9 @@ func Main(args []string) int {
 		if len(args) == 1 && args[0] == "all" {
 			var res map[string]int
 			if err = call(ctx, ipc.MProbeNodes, nil, &res); err == nil {
-				for k, ms := range res {
-					if ms < 0 {
-						fmt.Printf("%s: 不通\n", k)
-					} else {
-						fmt.Printf("%s: %d ms\n", k, ms)
-					}
-				}
+				var v ipc.StateView
+				_ = call(ctx, ipc.MGetState, nil, &v) // 拿不到也照样打结果,只是标不出 IPv6 节点
+				printProbe(v, res)
 			}
 			break
 		}
@@ -314,6 +310,41 @@ func status(ctx context.Context) error {
 	if err := call(ctx, ipc.MGetState, nil, &v); err != nil {
 		return err
 	}
+	printStatus(v)
+	return nil
+}
+
+// printProbe test all 的结果:按节点列表的顺序打(列表里没有的排在后面,按名字排),一行一个。关着 IPv6 时只能走 IPv6 的节点
+// (见 ipc.StateView.V6Blocked)服务不测、直接记不通,这里写明是没测,和 nodes 里的标法一样;拿不到状态时照原样打。
+func printProbe(v ipc.StateView, res map[string]int) {
+	names := make([]string, 0, len(res))
+	seen := make(map[string]bool, len(res))
+	for _, n := range v.Nodes {
+		if _, ok := res[n]; ok && !seen[n] {
+			names, seen[n] = append(names, n), true
+		}
+	}
+	var rest []string
+	for n := range res {
+		if !seen[n] {
+			rest = append(rest, n)
+		}
+	}
+	slices.Sort(rest)
+	for _, n := range append(names, rest...) {
+		switch ms := res[n]; {
+		case slices.Contains(v.V6Blocked, n):
+			fmt.Printf("%s: %s\n", n, v6Untested)
+		case ms < 0:
+			fmt.Printf("%s: 不通\n", n)
+		default:
+			fmt.Printf("%s: %d ms\n", n, ms)
+		}
+	}
+}
+
+// printStatus status 命令的输出。
+func printStatus(v ipc.StateView) {
 	fmt.Printf("%s %s(服务 v%s)\n", buildinfo.DisplayName, buildinfo.Version, v.Version)
 	st := string(v.State.Status)
 	if v.State.Error != "" {
@@ -328,7 +359,7 @@ func status(ctx context.Context) error {
 	if v.AutoNow != "" && v.AutoNow != v.Node {
 		node += "(实际在用 " + v.AutoNow + ")"
 	}
-	fmt.Println("节点:  ", node, fmt.Sprintf("(共 %d 个)", len(v.Nodes)))
+	fmt.Println("节点:  ", node, nodeCountNote(v))
 	for _, l := range selectionNotes(v) {
 		fmt.Println("提示:  ", l)
 	}
@@ -346,11 +377,38 @@ func status(ctx context.Context) error {
 		}
 		fmt.Printf("隧道:   判废 %d 次,重建 %d 次%s\n", tv.Sick, tv.Rebuilds, last)
 	}
-	return nil
+}
+
+// v6Tag 关着 IPv6 时只能走 IPv6 的节点(见 ipc.StateView.V6Blocked)在 nodes 里的标注,和网页界面的「IPv6 节点」一样;
+// v6Untested 是 test all 里的。
+const (
+	v6Tag      = "IPv6 节点(「允许 IPv6」关着,这一轮不用)"
+	v6Untested = "IPv6 节点(「允许 IPv6」关着,没测)"
+)
+
+// nodeTotal 订阅里真正的节点数:列表首项 auto(自动选择)不是节点,内核 proxy 组里的线路组名(订阅缓存还没有时
+// 列表取自内核)也不是。和界面上写的「N 个节点」一样。
+func nodeTotal(v ipc.StateView) int {
+	n := 0
+	for _, tag := range v.Nodes {
+		if tag != "auto" && !isGroup(v, tag) {
+			n++
+		}
+	}
+	return n
+}
+
+// nodeCountNote status 节点那一行后面的括号:订阅里共几个节点,关着 IPv6 时其中几个这一轮不用。
+func nodeCountNote(v ipc.StateView) string {
+	if len(v.V6Blocked) > 0 {
+		return fmt.Sprintf("(共 %d 个节点,其中 %d 个是 IPv6 节点、「允许 IPv6」关着,这一轮不用)", nodeTotal(v), len(v.V6Blocked))
+	}
+	return fmt.Sprintf("(共 %d 个节点)", nodeTotal(v))
 }
 
 // nodeLine 节点列表的一行:当前项带 *,后面是最近一次列表测速的延迟。提示节点(面板放来显示续费 / 用量信息的,
-// 地址只指向本机)不测速,写明它不能上网,不显示成"不通"。
+// 地址只指向本机)不测速,写明它不能上网,不显示成"不通";关着 IPv6 时只能走 IPv6 的节点同样不测,标成「IPv6 节点」
+// (网页界面一样标,不用先测一次速才看出来)。
 func nodeLine(v ipc.StateView, n string) string {
 	mark := "  "
 	if n == v.Node {
@@ -359,6 +417,8 @@ func nodeLine(v ipc.StateView, n string) string {
 	ms := ""
 	if slices.Contains(v.Hints, n) {
 		ms = "  提示(只显示续费 / 用量信息,不能上网)"
+	} else if slices.Contains(v.V6Blocked, n) {
+		ms = "  " + v6Tag // 测速时它不测、直接记不通:那个"不通"不显示,显示原因
 	} else if d, ok := v.Delays[n]; ok {
 		if d < 0 {
 			ms = "  不通"
@@ -398,7 +458,19 @@ func printGroups(v ipc.StateView) {
 		if g.Tag == v.Node || g.Tag == v.Settings.Selected {
 			mark = "* "
 		}
-		fmt.Println(mark + g.Tag + ":" + strings.Join(g.Members, " / "))
+		// 关着 IPv6 时只能走 IPv6 的成员标出来(线路自动不用它们);成员全是这种的线路整条标,和网页界面的线路行一样
+		members, blocked := make([]string, len(g.Members)), 0
+		for i, m := range g.Members {
+			members[i] = m
+			if slices.Contains(v.V6Blocked, m) {
+				members[i], blocked = m+"(IPv6)", blocked+1
+			}
+		}
+		tail := ""
+		if blocked > 0 && blocked == len(g.Members) {
+			tail = "  " + v6Tag
+		}
+		fmt.Println(mark + g.Tag + ":" + strings.Join(members, " / ") + tail)
 	}
 }
 
