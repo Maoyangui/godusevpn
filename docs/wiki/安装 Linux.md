@@ -37,6 +37,7 @@ curl -fsSL https://raw.githubusercontent.com/Maoyangui/godusevpn/master/deploy/i
 开机自启的开关只管开机:关着时重启后服务不会自己起来,`godusevpn start` 照样能起。
 服务崩了 systemd / procd 会自己拉起;梅林没有这种机制,起服务时挂一条每分钟的定时任务(`cru`)代替(开机自启关着也一样)——
 `godusevpn stop` 主动停掉的不拉,再 `start` 或重启路由器(开着开机自启时)后恢复。
+在终端里前台跑 `godusevpn run`(调试用)不会挂这条定时;要前台调试,先 `godusevpn stop` 停掉服务,前台的 Ctrl-C 停掉之后也不会被拉到后台。
 
 ## 本机模式(默认)
 

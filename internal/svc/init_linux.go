@@ -524,7 +524,7 @@ func Uninstall() error {
 // Refresh 守护进程每次启动时调:面板自更新只换程序文件、不重跑 install,旧版装下的启动脚本会一直留着。
 // 只动已经装好的(手动 `godusevpn run`、没装服务的不碰)。systemd / procd 补上开机闸单元;
 // Entware 的脚本(看门狗)不带程序路径,和当前模板不同就按原来的开关状态重写(先写临时文件再改名:脚本可能正被 sh 读着),
-// 再补上看门狗定时 —— 服务正在起,说明用户没停它。
+// 是启动脚本拉起来的就再补上看门狗定时 —— 服务正在起,说明用户没停它(前台跑的不补,见 refreshEntware)。
 func Refresh() error {
 	k := detect()
 	if !exists(unitPath()) {
@@ -546,17 +546,48 @@ func Refresh() error {
 	if k != initEntware {
 		return nil
 	}
-	enabled, err := refreshEntwareScript(unitPath())
+	return refreshEntware(unitPath())
+}
+
+// refreshEntware Refresh 在 Entware 上的那一段:p 是已装的启动脚本。
+// 补挂看门狗定时是给旧版本的脚本擦屁股的(v0.7.9 之前的脚本起服务时不挂定时),只给启动脚本拉起来的守护进程补:
+// 用户在终端里前台跑的 godusevpn run(调试)补挂了的话,Ctrl-C 停掉之后一分钟内就被看门狗拉到后台去 —— 前台停掉
+// 不留"用户停了"的标记,看门狗当它崩了。
+func refreshEntware(p string) error {
+	enabled, err := refreshEntwareScript(p)
 	if err != nil {
 		return err
 	}
-	if _, err := exec.LookPath("cru"); err != nil || !enabled {
-		// 不是梅林(没有 cru),或者自启关着:这时在跑的是用户手动起的,脚本起它的时候已经挂上了;
-		// 前台跑的(godusevpn run)不挂,免得停了之后被看门狗拉到后台去
+	if _, err := exec.LookPath("cru"); err != nil || !enabled || !launchedByScript() {
+		// 不是梅林(没有 cru);自启关着(这时在跑的是用户手动起的,当前的脚本起它的时候已经挂上了);
+		// 或者不是启动脚本拉起来的(前台跑的)
 		return nil
 	}
 	_, err = sh("cru", entwareWatchdog...)
 	return err
+}
+
+// launchedByScript 本进程是不是启动脚本在后台拉起来的:新旧脚本(连同 Entware 的 rc.func)都是
+// "$PROCS $ARGS >/dev/null ... &",标准输出接 /dev/null,sh 给后台命令的标准输入也是 /dev/null;在终端里前台跑的
+// 标准输入输出连着终端(输出接到管道、文件的也不算)。
+func launchedByScript() bool { return isDevNull(os.Stdin) && isDevNull(os.Stdout) }
+
+// isDevNull f 是不是 /dev/null。
+func isDevNull(f *os.File) bool {
+	a, err := f.Stat()
+	if err != nil {
+		return false
+	}
+	b, err := os.Stat(os.DevNull)
+	if err != nil {
+		return false
+	}
+	if os.SameFile(a, b) {
+		return true
+	}
+	as, aok := a.Sys().(*syscall.Stat_t)
+	bs, bok := b.Sys().(*syscall.Stat_t)
+	return aok && bok && a.Mode()&os.ModeCharDevice != 0 && b.Mode()&os.ModeCharDevice != 0 && as.Rdev == bs.Rdev
 }
 
 // refreshEntwareScript 已装的 Entware 脚本(p)和当前模板不同就按原来的开关状态重写(换文件不原地改,权限照旧,见 replaceFile:

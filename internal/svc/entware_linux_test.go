@@ -17,6 +17,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 // fakeEnv 设了它,测试程序就不跑测试,而是冒充 godusevpn(见 fakeGodusevpn)。
@@ -30,7 +32,9 @@ func TestMain(m *testing.M) {
 }
 
 // fakeGodusevpn 冒充 godusevpn 的进程(把测试程序复制成那个名字来跑,进程名、argv[0] 都和真的一样):
-//   - run:守护进程。登记进程号(run.<pid>)后一直挂着,收到 TERM / KILL 就没了;
+//   - run:守护进程。登记进程号(run.<pid>)后一直挂着,收到 TERM / KILL 就没了。设了 FAKE_REFRESH(一份已装的脚本)
+//     就先像真的守护进程启动时那样跑 Refresh 在 Entware 上的那一段(refreshEntware,补挂看门狗定时调 PATH 里的 cru),
+//     做完写 refreshed.<pid>;
 //   - 设了 FAKE_QUERY:像 godusevpn status 那样问服务在不在跑。把自己的进程号、entwareDaemons(FAKE_QUERY)
 //     (QueryStatus 现在的判断)和只按名字 pidof 的结果(以前的判断)写进 query.out,各占一行;
 //   - idle:不相干的同名进程(像开着的 godusevpn logs -f),只是挂着,收到信号就没了;
@@ -38,6 +42,11 @@ func TestMain(m *testing.M) {
 //     跑完把退出码和输出写进 caller.out —— 自己被脚本杀了就写不出来。
 func fakeGodusevpn(dir string, args []string) int {
 	if len(args) > 0 && args[0] == "run" {
+		if p := os.Getenv("FAKE_REFRESH"); p != "" {
+			// 像真的守护进程那样启动时调 Refresh 在 Entware 上的那一段(p 是一份已装的脚本),做完留个记号(内容是返回的错误)
+			err := refreshEntware(p)
+			_ = os.WriteFile(filepath.Join(dir, "refreshed."+strconv.Itoa(os.Getpid())), []byte(fmt.Sprint(err)), 0o644)
+		}
 		_ = os.WriteFile(filepath.Join(dir, "run."+strconv.Itoa(os.Getpid())), nil, 0o644)
 		time.Sleep(10 * time.Minute) // 测试出了岔子也不会永远留着
 		return 0
@@ -946,6 +955,200 @@ func TestEntwareStartStopConsistent(t *testing.T) {
 		if len(bad) > 0 {
 			t.Fatalf("start 和 stop 同时跑,结果前后对不上(停着却没标记 = 一分钟后看门狗又拉起来)%d 轮:\n%s", len(bad), strings.Join(bad, "\n"))
 		}
+	})
+}
+
+// openPTY 开一对伪终端(主端、从端):从端给前台跑的守护进程当终端(标准输入、输出、错误都接它),像用户 SSH 上去在终端里跑。
+// 主端的输出一直读掉,免得写满了把守护进程卡住。
+func openPTY(t *testing.T) (master, slave *os.File) {
+	t.Helper()
+	m, err := os.OpenFile("/dev/ptmx", os.O_RDWR|syscall.O_NOCTTY, 0)
+	if err != nil {
+		t.Skipf("开不了伪终端: %v", err)
+	}
+	fd := int(m.Fd())
+	if err := unix.IoctlSetPointerInt(fd, unix.TIOCSPTLCK, 0); err != nil {
+		m.Close()
+		t.Skipf("解锁伪终端: %v", err)
+	}
+	n, err := unix.IoctlGetInt(fd, unix.TIOCGPTN)
+	if err != nil {
+		m.Close()
+		t.Skipf("取伪终端号: %v", err)
+	}
+	s, err := os.OpenFile("/dev/pts/"+strconv.Itoa(n), os.O_RDWR|syscall.O_NOCTTY, 0)
+	if err != nil {
+		m.Close()
+		t.Skipf("开伪终端从端: %v", err)
+	}
+	go func() { _, _ = io.Copy(io.Discard, m) }()
+	t.Cleanup(func() { _ = s.Close(); _ = m.Close() })
+	return m, s
+}
+
+// runScript 测试进程自己跑一遍 script(和 run 一样,调用者不叫守护进程的名字),env 追加的环境变量(后写的优先)。
+func (r *entwareRig) runScript(env []string, script string, args ...string) (string, error) {
+	sh := "sh"
+	if r.busybox {
+		sh = filepath.Join(r.bin, "sh")
+	}
+	c := exec.Command(sh, append([]string{script}, args...)...)
+	c.Env = r.envWith(env...)
+	b, err := c.CombinedOutput()
+	return string(b), err
+}
+
+// armedByDaemon 守护进程(Refresh 那一段)补挂的看门狗定时:cru.log 里编号是真名字 godusevpn 的那几行
+// (脚本自己挂的编号是替身环境里的名字,分得开)。
+func (r *entwareRig) armedByDaemon() []string {
+	var out []string
+	for _, l := range strings.Split(r.log("cru.log"), "\n") {
+		if strings.HasPrefix(l, "a "+name+" ") {
+			out = append(out, l)
+		}
+	}
+	return out
+}
+
+// 梅林(Entware):开着开机自启时,守护进程启动时(Refresh)给看门狗补挂定时,以前不管是谁起的都挂 —— 用户在终端里前台跑
+// godusevpn run 调试,Ctrl-C 停掉之后一分钟内就被看门狗拉到后台去(没有"用户停了"的标记,看门狗当它崩了)。现在只有
+// 启动脚本拉起来的才补挂:新旧脚本(连同 Entware 的 rc.func)都在后台拉起、标准输出接 /dev/null,后台命令的标准输入
+// 也是 /dev/null;前台跑的连着终端。补挂本来是给旧版本的脚本擦屁股的(更早的脚本起服务时不挂定时),旧脚本拉起来的照样补。
+// 真跑:Refresh 那一段用测试程序冒充的守护进程启动时跑(FAKE_REFRESH 指着一份开着自启的已装脚本),cru 是只记账的假货。
+//  1. 在伪终端里前台跑(像 SSH 上去跑):不补挂;Ctrl-C 之后要是挂了,像 cron 那样跑一次看门狗,看它会不会被拉到后台;
+//  2. 前台跑、输出接管道(godusevpn run | tee …):不补挂;
+//  3. 启动脚本拉起(godusevpn start 跑 manual-start):补挂;
+//  4. 旧脚本拉起(交给 Entware 的 rc.func 起,它不挂定时):补挂;
+//  5. 开机自启关着:脚本拉起的也不补(脚本自己已经挂了)。
+func TestEntwareRefreshArmsWatchdogOnlyForScriptLaunch(t *testing.T) {
+	eachToolset(t, func(t *testing.T, busybox bool) {
+		r := newEntwareRig(t, "gvfgnd", busybox)
+		installed := filepath.Join(r.dir, "installed", "S99godusevpn") // 一份"已装的"脚本,Refresh 只读它的开关、换模板
+		if err := os.MkdirAll(filepath.Dir(installed), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		setInstalled := func(enabled bool) {
+			t.Helper()
+			s, _ := entwareScriptLike(map[bool]string{true: "ENABLED=yes", false: "ENABLED=no"}[enabled])
+			if err := os.WriteFile(installed, []byte(s), 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+		refresh := "FAKE_REFRESH=" + installed
+		path := "PATH=" + r.bin + ":" + os.Getenv("PATH") // 前台跑的从用户的 shell 起,cru 在 PATH 里
+		// refreshed 等守护进程 pid 跑完 Refresh 那一段,返回它的结果
+		refreshed := func(pid int) string {
+			t.Helper()
+			f := filepath.Join(r.dir, "refreshed."+strconv.Itoa(pid))
+			waitFor(t, "守护进程跑完 Refresh", func() bool { _, err := os.Stat(f); return err == nil })
+			b, _ := os.ReadFile(f)
+			return string(b)
+		}
+		// foreground 测试进程直接起一个前台的守护进程(godusevpn run),标准输入输出照 io 接
+		foreground := func(tty *os.File, stdout io.Writer) (*exec.Cmd, chan error) {
+			t.Helper()
+			c := exec.Command(r.fake, "run")
+			c.Env = r.envWith(refresh, path)
+			if tty != nil {
+				c.Stdin, c.Stdout, c.Stderr = tty, tty, tty
+			} else {
+				c.Stdout, c.Stderr = stdout, stdout
+			}
+			if err := c.Start(); err != nil {
+				t.Fatal(err)
+			}
+			done := make(chan error, 1)
+			go func() { done <- c.Wait() }()
+			return c, done
+		}
+		stopAll := func() {
+			t.Helper()
+			for _, pid := range r.alive() {
+				_ = syscall.Kill(pid, syscall.SIGTERM)
+			}
+			waitFor(t, "守护进程都停掉", func() bool { return len(r.alive()) == 0 })
+		}
+		setInstalled(true)
+
+		// 1. 伪终端里前台跑:不补挂。Ctrl-C 停掉;挂了的话一分钟内 cron 会跑看门狗(没有标记)——它会被拉到后台
+		_, tty := openPTY(t)
+		c, done := foreground(tty, nil)
+		if res := refreshed(c.Process.Pid); res != "<nil>" {
+			t.Fatalf("前台跑的 Refresh 出错: %s", res)
+		}
+		armed := r.armedByDaemon()
+		_ = c.Process.Signal(syscall.SIGINT) // Ctrl-C
+		select {
+		case <-done:
+		case <-time.After(20 * time.Second):
+			t.Fatal("前台跑的守护进程 Ctrl-C 之后没退出")
+		}
+		if len(armed) > 0 {
+			if out, err := r.run("watchdog"); err != nil {
+				t.Fatalf("watchdog: %v\n%s", err, out)
+			}
+			t.Fatalf("前台跑的 godusevpn run 不该补挂看门狗定时(挂了 %q):Ctrl-C 停掉之后,一分钟内看门狗把它拉到了后台 %v", armed, r.settled())
+		}
+		if got := r.settled(); len(got) != 0 || r.marked() {
+			t.Fatalf("前台跑的停掉之后不该有守护进程、也不该动标记: %v 标记=%v", got, r.marked())
+		}
+
+		// 2. 前台跑、输出接管道:同样不补挂
+		r.clearLogs()
+		var buf strings.Builder
+		c, done = foreground(nil, &buf)
+		if res := refreshed(c.Process.Pid); res != "<nil>" {
+			t.Fatalf("Refresh 出错: %s", res)
+		}
+		if armed := r.armedByDaemon(); len(armed) > 0 {
+			t.Fatalf("输出接管道的前台 godusevpn run 也不该补挂看门狗定时: %q", armed)
+		}
+		_ = c.Process.Signal(syscall.SIGINT)
+		<-done
+
+		// 3. 启动脚本拉起(godusevpn start):补挂(脚本自己也挂了一次)
+		r.clearLogs()
+		if code, out, alive := r.caller("start", startAction(initEntware), refresh); !alive || code != 0 {
+			t.Fatalf("start: alive=%v code=%d\n%s", alive, code, out)
+		}
+		waitFor(t, "守护进程起来", func() bool { return len(r.alive()) == 1 })
+		if res := refreshed(r.alive()[0]); res != "<nil>" {
+			t.Fatalf("Refresh 出错: %s", res)
+		}
+		if armed := r.armedByDaemon(); len(armed) != 1 || armed[0] != strings.Join(entwareWatchdog, " ") {
+			t.Fatalf("启动脚本拉起的守护进程要补挂看门狗定时: %q(cru.log: %q)", armed, r.log("cru.log"))
+		}
+		stopAll()
+
+		// 4. 旧脚本拉起(交给 Entware 的 rc.func,它不挂定时):补挂
+		r.clearLogs()
+		if out, err := r.runScript([]string{refresh, path}, r.legacy(), "start"); err != nil {
+			t.Fatalf("旧脚本 start: %v\n%s", err, out)
+		}
+		waitFor(t, "守护进程起来", func() bool { return len(r.alive()) == 1 })
+		if res := refreshed(r.alive()[0]); res != "<nil>" {
+			t.Fatalf("Refresh 出错: %s", res)
+		}
+		if armed := r.armedByDaemon(); len(armed) != 1 {
+			t.Fatalf("旧脚本拉起的守护进程要补挂看门狗定时(旧脚本自己不挂): %q", armed)
+		}
+		stopAll()
+
+		// 5. 开机自启关着:脚本拉起的也不补(脚本起它的时候已经挂上了)
+		setInstalled(false)
+		r.clearLogs()
+		_ = os.Remove(r.stopped)
+		if code, out, alive := r.caller("start", startAction(initEntware), refresh); !alive || code != 0 {
+			t.Fatalf("start: alive=%v code=%d\n%s", alive, code, out)
+		}
+		waitFor(t, "守护进程起来", func() bool { return len(r.alive()) == 1 })
+		if res := refreshed(r.alive()[0]); res != "<nil>" {
+			t.Fatalf("Refresh 出错: %s", res)
+		}
+		if armed := r.armedByDaemon(); len(armed) != 0 {
+			t.Fatalf("开机自启关着时守护进程不补挂: %q", armed)
+		}
+		stopAll()
 	})
 }
 
