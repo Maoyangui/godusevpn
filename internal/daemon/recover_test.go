@@ -40,6 +40,39 @@ func fakeNodeServer(t *testing.T, hang int, hold time.Duration) (string, *atomic
 	return strconv.Itoa(ln.Addr().(*net.TCPAddr).Port), &accepted
 }
 
+// startRound 在后台对测速组起一轮测速(像定时测速那样),等它真的测到假节点(收到第一条连接)再返回。
+// 内核刚起来时它自己的那一轮(PostStart)可能正好占着组:那时叫 GroupTest 会立刻回空结果、什么都不测,得再叫。
+func startRound(t *testing.T, d *Daemon, group string, accepted *atomic.Int32) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	go func() {
+		for accepted.Load() == 0 && time.Now().Before(deadline) {
+			_, _ = d.core.GroupTest(context.Background(), group)
+			time.Sleep(5 * time.Millisecond)
+		}
+	}()
+	waitAccepted(t, accepted, 1)
+}
+
+// settle 等内核启动时各测速组自己的那一轮(PostStart,成员都预记了"刚测过",瞬间就完)过去,别和测试要数的那几轮叠在一起。
+func settle(t *testing.T, d *Daemon, groups ...string) {
+	t.Helper()
+	time.Sleep(100 * time.Millisecond)
+	deadline := time.Now().Add(5 * time.Second)
+	for _, g := range groups {
+		for {
+			busy, known := d.core.GroupBusy(g)
+			if !known || !busy {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("测速组 %s 一直在测", g)
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+}
+
 // waitAccepted 等假节点服务器收到第 n 条连接(那一轮测速确实开始测它了)。
 func waitAccepted(t *testing.T, accepted *atomic.Int32, n int32) {
 	t.Helper()
@@ -69,8 +102,7 @@ func TestRecoverInGroupWaitsForRoundInFlight(t *testing.T) {
 	startCore(t, d, `{"type":"selector","tag":"proxy","outbounds":["auto","G","dead","live","other"],"default":"G"},`+
 		urltestOut("auto", `"dead","live","other"`, url)+","+urltestOut("G", `"dead","live"`, url)+","+
 		`{"type":"socks","tag":"dead","server":"127.0.0.1","server_port":`+port+`},{"type":"direct","tag":"live"},{"type":"direct","tag":"other"}`)
-	go func() { _, _ = d.core.GroupTest(context.Background(), "G") }() // 定时测速正好在测 G
-	waitAccepted(t, accepted, 1)
+	startRound(t, d, "G", accepted) // 定时测速正好在测 G
 	if !d.recoverRoute(context.Background()) {
 		t.Fatal("组里有通的那台:应当在组里自救成功")
 	}
@@ -97,6 +129,7 @@ func TestRecoverDeadGroupTestedOnce(t *testing.T) {
 		urltestOut("auto", `"other"`, url)+","+urltestOut("G", `"dead1","dead2"`, url)+","+
 		`{"type":"socks","tag":"dead1","server":"127.0.0.1","server_port":`+port+`},`+
 		`{"type":"socks","tag":"dead2","server":"127.0.0.1","server_port":`+port+`},{"type":"direct","tag":"other"}`)
+	settle(t, d, "G", "auto")
 	if n := accepted.Load(); n != 0 {
 		t.Fatalf("前提:启动那一轮不该测这两台: %d", n)
 	}
@@ -123,8 +156,7 @@ func TestRecoverYieldsToUserSelection(t *testing.T) {
 		urltestOut("auto", `"dead","live","other"`, url)+","+urltestOut("G", `"dead","live"`, url)+","+
 		`{"type":"socks","tag":"dead","server":"127.0.0.1","server_port":`+port+`},{"type":"direct","tag":"live"},`+
 		`{"type":"direct","tag":"other"},{"type":"direct","tag":"us"}`)
-	go func() { _, _ = d.core.GroupTest(context.Background(), "G") }()
-	waitAccepted(t, accepted, 1)
+	startRound(t, d, "G", accepted)
 	done := make(chan bool, 1)
 	go func() { done <- d.recoverRoute(context.Background()) }()
 	time.Sleep(300 * time.Millisecond) // 自救已经在等这一组测完
