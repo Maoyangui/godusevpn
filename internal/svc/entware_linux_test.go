@@ -231,15 +231,28 @@ func (r *entwareRig) caller(sub, action string, env ...string) (code int, out st
 }
 
 // run 测试进程自己跑一遍脚本:调用者不叫这个名字,和 cru 的看门狗、开机时 rc.unslung 调它一样。
-func (r *entwareRig) run(action string) (string, error) {
+// args 是动作和后面的参数(rc.unslung 调的时候第二项是它自己的 CALLER)。
+func (r *entwareRig) run(args ...string) (string, error) {
 	sh := "sh"
 	if r.busybox {
 		sh = filepath.Join(r.bin, "sh")
 	}
-	c := exec.Command(sh, r.script, action)
+	c := exec.Command(sh, append([]string{r.script}, args...)...)
 	c.Env = r.env
 	b, err := c.CombinedOutput()
 	return string(b), err
+}
+
+// exitCode 跑完的退出码:没出错是 0,出错取 ExitError 的;根本没跑起来给 -1。
+func exitCode(err error) int {
+	var ee *exec.ExitError
+	switch {
+	case err == nil:
+		return 0
+	case errors.As(err, &ee):
+		return ee.ExitCode()
+	}
+	return -1
 }
 
 // startDaemon 测试自己起一个守护进程("名字 run"),等它登记好;返回进程号和等它结束的通道(收尸在这里做)。
@@ -376,8 +389,8 @@ func TestEntwareStopSparesCaller(t *testing.T) {
 // 梅林(Entware)上 godusevpn install / start 调启动脚本起服务,不能把正在调它的自己当成"已经在跑":以前脚本的 start
 // 交给 rc.func,它按名字 pidof godusevpn,调用者也叫这个名字 —— 装完服务没起来,梅林要等看门狗一分钟后才拉,
 // 没有 cru 的 Entware 要等重启。真起几个同名进程跑一遍脚本:install 调 start 返回时守护进程已经在跑;服务在跑时
-// 再 start 什么都不动;自启关着照 rc.func 返回 8;程序不在时等满 10 秒报失败;最后用以前的做法(交给 rc.func)对照,
-// 确认替身 rc.func 确实会把调用者当成服务、一个都不拉。
+// 再 start 什么都不动;程序不在时等满 10 秒报失败;最后用以前的做法(交给 rc.func)对照,确认替身 rc.func 确实会把调用者
+// 当成服务、一个都不拉。程序起服务调的是脚本的 manual-start(startAction),开机自启的开关见 TestEntwareAutostartOnlyGatesBoot。
 func TestEntwareStartFromCaller(t *testing.T) {
 	eachToolset(t, func(t *testing.T, busybox bool) {
 		r := newEntwareRig(t, "gvstrt", busybox)
@@ -385,7 +398,7 @@ func TestEntwareStartFromCaller(t *testing.T) {
 		// 1. godusevpn install 调 start(之前用户 stop 过,留着标记):返回时守护进程已经起来了,只有一个;
 		//    标记去掉、看门狗定时挂上、和 rc.func 一样往系统日志记一笔;不经 rc.func
 		r.mark()
-		code, out, alive := r.caller("install", "start")
+		code, out, alive := r.caller("install", startAction(initEntware))
 		if !alive || code != 0 {
 			t.Fatalf("调脚本 start 的调用者应活着拿到退出码 0: alive=%v code=%d\n%s", alive, code, out)
 		}
@@ -400,7 +413,7 @@ func TestEntwareStartFromCaller(t *testing.T) {
 		if got := r.log("cru.log"); got != r.cruLine() {
 			t.Fatalf("start 要挂上看门狗定时: %q", got)
 		}
-		if got := r.log("logger.log"); !busybox && got != "Started "+r.name+" from start." { // BusyBox 的 sh 直接用自己的 logger,记进系统日志
+		if got := r.log("logger.log"); !busybox && got != "Started "+r.name+" from "+startAction(initEntware)+"." { // BusyBox 的 sh 直接用自己的 logger,记进系统日志
 			t.Fatalf("起来了要和 rc.func 一样记一笔: %q", got)
 		}
 		if got := r.log("rc.log"); got != "" {
@@ -409,7 +422,7 @@ func TestEntwareStartFromCaller(t *testing.T) {
 
 		// 2. 服务在跑时再 start(godusevpn start、重装再 install):什么都不起,照样 0
 		r.clearLogs()
-		code, out, alive = r.caller("start", "start")
+		code, out, alive = r.caller("start", startAction(initEntware))
 		if !alive || code != 0 || !strings.Contains(out, "already running") {
 			t.Fatalf("服务在跑时 start 应直接成功: alive=%v code=%d\n%s", alive, code, out)
 		}
@@ -417,19 +430,11 @@ func TestEntwareStartFromCaller(t *testing.T) {
 			t.Fatalf("服务在跑时 start 不该再起一个: %v(原来 %v)", got, first)
 		}
 
-		// 3. 开机自启关着:和 rc.func 一样返回 8、不起
+		// 3. 停掉(最后的对照组要从没在跑开始)
 		if out, err := r.run("stop"); err != nil {
 			t.Fatalf("stop: %v\n%s", err, out)
 		}
 		waitFor(t, "守护进程停掉", func() bool { return len(r.alive()) == 0 })
-		r.render(false)
-		if code, out, alive := r.caller("start", "start"); !alive || code != 8 {
-			t.Fatalf("自启关着时 start 应和 rc.func 一样返回 8: alive=%v code=%d\n%s", alive, code, out)
-		}
-		if got := r.settled(); len(got) != 0 {
-			t.Fatalf("自启关着时不该起: %v", got)
-		}
-		r.render(true)
 
 		// 4. 程序不在(链接丢了之类):等满 10 秒报失败,退出码 255,也记一笔;看门狗下一分钟再试
 		r.clearLogs()
@@ -467,7 +472,8 @@ func TestEntwareStartFromCaller(t *testing.T) {
 }
 
 // 梅林(Entware)的看门狗:真跑一遍脚本。起服务时挂上定时、去掉"用户停了"的标记;stop 留标记;定时看到标记、
-// 或服务在跑、或自启关着就不拉,否则(崩了)拉起来。起停都不交给 rc.func(它按名字认进程,见上面两条)。
+// 或服务在跑就不拉,否则(崩了)拉起来 —— 开机自启关着也拉(在跑就是用户起的,和 systemd / procd 一样)。
+// 起停都不交给 rc.func(它按名字认进程,见上面两条)。
 func TestEntwareWatchdog(t *testing.T) {
 	eachToolset(t, func(t *testing.T, busybox bool) {
 		r := newEntwareRig(t, "gvwdog", busybox)
@@ -523,14 +529,92 @@ func TestEntwareWatchdog(t *testing.T) {
 		}
 		waitFor(t, "restart 拉起守护进程", func() bool { return len(r.alive()) == 1 })
 
-		// 开机自启关着:崩了定时也不拉
+		// 开机自启关着(服务在跑时关的):崩了定时照样拉 —— 那个开关只管开机,systemd / procd 关了自启也照样重拉
 		cur := r.alive()
 		r.render(false)
 		_ = syscall.Kill(cur[0], syscall.SIGKILL)
 		waitFor(t, "守护进程没了", func() bool { return len(r.alive()) == 0 })
 		run("watchdog")
+		waitFor(t, "开机自启关着时看门狗也拉起新的守护进程", func() bool { return len(r.alive()) == 1 })
+	})
+}
+
+// 梅林(Entware)的开机自启开关只管开机,和 systemd / procd 一样:rc.unslung 开机时调脚本的 start,自启关着就照 rc.func
+// 返回 8、不起,标记和看门狗定时也不动(开机没起,一分钟后看门狗也不会替它起);godusevpn start / install 调的是
+// manual-start,不看开关;面板升级后的重启(脚本的 restart)照样重启正在跑的,没在跑的不起;看门狗也不看开关,手动起的
+// 崩了照样拉。以前程序调的也是 start:自启关着时手动起不来(返回 8),面板升级的 restart 停了旧的、新的不起,服务一直停着。
+func TestEntwareAutostartOnlyGatesBoot(t *testing.T) {
+	eachToolset(t, func(t *testing.T, busybox bool) {
+		r := newEntwareRig(t, "gvboot", busybox)
+		r.render(false)
+		r.mark() // 关机时 rc.unslung stop 留下的
+
+		// 1. 开机:rc.unslung start(第二项是它自己的 CALLER)。不起、照 rc.func 返回 8;标记还在、不挂看门狗定时、不交给 rc.func
+		out, err := r.run("start", "/jffs/scripts/post-mount")
+		if code := exitCode(err); code != 8 {
+			t.Fatalf("开机自启关着时 rc.unslung start 应照 rc.func 返回 8,得 %d\n%s", code, out)
+		}
 		if got := r.settled(); len(got) != 0 {
-			t.Fatalf("开机自启关着时定时不该拉: %v", got)
+			t.Fatalf("开机自启关着时开机不该起: %v", got)
+		}
+		if !r.marked() || r.log("cru.log") != "" || r.log("rc.log") != "" {
+			t.Errorf("开机没起就什么都不动(不然看门狗一分钟后替它起):标记=%v cru=%q rc.func=%q", r.marked(), r.log("cru.log"), r.log("rc.log"))
+		}
+
+		// 2. rc.unslung restart(没在跑):同样不起、返回 8,什么都不动
+		r.clearLogs()
+		out, err = r.run("restart")
+		if code := exitCode(err); code != 8 || len(r.settled()) != 0 {
+			t.Fatalf("自启关着、没在跑时 restart 不该把它起来: code=%d 守护进程=%v\n%s", code, r.alive(), out)
+		}
+		if !r.marked() || r.log("cru.log") != "" {
+			t.Errorf("restart 没起就什么都不动:标记=%v cru=%q", r.marked(), r.log("cru.log"))
+		}
+
+		// 3. godusevpn start(程序调的动作,同名的调用者):照样起来、只有一个;去掉标记、挂上看门狗定时
+		r.clearLogs()
+		code, out, alive := r.caller("start", startAction(initEntware))
+		if !alive || code != 0 {
+			t.Fatalf("开机自启关着时 godusevpn start 也应起来(开关只管开机): alive=%v code=%d\n%s", alive, code, out)
+		}
+		if ds := entwareDaemonsByScan(r.name); len(ds) != 1 {
+			t.Fatalf("start 返回时守护进程就应该在跑了(恰好一个),得 %v\n%s", ds, out)
+		}
+		waitFor(t, "守护进程登记进程号", func() bool { return len(r.alive()) == 1 })
+		if r.marked() || r.log("cru.log") != r.cruLine() {
+			t.Fatalf("手动起了要去掉标记、挂上看门狗定时: 标记=%v cru=%q", r.marked(), r.log("cru.log"))
+		}
+		first := r.alive()
+
+		// 4. 崩了:看门狗照样拉起来(和 systemd 的 Restart=on-failure、procd 的 respawn 一样不看开机自启)
+		_ = syscall.Kill(first[0], syscall.SIGKILL)
+		waitFor(t, "守护进程没了", func() bool { return len(r.alive()) == 0 })
+		if out, err := r.run("watchdog"); err != nil {
+			t.Fatalf("watchdog: %v\n%s", err, out)
+		}
+		waitFor(t, "看门狗拉起新的守护进程", func() bool { return len(r.alive()) == 1 })
+		second := r.alive()
+
+		// 5. 面板升级后的重启(Restart 交给脚本的 restart;rc.unslung restart 也走这条):停旧的、起新的,只有一个
+		out, err = r.run("restart")
+		if err != nil {
+			t.Fatalf("开机自启关着时 restart 也应重启正在跑的: %v\n%s", err, out)
+		}
+		waitFor(t, "restart 停了旧的、起了新的", func() bool { a := r.alive(); return len(a) == 1 && a[0] != second[0] })
+		if got := r.settled(); len(got) != 1 || len(entwareDaemonsByScan(r.name)) != 1 {
+			t.Fatalf("restart 之后应只有一个守护进程: %v", got)
+		}
+
+		// 6. godusevpn stop 之后:开机的 start 照旧不起;再 godusevpn start 又起来
+		if code, out, alive := r.caller("stop", "stop"); !alive || code != 0 {
+			t.Fatalf("stop: alive=%v code=%d\n%s", alive, code, out)
+		}
+		waitFor(t, "守护进程停掉", func() bool { return len(r.alive()) == 0 })
+		if out, err := r.run("start"); exitCode(err) != 8 || len(r.settled()) != 0 {
+			t.Fatalf("开机自启关着时 start 照旧不起: %v %v\n%s", err, r.alive(), out)
+		}
+		if code, out, alive := r.caller("start", startAction(initEntware)); !alive || code != 0 || len(entwareDaemonsByScan(r.name)) != 1 {
+			t.Fatalf("godusevpn start 又能起来: alive=%v code=%d\n%s", alive, code, out)
 		}
 	})
 }

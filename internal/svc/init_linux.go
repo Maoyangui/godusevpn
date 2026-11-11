@@ -233,9 +233,14 @@ PREARGS=""
 DESC=$PROCS
 PATH=/opt/bin:/opt/sbin:/sbin:/bin:/usr/sbin:/usr/bin
 
-# 梅林没有 systemd / procd 那样的崩溃重拉:start 时挂一条每分钟的 cru 定时,服务没在跑就拉起来。
-# 用户主动 stop 留个标记,定时看到它就不拉;再 start(开机也是 start)时去掉。
+# 梅林没有 systemd / procd 那样的崩溃重拉:起服务时挂一条每分钟的 cru 定时,服务没在跑就拉起来。
+# 用户主动 stop 留个标记,定时看到它就不拉;再起服务(开机也算)时去掉。
 STOPPED=/opt/var/lib/godusevpn/stopped
+
+# 开机自启的开关(ENABLED)只管开机,和 systemd / procd 一样:rc.unslung 开机时调的是 start,自启关着就照 rc.func
+# 返回 8、不起,标记和定时也不动(手动跑 rc.unslung start、本脚本的 start 也一样)。godusevpn start / install 起服务调的是
+# manual-start,不看开关;restart(面板升级后的重启、rc.unslung restart)自启关着时照样重启正在跑的,没在跑的不起、返回 8。
+# 看门狗也不看开关:定时是起了服务才挂的(开机没起就没有),手动起来的崩了照样拉,和 systemd / procd 关了自启照样重拉一样。
 
 # 起停和 check 都不交给 rc.func:它按名字 pidof / killall $PROCS,而 godusevpn install / start / stop / uninstall 这些
 # 正在调本脚本的命令也叫这个名字 —— start 把调用者当成"已经在跑"而不拉(装完服务没起来,梅林要等看门狗一分钟后拉,
@@ -274,10 +279,9 @@ halt() {
 	done
 	echo " done."
 }
-# launch 照 rc.func 的 start:自启关着不起(和 rc.func 一样返回 8);守护进程已经在跑就不再起(重复 start 没事);
-# 否则在后台拉起,等它出现,最多 10 秒,出现了才算起来了。
+# launch 照 rc.func 的 start:守护进程已经在跑就不再起(重复 start 没事);否则在后台拉起,等它出现,最多 10 秒,
+# 出现了才算起来了。开机自启的开关不在这里看(只有开机的 start 看,见上)。
 launch() {
-	[ "$ENABLED" = yes ] || return 8
 	echo " Starting $DESC..."
 	if [ -n "$(daemons)" ]; then
 		echo " $DESC is already running."
@@ -300,13 +304,16 @@ launch() {
 
 case "$1" in
 watchdog)
-	[ "$ENABLED" = yes ] || exit 0
 	[ -f "$STOPPED" ] && exit 0
 	[ -n "$(daemons)" ] && exit 0
 	launch watchdog
 	exit $?
 	;;
-start | restart)
+start | manual-start | restart)
+	case "$1" in
+	start) [ "$ENABLED" = yes ] || exit 8 ;;
+	restart) [ "$ENABLED" = yes ] || [ -n "$(daemons)" ] || exit 8 ;;
+	esac
 	if [ "$1" = restart ]; then
 		halt TERM || exit $?
 	fi
@@ -337,6 +344,18 @@ esac
 
 // entwareWatchdog 看门狗定时的 cru 编号与命令(和脚本里那行一致)。
 var entwareWatchdog = []string{"a", name, "* * * * * /opt/etc/init.d/S99" + name + " watchdog"}
+
+// entwareManualStart 程序(godusevpn start / install)起服务时调 Entware 脚本的动作。脚本的 start 留给开机时的 rc.unslung,
+// 照 rc.func 看开机自启的开关,关着就不起、返回 8;程序起服务和 systemd / procd 上一样不看开关,所以用脚本自己的这个动作。
+const entwareManualStart = "manual-start"
+
+// startAction 程序起服务时交给初始化系统的动作。
+func startAction(k initKind) string {
+	if k == initEntware {
+		return entwareManualStart
+	}
+	return "start"
+}
 
 func unitPath() string {
 	switch detect() {
@@ -447,7 +466,9 @@ func Refresh() error {
 		return err
 	}
 	if _, err := exec.LookPath("cru"); err != nil || !enabled {
-		return nil // 不是梅林(没有 cru),或者自启关着
+		// 不是梅林(没有 cru),或者自启关着:这时在跑的是用户手动起的,脚本起它的时候已经挂上了;
+		// 前台跑的(godusevpn run)不挂,免得停了之后被看门狗拉到后台去
+		return nil
 	}
 	_, err = sh("cru", entwareWatchdog...)
 	return err
@@ -534,13 +555,13 @@ func ctl(action string) error {
 	return errors.New("没识别出初始化系统")
 }
 
-// Start 让初始化系统起服务;已经在跑就什么都不做。
+// Start 让初始化系统起服务;已经在跑就什么都不做。开机自启关着也照样起(那个开关只管开机)。
 func Start() error {
 	if err := needRoot(); err != nil {
 		return err
 	}
 	ensureCurrentEntwareScript()
-	return ctl("start")
+	return ctl(startAction(detect()))
 }
 
 // ensureCurrentEntwareScript 起停之前把已装的 Entware 脚本换成当前模板(开机自启的开关照抄)。手工换了程序、或面板升级后
@@ -572,7 +593,8 @@ func Restart() error {
 		return err
 	}
 	// procd / Entware 的 restart 是脚本里的 stop 再 start:脱离本进程跑(自成一个会话),本进程被停掉它也跑得完。
-	// Entware 脚本的 stop 只按进程号停 "godusevpn run" 那个守护进程(就是发起重启的本进程),脚本进程不受影响。
+	// Entware 脚本的 stop 只按进程号停 "godusevpn run" 那个守护进程(就是发起重启的本进程),脚本进程不受影响;
+	// 开机自启关着时脚本的 restart 照样重启正在跑的(就是本进程)。
 	c := exec.Command(argv[0], argv[1:]...)
 	c.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	if err := c.Start(); err != nil {

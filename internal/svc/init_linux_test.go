@@ -25,6 +25,19 @@ func TestRestartHandsOffToInitSystem(t *testing.T) {
 	}
 }
 
+// 程序起服务交给初始化系统的动作:Entware 用脚本自己的 manual-start(脚本的 start 留给开机时的 rc.unslung,它看开机自启
+// 的开关,关着就不起),别的照旧是 start(systemctl start / procd 的 start 本来就不看自启)。
+func TestStartAction(t *testing.T) {
+	if got := startAction(initEntware); got != "manual-start" || !strings.Contains(entwareScript, "start | manual-start | restart") {
+		t.Fatalf("Entware 起服务要用脚本里认的 manual-start,得 %q", got)
+	}
+	for _, k := range []initKind{initSystemd, initProcd} {
+		if got := startAction(k); got != "start" {
+			t.Fatalf("systemd / procd 起服务照旧是 start,得 %q", got)
+		}
+	}
+}
+
 // 面板自更新升级上来的旧脚本:按当前模板重写,开机自启的开关照抄。
 func TestEntwareScriptRefreshKeepsEnabled(t *testing.T) {
 	old := "#!/bin/sh\nENABLED=no\nPROCS=godusevpn\n. /opt/etc/init.d/rc.func\n"
