@@ -1,5 +1,10 @@
 /dist/
 *.exe
+# 在仓库根目录 go build 出来的可执行文件(macOS / Linux 上不带 .exe)
+/godusevpn
+/godusevpn-daemon
+/godusevpn-cli
+/godusevpn-svc
 *.log
 *.db
 installer/deps/
