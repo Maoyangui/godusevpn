@@ -236,9 +236,11 @@ PATH=/opt/bin:/opt/sbin:/sbin:/bin:/usr/sbin:/usr/bin
 # 用户主动 stop 留个标记,定时看到它就不拉;再 start(开机也是 start)时去掉。
 STOPPED=/opt/var/lib/godusevpn/stopped
 
-# stop / restart 不交给 rc.func:它按名字 killall $PROCS,而 godusevpn uninstall / stop 这些正在调本脚本的命令
-# 也叫这个名字,会被一起杀掉 —— 卸载做到一半自己没了,闸、自启脚本、看门狗定时全留着。
-# 这里只停守护进程(rc.func 拉起来的 "$PROCS $ARGS",命令行第二项是 $ARGS),按进程号发信号,调用者一个都不碰。
+# 起停都不交给 rc.func:它按名字 pidof / killall $PROCS,而 godusevpn install / start / stop / uninstall 这些正在调
+# 本脚本的命令也叫这个名字 —— start 把调用者当成"已经在跑"而不拉(装完服务没起来,梅林要等看门狗一分钟后拉,
+# 没有 cru 的要等重启);stop 把调用者一起杀掉(卸载做到一半自己没了,闸、自启脚本、看门狗定时全留着)。
+# 这里只认守护进程(拉起来的 "$PROCS $ARGS",命令行第二项是 $ARGS),按进程号发信号,调用者一个都不碰。
+CALLER=$2
 arg2() { { tr '\0' '\n' < /proc/$1/cmdline; } 2>/dev/null | sed -n 2p; }
 daemons() {
 	for p in $(pidof $PROCS); do
@@ -246,7 +248,7 @@ daemons() {
 	done
 }
 # gone 停掉的这些进程都没了:/proc 里没有了,或者进程号已经给了别的程序。退出了、还没收尸的(僵尸)不算 ——
-# 有的 pidof 把僵尸也当成在跑,restart 紧接着交给 rc.func 的 start 会以为"已经在跑"而不拉。
+# 有的 pidof 把僵尸也当成在跑,停完紧接着只按名字查的(用户自己的脚本之类)会以为服务还在。
 gone() {
 	for p in "$@"; do
 		[ -d /proc/$p ] || continue
@@ -270,21 +272,48 @@ halt() {
 	done
 	echo " done."
 }
+# launch 照 rc.func 的 start:自启关着不起(和 rc.func 一样返回 8);守护进程已经在跑就不再起(重复 start 没事);
+# 否则在后台拉起,等它出现,最多 10 秒,出现了才算起来了。
+launch() {
+	[ "$ENABLED" = yes ] || return 8
+	echo " Starting $DESC..."
+	if [ -n "$(daemons)" ]; then
+		echo " $DESC is already running."
+		return 0
+	fi
+	$PREARGS $PROCS $ARGS >/dev/null 2>&1 &
+	i=0
+	until [ -n "$(daemons)" ]; do
+		if [ $i -ge 10 ]; then
+			echo " $DESC failed to start."
+			logger "Failed to start $DESC from ${CALLER:-$1}." 2>/dev/null
+			return 255
+		fi
+		sleep 1
+		i=$((i + 1))
+	done
+	logger "Started $DESC from ${CALLER:-$1}." 2>/dev/null
+	echo " done."
+}
 
 case "$1" in
 watchdog)
 	[ "$ENABLED" = yes ] || exit 0
 	[ -f "$STOPPED" ] && exit 0
-	pidof $PROCS >/dev/null && exit 0
-	set -- start
+	[ -n "$(daemons)" ] && exit 0
+	launch watchdog
+	exit $?
 	;;
 start | restart)
-	rm -f "$STOPPED"
-	command -v cru >/dev/null 2>&1 && cru a $PROCS "* * * * * /opt/etc/init.d/S99godusevpn watchdog"
 	if [ "$1" = restart ]; then
 		halt TERM || exit $?
-		set -- start "$2"
 	fi
+	launch "$1"
+	rc=$?
+	# 去标记、挂定时放在拉起之后:先挂上的话赶上整分钟那一下,看门狗和这里会各拉起一个。没拉起来也照样挂,看门狗每分钟再试
+	rm -f "$STOPPED"
+	command -v cru >/dev/null 2>&1 && cru a $PROCS "* * * * * /opt/etc/init.d/S99godusevpn watchdog"
+	exit $rc
 	;;
 stop | kill)
 	mkdir -p "${STOPPED%/*}" && touch "$STOPPED"
@@ -495,7 +524,24 @@ func ctl(action string) error {
 	return errors.New("没识别出初始化系统")
 }
 
-func Start() error { return ctl("start") }
+// Start 让初始化系统起服务;已经在跑就什么都不做。
+func Start() error {
+	if err := needRoot(); err != nil {
+		return err
+	}
+	ensureCurrentEntwareScript()
+	return ctl("start")
+}
+
+// ensureCurrentEntwareScript 起停之前把已装的 Entware 脚本换成当前模板(开机自启的开关照抄)。手工换了程序、或面板升级后
+// 守护进程没起来时,磁盘上还是旧版本写的脚本:它的起停交给 rc.func,按名字 pidof / killall godusevpn ——
+// 正在调它的本进程(godusevpn start / install / stop / uninstall)在 start 时被当成"已经在跑"而不拉,在 stop 时被一起杀掉。
+// 换不了也照样起停,结果和以前一样。
+func ensureCurrentEntwareScript() {
+	if detect() == initEntware && exists(unitPath()) {
+		_, _ = refreshEntwareScript(unitPath())
+	}
+}
 
 // Restart 让初始化系统重启本服务,交出去就返回。调用方可能正是这个服务自己(应用内升级换完文件):
 // 在本进程里先 Stop 再 Start,Stop 就把自己杀了,Start 永远轮不到,服务一直停着。
@@ -549,11 +595,7 @@ func Stop() error {
 	if unitPath() == "" || !exists(unitPath()) {
 		return nil
 	}
-	if detect() == initEntware {
-		// 已装的可能还是旧版本写的脚本:stop 交给 rc.func 按名字 killall godusevpn,正在调它的本进程
-		// (godusevpn uninstall / stop)会被一起杀掉。先换成当前模板再停;换不了也照样停,结果和以前一样。
-		_, _ = refreshEntwareScript(unitPath())
-	}
+	ensureCurrentEntwareScript()
 	return ctl("stop")
 }
 

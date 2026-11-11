@@ -2,7 +2,6 @@ package svc
 
 import (
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -26,82 +25,6 @@ func TestRestartHandsOffToInitSystem(t *testing.T) {
 	}
 }
 
-// 梅林(Entware)的看门狗:真跑一遍脚本(rc.func / pidof / cru 换成临时目录里的假货)。
-// 起服务时挂上定时、去掉"用户停了"的标记;stop 留标记(停进程由脚本自己按进程号做,不交给 rc.func,
-// 见 TestEntwareStopSparesCaller);定时看到标记、或服务在跑、或自启关着就不拉,否则拉起来。
-func TestEntwareWatchdog(t *testing.T) {
-	sh, err := exec.LookPath("sh")
-	if err != nil {
-		t.Skip("没有 sh")
-	}
-	dir := t.TempDir()
-	bin := filepath.Join(dir, "bin")
-	if err := os.MkdirAll(bin, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	write := func(p, s string) {
-		t.Helper()
-		if err := os.WriteFile(p, []byte(s), 0o755); err != nil {
-			t.Fatal(err)
-		}
-	}
-	write(filepath.Join(bin, "pidof"), "#!/bin/sh\n[ -f "+filepath.Join(dir, "running")+" ]\n")
-	write(filepath.Join(bin, "cru"), "#!/bin/sh\necho \"$*\" >> "+filepath.Join(dir, "cru.log")+"\n")
-	write(filepath.Join(dir, "rc.func"), "echo \"$1\" >> "+filepath.Join(dir, "rc.log")+"\n")
-	stopped := filepath.Join(dir, "state", "stopped")
-	render := func(enabled bool) string {
-		s, _ := entwareScriptLike(map[bool]string{true: "ENABLED=yes", false: "ENABLED=no"}[enabled])
-		s = strings.Replace(s, "/opt/etc/init.d/rc.func", filepath.Join(dir, "rc.func"), 1)
-		s = strings.Replace(s, "/opt/var/lib/godusevpn/stopped", stopped, 1)
-		s = strings.Replace(s, "PATH=/opt/bin:", "PATH="+bin+":/opt/bin:", 1)
-		p := filepath.Join(dir, "S99godusevpn")
-		write(p, s)
-		return p
-	}
-	run := func(script, action string) (rc, cru string) {
-		t.Helper()
-		_ = os.Remove(filepath.Join(dir, "rc.log"))
-		_ = os.Remove(filepath.Join(dir, "cru.log"))
-		if out, err := exec.Command(sh, script, action).CombinedOutput(); err != nil {
-			t.Fatalf("%s: %v\n%s", action, err, out)
-		}
-		b1, _ := os.ReadFile(filepath.Join(dir, "rc.log"))
-		b2, _ := os.ReadFile(filepath.Join(dir, "cru.log"))
-		return strings.TrimSpace(string(b1)), strings.TrimSpace(string(b2))
-	}
-	marked := func() bool { _, err := os.Stat(stopped); return err == nil }
-	on := render(true)
-
-	if rc, _ := run(on, "stop"); rc != "" || !marked() {
-		t.Fatalf("stop 留下标记,停进程不交给 rc.func(它按名字 killall,会连调用者一起杀): rc=%q 标记=%v", rc, marked())
-	}
-	if rc, _ := run(on, "watchdog"); rc != "" {
-		t.Fatalf("用户停了的服务定时不该拉起来,rc.func 收到 %q", rc)
-	}
-	rc, cru := run(on, "start")
-	if rc != "start" || marked() || cru != "a godusevpn * * * * * /opt/etc/init.d/S99godusevpn watchdog" {
-		t.Fatalf("start 要去掉标记、挂上定时: rc=%q 标记=%v cru=%q", rc, marked(), cru)
-	}
-	if strings.Join(entwareWatchdog, " ") != cru {
-		t.Fatalf("守护进程补挂的定时要和脚本里的一致: %q ≠ %q", strings.Join(entwareWatchdog, " "), cru)
-	}
-	write(filepath.Join(dir, "running"), "")
-	if rc, _ := run(on, "watchdog"); rc != "" {
-		t.Fatalf("服务在跑时定时不该再拉,rc.func 收到 %q", rc)
-	}
-	_ = os.Remove(filepath.Join(dir, "running"))
-	if rc, _ := run(on, "watchdog"); rc != "start" {
-		t.Fatalf("服务没在跑、也不是用户停的(崩了):定时要拉起来,rc.func 收到 %q", rc)
-	}
-	run(on, "stop")
-	if rc, _ := run(on, "restart"); rc != "start" || marked() {
-		t.Fatalf("restart(面板升级走这条)要去掉标记,脚本自己停了守护进程后交给 rc.func 的是 start: rc=%q 标记=%v", rc, marked())
-	}
-	if rc, _ := run(render(false), "watchdog"); rc != "" {
-		t.Fatalf("开机自启关着时定时不该拉,rc.func 收到 %q", rc)
-	}
-}
-
 // 面板自更新升级上来的旧脚本:按当前模板重写,开机自启的开关照抄。
 func TestEntwareScriptRefreshKeepsEnabled(t *testing.T) {
 	old := "#!/bin/sh\nENABLED=no\nPROCS=godusevpn\n. /opt/etc/init.d/rc.func\n"
@@ -114,8 +37,8 @@ func TestEntwareScriptRefreshKeepsEnabled(t *testing.T) {
 	}
 }
 
-// 停服务前先把旧版本写的脚本换成当前模板(旧脚本的 stop 交给 rc.func 按名字 killall,会连调 stop 的本进程一起杀),
-// 开机自启的开关照抄;已经是当前模板的不动。
+// 起停服务前先把旧版本写的脚本换成当前模板(旧脚本的起停交给 rc.func 按名字 pidof / killall:start 把调它的本进程
+// 当成"已经在跑"而不拉,stop 把本进程一起杀),开机自启的开关照抄;已经是当前模板的不动。
 func TestRefreshEntwareScriptBeforeStop(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "S99godusevpn")
 	old := "#!/bin/sh\nENABLED=no\nPROCS=godusevpn\nARGS=\"run\"\ncase \"$1\" in\nstop | kill)\n\ttouch /opt/var/lib/godusevpn/stopped\n\t;;\nesac\n. /opt/etc/init.d/rc.func\n"
@@ -125,7 +48,7 @@ func TestRefreshEntwareScriptBeforeStop(t *testing.T) {
 	on, err := refreshEntwareScript(p)
 	b, _ := os.ReadFile(p)
 	want, _ := entwareScriptLike(old)
-	if err != nil || on || string(b) != want || !strings.Contains(string(b), "halt TERM") {
+	if err != nil || on || string(b) != want || !strings.Contains(string(b), "halt TERM") || !strings.Contains(string(b), "launch \"$1\"") {
 		t.Fatalf("旧脚本应换成当前模板、自启保持关着: on=%v err=%v\n%s", on, err, b)
 	}
 	if _, err := os.Stat(p + ".tmp"); !os.IsNotExist(err) {

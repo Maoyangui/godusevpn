@@ -9,6 +9,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -28,7 +30,7 @@ func TestMain(m *testing.M) {
 
 // fakeGodusevpn 冒充 godusevpn 的进程(把测试程序复制成那个名字来跑,进程名、argv[0] 都和真的一样):
 //   - run:守护进程。登记进程号(run.<pid>)后一直挂着,收到 TERM / KILL 就没了;
-//   - 别的子命令:像 godusevpn uninstall / stop 那样调启动脚本(sh $FAKE_SCRIPT $FAKE_ACTION),
+//   - 别的子命令:像 godusevpn install / start / uninstall / stop 那样调启动脚本(sh $FAKE_SCRIPT $FAKE_ACTION),
 //     跑完把退出码和输出写进 caller.out —— 自己被脚本杀了就写不出来。
 func fakeGodusevpn(dir string, args []string) int {
 	if len(args) > 0 && args[0] == "run" {
@@ -80,12 +82,31 @@ for PROC in $PROCS; do
 done
 `
 
-// 梅林(Entware)上 godusevpn uninstall / stop 调启动脚本停服务,不能把正在调它的自己也杀了:
-// 以前脚本的 stop 交给 rc.func,按名字 killall godusevpn,调用者也叫这个名字,卸载做到一半就没了。
-// 真起几个同名进程(把测试程序复制成一个独有的名字,不碰机器上别的进程)跑一遍脚本:
-// stop 只停 "名字 run" 那个守护进程、调用者活着拿到退出码 0;没在跑时也一样;kill 用 KILL;
-// restart 停掉旧的、经 rc.func 拉起新的;最后用以前的做法(交给 rc.func)对照,确认替身 rc.func 确实会连调用者一起杀。
-func TestEntwareStopSparesCaller(t *testing.T) {
+// busyboxApplets 梅林上脚本用到的这些都是 BusyBox 的;BusyBox 那一遍把它们换成测试机上的 busybox。
+var busyboxApplets = []string{"sh", "pidof", "tr", "sed", "kill", "sleep", "mkdir", "touch", "rm"}
+
+// eachToolset 用系统自带的 sh / pidof / tr / sed … 跑一遍,再换成 BusyBox 的跑一遍(梅林上就是这些;没装 busybox 就跳过那一遍)。
+func eachToolset(t *testing.T, f func(t *testing.T, busybox bool)) {
+	t.Run("系统工具", func(t *testing.T) { f(t, false) })
+	t.Run("BusyBox", func(t *testing.T) { f(t, true) })
+}
+
+// entwareRig 真跑 Entware 启动脚本的替身环境(都在一个临时目录里,不碰机器上别的进程和文件):
+//   - bin/<name>:测试程序复制成一个独有的名字冒充 godusevpn(守护进程是 "名字 run",调用者是 "名字 install" 之类)。
+//     名字 14 个字符:进程名最长 15,超了 pidof 认不全;
+//   - rc.func:照 Entware 的 rc.func 写的替身(fakeRCFunc),每回被调先在 rc.log 记一笔动作;
+//   - bin/cru、bin/logger:只记账的假货(cru.log、logger.log)。BusyBox 那一遍 sh 自己有 logger(applet 优先于 PATH),
+//     记进系统日志,logger.log 就没有了;
+//   - 启动脚本(S99godusevpn)里的程序名、rc.func、标记、PATH 都换到这里。
+type entwareRig struct {
+	t                                     *testing.T
+	busybox                               bool
+	name, dir, bin, fake, script, stopped string
+	env                                   []string
+}
+
+func newEntwareRig(t *testing.T, prefix string, busybox bool) *entwareRig {
+	t.Helper()
 	for _, tool := range []string{"sh", "pidof", "tr", "sed", "kill", "sleep"} {
 		if _, err := exec.LookPath(tool); err != nil {
 			t.Skipf("没有 %s", tool)
@@ -96,159 +117,435 @@ func TestEntwareStopSparesCaller(t *testing.T) {
 	}
 	var rnd [4]byte
 	_, _ = rand.Read(rnd[:])
-	procName := "gvfake" + hex.EncodeToString(rnd[:]) // 14 个字符:进程名最长 15,超了 pidof 认不全
 	dir := t.TempDir()
-	bin := filepath.Join(dir, "bin")
-	if err := os.MkdirAll(bin, 0o755); err != nil {
+	r := &entwareRig{t: t, busybox: busybox, name: prefix + hex.EncodeToString(rnd[:]), dir: dir, bin: filepath.Join(dir, "bin"),
+		script: filepath.Join(dir, "S99godusevpn"), stopped: filepath.Join(dir, "state", "stopped")}
+	if len(r.name) > 15 {
+		t.Fatalf("冒充的程序名 %q 超过 15 个字符,pidof 认不全", r.name)
+	}
+	if err := os.MkdirAll(r.bin, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	self, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
 	}
-	fake := filepath.Join(bin, procName)
-	copyFile(t, self, fake)
-	if err := os.WriteFile(filepath.Join(dir, "rc.func"), []byte(fakeRCFunc), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	stopped := filepath.Join(dir, "state", "stopped")
-	script := filepath.Join(dir, "S99godusevpn")
-	s := strings.Replace(entwareScript, "PROCS=godusevpn", "PROCS="+procName, 1)
-	s = strings.Replace(s, "/opt/etc/init.d/rc.func", filepath.Join(dir, "rc.func"), 1)
-	s = strings.Replace(s, "/opt/var/lib/godusevpn/stopped", stopped, 1)
-	s = strings.Replace(s, "PATH=/opt/bin:", "PATH="+bin+":/opt/bin:", 1)
-	if s == entwareScript || strings.Count(s, dir) != 3 {
-		t.Fatalf("脚本模板变了,测试里的替换要跟上:\n%s", s)
-	}
-	if err := os.WriteFile(script, []byte(s), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	env := append(os.Environ(), fakeEnv+"="+dir, "FAKE_SCRIPT="+script)
-	t.Cleanup(func() { // 冒充的守护进程一个都不留(只杀名字对得上、还活着的:进程号可能早被别的进程用了)
-		for _, pid := range runPIDs(dir) {
-			if fakeAlive(pid, procName) {
-				_ = syscall.Kill(pid, syscall.SIGKILL)
+	r.fake = filepath.Join(r.bin, r.name)
+	copyFile(t, self, r.fake)
+	r.write("rc.func", "printf '%s\\n' \"$1\" >> "+filepath.Join(dir, "rc.log")+"\n"+fakeRCFunc, 0o644)
+	r.write("bin/cru", "#!/bin/sh\necho \"$*\" >> "+filepath.Join(dir, "cru.log")+"\n", 0o755)
+	r.write("bin/logger", "#!/bin/sh\necho \"$*\" >> "+filepath.Join(dir, "logger.log")+"\n", 0o755)
+	r.env = append(os.Environ(), fakeEnv+"="+dir, "FAKE_SCRIPT="+r.script)
+	if busybox {
+		bb, err := exec.LookPath("busybox")
+		if err != nil {
+			t.Skip("没有 busybox")
+		}
+		for _, a := range busyboxApplets {
+			if err := os.Symlink(bb, filepath.Join(r.bin, a)); err != nil {
+				t.Fatal(err)
 			}
+		}
+		r.env = append(r.env, "PATH="+r.bin+":"+os.Getenv("PATH")) // 调用者跑的 sh 也用 BusyBox 的(后写的同名变量优先)
+	}
+	t.Cleanup(func() { // 冒充的守护进程一个都不留(只杀名字对得上、还活着的:进程号可能早被别的进程用了)
+		for _, pid := range r.alive() {
+			_ = syscall.Kill(pid, syscall.SIGKILL)
 		}
 	})
+	r.render(true)
+	return r
+}
 
-	startDaemon := func() (*exec.Cmd, chan error) {
-		t.Helper()
-		before := len(runPIDs(dir))
-		c := exec.Command(fake, "run")
-		c.Env = env
-		if err := c.Start(); err != nil {
-			t.Fatal(err)
-		}
-		done := make(chan error, 1)
-		go func() { done <- c.Wait() }()
-		waitFor(t, "守护进程登记进程号", func() bool { return len(runPIDs(dir)) > before })
-		return c, done
+func (r *entwareRig) write(rel, s string, mode os.FileMode) {
+	r.t.Helper()
+	if err := os.WriteFile(filepath.Join(r.dir, rel), []byte(s), mode); err != nil {
+		r.t.Fatal(err)
 	}
-	caller := func(action string) (code int, out string, alive bool) {
-		t.Helper()
-		_ = os.Remove(filepath.Join(dir, "caller.out"))
-		c := exec.Command(fake, "uninstall") // 和 godusevpn uninstall 一样:同一个名字,命令行第二项不是 run
-		c.Env = append(env, "FAKE_ACTION="+action)
-		if err := c.Start(); err != nil {
-			t.Fatal(err)
-		}
-		done := make(chan error, 1)
-		go func() { done <- c.Wait() }()
-		select {
-		case <-done:
-		case <-time.After(40 * time.Second):
-			_ = c.Process.Kill()
-			t.Fatalf("调用者跑 %s 超时", action)
-		}
-		b, err := os.ReadFile(filepath.Join(dir, "caller.out"))
-		if err != nil {
-			return 0, "", false // 被杀了,结果没写出来
-		}
-		first, rest, _ := strings.Cut(string(b), "\n")
-		code, _ = strconv.Atoi(first)
-		return code, rest, true
-	}
-	gone := func(done chan error, sig syscall.Signal) {
-		t.Helper()
-		select {
-		case err := <-done:
-			var ee *exec.ExitError
-			if !errors.As(err, &ee) {
-				t.Fatalf("守护进程应被信号结束: %v", err)
-			}
-			if ws, ok := ee.Sys().(syscall.WaitStatus); !ok || !ws.Signaled() || ws.Signal() != sig {
-				t.Fatalf("守护进程应被 %v 结束: %v", sig, err)
-			}
-		case <-time.After(20 * time.Second):
-			t.Fatal("守护进程没被停掉")
-		}
-	}
-	marked := func() bool { _, err := os.Stat(stopped); return err == nil }
+}
 
-	// 1. godusevpn uninstall / stop 调脚本 stop:守护进程(TERM)停了,调用者活着、退出码 0,留下"用户停了"的标记
-	_, done := startDaemon()
-	code, out, alive := caller("stop")
-	if !alive || code != 0 {
-		t.Fatalf("调脚本 stop 的调用者应活着拿到退出码 0: alive=%v code=%d\n%s", alive, code, out)
-	}
-	gone(done, syscall.SIGTERM)
-	if !marked() {
-		t.Fatal("stop 要留下标记,看门狗才不拉")
-	}
+// render 把启动脚本的当前模板(开机自启开 / 关)写成替身环境里的 S99godusevpn。
+func (r *entwareRig) render(enabled bool) {
+	r.t.Helper()
+	s, _ := entwareScriptLike(map[bool]string{true: "ENABLED=yes", false: "ENABLED=no"}[enabled])
+	r.write("S99godusevpn", r.localize(s), 0o755)
+}
 
-	// 2. 守护进程本来就没在跑(比如升级失败后来卸载):同样不碰调用者,直接成功
-	if code, out, alive := caller("stop"); !alive || code != 0 {
-		t.Fatalf("没在跑时 stop 也不该杀调用者: alive=%v code=%d\n%s", alive, code, out)
+// localize 脚本里的程序名、rc.func、标记、PATH 换到替身环境。
+func (r *entwareRig) localize(s string) string {
+	r.t.Helper()
+	orig := s
+	s = strings.Replace(s, "PROCS=godusevpn", "PROCS="+r.name, 1)
+	s = strings.Replace(s, "/opt/etc/init.d/rc.func", filepath.Join(r.dir, "rc.func"), 1)
+	s = strings.Replace(s, "/opt/var/lib/godusevpn/stopped", r.stopped, 1)
+	s = strings.Replace(s, "PATH=/opt/bin:", "PATH="+r.bin+":/opt/bin:", 1)
+	if s == orig || strings.Count(s, r.dir) != 3 || !strings.Contains(s, "PROCS="+r.name+"\n") {
+		r.t.Fatalf("脚本模板变了,测试里的替换要跟上:\n%s", s)
 	}
+	return s
+}
 
-	// 3. kill:用 KILL
-	_, done = startDaemon()
-	if code, out, alive := caller("kill"); !alive || code != 0 {
-		t.Fatalf("kill 也不该杀调用者: alive=%v code=%d\n%s", alive, code, out)
+// legacy 以前的做法:起停全交给 rc.func(和改之前的脚本落到 rc.func 的那一段一样),返回脚本路径。
+func (r *entwareRig) legacy() string {
+	r.write("legacy", "ENABLED=yes\nPROCS="+r.name+"\nARGS=run\n. "+filepath.Join(r.dir, "rc.func")+"\n", 0o644)
+	return filepath.Join(r.dir, "legacy")
+}
+
+func (r *entwareRig) envWith(kv ...string) []string {
+	return append(append([]string(nil), r.env...), kv...)
+}
+
+// caller 像 godusevpn <sub> 那样(同一个名字,命令行第二项不是 run)调启动脚本的 action;env 追加的环境变量(后写的优先)。
+// 返回退出码、输出,以及调用者是不是活着跑完了 —— 被脚本杀了就没有结果。
+func (r *entwareRig) caller(sub, action string, env ...string) (code int, out string, alive bool) {
+	r.t.Helper()
+	_ = os.Remove(filepath.Join(r.dir, "caller.out"))
+	c := exec.Command(r.fake, sub)
+	c.Env = r.envWith(append([]string{"FAKE_ACTION=" + action}, env...)...)
+	if err := c.Start(); err != nil {
+		r.t.Fatal(err)
 	}
-	gone(done, syscall.SIGKILL)
-
-	// 4. restart(面板升级经 Restart 走这条):停掉旧的、去掉标记、经 rc.func 拉起新的(新的不是本测试的子进程,按登记的进程号找)
-	_, done = startDaemon()
-	old := runPIDs(dir)
-	rs := exec.Command("sh", script, "restart")
-	rs.Env = env
-	rsOut, err := rs.CombinedOutput()
+	done := make(chan error, 1)
+	go func() { done <- c.Wait() }()
+	select {
+	case <-done:
+	case <-time.After(40 * time.Second):
+		_ = c.Process.Kill()
+		r.t.Fatalf("调用者跑 %s 超时", action)
+	}
+	b, err := os.ReadFile(filepath.Join(r.dir, "caller.out"))
 	if err != nil {
-		t.Fatalf("restart: %v\n%s", err, rsOut)
+		return 0, "", false // 被杀了,结果没写出来
 	}
-	gone(done, syscall.SIGTERM)
-	if marked() {
-		t.Fatal("restart 要去掉标记")
+	first, rest, _ := strings.Cut(string(b), "\n")
+	code, _ = strconv.Atoi(first)
+	return code, rest, true
+}
+
+// run 测试进程自己跑一遍脚本:调用者不叫这个名字,和 cru 的看门狗、开机时 rc.unslung 调它一样。
+func (r *entwareRig) run(action string) (string, error) {
+	sh := "sh"
+	if r.busybox {
+		sh = filepath.Join(r.bin, "sh")
 	}
-	var fresh []int
-	newDaemons := func() bool { // 新拉起的那个刚 exec 完时可能还没来得及登记,等一会儿
-		fresh = fresh[:0]
-		for _, pid := range runPIDs(dir) {
-			if !containsInt(old, pid) && fakeAlive(pid, procName) {
-				fresh = append(fresh, pid)
+	c := exec.Command(sh, r.script, action)
+	c.Env = r.env
+	b, err := c.CombinedOutput()
+	return string(b), err
+}
+
+// startDaemon 测试自己起一个守护进程("名字 run"),等它登记好;返回进程号和等它结束的通道(收尸在这里做)。
+func (r *entwareRig) startDaemon() (int, chan error) {
+	r.t.Helper()
+	c := exec.Command(r.fake, "run")
+	c.Env = r.env
+	if err := c.Start(); err != nil {
+		r.t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- c.Wait() }()
+	pid := c.Process.Pid
+	waitFor(r.t, "守护进程登记进程号", func() bool { return containsInt(r.alive(), pid) })
+	return pid, done
+}
+
+// alive 登记过、现在还活着的冒充守护进程(按进程号排好)。
+func (r *entwareRig) alive() []int {
+	var out []int
+	for _, pid := range runPIDs(r.dir) {
+		if fakeAlive(pid, r.name) {
+			out = append(out, pid)
+		}
+	}
+	sort.Ints(out)
+	return out
+}
+
+// settled 等一小会儿再看还活着的守护进程:确认"没有多起一个"用,刚拉起的要过一会儿才登记。
+func (r *entwareRig) settled() []int {
+	time.Sleep(500 * time.Millisecond)
+	return r.alive()
+}
+
+func (r *entwareRig) log(name string) string {
+	b, _ := os.ReadFile(filepath.Join(r.dir, name))
+	return strings.TrimSpace(string(b))
+}
+
+func (r *entwareRig) clearLogs() {
+	for _, n := range []string{"rc.log", "cru.log", "logger.log"} {
+		_ = os.Remove(filepath.Join(r.dir, n))
+	}
+}
+
+func (r *entwareRig) marked() bool { _, err := os.Stat(r.stopped); return err == nil }
+
+// mark 留下"用户停了"的标记(和 stop 留的一样)。
+func (r *entwareRig) mark() {
+	r.t.Helper()
+	if err := os.MkdirAll(filepath.Dir(r.stopped), 0o755); err != nil {
+		r.t.Fatal(err)
+	}
+	if err := os.WriteFile(r.stopped, nil, 0o644); err != nil {
+		r.t.Fatal(err)
+	}
+}
+
+// cruLine 脚本挂的看门狗定时(替身环境里程序名换过,定时编号跟着换)。
+func (r *entwareRig) cruLine() string {
+	return "a " + r.name + " * * * * * /opt/etc/init.d/S99godusevpn watchdog"
+}
+
+// waitSignaled 测试自己起的守护进程应被信号 sig 结束。
+func waitSignaled(t *testing.T, done chan error, sig syscall.Signal) {
+	t.Helper()
+	select {
+	case err := <-done:
+		var ee *exec.ExitError
+		if !errors.As(err, &ee) {
+			t.Fatalf("守护进程应被信号结束: %v", err)
+		}
+		if ws, ok := ee.Sys().(syscall.WaitStatus); !ok || !ws.Signaled() || ws.Signal() != sig {
+			t.Fatalf("守护进程应被 %v 结束: %v", sig, err)
+		}
+	case <-time.After(20 * time.Second):
+		t.Fatal("守护进程没被停掉")
+	}
+}
+
+// 梅林(Entware)上 godusevpn uninstall / stop 调启动脚本停服务,不能把正在调它的自己也杀了:
+// 以前脚本的 stop 交给 rc.func,按名字 killall godusevpn,调用者也叫这个名字,卸载做到一半就没了。
+// 真起几个同名进程跑一遍脚本:stop 只停 "名字 run" 那个守护进程、调用者活着拿到退出码 0;没在跑时也一样;kill 用 KILL;
+// restart 停掉旧的、拉起新的;最后用以前的做法(交给 rc.func)对照,确认替身 rc.func 确实会连调用者一起杀。
+func TestEntwareStopSparesCaller(t *testing.T) {
+	eachToolset(t, func(t *testing.T, busybox bool) {
+		r := newEntwareRig(t, "gvstop", busybox)
+
+		// 1. godusevpn uninstall / stop 调脚本 stop:守护进程(TERM)停了,调用者活着、退出码 0,留下"用户停了"的标记
+		_, done := r.startDaemon()
+		code, out, alive := r.caller("uninstall", "stop")
+		if !alive || code != 0 {
+			t.Fatalf("调脚本 stop 的调用者应活着拿到退出码 0: alive=%v code=%d\n%s", alive, code, out)
+		}
+		waitSignaled(t, done, syscall.SIGTERM)
+		if !r.marked() {
+			t.Fatal("stop 要留下标记,看门狗才不拉")
+		}
+
+		// 2. 守护进程本来就没在跑(比如升级失败后来卸载):同样不碰调用者,直接成功
+		if code, out, alive := r.caller("uninstall", "stop"); !alive || code != 0 {
+			t.Fatalf("没在跑时 stop 也不该杀调用者: alive=%v code=%d\n%s", alive, code, out)
+		}
+
+		// 3. kill:用 KILL
+		_, done = r.startDaemon()
+		if code, out, alive := r.caller("uninstall", "kill"); !alive || code != 0 {
+			t.Fatalf("kill 也不该杀调用者: alive=%v code=%d\n%s", alive, code, out)
+		}
+		waitSignaled(t, done, syscall.SIGKILL)
+
+		// 4. restart(面板升级经 Restart 走这条):停掉旧的、去掉标记、拉起新的(新的不是本测试的子进程,按登记的进程号找)
+		old, done := r.startDaemon()
+		rsOut, err := r.run("restart")
+		if err != nil {
+			t.Fatalf("restart: %v\n%s", err, rsOut)
+		}
+		waitSignaled(t, done, syscall.SIGTERM)
+		if r.marked() {
+			t.Fatal("restart 要去掉标记")
+		}
+		waitFor(t, "restart 拉起一个新的守护进程", func() bool { a := r.alive(); return len(a) == 1 && a[0] != old })
+		fresh := r.alive()
+
+		// 5. 对照:以前的做法(stop 交给 rc.func,按名字 killall)会把调用者一起杀掉 —— 替身 rc.func 和真的一样会出这个事
+		if _, _, alive := r.caller("uninstall", "stop", "FAKE_SCRIPT="+r.legacy()); alive {
+			t.Fatal("对照失败:交给 rc.func 的 stop 应该连调用者一起杀掉(替身和真的 rc.func 不一致?)")
+		}
+		waitFor(t, "对照里的守护进程也被 killall 掉", func() bool { return !fakeAlive(fresh[0], r.name) })
+	})
+}
+
+// 梅林(Entware)上 godusevpn install / start 调启动脚本起服务,不能把正在调它的自己当成"已经在跑":以前脚本的 start
+// 交给 rc.func,它按名字 pidof godusevpn,调用者也叫这个名字 —— 装完服务没起来,梅林要等看门狗一分钟后才拉,
+// 没有 cru 的 Entware 要等重启。真起几个同名进程跑一遍脚本:install 调 start 返回时守护进程已经在跑;服务在跑时
+// 再 start 什么都不动;自启关着照 rc.func 返回 8;程序不在时等满 10 秒报失败;最后用以前的做法(交给 rc.func)对照,
+// 确认替身 rc.func 确实会把调用者当成服务、一个都不拉。
+func TestEntwareStartFromCaller(t *testing.T) {
+	eachToolset(t, func(t *testing.T, busybox bool) {
+		r := newEntwareRig(t, "gvstrt", busybox)
+
+		// 1. godusevpn install 调 start(之前用户 stop 过,留着标记):返回时守护进程已经起来了,只有一个;
+		//    标记去掉、看门狗定时挂上、和 rc.func 一样往系统日志记一笔;不经 rc.func
+		r.mark()
+		code, out, alive := r.caller("install", "start")
+		if !alive || code != 0 {
+			t.Fatalf("调脚本 start 的调用者应活着拿到退出码 0: alive=%v code=%d\n%s", alive, code, out)
+		}
+		if ds := entwareDaemonsByScan(r.name); len(ds) != 1 {
+			t.Fatalf("start 返回时守护进程就应该在跑了(\"名字 run\" 的恰好一个),得 %v\n%s", ds, out)
+		}
+		waitFor(t, "守护进程登记进程号", func() bool { return len(r.alive()) == 1 })
+		first := r.alive()
+		if r.marked() {
+			t.Fatal("start 要去掉标记")
+		}
+		if got := r.log("cru.log"); got != r.cruLine() {
+			t.Fatalf("start 要挂上看门狗定时: %q", got)
+		}
+		if got := r.log("logger.log"); !busybox && got != "Started "+r.name+" from start." { // BusyBox 的 sh 直接用自己的 logger,记进系统日志
+			t.Fatalf("起来了要和 rc.func 一样记一笔: %q", got)
+		}
+		if got := r.log("rc.log"); got != "" {
+			t.Fatalf("start 不该交给 rc.func(它按名字认进程),rc.func 收到 %q", got)
+		}
+
+		// 2. 服务在跑时再 start(godusevpn start、重装再 install):什么都不起,照样 0
+		r.clearLogs()
+		code, out, alive = r.caller("start", "start")
+		if !alive || code != 0 || !strings.Contains(out, "already running") {
+			t.Fatalf("服务在跑时 start 应直接成功: alive=%v code=%d\n%s", alive, code, out)
+		}
+		if got := r.settled(); !reflect.DeepEqual(got, first) || len(entwareDaemonsByScan(r.name)) != 1 {
+			t.Fatalf("服务在跑时 start 不该再起一个: %v(原来 %v)", got, first)
+		}
+
+		// 3. 开机自启关着:和 rc.func 一样返回 8、不起
+		if out, err := r.run("stop"); err != nil {
+			t.Fatalf("stop: %v\n%s", err, out)
+		}
+		waitFor(t, "守护进程停掉", func() bool { return len(r.alive()) == 0 })
+		r.render(false)
+		if code, out, alive := r.caller("start", "start"); !alive || code != 8 {
+			t.Fatalf("自启关着时 start 应和 rc.func 一样返回 8: alive=%v code=%d\n%s", alive, code, out)
+		}
+		if got := r.settled(); len(got) != 0 {
+			t.Fatalf("自启关着时不该起: %v", got)
+		}
+		r.render(true)
+
+		// 4. 程序不在(链接丢了之类):等满 10 秒报失败,退出码 255,也记一笔;看门狗下一分钟再试
+		r.clearLogs()
+		missing := filepath.Join(r.dir, "S99missing")
+		r.write("S99missing", strings.Replace(r.localize(entwareScript), "PROCS="+r.name+"\n", "PROCS="+r.name+"x\n", 1), 0o755)
+		sh := "sh"
+		if busybox {
+			sh = filepath.Join(r.bin, "sh")
+		}
+		c := exec.Command(sh, missing, "start")
+		c.Env = r.env
+		began := time.Now()
+		b, err := c.CombinedOutput()
+		var ee *exec.ExitError
+		if !errors.As(err, &ee) || ee.ExitCode() != 255 || !strings.Contains(string(b), "failed to start") || time.Since(began) < 9*time.Second {
+			t.Fatalf("程序不在时应等满 10 秒报失败(255): %v %v\n%s", err, time.Since(began), b)
+		}
+		if got := r.log("logger.log"); !busybox && got != "Failed to start "+r.name+"x from start." {
+			t.Fatalf("没起来也要记一笔: %q", got)
+		}
+		if got := r.log("cru.log"); !strings.Contains(got, " watchdog") {
+			t.Fatalf("没起来也要挂上看门狗定时,每分钟再试: %q", got)
+		}
+
+		// 5. 对照:以前的做法(start 交给 rc.func,按名字 pidof)把调用者当成服务已经在跑,一个都不拉
+		code, out, alive = r.caller("install", "start", "FAKE_SCRIPT="+r.legacy())
+		if !alive || code != 0 || !strings.Contains(out, "already running") {
+			t.Fatalf("对照失败:交给 rc.func 的 start 应把调用者当成已经在跑(替身和真的 rc.func 不一致?) alive=%v code=%d\n%s", alive, code, out)
+		}
+		time.Sleep(time.Second)
+		if got := r.alive(); len(got) != 0 {
+			t.Fatalf("对照失败:交给 rc.func 的 start 不该拉起守护进程: %v", got)
+		}
+	})
+}
+
+// 梅林(Entware)的看门狗:真跑一遍脚本。起服务时挂上定时、去掉"用户停了"的标记;stop 留标记;定时看到标记、
+// 或服务在跑、或自启关着就不拉,否则(崩了)拉起来。起停都不交给 rc.func(它按名字认进程,见上面两条)。
+func TestEntwareWatchdog(t *testing.T) {
+	eachToolset(t, func(t *testing.T, busybox bool) {
+		r := newEntwareRig(t, "gvwdog", busybox)
+		run := func(action string) {
+			t.Helper()
+			r.clearLogs()
+			if out, err := r.run(action); err != nil {
+				t.Fatalf("%s: %v\n%s", action, err, out)
+			}
+			if got := r.log("rc.log"); got != "" {
+				t.Fatalf("%s 不该交给 rc.func(它按名字认进程),rc.func 收到 %q", action, got)
 			}
 		}
-		return len(fresh) > 0
-	}
-	for i := 0; i < 100 && !newDaemons(); i++ {
-		time.Sleep(50 * time.Millisecond)
-	}
-	if len(fresh) != 1 {
-		t.Fatalf("restart 应经 rc.func 拉起一个新的守护进程: %v(旧的 %v)\n%s", fresh, old, rsOut)
-	}
 
-	// 5. 对照:以前的做法(stop 交给 rc.func,按名字 killall)会把调用者一起杀掉 —— 替身 rc.func 和真的一样会出这个事
-	legacy := filepath.Join(dir, "legacy-stop")
-	if err := os.WriteFile(legacy, []byte("ENABLED=yes\nPROCS="+procName+"\nARGS=run\n. "+filepath.Join(dir, "rc.func")+"\n"), 0o644); err != nil {
-		t.Fatal(err)
+		run("stop")
+		if !r.marked() {
+			t.Fatal("stop 要留下标记,看门狗才不拉")
+		}
+		run("watchdog")
+		if got := r.settled(); len(got) != 0 {
+			t.Fatalf("用户停了的服务定时不该拉起来: %v", got)
+		}
+
+		run("start")
+		if r.marked() || r.log("cru.log") != r.cruLine() {
+			t.Fatalf("start 要去掉标记、挂上定时: 标记=%v cru=%q", r.marked(), r.log("cru.log"))
+		}
+		if want := strings.Join(entwareWatchdog, " "); strings.Replace(r.log("cru.log"), r.name, name, 1) != want {
+			t.Fatalf("守护进程补挂的定时要和脚本里的一致: %q ≠ %q", want, r.log("cru.log"))
+		}
+		waitFor(t, "start 拉起守护进程", func() bool { return len(r.alive()) == 1 })
+		first := r.alive()
+		run("watchdog")
+		if got := r.settled(); !reflect.DeepEqual(got, first) {
+			t.Fatalf("服务在跑时定时不该再拉: %v(原来 %v)", got, first)
+		}
+
+		// 崩了(不是用户停的):定时拉起来
+		_ = syscall.Kill(first[0], syscall.SIGKILL)
+		waitFor(t, "守护进程没了", func() bool { return len(r.alive()) == 0 })
+		run("watchdog")
+		waitFor(t, "看门狗拉起新的守护进程", func() bool { return len(r.alive()) == 1 })
+		if got := r.log("logger.log"); !busybox && got != "Started "+r.name+" from watchdog." {
+			t.Fatalf("看门狗拉起来也记一笔: %q", got)
+		}
+
+		// stop 之后 restart(面板升级走这条):去掉标记、拉起来
+		run("stop")
+		waitFor(t, "守护进程停掉", func() bool { return len(r.alive()) == 0 })
+		run("restart")
+		if r.marked() {
+			t.Fatal("restart 要去掉标记")
+		}
+		waitFor(t, "restart 拉起守护进程", func() bool { return len(r.alive()) == 1 })
+
+		// 开机自启关着:崩了定时也不拉
+		cur := r.alive()
+		r.render(false)
+		_ = syscall.Kill(cur[0], syscall.SIGKILL)
+		waitFor(t, "守护进程没了", func() bool { return len(r.alive()) == 0 })
+		run("watchdog")
+		if got := r.settled(); len(got) != 0 {
+			t.Fatalf("开机自启关着时定时不该拉: %v", got)
+		}
+	})
+}
+
+// entwareDaemonsByScan 测试这边独立数一遍 "名字 run" 的守护进程(扫 /proc,不经 pidof):核对脚本说起来了的时候是不是真起来了。
+func entwareDaemonsByScan(name string) []int {
+	var out []int
+	ents, _ := os.ReadDir("/proc")
+	for _, e := range ents {
+		pid, err := strconv.Atoi(e.Name())
+		if err != nil {
+			continue
+		}
+		b, err := os.ReadFile("/proc/" + e.Name() + "/cmdline")
+		if err != nil {
+			continue
+		}
+		args := strings.Split(string(b), "\x00")
+		if len(args) > 1 && filepath.Base(args[0]) == name && args[1] == "run" {
+			out = append(out, pid)
+		}
 	}
-	env = append(env, "FAKE_SCRIPT="+legacy) // 后写的同名变量优先
-	if _, _, alive := caller("stop"); alive {
-		t.Fatal("对照失败:交给 rc.func 的 stop 应该连调用者一起杀掉(替身和真的 rc.func 不一致?)")
-	}
-	waitFor(t, "对照里的守护进程也被 killall 掉", func() bool { return !fakeAlive(fresh[0], procName) })
+	return out
 }
 
 func copyFile(t *testing.T, from, to string) {
