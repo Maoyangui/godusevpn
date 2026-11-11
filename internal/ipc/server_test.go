@@ -52,10 +52,8 @@ func TestPipeRoundTrip(t *testing.T) {
 // 处理器跑得比连接的空闲期限长(换新配置要好几分钟):应答照样写得回去,调用方在自己的期限内收得到。
 // 以前整条连接只给 60 秒,处理器还没跑完连接就到期,调用方只能等到自己超时。
 func TestSlowHandlerStillAnswers(t *testing.T) {
-	old := idleTimeout
-	idleTimeout = 200 * time.Millisecond
-	t.Cleanup(func() { idleTimeout = old })
 	s := NewServer(nil)
+	s.idle = 200 * time.Millisecond
 	s.Handle("Slow", func(json.RawMessage) (any, error) {
 		time.Sleep(800 * time.Millisecond)
 		return "done", nil

@@ -192,7 +192,7 @@ func Main(args []string) int {
 			}
 		}
 		if err == nil {
-			s.WebPassword = "" // 哈希也不用给人看
+			s.WebPassword, s.Rev = "", 0 // 哈希也不用给人看;版本号只给存回去时合并用
 			b, _ := json.MarshalIndent(s, "", "  ")
 			fmt.Println(string(b))
 		}

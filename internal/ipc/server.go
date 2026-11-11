@@ -17,13 +17,14 @@ type Server struct {
 	handlers map[string]Handler
 	ln       net.Listener
 	logf     func(string, ...any)
+	idle     time.Duration // 见 idleTimeout;Listen 之前定好,之后只读
 }
 
 func NewServer(logf func(string, ...any)) *Server {
 	if logf == nil {
 		logf = func(string, ...any) {}
 	}
-	return &Server{handlers: map[string]Handler{}, logf: logf}
+	return &Server{handlers: map[string]Handler{}, logf: logf, idle: idleTimeout}
 }
 
 func (s *Server) Handle(method string, h Handler) {
@@ -64,12 +65,11 @@ func (s *Server) Close() error {
 
 // idleTimeout 连接上等下一条请求、写回一条应答各最多这么久。处理器本身跑多久不在这里限:换新配置的方法要好几分钟
 // (见 SlowCallTimeout),以前整条连接只给 60 秒,处理器还没跑完连接就到期,应答写不回去,调用方只能等到自己超时。
-// 变量是为了测试能调短。
-var idleTimeout = 60 * time.Second
+const idleTimeout = 60 * time.Second
 
 func (s *Server) serve(conn net.Conn) {
 	defer conn.Close()
-	_ = conn.SetDeadline(time.Now().Add(idleTimeout))
+	_ = conn.SetDeadline(time.Now().Add(s.idle))
 	r := bufio.NewReaderSize(conn, 1<<20)
 	w := bufio.NewWriter(conn)
 	for {
@@ -108,13 +108,13 @@ func (s *Server) serve(conn net.Conn) {
 			}
 		}
 		b, _ := json.Marshal(resp)
-		_ = conn.SetDeadline(time.Now().Add(idleTimeout)) // 写回应答、等下一条请求
+		_ = conn.SetDeadline(time.Now().Add(s.idle)) // 写回应答、等下一条请求
 		w.Write(b)
 		w.WriteByte('\n')
 		if err := w.Flush(); err != nil {
 			return
 		}
-		_ = conn.SetDeadline(time.Now().Add(idleTimeout))
+		_ = conn.SetDeadline(time.Now().Add(s.idle))
 	}
 }
 
