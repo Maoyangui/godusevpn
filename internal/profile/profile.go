@@ -64,6 +64,45 @@ const parserVersion = 1
 var reservedTags = map[string]bool{"proxy": true, "auto": true, "direct": true, "block": true, "dns-out": true}
 var nonNodeTypes = map[string]bool{"selector": true, "urltest": true, "direct": true, "block": true, "dns": true}
 
+// dropKeys 节点出站里客户端一概不要的字段:节点域名怎么解析由客户端自己定(dns.strategy 加 route.default_domain_resolver,见 builder)。
+//   - domain_resolver:第三方订阅常让它指向订阅自己的 DNS 服务器,而订阅的 DNS 段客户端整个不要,留着这个节点就建不起来。
+//   - domain_strategy:sing-box 已废弃的写法,Sub-Store 之类会把 Clash 的 ip-version 转成它,旧模板也常写 prefer_ipv4。
+//     出站写了它、又没写 domain_resolver 时,sing-box 拿它盖掉解析策略(common/dialer 的 NewWithOptions),嵌入方式下没有
+//     deprecated 的管理器,既不报错也不拦:关着 IPv6 时 dns.strategy 是 ipv4_only,写了 prefer_ipv6 / ipv6_only 的节点
+//     照样解析 AAAA、经 IPv6 去连,prefer_ipv4 的在 IPv4 慢或不通时也会并行回落到 IPv6 —— 关着 IPv6 就不走 IPv6 落空。
+var dropKeys = []string{"domain_resolver", "domain_strategy"}
+
+// cleanNode 去掉节点出站里的 dropKeys;tag 不为空、又和出站里写的不一样时改成它。什么都不用改就原样返回(字节不变),
+// 不是 JSON 对象返回 false。只动顶层这几个键,别的字段原样保留。
+func cleanNode(raw json.RawMessage, tag string) (json.RawMessage, bool) {
+	var m map[string]json.RawMessage
+	if json.Unmarshal(raw, &m) != nil || m == nil {
+		return raw, false
+	}
+	changed := false
+	for _, k := range dropKeys {
+		if _, ok := m[k]; ok {
+			delete(m, k)
+			changed = true
+		}
+	}
+	if tag != "" {
+		var cur string
+		if json.Unmarshal(m["tag"], &cur) != nil || cur != tag {
+			m["tag"], _ = json.Marshal(tag)
+			changed = true
+		}
+	}
+	if !changed {
+		return raw, true
+	}
+	b, err := json.Marshal(m)
+	if err != nil {
+		return raw, false
+	}
+	return b, true
+}
+
 // Parse 解析订阅正文与响应头。
 func Parse(body []byte, hdr http.Header) (*Profile, error) {
 	var doc struct {
@@ -81,9 +120,8 @@ func Parse(body []byte, hdr http.Header) (*Profile, error) {
 	var urltests []json.RawMessage
 	for _, raw := range doc.Outbounds {
 		var meta struct {
-			Type     string          `json:"type"`
-			Tag      string          `json:"tag"`
-			Resolver json.RawMessage `json:"domain_resolver"`
+			Type string `json:"type"`
+			Tag  string `json:"tag"`
 		}
 		if json.Unmarshal(raw, &meta) != nil || meta.Type == "" {
 			continue
@@ -104,16 +142,10 @@ func Parse(body []byte, hdr http.Header) (*Profile, error) {
 			tag = fmt.Sprintf("%s %d", base, i)
 		}
 		used[tag] = true
-		// 改过名字要写回出站。domain_resolver 一并去掉:第三方订阅常让它指向订阅自己的 DNS 服务器,
-		// 而订阅的 DNS 段客户端整个不要,留着这个节点就建不起来;去掉后节点域名由客户端自己的解析处理
-		if tag != meta.Tag || len(meta.Resolver) > 0 {
-			var m map[string]any
-			if json.Unmarshal(raw, &m) != nil {
-				continue
-			}
-			m["tag"] = tag
-			delete(m, "domain_resolver")
-			raw, _ = json.Marshal(m)
+		// 改过名字要写回出站;节点自带的解析设置一并去掉(见 dropKeys)
+		var ok bool
+		if raw, ok = cleanNode(raw, tag); !ok {
+			continue
 		}
 		if _, dup := renamed[meta.Tag]; !dup && meta.Tag != "" {
 			renamed[meta.Tag] = tag
@@ -377,6 +409,13 @@ func Load(path string) (*Profile, error) {
 	}
 	if len(p.Outbounds) == 0 {
 		return nil, ErrNoNodes
+	}
+	// 旧版本存的缓存里节点可能还带着 domain_strategy(那时只去 domain_resolver):读进来就去掉,不用等下一次刷新(见 dropKeys)。
+	// 只改内存里这份,和 Tags 一一对应,一条都不丢
+	for i, raw := range p.Outbounds {
+		if c, ok := cleanNode(raw, ""); ok {
+			p.Outbounds[i] = c
+		}
 	}
 	return &p, nil
 }
