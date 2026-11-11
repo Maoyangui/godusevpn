@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -220,7 +221,7 @@ func NewWithOptions(o Options) (*Daemon, error) {
 		d.logf("设置读不出来,先用默认值起来,但不会动现有的隐私保护(去设置页保存一次即可修复,原文件会先另存一份): %v", err)
 	}
 	d.settings = s
-	d.settingsGeneration = 1
+	d.settingsGeneration = firstGeneration()
 	d.persistedOK = true
 	d.applyLogRetention()
 	d.initCoreLog(s.CoreLogDisk)
@@ -475,21 +476,41 @@ func (d *Daemon) getSettings() settings.Settings {
 	return d.settings.Clone()
 }
 
-func (d *Daemon) setSettings(s settings.Settings) error {
-	return d.writeSettings(func(settings.Settings) (settings.Settings, bool) { return s, true })
-}
+// 写设置一律"在此刻的设置上只改自己那几项"(updateSettings / editSettings / writeSettings):不再有"先 getSettings 读整份、
+// 改几项、再整份写回"的写法 —— 读和写之间别人改的(面板密码、设备、订阅、选择……)会被这份旧快照盖回去。
 
 // updateSettings 读改写一气呵成:fn 改的是此刻的设置(和别的写设置互斥,不会把这期间别人写的盖掉),返回 false 表示不用改。
 // fn 里别碰内核、别拿别的锁(持着 configPublishMu)。
 func (d *Daemon) updateSettings(fn func(s *settings.Settings) bool) error {
-	return d.writeSettings(func(cur settings.Settings) (settings.Settings, bool) {
+	_, err := d.writeSettings(func(cur settings.Settings) (settings.Settings, bool) {
 		ok := fn(&cur)
 		return cur, ok
 	})
+	return err
 }
 
+// editSettings 同 updateSettings,fn 能报错(报错就不写、原样返回;报 errUnchanged 是不用写,不算错);返回写下的那份。
+func (d *Daemon) editSettings(fn func(s *settings.Settings) error) (settings.Settings, error) {
+	var fnErr error
+	s, err := d.writeSettings(func(cur settings.Settings) (settings.Settings, bool) {
+		fnErr = fn(&cur)
+		return cur, fnErr == nil
+	})
+	if errors.Is(fnErr, errUnchanged) {
+		return s, nil
+	}
+	if fnErr != nil {
+		return s, fnErr
+	}
+	return s, err
+}
+
+// errUnchanged editSettings 的 fn 说"不用改"。
+var errUnchanged = errors.New("settings unchanged")
+
 // writeSettings 落盘并换上新设置。next 拿到的是此刻的设置(深拷贝),返回要写的那份;false 表示不用写。
-func (d *Daemon) writeSettings(next func(cur settings.Settings) (settings.Settings, bool)) error {
+// 返回写下的那份(不用写时是此刻的设置)。
+func (d *Daemon) writeSettings(next func(cur settings.Settings) (settings.Settings, bool)) (settings.Settings, error) {
 	d.configPublishMu.Lock()
 	defer d.configPublishMu.Unlock()
 	d.mu.Lock()
@@ -498,10 +519,10 @@ func (d *Daemon) writeSettings(next func(cur settings.Settings) (settings.Settin
 	d.mu.Unlock()
 	s, ok := next(cur)
 	if !ok {
-		return nil
+		return cur, nil
 	}
 	if err := s.Validate(); err != nil {
-		return err
+		return cur, err
 	}
 	d.mu.Lock()
 	p, v6 := d.profiles[s.ActiveProfile], d.v6Only
@@ -511,7 +532,7 @@ func (d *Daemon) writeSettings(next func(cur settings.Settings) (settings.Settin
 		// 原文件读不出来、手上是默认值:这一存就把它整份覆盖。先另存一份,留不下就不存
 		bak, err := settings.Preserve(paths.Settings())
 		if err != nil {
-			return fmt.Errorf("原设置文件读不出来,另存一份失败,先不覆盖它: %w", err)
+			return cur, fmt.Errorf("原设置文件读不出来,另存一份失败,先不覆盖它: %w", err)
 		}
 		if bak != "" {
 			d.logf("原设置文件读不出来,已另存为 %s,现在按新设置覆盖", bak)
@@ -519,7 +540,7 @@ func (d *Daemon) writeSettings(next func(cur settings.Settings) (settings.Settin
 	}
 	s, err := d.saveSettingsFile(s) // 别的进程这期间写过文件:它改的那几项合并进来
 	if err != nil {
-		return err
+		return cur, err
 	}
 	d.mu.Lock()
 	if s.Selected != d.settings.Selected || s.LineAuto != d.settings.LineAuto || s.ActiveProfile != d.settings.ActiveProfile {
@@ -531,7 +552,7 @@ func (d *Daemon) writeSettings(next func(cur settings.Settings) (settings.Settin
 	d.settingsOK = true // 刚刚整份写成功了,文件从此可信 —— 之前读不出来的那次到此为止
 	d.mu.Unlock()
 	d.applyLogRetention()
-	return nil
+	return s.Clone(), nil
 }
 
 // saveSettingsFile 设置落盘:别的进程(服务没跑时的命令行、「恢复网络」的离线兜底)这期间写过文件,就在文件现在的内容上
@@ -549,6 +570,18 @@ func (d *Daemon) saveSettingsFile(s settings.Settings) (settings.Settings, error
 	d.diskBase, d.diskRaw, d.diskOK = saved.Clone(), wrote, true
 	d.mu.Unlock()
 	return saved, nil
+}
+
+// firstGeneration 这个服务进程的设置从第几版数起:随机挑一个(小于 2^52,页面 JS 的数字照样精确)。版本号经控制口给出去,
+// 存回来时按它找出发的那一版(见 MSetSettings);每次启动都从 1 数的话,设置页在旧进程下打开、服务这期间重启过(自动更新、
+// 崩溃重启),带回来的旧版本号会对上新进程的另一版,按错的基准合并 —— 页面没改的字段被旧值盖掉,改了的反倒被当成没改。
+// 随机起点下,别的进程给出去的版本号落进本进程记着的那几版里的机会是 settingsKeep/2^52,认不出就让人重开设置。
+func firstGeneration() uint64 {
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return uint64(time.Now().UnixNano())&(1<<52-1) | 1
+	}
+	return binary.LittleEndian.Uint64(b[:])&(1<<52-1) | 1
 }
 
 // settingsKeep 记多少版设置(见 settingsHist)。选节点、刷新订阅也会出新版,设置页开着放一阵子也够用。
@@ -607,6 +640,31 @@ func (d *Daemon) rollbackSelection(prev, wrote settings.Settings) {
 	}); err != nil {
 		d.logf("切换失败后退回原来的选择没成功: %v", err)
 	}
+}
+
+// errSelectionMoved 在写设置外面按读到的选择算好的结果,写的时候选择已经被别人改了(见 MSetLineAuto)。
+var errSelectionMoved = errors.New("selection changed meanwhile")
+
+// errNoProfile 要改的那条订阅已经没了(可能是刚被别处删的)。
+var errNoProfile = errors.New("没有这条订阅")
+
+// revertSettings 把 prev → wrote 这次改了的顶层字段在此刻的设置上退回 prev 的值(见 settings.Merge3):这期间别人改的别的字段留着。
+func (d *Daemon) revertSettings(prev, wrote settings.Settings) error {
+	var mergeErr error
+	_, err := d.writeSettings(func(cur settings.Settings) (settings.Settings, bool) {
+		var m settings.Settings
+		if m, mergeErr = settings.Merge3(wrote, cur, prev); mergeErr != nil {
+			return cur, false
+		}
+		if m.Selected != cur.Selected {
+			m.SelectedNode = prev.SelectedNode // 选择退回去了:线路组用不了时用的那台也跟着退
+		}
+		return m, true
+	})
+	if mergeErr != nil {
+		return mergeErr
+	}
+	return err
 }
 
 // fillSelectedNode 选的是线路组时记着"线路组用不了的时候用哪台"(settings.SelectedNode:退回旧版本时磁盘上 selected 写的就是它,
@@ -1427,9 +1485,10 @@ func (d *Daemon) switchModeLive(mode string) error {
 	return nil
 }
 
-func (d *Daemon) restartForPrivacySettings(prev settings.Settings) error {
-	next := d.getSettings()
-	relax := privacyRelaxes(prev, next)
+// restartForPrivacySettings 换了隐私相关设置后重建连接。prev 是改之前的设置,wrote 是这次写下的那份:收紧方向重建失败时
+// 只把 prev → wrote 改了的那几项退回去(revertSettings),这期间别人改的(面板密码、设备……)不跟着退。
+func (d *Daemon) restartForPrivacySettings(prev, wrote settings.Settings) error {
+	relax := privacyRelaxes(prev, wrote)
 	hold := prev.GuardOn() && d.machine.Wanted()
 	nicHold := wantNICOff(prev) && d.machine.Wanted()
 	d.mu.Lock()
@@ -1444,12 +1503,16 @@ func (d *Daemon) restartForPrivacySettings(prev settings.Settings) error {
 		d.mu.Unlock()
 	}()
 	var rollback func() error
+	var rollbackErr error
 	if !relax {
-		rollback = func() error { return d.setSettings(prev) }
+		rollback = func() error {
+			rollbackErr = d.revertSettings(prev, wrote)
+			return rollbackErr
+		}
 	}
 	err := d.machine.RestartChecked(rollback)
 	current := d.getSettings()
-	if err != nil && !relax && !reflect.DeepEqual(current, prev) {
+	if err != nil && !relax && rollbackErr != nil {
 		// 收紧方向:重启失败、回滚设置也失败。此刻设置文件是新值、数据面按旧配置在跑(RestartChecked
 		// 失败时旧数据面保留)。闸与网卡 IPv6 由 syncGuard / syncNICIPv6 按当前设置继续对齐;
 		// 这里把事实报出去,不再用永久 hold 把撤闸路径一起锁死。
@@ -2515,15 +2578,19 @@ func (d *Daemon) registerHandlers() {
 		if err != nil {
 			return nil, err
 		}
-		s := d.getSettings()
-		prev := s
-		s.Mode = strings.ToLower(strings.TrimSpace(in.Mode))
-		if err := d.setSettings(s); err != nil {
+		mode := strings.ToLower(strings.TrimSpace(in.Mode))
+		var prev, s settings.Settings // s:改完的那份(和以前一样不含写的时候补的 SelectedNode),下面拿它和 prev 比
+		if _, err := d.editSettings(func(cur *settings.Settings) error {
+			prev = cur.Clone()
+			cur.Mode = mode
+			s = cur.Clone()
+			return nil
+		}); err != nil {
 			return nil, err
 		}
 		if d.core.Running() && s.Mode != prev.Mode {
 			if needsPrivacyRebuild(prev, s) || !d.modeSwitchIsLive(prev, s) || d.switchModeLive(s.Mode) != nil {
-				if err := d.restartForPrivacySettings(prev); err != nil {
+				if err := d.restartForPrivacySettings(prev, s); err != nil {
 					return nil, &ipc.CallError{Code: state.CodeOf(err), Msg: "切换模式失败,已保持旧配置与隐私保护: " + err.Error()}
 				}
 			}
@@ -2555,26 +2622,31 @@ func (d *Daemon) registerHandlers() {
 		if err != nil {
 			return nil, err
 		}
-		tag := strings.TrimSpace(in.Tag)
-		s := d.getSettings()
-		prev := s
-		s.Selected = tag
-		if tag == "auto" {
-			s.Selected = ""
+		sel := strings.TrimSpace(in.Tag)
+		if sel == "auto" {
+			sel = ""
 		}
-		_, cur := d.activeProfile()
-		s.LineAuto = lineAutoAfterSelect(cur, s.Selected, s.LineAuto)
-		if _, ok := cur.Group(s.Selected); ok {
-			// 选的是线路组:退回旧版本时用的那一台(见 settings.SelectedNode)记组里此刻在用的;内核里还没有这一组就照旧
-			if now := d.groupNow(s.Selected); now != "" {
-				s.SelectedNode = now
+		_, prof := d.activeProfile()
+		_, group := prof.Group(sel)
+		// 选的是节点(或自动选择):明说了就是它(SelectedNode 写成它自己)。不这样的话,原来选的线路组没了、冒出个同名节点之后,
+		// 用户明点这个节点也还当成"线路组没了、用记着的那台"(见 fillSelectedNode)。
+		// 选的是线路组:退回旧版本时用的那一台(见 settings.SelectedNode)记组里此刻在用的;内核里还没有这一组就照旧。
+		// 问内核放在写设置外面(写设置时不碰内核)
+		node := sel
+		if group {
+			node = d.groupNow(sel)
+		}
+		var prev, s settings.Settings
+		if _, err := d.editSettings(func(cur *settings.Settings) error {
+			prev = cur.Clone()
+			cur.Selected = sel
+			cur.LineAuto = lineAutoAfterSelect(prof, sel, cur.LineAuto)
+			if !group || node != "" {
+				cur.SelectedNode = node
 			}
-		} else {
-			// 选的是节点(或自动选择):明说了就是它。不这样的话,原来选的线路组没了、冒出个同名节点之后,
-			// 用户明点这个节点也还当成"线路组没了、用记着的那台"(见 fillSelectedNode)
-			s.SelectedNode = s.Selected
-		}
-		if err := d.setSettings(s); err != nil {
+			s = cur.Clone()
+			return nil
+		}); err != nil {
 			return nil, err
 		}
 		if err := d.applySelected(s.Selected); err != nil {
@@ -2592,16 +2664,36 @@ func (d *Daemon) registerHandlers() {
 		if err != nil {
 			return nil, err
 		}
-		s := d.getSettings()
-		prev := s
-		_, cur := d.activeProfile()
-		next := lineAutoSelection(cur, s.Selected, in.On, d.groupNow, d.v6BlockedNow(s), s.SelectedNode)
-		changed := next != s.Selected
-		if in.On && changed {
-			s.SelectedNode = s.Selected // 从组里的某一台换成线路组:线路组用不了时(退回旧版本)就用原来这台
+		// 换成哪个要问内核(线路组此刻在用哪台),在写设置外面按读到的选择算好;写的时候选择已经被别人改了(自动换线路、
+		// 删订阅、改手动节点)就按新的再算一遍。写只动选择这几项,别的字段(面板密码、设备……)不碰
+		var prev, s settings.Settings
+		var next string
+		var changed bool
+		for try := 0; ; try++ {
+			snap := d.getSettings()
+			_, prof := d.activeProfile()
+			next = lineAutoSelection(prof, snap.Selected, in.On, d.groupNow, d.v6BlockedNow(snap), snap.SelectedNode)
+			changed = next != snap.Selected
+			_, err = d.editSettings(func(cur *settings.Settings) error {
+				if cur.Selected != snap.Selected || cur.SelectedNode != snap.SelectedNode || cur.ActiveProfile != snap.ActiveProfile {
+					return errSelectionMoved
+				}
+				prev = cur.Clone()
+				if in.On && changed {
+					cur.SelectedNode = cur.Selected // 从组里的某一台换成线路组:线路组用不了时(退回旧版本)就用原来这台
+				}
+				cur.LineAuto, cur.Selected = in.On, next
+				s = cur.Clone()
+				return nil
+			})
+			if !errors.Is(err, errSelectionMoved) || try >= 2 {
+				break
+			}
 		}
-		s.LineAuto, s.Selected = in.On, next
-		if err := d.setSettings(s); err != nil {
+		if errors.Is(err, errSelectionMoved) {
+			return nil, errors.New("选择刚被别处改过,请再点一次")
+		}
+		if err != nil {
 			return nil, err
 		}
 		if changed {
@@ -2716,21 +2808,23 @@ func (d *Daemon) registerHandlers() {
 		if err != nil {
 			return nil, &ipc.CallError{Code: state.CodeOf(err), Msg: err.Error()}
 		}
-		s := d.getSettings()
 		name := strings.TrimSpace(in.Name)
 		if name == "" {
 			name = np.Title
 		}
-		if name == "" {
-			name = fmt.Sprintf("订阅 %d", len(s.Profiles)+1)
-		}
 		sp := settings.Profile{ID: settings.NewID(), Name: name, URL: url}
-		s.Profiles = append(s.Profiles, sp)
-		first := len(s.Profiles) == 1
-		if first {
-			s.ActiveProfile = sp.ID
-		}
-		if err := d.setSettings(s); err != nil {
+		first := false
+		if _, err := d.editSettings(func(s *settings.Settings) error {
+			if sp.Name == "" {
+				sp.Name = fmt.Sprintf("订阅 %d", len(s.Profiles)+1)
+			}
+			s.Profiles = append(s.Profiles, sp)
+			first = len(s.Profiles) == 1
+			if first {
+				s.ActiveProfile = sp.ID
+			}
+			return nil
+		}); err != nil {
 			return nil, err
 		}
 		d.setProfileCache(sp.ID, np)
@@ -2747,19 +2841,22 @@ func (d *Daemon) registerHandlers() {
 		if err != nil {
 			return nil, err
 		}
-		s := d.getSettings()
-		kept := s.Profiles[:0:0]
-		for _, sp := range s.Profiles {
-			if sp.ID != in.ID {
-				kept = append(kept, sp)
+		var kept []settings.Profile
+		wasActive := false
+		if _, err := d.editSettings(func(s *settings.Settings) error {
+			kept = s.Profiles[:0:0]
+			for _, sp := range s.Profiles {
+				if sp.ID != in.ID {
+					kept = append(kept, sp)
+				}
 			}
-		}
-		if len(kept) == len(s.Profiles) {
-			return nil, errors.New("没有这条订阅")
-		}
-		wasActive := s.ActiveProfile == in.ID
-		s.Profiles = kept
-		if err := d.setSettings(s); err != nil {
+			if len(kept) == len(s.Profiles) {
+				return errNoProfile
+			}
+			wasActive = s.ActiveProfile == in.ID
+			s.Profiles = kept
+			return nil
+		}); err != nil {
 			return nil, err
 		}
 		d.mu.Lock()
@@ -2793,30 +2890,32 @@ func (d *Daemon) registerHandlers() {
 		if err != nil {
 			return nil, err
 		}
-		s := d.getSettings()
-		found := false
-		for _, sp := range s.Profiles {
-			if sp.ID == in.ID {
-				found = true
+		prevID, switched := "", false
+		if _, err := d.editSettings(func(s *settings.Settings) error {
+			if !slices.ContainsFunc(s.Profiles, func(sp settings.Profile) bool { return sp.ID == in.ID }) {
+				return errNoProfile
 			}
-		}
-		if !found {
-			return nil, errors.New("没有这条订阅")
-		}
-		if s.ActiveProfile != in.ID {
-			prevID := s.ActiveProfile
+			if s.ActiveProfile == in.ID {
+				return errUnchanged
+			}
+			prevID, switched = s.ActiveProfile, true
 			s.ActiveProfile = in.ID
-			if err := d.setSettings(s); err != nil {
-				return nil, err
-			}
+			return nil
+		}); err != nil {
+			return nil, err
+		}
+		if switched {
 			if err := d.restart(); err != nil {
 				// 新订阅没备出配置,旧内核照跑:设置也退回去,和正在跑的对得上。不退的话界面列的是新订阅的节点,
 				// 之后任何一次重建都按新订阅来,它拉不到就一直退避
-				if cur := d.getSettings(); cur.ActiveProfile == in.ID {
-					cur.ActiveProfile = prevID
-					if rerr := d.setSettings(cur); rerr != nil {
-						d.logf("切换订阅失败后退回原订阅也失败: %v", rerr)
+				if rerr := d.updateSettings(func(cur *settings.Settings) bool {
+					if cur.ActiveProfile != in.ID {
+						return false
 					}
+					cur.ActiveProfile = prevID
+					return true
+				}); rerr != nil {
+					d.logf("切换订阅失败后退回原订阅也失败: %v", rerr)
 				}
 				return nil, &ipc.CallError{Code: state.CodeOf(err), Msg: "切换订阅失败,保持当前连接: " + err.Error()}
 			}
@@ -2864,16 +2963,22 @@ func (d *Daemon) registerHandlers() {
 			if np, err = d.fetchProfile(context.Background(), u); err != nil {
 				return nil, &ipc.CallError{Code: state.CodeOf(err), Msg: err.Error()}
 			}
-			if s = d.getSettings(); find(s) < 0 { // 拉的这段时间里订阅可能被删了
-				return nil, errors.New("没有这条订阅")
+		}
+		name := strings.TrimSpace(in.Name)
+		s, err = d.editSettings(func(cur *settings.Settings) error {
+			i := find(*cur) // 拉的这段时间里订阅可能被删了
+			if i < 0 {
+				return errNoProfile
 			}
-			idx = find(s)
-			s.Profiles[idx].URL = u
-		}
-		if n := strings.TrimSpace(in.Name); n != "" {
-			s.Profiles[idx].Name = n
-		}
-		if err := d.setSettings(s); err != nil {
+			if urlChanged {
+				cur.Profiles[i].URL = u
+			}
+			if name != "" {
+				cur.Profiles[i].Name = name
+			}
+			return nil
+		})
+		if err != nil {
 			return nil, err
 		}
 		if urlChanged {
@@ -2913,7 +3018,7 @@ func (d *Daemon) registerHandlers() {
 		}
 		if in.Async {
 			// 界面用:放到后台刷、立刻返回,这条订阅标成"正在刷新";结果(拉取时间 / 失败原因)随状态推送回去。
-			// 回退链(当前节点 → 自动选择 → 直连)最长两分多钟,控制管道的一次调用 60 秒就断,界面会报超时而后台还在刷
+			// 连着时回退链(当前节点 → 自动选择 → 直连)最长 fetchChainBudget(约 5 分 40 秒),之后可能还要重连;界面不必一直占着一次调用
 			d.mu.Lock()
 			if d.refreshQueued == nil {
 				d.refreshQueued = map[string]bool{}
@@ -2989,20 +3094,22 @@ func (d *Daemon) registerHandlers() {
 		if mac == "" {
 			return nil, errors.New("MAC 地址无效")
 		}
-		s := d.getSettings()
-		found := false
-		for i := range s.Devices {
-			if s.Devices[i].MAC == mac {
-				s.Devices[i].Name, s.Devices[i].Mode, found = in.Name, in.Mode, true
-				if in.IP != "" {
-					s.Devices[i].IP = in.IP
+		s, err := d.editSettings(func(s *settings.Settings) error {
+			found := false
+			for i := range s.Devices {
+				if s.Devices[i].MAC == mac {
+					s.Devices[i].Name, s.Devices[i].Mode, found = in.Name, in.Mode, true
+					if in.IP != "" {
+						s.Devices[i].IP = in.IP
+					}
 				}
 			}
-		}
-		if !found {
-			s.Devices = append(s.Devices, settings.Device{MAC: mac, IP: in.IP, Name: in.Name, Mode: in.Mode})
-		}
-		if err := d.setSettings(s); err != nil {
+			if !found {
+				s.Devices = append(s.Devices, settings.Device{MAC: mac, IP: in.IP, Name: in.Name, Mode: in.Mode})
+			}
+			return nil
+		})
+		if err != nil {
 			return nil, err
 		}
 		if d.core.Running() && s.NetMode == settings.NetGateway {
@@ -3020,18 +3127,20 @@ func (d *Daemon) registerHandlers() {
 			return nil, err
 		}
 		mac := settings.NormalizeMAC(in.MAC)
-		s := d.getSettings()
-		kept := s.Devices[:0]
 		removedPolicy := false
-		for _, dev := range s.Devices {
-			if dev.MAC == mac {
-				removedPolicy = dev.Mode != ""
-				continue
+		s, err := d.editSettings(func(s *settings.Settings) error {
+			kept := s.Devices[:0]
+			for _, dev := range s.Devices {
+				if dev.MAC == mac {
+					removedPolicy = dev.Mode != ""
+					continue
+				}
+				kept = append(kept, dev)
 			}
-			kept = append(kept, dev)
-		}
-		s.Devices = kept
-		if err := d.setSettings(s); err != nil {
+			s.Devices = kept
+			return nil
+		})
+		if err != nil {
 			return nil, err
 		}
 		if removedPolicy && d.core.Running() && s.NetMode == settings.NetGateway {
@@ -3074,13 +3183,13 @@ func (d *Daemon) registerHandlers() {
 		if in.Rev != 0 {
 			b, ok := d.settingsAt(in.Rev)
 			if !ok {
-				return nil, errors.New("设置在这期间被改过很多次,认不出这份是从哪一版改的:重新打开设置再改")
+				return nil, errors.New("设置在这期间被改过很多次(或服务重启过),认不出这份是从哪一版改的:重新打开设置再改")
 			}
 			base = &b
 		}
 		var prev, next settings.Settings
 		var mergeErr error
-		if err := d.writeSettings(func(cur settings.Settings) (settings.Settings, bool) {
+		_, err = d.writeSettings(func(cur settings.Settings) (settings.Settings, bool) {
 			prev = cur
 			n := in
 			if base != nil {
@@ -3094,13 +3203,15 @@ func (d *Daemon) registerHandlers() {
 			n.ProbeMoved = true                                           // 用户这次保存的就是他要的间隔
 			n.Profiles, n.ActiveProfile = cur.Profiles, cur.ActiveProfile // 订阅另有接口管,这里不动
 			n.LineAuto = cur.LineAuto                                     // 「线路自动」只归 SetLineAuto 管:设置页拿着打开时的旧快照整份保存
+			// 下面拿它和 prev 比改了什么(不是写下的那份:那份补过 SelectedNode)
 			next = n
 			return n, true
-		}); err != nil {
-			return nil, err
-		}
+		})
 		if mergeErr != nil {
 			return nil, mergeErr
+		}
+		if err != nil {
+			return nil, err
 		}
 		if prev.CoreLogDisk != next.CoreLogDisk {
 			d.coreDisk.Store(next.CoreLogDisk)
@@ -3118,7 +3229,7 @@ func (d *Daemon) registerHandlers() {
 		// 跨过严格全局边界(防逃逸 + 全局)、或动了 IPv6 / TUN,会改变密封 DNS 与闸的安全边界,
 		// 运行中必须整份重建;边界没变的切模式在下面就地切。规则模式下开关防逃逸只动防火墙,配置一字不变,不用重建。
 		if d.core.Running() && needsPrivacyRebuild(prev, next) {
-			if err := d.restartForPrivacySettings(prev); err != nil {
+			if err := d.restartForPrivacySettings(prev, next); err != nil {
 				msg := "隐私设置切换失败,已保持旧配置与隐私保护: " + err.Error()
 				if privacyRelaxes(prev, next) {
 					// 放宽方向不回滚,所以别再说"已保持旧配置" —— 那是假话。
