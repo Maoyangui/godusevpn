@@ -147,6 +147,10 @@ type Daemon struct {
 	// selMu 切 proxy 那一下串行:自救"核对代数 + 切过去"和就地换选择(applySelected)不交错 ——
 	// 要么自救先切、用户的随后盖过来,要么自救核对时就看到代数变了。只包住内核调用,不碰别的锁。
 	selMu sync.Mutex
+	// connGen 内核每成功起来一次加一:旧版本存的订阅缓存每次连接只补拉一次(见 maybeRefresh),按它认"这次连接"。
+	connGen atomic.Uint64
+	// outdatedTried 订阅 id → 补拉旧缓存那次是哪一次连接里试的(d.mu 管)
+	outdatedTried map[string]uint64
 }
 
 type persisted struct {
@@ -460,14 +464,37 @@ func (d *Daemon) getSettings() settings.Settings {
 }
 
 func (d *Daemon) setSettings(s settings.Settings) error {
-	if err := s.Validate(); err != nil {
-		return err
-	}
+	return d.writeSettings(func(settings.Settings) (settings.Settings, bool) { return s, true })
+}
+
+// updateSettings 读改写一气呵成:fn 改的是此刻的设置(和别的写设置互斥,不会把这期间别人写的盖掉),返回 false 表示不用改。
+// fn 里别碰内核、别拿别的锁(持着 configPublishMu)。
+func (d *Daemon) updateSettings(fn func(s *settings.Settings) bool) error {
+	return d.writeSettings(func(cur settings.Settings) (settings.Settings, bool) {
+		ok := fn(&cur)
+		return cur, ok
+	})
+}
+
+// writeSettings 落盘并换上新设置。next 拿到的是此刻的设置(深拷贝),返回要写的那份;false 表示不用写。
+func (d *Daemon) writeSettings(next func(cur settings.Settings) (settings.Settings, bool)) error {
 	d.configPublishMu.Lock()
 	defer d.configPublishMu.Unlock()
 	d.mu.Lock()
+	cur := d.settings.Clone()
 	unreadable := !d.settingsOK
 	d.mu.Unlock()
+	s, ok := next(cur)
+	if !ok {
+		return nil
+	}
+	if err := s.Validate(); err != nil {
+		return err
+	}
+	d.mu.Lock()
+	p, v6 := d.profiles[s.ActiveProfile], d.v6Only
+	d.mu.Unlock()
+	fillSelectedNode(&s, cur, p, builder.V6Blocked(p, s, v6))
 	if unreadable {
 		// 原文件读不出来、手上是默认值:这一存就把它整份覆盖。先另存一份,留不下就不存
 		bak, err := settings.Preserve(paths.Settings())
@@ -491,6 +518,44 @@ func (d *Daemon) setSettings(s settings.Settings) error {
 	d.mu.Unlock()
 	d.applyLogRetention()
 	return nil
+}
+
+// fillSelectedNode 选的是线路组时记着"线路组用不了的时候用哪台"(settings.SelectedNode:退回旧版本时磁盘上 selected 写的就是它,
+// 线路组从订阅里没了时这一轮也用它)。已经记着的还在组里就留着 —— 调用方可以先填上更合适的(用户原来在用的那台、
+// 组里此刻在用的那台);不然取第一台这一轮能用的。经控制口来的整份设置里没有它:选择没变就沿用原来记的。
+// 选的是节点、自动选择就清空;选的东西在订阅里已经没有了(线路组没了)就保留 —— 这时候正要靠它(见 builder.Effective)。
+// 换了订阅时不沿用别的订阅里记的那台。
+func fillSelectedNode(s *settings.Settings, cur settings.Settings, p *profile.Profile, blocked []string) {
+	s.SelectedGroup = "" // 只在磁盘上用(见 settings.Save)
+	if s.SelectedNode == "" && s.Selected == cur.Selected && s.ActiveProfile == cur.ActiveProfile {
+		s.SelectedNode = cur.SelectedNode
+	}
+	if s.Selected == "" {
+		s.SelectedNode = ""
+		return
+	}
+	if p == nil {
+		return
+	}
+	if g, ok := p.Group(s.Selected); ok {
+		if slices.Contains(g.Members, s.SelectedNode) {
+			return
+		}
+		s.SelectedNode = ""
+		for _, m := range g.Members {
+			if !slices.Contains(blocked, m) {
+				s.SelectedNode = m
+				return
+			}
+		}
+		if len(g.Members) > 0 {
+			s.SelectedNode = g.Members[0]
+		}
+		return
+	}
+	if slices.Contains(p.Tags, s.Selected) || s.ActiveProfile != cur.ActiveProfile {
+		s.SelectedNode = ""
+	}
 }
 
 func (d *Daemon) settingsSnapshot() (settings.Settings, uint64) {
@@ -634,10 +699,22 @@ func (d *Daemon) noteFetchErr(id string, err error) {
 // (防逃逸下域名改经 DoH 解析,见 directHTTP)。
 // 订阅无效 / 到期这类错误不换路径,直接返回。
 func (d *Daemon) fetchProfile(ctx context.Context, url string) (*profile.Profile, error) {
+	return d.fetchProfileVia(ctx, url, false)
+}
+
+// fetchProfileVia tunnelOnly 为真时只经当前代理拉一次:不让 auto 组强测全部节点、不走最后那一跳直连,内核没跑就不拉 ——
+// 给"可有可无"的补拉用(旧版本存的缓存认出线路组,见 maybeRefresh)。
+func (d *Daemon) fetchProfileVia(ctx context.Context, url string, tunnelOnly bool) (*profile.Profile, error) {
 	if !d.core.Running() {
+		if tunnelOnly {
+			return nil, state.Errf(state.CodeProfileNet, "没连上,不在隧道外拉")
+		}
 		return d.fetchWith(ctx, url, d.directHTTP())
 	}
 	routes := []string{"proxy", "auto", "auto", "auto", "direct"} // 当前代理一次、auto 三次、最后直连
+	if tunnelOnly {
+		routes = routes[:1]
+	}
 	var last error
 	for i, tag := range routes {
 		if tag == "auto" && i == 1 && d.getSettings().Selected != "" {
@@ -693,8 +770,9 @@ func (d *Daemon) fetchWith(ctx context.Context, url string, client *http.Client)
 
 // refreshCall 一次进行中的订阅刷新;done 关掉之后 err 就是它的结果。
 type refreshCall struct {
-	done chan struct{}
-	err  error
+	done       chan struct{}
+	err        error
+	tunnelOnly bool // 只经隧道拉的那种(见 fetchProfileVia):它失败了,要完整回退链的调用方得自己再走一遍
 }
 
 // refreshProfile 拉指定订阅并更新缓存,返回节点是否有变化。
@@ -703,17 +781,29 @@ type refreshCall struct {
 // 每一次都会从头再走一遍"代理 → auto → 直连",严格全局下就是多一次直连。后来的等那一次的结果,
 // 只报成败、不报"有变化"(变化由发起的那一方处理,免得重连两遍)。
 func (d *Daemon) refreshProfile(ctx context.Context, id string) (changed bool, err error) {
+	return d.refreshProfileVia(ctx, id, false)
+}
+
+// refreshProfileVia tunnelOnly 见 fetchProfileVia。
+func (d *Daemon) refreshProfileVia(ctx context.Context, id string, tunnelOnly bool) (changed bool, err error) {
 	d.mu.Lock()
-	if c := d.refreshing[id]; c != nil {
+	for {
+		c := d.refreshing[id]
+		if c == nil {
+			break
+		}
 		d.mu.Unlock()
 		select {
 		case <-c.done:
-			return false, c.err
 		case <-ctx.Done():
 			return false, ctx.Err()
 		}
+		if c.err == nil || !c.tunnelOnly || tunnelOnly {
+			return false, c.err
+		}
+		d.mu.Lock() // 在跑的那次只经隧道、没拉到:这边要的是完整回退链,自己再走一遍
 	}
-	c := &refreshCall{done: make(chan struct{})}
+	c := &refreshCall{done: make(chan struct{}), tunnelOnly: tunnelOnly}
 	if d.refreshing == nil {
 		d.refreshing = map[string]*refreshCall{}
 	}
@@ -748,12 +838,15 @@ func (d *Daemon) refreshProfile(ctx context.Context, id string) (changed bool, e
 		d.noteFetchErr(id, err)
 		return false, err
 	}
-	np, err := d.fetchProfile(ctx, url)
+	np, err := d.fetchProfileVia(ctx, url, tunnelOnly)
 	if err != nil {
-		d.noteFetchErr(id, err)
+		if !tunnelOnly { // 补拉没拉到不算这条订阅出错(缓存照样能用,界面不必挂错误)
+			d.noteFetchErr(id, err)
+		}
 		return false, err
 	}
 	d.setProfileCache(id, np)
+	d.reconcileLineGroup(id, old, np) // 选中的线路组在新订阅里没了:记一台同线路还在的
 	return old == nil || !sameNodes(old, np), nil
 }
 
@@ -787,6 +880,11 @@ func (d *Daemon) prepare(ctx context.Context) ([]byte, error) {
 		} else {
 			_, p = d.activeProfile()
 			d.logf("订阅「%s」已更新:%d 个节点", a.Name, len(p.Outbounds))
+			// 刷新时选中的线路组没了、记了一台同线路的(reconcileLineGroup):这是刷新自己写的,配置按写过之后的设置生成;
+			// 这期间别的设置变了照旧整份重来(见下面的代数核对)
+			if s2, gen2 := d.settingsSnapshot(); gen2 != settingsGeneration && onlySelectedNodeChanged(s, s2) {
+				s, settingsGeneration = s2, gen2
+			}
 		}
 	} else if stale {
 		d.logf("订阅缓存已过期:防流量逃逸开着,先用缓存连上,再经代理刷新(当前代理 → auto → 最后才直连)")
@@ -846,6 +944,12 @@ func (d *Daemon) prepare(ctx context.Context) ([]byte, error) {
 	d.preparedConfigHash = sha256.Sum256(cfg)
 	d.mu.Unlock()
 	return cfg, nil
+}
+
+// onlySelectedNodeChanged 两份设置只差"线路组用不了时用哪台"(settings.SelectedNode)。
+func onlySelectedNodeChanged(a, b settings.Settings) bool {
+	a.SelectedNode = b.SelectedNode
+	return reflect.DeepEqual(a, b)
 }
 
 // skippedNode 一个被剔掉的节点:原因,和判它时的出站内容(内容变了就不再沿用这个判断)。
@@ -933,7 +1037,7 @@ func (d *Daemon) start(cfg []byte) error {
 	d.mu.Lock()
 	prepared := d.prepared
 	d.mu.Unlock()
-	mode, sel := builder.ModeName(s.Mode), builder.SelectedFor(prepared, s.Selected)
+	mode, sel := builder.ModeName(s.Mode), builder.Effective(prepared, s)
 	if err := core.PresetCache(builder.CachePath(paths.DataDir()), mode, "proxy", sel); err != nil {
 		d.logf("内核缓存里的模式 / 节点没对齐,起来之后再纠正: %v", err)
 	}
@@ -964,6 +1068,8 @@ func (d *Daemon) start(cfg []byte) error {
 	d.mu.Lock()
 	d.running = d.prepared // 起来了,这份订阅才是内核在用的
 	d.mu.Unlock()
+	// 新的一次连接(旧缓存的补拉按它每次连接补一次,见 maybeRefresh)
+	d.connGen.Add(1)
 	d.clashPort.Store(int32(d.preparedClashPortValue())) // 界面按它连 Clash API;同理要等真起来了才算数
 	d.markProbed()                                       // sing-box 启动时(PostStart)自己会把 auto 组全测一轮,定时测速从这时候起算
 	d.guardTunUp()
@@ -1972,17 +2078,43 @@ func (d *Daemon) clearExit() {
 // 不做得更勤是因为没必要 —— 出口真变了几乎都是因为换了节点,而换节点是立刻就重测的。
 const exitMaxAge = 10 * time.Minute
 
-// maybeRefresh 定时刷新当前订阅;节点变了就重连。旧版本存的缓存(Outdated)也在这里补拉一次:连上之后经隧道拉,
-// 不挡第一次连接(见 profile.Outdated)。
+// maybeRefresh 定时刷新当前订阅;节点变了就重连。旧版本存的缓存(Outdated:节点照样能用,只是没认出线路组)也在这里补拉:
+// 连上之后只经隧道拉一次 —— 拉不到不强测全部节点、不在隧道外直连面板,同一次连接里也不再试(每 10 分钟一轮的定时刷新
+// 不会一遍遍重来),下次连上再补;缓存真过期了照旧走完整的回退链。不挡第一次连接(见 profile.Outdated)。
 func (d *Daemon) maybeRefresh(ctx context.Context) {
 	s := d.getSettings()
 	a, p := d.activeProfile()
-	if a == nil || (p != nil && p.URL == a.URL && !p.Stale(time.Duration(s.UpdateHours)*time.Hour) && !(p.Outdated() && d.core.Running())) {
+	if a == nil {
 		return
 	}
-	changed, err := d.refreshProfile(ctx, a.ID)
+	tunnelOnly := false
+	if p != nil && p.URL == a.URL && !p.Stale(time.Duration(s.UpdateHours)*time.Hour) {
+		if !p.Outdated() || !d.core.Running() {
+			return
+		}
+		gen := d.connGen.Load()
+		d.mu.Lock()
+		last, seen := d.outdatedTried[a.ID]
+		tried := seen && last == gen
+		if !tried {
+			if d.outdatedTried == nil {
+				d.outdatedTried = map[string]uint64{}
+			}
+			d.outdatedTried[a.ID] = gen
+		}
+		d.mu.Unlock()
+		if tried {
+			return
+		}
+		tunnelOnly = true
+	}
+	changed, err := d.refreshProfileVia(ctx, a.ID, tunnelOnly)
 	if err != nil {
-		d.logf("定时刷新订阅失败: %v", err)
+		if tunnelOnly {
+			d.logf("旧版本存的订阅缓存补拉没成功(经隧道拉的,这次连接不再试): %v", err)
+		} else {
+			d.logf("定时刷新订阅失败: %v", err)
+		}
 		return
 	}
 	if changed {
@@ -2089,6 +2221,10 @@ func (d *Daemon) stateView() ipc.StateView {
 	s := d.getSettings()
 	profiles, active := d.profileViews()
 	v := ipc.StateView{Version: buildinfo.Version, Protocol: ipc.Version, State: d.machine.Snapshot(), Mode: s.Mode, Node: s.Selected, Profile: active, Profiles: profiles, Settings: s, Uptime: int64(d.core.Uptime().Seconds())}
+	if _, cur := d.activeProfile(); cur != nil {
+		// 没连着时显示这一轮连上会用的(选的东西订阅里没了时回落的那一个,见 builder.Effective),不是设置里那个已经不在的名字
+		v.Node = builder.Effective(cur, s)
+	}
 	if v.Node == "" {
 		v.Node = "auto"
 	}
@@ -2145,7 +2281,8 @@ func (d *Daemon) stateView() ipc.StateView {
 		if p := d.profiles[a.ID]; p != nil {
 			v.Groups = p.Groups // 缓存里的订阅解析出来之后不再改,只读着用
 			v.V6Blocked = builder.V6Blocked(p, s, d.v6Only)
-			v.SelectedV6 = selectionBlocked(p, s.Selected, v.V6Blocked)
+			v.SelectedV6 = selectionBlocked(p, builder.Effective(p, s), v.V6Blocked)
+			v.SelNote = selNote(p, s)
 		}
 	}
 	// 只标当前订阅里名字和内容都没变的:换了订阅、或刷新后机场把节点改成能用的,不再沿用上次连接时的判断
@@ -2305,6 +2442,12 @@ func (d *Daemon) registerHandlers() {
 		}
 		_, cur := d.activeProfile()
 		s.LineAuto = lineAutoAfterSelect(cur, s.Selected, s.LineAuto)
+		if _, ok := cur.Group(s.Selected); ok {
+			// 选的是线路组:退回旧版本时用的那一台(见 settings.SelectedNode)记组里此刻在用的;内核里还没有这一组就照旧
+			if now := d.groupNow(s.Selected); now != "" {
+				s.SelectedNode = now
+			}
+		}
 		if err := d.setSettings(s); err != nil {
 			return nil, err
 		}
@@ -2324,8 +2467,11 @@ func (d *Daemon) registerHandlers() {
 		}
 		s := d.getSettings()
 		_, cur := d.activeProfile()
-		next := lineAutoSelection(cur, s.Selected, in.On, d.groupNow, d.v6BlockedNow(s))
+		next := lineAutoSelection(cur, s.Selected, in.On, d.groupNow, d.v6BlockedNow(s), s.SelectedNode)
 		changed := next != s.Selected
+		if in.On && changed {
+			s.SelectedNode = s.Selected // 从组里的某一台换成线路组:线路组用不了时(退回旧版本)就用原来这台
+		}
 		s.LineAuto, s.Selected = in.On, next
 		if err := d.setSettings(s); err != nil {
 			return nil, err

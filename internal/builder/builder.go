@@ -107,6 +107,16 @@ func SelectedFor(p *profile.Profile, selected string) string {
 	return "auto"
 }
 
+// Effective 这一轮 proxy 组实际落在哪:同 SelectedFor,只是选的线路组在订阅里没了(线路改成只部署一台:服务器下线、
+// 入口停用、只分到一台)时,用记着的同线路那一台(settings.SelectedNode),线路、出口不变;那台也不在了才回落自动选择。
+func Effective(p *profile.Profile, s settings.Settings) string {
+	sel := SelectedFor(p, s.Selected)
+	if sel == "auto" && s.Selected != "" && s.SelectedNode != "" && p != nil && slices.Contains(p.Tags, s.SelectedNode) {
+		return s.SelectedNode
+	}
+	return sel
+}
+
 // DefaultSelected 同 SelectedFor,只认节点(给只有节点列表的地方用)。
 func DefaultSelected(tags []string, selected string) string {
 	return SelectedFor(&profile.Profile{Tags: tags}, selected)
@@ -174,7 +184,7 @@ func buildConfig(in Input, rep *Report) ([]byte, error) {
 		return nil, err
 	}
 	tags := in.Profile.Tags
-	selected := SelectedFor(in.Profile, s.Selected)
+	selected := Effective(in.Profile, s)
 
 	// ---- 出站 ----
 	// 线路组只在选中的就是某条线路组时才进配置,而且全部放进去(线路之间切换才能就地完成)。选的是自动选择或某个节点时

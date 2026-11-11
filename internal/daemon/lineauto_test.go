@@ -124,10 +124,11 @@ func TestQuietTags(t *testing.T) {
 	if quietTags(nil, "hk", false) != nil {
 		t.Fatal("没有订阅时照常测")
 	}
-	// start() 按 SelectedFor 认线路组、按 quietTags 只放开要用的那几台;不能再只认节点
+	// start() 按这一轮实际落到的选择(builder.Effective:认线路组,线路组没了时用同线路那一台)对齐缓存、
+	// 按 quietTags 只放开要用的那几台;不能再只认节点
 	start := funcBody(t, readDaemonSource(t), "func (d *Daemon) start(cfg []byte) error {")
-	if !strings.Contains(start, "builder.SelectedFor(") || !strings.Contains(start, "quietTags(") || strings.Contains(start, "DefaultSelected(") {
-		t.Fatal("start() 应按 SelectedFor 对齐缓存、按 quietTags 安静启动")
+	if !strings.Contains(start, "builder.Effective(") || !strings.Contains(start, "quietTags(") || strings.Contains(start, "DefaultSelected(") {
+		t.Fatal("start() 应按 builder.Effective 对齐缓存、按 quietTags 安静启动")
 	}
 }
 
@@ -164,13 +165,20 @@ func TestLineAutoConversions(t *testing.T) {
 		{"jp", false, []string{"jp-A", "jp-B"}, "jp-A"},
 		{"us", false, nil, "us"},
 	} {
-		if got := lineAutoSelection(p, c.sel, c.on, now, c.blocked); got != c.want {
+		if got := lineAutoSelection(p, c.sel, c.on, now, c.blocked, ""); got != c.want {
 			t.Fatalf("选 %q 时把开关拨到 %v:得 %q,应 %q", c.sel, c.on, got, c.want)
 		}
 	}
 	// 内核里那一台已经不在组里(订阅刷新后换了):取第一台
-	if got := lineAutoSelection(p, "hk", false, func(string) string { return "已删" }, nil); got != "hk-A" {
+	if got := lineAutoSelection(p, "hk", false, func(string) string { return "已删" }, nil, ""); got != "hk-A" {
 		t.Fatalf("得 %q", got)
+	}
+	// 选的线路组在订阅里没了(线路只剩一台):关掉时固定到这一轮正在用的同线路那一台
+	if got := lineAutoSelection(p, "旧线路", false, nil, nil, "hk-B"); got != "hk-B" {
+		t.Fatalf("组没了时关掉:固定到同线路那一台,得 %q", got)
+	}
+	if got := lineAutoSelection(p, "旧线路", false, nil, nil, "已删"); got != "旧线路" {
+		t.Fatalf("那一台也没了:不动,得 %q", got)
 	}
 }
 

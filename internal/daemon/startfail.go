@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Maoyangui/godusevpn/internal/builder"
 	"github.com/Maoyangui/godusevpn/internal/core"
 	"github.com/Maoyangui/godusevpn/internal/paths"
 	"github.com/Maoyangui/godusevpn/internal/ruleset"
@@ -76,17 +77,25 @@ func (d *Daemon) classifyStart(err error) error {
 func (d *Daemon) recoverRoute(ctx context.Context) bool {
 	gen := d.selGen.Load() // 先取代数再读设置:读到的设置一定不比这个代数旧
 	s := d.getSettings()
-	if s.Selected == "" {
+	// 内核这一轮实际落在哪:按它启动时那份订阅算(选的线路组没了时是同线路那一台,选的东西都没了就是自动选择,见 builder.Effective)
+	d.mu.Lock()
+	running := d.running
+	d.mu.Unlock()
+	sel := s.Selected
+	if running != nil {
+		sel = builder.Effective(running, s)
+	}
+	if sel == "" || sel == "auto" {
 		return false // 本来就是自动选择:内核自己会换,这里帮不上忙
 	}
 	if !d.core.Running() {
 		return false
 	}
-	skip := []string{s.Selected}
-	if members, ok := d.core.Members(s.Selected); ok {
+	skip := []string{sel}
+	if members, ok := d.core.Members(sel); ok {
 		// 选的是线路组(内核里有这一组)
-		d.logf("线路组「%s」一直不通,先在这一组的服务器里换一台", s.Selected)
-		switch d.recoverInGroup(ctx, s.Selected, gen) {
+		d.logf("线路组「%s」一直不通,先在这一组的服务器里换一台", sel)
+		switch d.recoverInGroup(ctx, sel, gen) {
 		case groupRecovered, groupYielded:
 			return true
 		case groupUnknown:
@@ -94,13 +103,13 @@ func (d *Daemon) recoverRoute(ctx context.Context) bool {
 				return false // 连接正在拆(断开、重连):不用救了
 			}
 			// 不知道是"还在测"还是"整组不通",就不能跨线路借道:这一轮测完,组里有通的会自己换过去
-			d.logf("线路组「%s」等不到测速结果,先不借别的线路,再观察一轮", s.Selected)
+			d.logf("线路组「%s」等不到测速结果,先不借别的线路,再观察一轮", sel)
 			return true
 		}
 		skip = append(skip, members...)
-		d.logf("线路组「%s」整组不通,临时换一条测得通的线路", s.Selected)
+		d.logf("线路组「%s」整组不通,临时换一条测得通的线路", sel)
 	} else {
-		d.logf("手动选定的节点「%s」一直不通,临时换一条测得通的线路", s.Selected)
+		d.logf("手动选定的节点「%s」一直不通,临时换一条测得通的线路", sel)
 	}
 	tctx, cancel := context.WithTimeout(ctx, 45*time.Second)
 	defer cancel()
@@ -133,7 +142,7 @@ func (d *Daemon) recoverRoute(ctx context.Context) bool {
 	}
 	d.setPing(bestMs)
 	d.clearExit()
-	d.logf("临时换线:已切到「%s」(%d ms);设置里选的仍是「%s」,重新连接或手动再选它时才会用回它", best, bestMs, s.Selected)
+	d.logf("临时换线:已切到「%s」(%d ms);设置里选的仍是「%s」,重新连接或手动再选它时才会用回它", best, bestMs, sel)
 	return true
 }
 

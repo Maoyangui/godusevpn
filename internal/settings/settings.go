@@ -72,6 +72,13 @@ type Settings struct {
 	Devices        []Device `json:"devices"`        // 局域网设备策略
 	ClashPort      int      `json:"clashPort"`      // 内核 Clash API 端口(只监听回环)
 	Selected       string   `json:"selected"`       // proxy 组当前选中的节点或线路组;空 = auto
+	// SelectedNode 选的是线路组时,线路组用不了的时候用的那一台(组里的一个成员,守护进程维护):旧版本不认识线路组,
+	// 磁盘上 selected 写的就是它(见 Save);线路组在订阅里没了(线路改成只部署一台)时,这一轮连接也用它,线路不变。
+	// 只在服务自己手里,不经控制口给出去。
+	SelectedNode string `json:"-"`
+	// SelectedGroup 只在磁盘上出现:选的是线路组时组名存在这里(旧版会忽略不认识的键),selected 写组里的一台。
+	// 读进来(Load)就挪回 Selected,内存里、控制口上一直是空的。
+	SelectedGroup string `json:"selectedGroup,omitempty"`
 	// LineAuto 节点面板顶上的「线路自动」:同一线路有多台服务器时合成一项,选它就在这几台里自动用最快的。
 	// 只是"按线路选"的偏好,本身不改内核配置(只有选中的是线路组时配置里才有线路组,见 builder);只归 SetLineAuto 管,
 	// 保存设置时沿用原值。加这一项不升 schema:旧版读设置时忽略它,退回旧版也起得来(见 TestSchemaStaysReadableByOldClients)。
@@ -114,6 +121,9 @@ func Load(path string) (Settings, error) {
 	s.ProbeMoved = false // 老文件没有这个键,读出来得是 false 才会迁
 	if err := json.Unmarshal(b, &s); err != nil {
 		return Default(), fmt.Errorf("设置文件损坏: %w", err)
+	}
+	if s.SelectedGroup != "" { // 选的是线路组:selected 那一台是写给旧版看的(见 Save)
+		s.SelectedNode, s.Selected, s.SelectedGroup = s.Selected, s.SelectedGroup, ""
 	}
 	if s.Schema > Schema {
 		return Default(), fmt.Errorf("设置文件来自更新的版本(schema %d),请升级客户端", s.Schema)
@@ -162,8 +172,18 @@ func (s *Settings) migrate() {
 	s.Schema = Schema
 }
 
+// Save 落盘(先写临时文件再改名)。
+//
+// 选的是线路组时,selected 写组里的一台(SelectedNode)、组名写进 selectedGroup:退回旧版本时旧版不认识线路组,
+// 把组名当节点就找不到、回落自动选择,还会把它当"手动选了节点"停掉定时测速;写成组里的一台,旧版就按手动选了这台来连,
+// 线路不变。不升 schema(旧版读到更新的 schema 会拒绝启动)。
 func (s Settings) Save(path string) error {
-	b, err := json.MarshalIndent(s, "", "  ")
+	disk := s
+	disk.SelectedGroup = ""
+	if s.SelectedNode != "" && s.SelectedNode != s.Selected && s.Selected != "" {
+		disk.Selected, disk.SelectedGroup = s.SelectedNode, s.Selected
+	}
+	b, err := json.MarshalIndent(disk, "", "  ")
 	if err != nil {
 		return err
 	}

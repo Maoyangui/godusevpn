@@ -84,7 +84,7 @@ func TestLineGroupsAbsentUnlessSelected(t *testing.T) {
 			t.Fatalf("选的是 %q(不是线路组)时,带不带线路组配置应逐字节一样", sel)
 		}
 	}
-	// 选的线路组已经不在订阅里(线路改成只部署一台了):回落到自动选择,配置里一个线路组都没有
+	// 选的线路组已经不在订阅里、也没记着同线路的那一台(见 TestEffectiveSelection):回落到自动选择,配置里一个线路组都没有
 	s := settings.Default()
 	s.Selected = "旧线路"
 	c, _ := buildProfile(t, withGroups, s)
@@ -147,5 +147,33 @@ func TestSelectedFor(t *testing.T) {
 	}
 	if DefaultSelected(p.Tags, "日本") != "auto" || DefaultSelected(p.Tags, "美国") != "美国" {
 		t.Fatal("DefaultSelected 只认节点")
+	}
+}
+
+// 选的线路组在订阅里没了(线路改成只部署一台:服务器下线、入口停用、只分到一台):用记着的同线路那一台,
+// 线路、出口不变;那台也不在了才回落自动选择。没选线路组时和 SelectedFor 一样。
+func TestEffectiveSelection(t *testing.T) {
+	p := groupProfile()
+	p.Groups = p.Groups[1:] // 「香港1」这一组没了,两台成员还在(或只剩一台)
+	for _, c := range []struct{ sel, node, want string }{
+		{"香港1", "香港1-B x2", "香港1-B x2"}, // 组没了:用记着的那一台
+		{"香港1", "已删", "auto"},           // 记着的那台也没了:自动选择
+		{"香港1", "", "auto"},
+		{"日本", "日本-B", "日本"}, // 组还在:就是这一组
+		{"美国", "", "美国"},
+		{"", "", "auto"},
+		{"已删的节点", "", "auto"},
+	} {
+		s := settings.Default()
+		s.Selected, s.SelectedNode = c.sel, c.node
+		if got := Effective(p, s); got != c.want {
+			t.Fatalf("选 %q(记着 %q):得 %q,应 %q", c.sel, c.node, got, c.want)
+		}
+	}
+	s := settings.Default()
+	s.Selected, s.SelectedNode = "香港1", "香港1-A"
+	c, _ := buildProfile(t, p, s)
+	if c.Outbounds[0]["default"] != "香港1-A" {
+		t.Fatalf("组没了时配置按同线路那一台连: %v", c.Outbounds[0]["default"])
 	}
 }

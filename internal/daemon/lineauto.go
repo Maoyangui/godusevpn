@@ -65,7 +65,8 @@ func lineAutoAfterSelect(p *profile.Profile, sel string, cur bool) bool {
 //   - 打开:选的是某个线路组里的节点 → 换成那个线路组;自动选择、不属于任何组的节点不变(只换列表的显示)。
 //   - 关闭:选的是线路组 → 固定到组里此刻在用的那台(now 给,内核在跑时才有);内核没跑、或那台已经不在组里,
 //     取第一台这一轮连得上的(blocked 是连不上的 IPv6 节点,全是的话照样取第一台)。
-func lineAutoSelection(p *profile.Profile, sel string, on bool, now func(group string) string, blocked []string) string {
+//     选的线路组在订阅里已经没了(线路只剩一台):固定到这一轮正在用的同线路那一台(fallback,见 builder.Effective)。
+func lineAutoSelection(p *profile.Profile, sel string, on bool, now func(group string) string, blocked []string, fallback string) string {
 	if p == nil || sel == "" {
 		return sel
 	}
@@ -76,6 +77,9 @@ func lineAutoSelection(p *profile.Profile, sel string, on bool, now func(group s
 		return sel
 	}
 	g, ok := p.Group(sel)
+	if !ok && fallback != "" && !slices.Contains(p.Tags, sel) && slices.Contains(p.Tags, fallback) {
+		return fallback
+	}
 	if !ok || len(g.Members) == 0 {
 		return sel
 	}
@@ -163,10 +167,10 @@ func (d *Daemon) v6BlockedNow(s settings.Settings) []string {
 	return builder.V6Blocked(p, s, v6)
 }
 
-// selectionBlocked 这一轮实际落到的选择(builder.SelectedFor)只能用关着 IPv6 时不用的节点:选的就是这种节点、
+// selectionBlocked 这一轮实际落到的选择(eff,见 builder.Effective)只能用关着 IPv6 时不用的节点:选的就是这种节点、
 // 成员全是这种节点的线路组,或者自动选择(包括选的已经不在订阅里、回落到自动选择)而订阅里的节点全是这种 ——
 // 自动选择那时只能落在它们上面(见 builder 的 reachable)。
-func selectionBlocked(p *profile.Profile, sel string, blocked []string) bool {
+func selectionBlocked(p *profile.Profile, eff string, blocked []string) bool {
 	if p == nil || len(blocked) == 0 {
 		return false
 	}
@@ -178,8 +182,7 @@ func selectionBlocked(p *profile.Profile, sel string, blocked []string) bool {
 		}
 		return len(list) > 0
 	}
-	eff := builder.SelectedFor(p, sel)
-	if eff == "auto" {
+	if eff == "" || eff == "auto" {
 		return all(p.Tags)
 	}
 	if g, ok := p.Group(eff); ok {
@@ -191,5 +194,63 @@ func selectionBlocked(p *profile.Profile, sel string, blocked []string) bool {
 // selectedV6 设置里选的(节点、线路组或自动选择)这一轮连不上,原因是它只能走 IPv6 而现在关着 IPv6。
 func (d *Daemon) selectedV6(s settings.Settings) bool {
 	_, p := d.activeProfile()
-	return selectionBlocked(p, s.Selected, d.v6BlockedNow(s))
+	return selectionBlocked(p, builder.Effective(p, s), d.v6BlockedNow(s))
+}
+
+// selNote 设置里选的节点 / 线路组在当前订阅里已经没有了:这一轮实际用的是什么(见 builder.Effective)。还在就返回 nil。
+func selNote(p *profile.Profile, s settings.Settings) *ipc.SelNote {
+	if p == nil || s.Selected == "" || builder.SelectedFor(p, s.Selected) != "auto" {
+		return nil
+	}
+	n := &ipc.SelNote{Gone: s.Selected, Group: s.SelectedNode != ""}
+	if eff := builder.Effective(p, s); eff != "auto" {
+		n.Now = eff
+	}
+	return n
+}
+
+// reconcileLineGroup 刷新订阅之后:选中的线路组在新订阅里没了(m-ui 只给部署在多台服务器上的线路出组,线路减到一台组就没了),
+// 就给它记一台同线路、还在新订阅里的服务器 —— 优先此刻正在用的那台 —— 这一轮连接就用它(见 builder.Effective),
+// 线路、出口不变,不回落到全局自动选择(那会跨线路换出口、换倍率)。设置里选的仍是这条线路:面板恢复多台、组回来了就自动回到线路自动。
+// 同线路一台都不剩了才回落自动选择;两种情况界面都写明(见 selNote)。old 是刷新前的那份(知道这条线路原来有哪几台)。
+func (d *Daemon) reconcileLineGroup(id string, old, fresh *profile.Profile) {
+	s := d.getSettings()
+	if id != s.ActiveProfile || old == nil || fresh == nil {
+		return
+	}
+	og, ok := old.Group(s.Selected)
+	if !ok || builder.SelectedFor(fresh, s.Selected) != "auto" {
+		return // 选的不是线路组,或者它(线路组、同名节点)还在
+	}
+	alive := func(m string) bool { return slices.Contains(og.Members, m) && slices.Contains(fresh.Tags, m) }
+	pick := ""
+	if now := d.currentNode(); alive(now) {
+		pick = now
+	} else if alive(s.SelectedNode) {
+		pick = s.SelectedNode
+	} else {
+		for _, m := range og.Members {
+			if alive(m) {
+				pick = m
+				break
+			}
+		}
+	}
+	if pick == "" {
+		d.logf("线路组「%s」在订阅里没了,这条线路的服务器也一台都不剩:这一轮回落到自动选择", s.Selected)
+		return
+	}
+	d.logf("线路组「%s」在订阅里没了(线路只剩一台服务器):改用同线路的「%s」,线路组回来后自动回到线路自动", s.Selected, pick)
+	if pick == s.SelectedNode {
+		return
+	}
+	if err := d.updateSettings(func(cur *settings.Settings) bool {
+		if cur.Selected != s.Selected || cur.ActiveProfile != id {
+			return false // 这期间用户改了选择:不动
+		}
+		cur.SelectedNode = pick
+		return true
+	}); err != nil {
+		d.logf("线路组「%s」没了,记同线路那一台失败: %v", s.Selected, err)
+	}
 }
