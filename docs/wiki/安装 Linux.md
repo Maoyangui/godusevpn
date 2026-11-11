@@ -39,6 +39,10 @@ curl -fsSL https://raw.githubusercontent.com/Maoyangui/godusevpn/master/deploy/i
 `godusevpn stop` 主动停掉的不拉,再 `start` 或重启路由器(开着开机自启时)后恢复。
 在终端里前台跑 `godusevpn run`(调试用)不会挂这条定时;要前台调试,先 `godusevpn stop` 停掉服务,前台的 Ctrl-C 停掉之后也不会被拉到后台。
 
+> **梅林从 v0.7.16 及更早的版本升级**:升级前在面板里关掉了开机自启的,面板升级时跑的还是旧版本的启动脚本 ——
+> 它停掉旧的守护进程之后,因为开机自启关着而不起新的,服务就停着(开着「防流量逃逸」时会一直断网,看门狗也不会拉)。
+> **升级后若服务没起来,执行 `godusevpn start`**。从这一版往后再升级不会这样(新的启动脚本重启时不看开机自启的开关)。
+
 ## 本机模式(默认)
 
 TUN 只代理本机流量,与 Windows 相同。
