@@ -13,7 +13,9 @@ import (
 	"time"
 
 	"github.com/Maoyangui/godusevpn/internal/builder"
+	"github.com/Maoyangui/godusevpn/internal/ipc"
 	"github.com/Maoyangui/godusevpn/internal/settings"
+	"github.com/Maoyangui/godusevpn/internal/state"
 )
 
 // 闸开着时,服务自己直连拉订阅的域名解析必须走 DoH(从本服务进程发出),不能交给系统解析器:
@@ -270,5 +272,21 @@ func TestDirectRequestsIPv4OnlyWhenIPv6Off(t *testing.T) {
 	}
 	if _, err := d.bootLookup6(d.getSettings())(ctx, "example.com"); !errors.As(err, &ae) {
 		t.Fatalf("关着 IPv6 还去连 IPv6 地址的 DoH(问 AAAA 那一路):%v", err)
+	}
+}
+
+// 界面、命令行等一次控制调用的上限不短于守护进程里最长的同步处理:连着时拉订阅的整条回退链,之后再备新配置、停旧起新(留一分钟)。
+// 桌面端、命令行都按这个等(桌面端是 Windows / macOS 才编译的包,这里看源码)。
+func TestCallersWaitAsLongAsDaemon(t *testing.T) {
+	if need := fetchChainBudget() + state.PrepareTimeout + time.Minute; ipc.SlowCallTimeout < need {
+		t.Fatalf("ipc.SlowCallTimeout=%v,守护进程最长要 %v", ipc.SlowCallTimeout, need)
+	}
+	b, err := os.ReadFile("../../cmd/godusevpn/app.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := funcBody(t, strings.ReplaceAll(string(b), "\r\n", "\n"), "func (a *App) call(method string, params, result any) error {")
+	if !strings.Contains(body, "ipc.SlowCallTimeout") {
+		t.Fatalf("桌面端调守护进程没按 ipc.SlowCallTimeout 等:\n%s", body)
 	}
 }

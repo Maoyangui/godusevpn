@@ -37,13 +37,16 @@ var (
 	InstallHint = "服务未运行:先以管理员身份执行 godusevpn-svc install"
 )
 
+// callTimeout 一条命令最多等多久:select、mode、settings 这些要备新配置,守护进程那边最长要好几分钟(见 ipc.SlowCallTimeout)。
+const callTimeout = ipc.SlowCallTimeout
+
 // Main 执行一条命令,返回进程退出码。args 不含程序名。
 func Main(args []string) int {
 	if len(args) < 1 {
 		Usage()
 		return 2
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), callTimeout)
 	defer cancel()
 	cmd, args := args[0], args[1:]
 	var err error

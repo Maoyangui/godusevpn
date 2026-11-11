@@ -734,7 +734,7 @@ func (d *Daemon) fetchProfileVia(ctx context.Context, url string, tunnelOnly boo
 		}
 		return d.fetchWith(ctx, url, d.directHTTP())
 	}
-	routes := []string{"proxy", "auto", "auto", "auto", "direct"} // 当前代理一次、auto 三次、最后直连
+	routes := fetchRoutes // 当前代理一次、auto 三次、最后直连
 	if tunnelOnly {
 		routes = routes[:1]
 	}
@@ -743,7 +743,7 @@ func (d *Daemon) fetchProfileVia(ctx context.Context, url string, tunnelOnly boo
 		if tag == "auto" && i == 1 && d.getSettings().Selected != "" {
 			d.groupTest(ctx, "auto") // 手动选节点 / 线路组时 auto 组平时不测(见 core.QuietAuto);当前节点拉不到了才靠它找一条通的
 		}
-		cl, err := d.core.HTTPClient(tag, 30*time.Second)
+		cl, err := d.core.HTTPClient(tag, fetchTry)
 		if err != nil {
 			continue
 		}
@@ -766,10 +766,25 @@ func (d *Daemon) fetchProfileVia(ctx context.Context, url string, tunnelOnly boo
 		select { // 隔两秒再试下一条路径;调用方等不及了就别再往下试
 		case <-ctx.Done():
 			return nil, last
-		case <-time.After(2 * time.Second):
+		case <-time.After(fetchGap):
 		}
 	}
 	return nil, last
+}
+
+// 连着时拉订阅的回退链:每条路径一次最多 fetchTry,路径之间隔 fetchGap;第一次走 auto 之前还可能强测一轮自动选择组(groupTestMax)。
+var fetchRoutes = []string{"proxy", "auto", "auto", "auto", "direct"}
+
+const (
+	fetchTry     = 30 * time.Second
+	fetchGap     = 2 * time.Second
+	groupTestMax = 3 * time.Minute // groupTest 的上限
+)
+
+// fetchChainBudget 连着时拉一次订阅最长要多久(整条回退链走完)。界面、命令行等一次控制调用的上限(ipc.SlowCallTimeout)按它算。
+func fetchChainBudget() time.Duration {
+	n := time.Duration(len(fetchRoutes))
+	return n*fetchTry + (n-1)*fetchGap + groupTestMax
 }
 
 // fetchWith 用给定客户端拉一次,并把错误映射成错误码。
@@ -1745,8 +1760,8 @@ func (d *Daemon) groupTest(ctx context.Context, tag string) {
 		if budget < 20*time.Second {
 			budget = 20 * time.Second
 		}
-		if budget > 3*time.Minute {
-			budget = 3 * time.Minute
+		if budget > groupTestMax {
+			budget = groupTestMax
 		}
 	}
 	tctx, cancel := context.WithTimeout(ctx, budget)

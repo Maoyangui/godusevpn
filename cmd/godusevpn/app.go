@@ -291,8 +291,10 @@ func (a *App) clashClient() (*clash.Client, error) {
 	return clash.New(info.Port, info.Secret), nil
 }
 
+// call 调一个控制方法。等多久见 ipc.SlowCallTimeout:换选择、改设置、切订阅要备新配置,守护进程那边最长要好几分钟,
+// 等得比它短的话界面先报超时、过一会儿又自己连好了。
 func (a *App) call(method string, params, result any) error {
-	ctx, cancel := context.WithTimeout(a.ctx, 90*time.Second)
+	ctx, cancel := context.WithTimeout(a.ctx, ipc.SlowCallTimeout)
 	defer cancel()
 	err := ipc.Call(ctx, method, params, result)
 	if errors.Is(err, ipc.ErrNoService) {
