@@ -39,12 +39,63 @@ func TestLocalServer(t *testing.T) {
 	}
 }
 
+// 提示节点只认 m-ui 的形状:地址只指向本机、不是 socks / http、回环 / localhost 上端口小于 1024(未指定地址不看端口)。
+// 写着本机地址的 socks / http 是接本机另一个代理(Tor 9050、本机 Clash 7890、公司代理),回环高端口多半是本机转发
+// (kcptun、ssh -L):都是真能用的节点,进自动选择、照常测速,不标「提示」。
+func TestHintShape(t *testing.T) {
+	for _, c := range []struct {
+		typ, server string
+		port        int
+		want        bool
+	}{
+		{"shadowsocks", "127.0.0.1", 1, true},    // m-ui「00-勿选-流量…」
+		{"shadowsocks", "127.0.0.1", 88, true},   // 生产上管理员自建的「续费提示」线路
+		{"vmess", "localhost", 443, true},        // 机场常见写法
+		{"trojan", "::1", 0, true},               // 没写端口
+		{"trojan", "0.0.0.0", 443, true},         // 未指定地址
+		{"vless", "0.0.0.0", 8443, true},         // 未指定地址不看端口
+		{"Shadowsocks", "127.0.0.1", 1023, true}, // 类型不分大小写
+		{"socks", "127.0.0.1", 1080, false},      // 本机的 socks 代理
+		{"socks", "127.0.0.1", 9050, false},      // Tor
+		{"http", "127.0.0.1", 7890, false},       // 本机 Clash 的 HTTP 口
+		{"http", "localhost", 80, false},         // socks / http 端口再低也不算
+		{"socks", "0.0.0.0", 1, false},
+		{"SOCKS", "127.0.0.1", 1, false},
+		{"shadowsocks", "127.0.0.1", 12948, false}, // kcptun 本机端
+		{"vless", "127.0.0.1", 1024, false},        // ssh -L 之类的本机转发
+		{"trojan", "1.2.3.4", 1, false},
+		{"trojan", "example.com", 1, false},
+	} {
+		if got := hintShape(c.typ, c.server, c.port); got != c.want {
+			t.Errorf("hintShape(%q, %q, %d) = %v,应 %v", c.typ, c.server, c.port, got, c.want)
+		}
+	}
+}
+
+// 本机链式代理不当提示节点:进自动选择和线路组,Report.Hints 里没有它们;同一份订阅里 m-ui 的提示节点照样剔掉。
+func TestLocalChainProxiesAreNotHints(t *testing.T) {
+	p := profileOf(t,
+		`{"type":"shadowsocks","tag":"00-勿选-流量:1.2/100GB 重置:12天","server":"127.0.0.1","server_port":1,"method":"aes-128-gcm","password":"dummy"}`,
+		`{"type":"socks","tag":"本机 Tor","server":"127.0.0.1","server_port":9050}`,
+		`{"type":"http","tag":"公司代理","server":"localhost","server_port":8080}`,
+		`{"type":"shadowsocks","tag":"kcptun","server":"127.0.0.1","server_port":12948,"method":"aes-128-gcm","password":"p"}`,
+		`{"type":"trojan","tag":"经本机 Tor","server":"hk.example","server_port":443,"password":"p","detour":"本机 Tor"}`,
+	)
+	if got := HintNodes(p); !reflect.DeepEqual(got, []string{"00-勿选-流量:1.2/100GB 重置:12天"}) {
+		t.Fatalf("只有 m-ui 的提示节点算: %v", got)
+	}
+	c, _ := buildProfile(t, p, settings.Default())
+	if got := anyStrings(outboundByTag(c)["auto"]["outbounds"]); !reflect.DeepEqual(got, p.Tags[1:]) {
+		t.Fatalf("本机链式代理照常进自动选择: %v", got)
+	}
+}
+
 // 续费 / 到期 / 用量的提示节点(地址只指向本机)不进自动选择和线路组,报在 Report.Hints 里(按订阅里的顺序);
 // proxy 里照样列着,手动选它照样选得上(和以前一样)。成员全是提示节点的组原样留着(空的测速组整份配置起不来)。
 func TestHintNodesExcludedFromAutoSelection(t *testing.T) {
 	p := profileOf(t,
 		`{"type":"shadowsocks","tag":"00-勿选-流量:1.2/100GB 重置:12天","server":"127.0.0.1","server_port":1,"method":"aes-128-gcm","password":"dummy"}`,
-		`{"type":"socks","tag":"续费提示","server":"127.0.0.1","server_port":88}`,
+		`{"type":"shadowsocks","tag":"续费提示","server":"127.0.0.1","server_port":88,"method":"aes-128-gcm","password":"dummy"}`,
 		`{"type":"trojan","tag":"香港1-A","server":"1.2.3.4","server_port":443,"password":"p"}`,
 		`{"type":"trojan","tag":"香港1-B","server":"hk-b.example","server_port":443,"password":"p"}`,
 		`{"type":"vmess","tag":"套餐到期:2026-12-01","server":"localhost","server_port":443,"uuid":"b831381d-6324-4d53-ad4f-8cda48b30811"}`,
@@ -107,7 +158,7 @@ func TestHintNodesExcludedFromAutoSelection(t *testing.T) {
 // 提示节点先于连不上的 IPv6 节点剔:剔完一个不剩时留 IPv6 节点(打开 IPv6、换个网络就能用),不留提示节点。
 func TestHintNodesYieldToV6Nodes(t *testing.T) {
 	p := profileOf(t,
-		`{"type":"socks","tag":"续费提示","server":"127.0.0.1","server_port":88}`,
+		`{"type":"shadowsocks","tag":"续费提示","server":"127.0.0.1","server_port":88,"method":"aes-128-gcm","password":"dummy"}`,
 		`{"type":"trojan","tag":"v6","server":"2001:db8::1","server_port":443,"password":"p"}`,
 		`{"type":"trojan","tag":"v6b","server":"2001:db8::2","server_port":443,"password":"p"}`,
 	)
@@ -167,7 +218,7 @@ func TestHintNodesSkipDetour(t *testing.T) {
 		`{"type":"shadowtls","tag":"stls-out","server":"1.2.3.4","server_port":443,"version":3,"password":"p","tls":{"enabled":true,"server_name":"www.example.com"}}`,
 		`{"type":"shadowsocks","tag":"续费提示","server":"127.0.0.1","server_port":1,"method":"aes-128-gcm","password":"dummy"}`,
 		`{"type":"trojan","tag":"本机占位链","server":"localhost","server_port":443,"password":"p","detour":"本机出口"}`,
-		`{"type":"socks","tag":"本机出口","server":"127.0.0.1","server_port":1}`,
+		`{"type":"shadowsocks","tag":"本机出口","server":"127.0.0.1","server_port":1,"method":"aes-128-gcm","password":"dummy"}`,
 		`{"type":"trojan","tag":"经 direct","server":"127.0.0.1","server_port":443,"password":"p","detour":"direct"}`,
 		`{"type":"trojan","tag":"圈A","server":"127.0.0.1","server_port":443,"password":"p","detour":"圈B"}`,
 		`{"type":"trojan","tag":"圈B","server":"127.0.0.1","server_port":443,"password":"p","detour":"圈A"}`,

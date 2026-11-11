@@ -20,7 +20,7 @@ func hintProfile(t *testing.T) *profile.Profile {
 	t.Helper()
 	p := prof(t,
 		`{"type":"shadowsocks","tag":"00-勿选-流量:1.0/100.0 重置:3天","server":"127.0.0.1","server_port":1,"method":"aes-128-gcm","password":"dummy"}`,
-		`{"type":"socks","tag":"hk-续费提示","server":"127.0.0.1","server_port":88}`,
+		`{"type":"shadowsocks","tag":"hk-续费提示","server":"127.0.0.1","server_port":88,"method":"aes-128-gcm","password":"dummy"}`,
 		`{"type":"socks","tag":"hk-A","server":"192.0.2.1","server_port":1080}`,
 		`{"type":"socks","tag":"hk-B","server":"192.0.2.2","server_port":1080}`,
 		`{"type":"socks","tag":"v6","server":"2001:db8::1","server_port":1080}`,
@@ -104,9 +104,10 @@ func TestProbeNodesSkipsHintNodes(t *testing.T) {
 			c.Close()
 		}
 	}()
+	// 提示节点写成未指定地址(不看端口,见 builder.HintNodes):Linux 上连 0.0.0.0 就是连本机,要是测了,会落到这个回环端口上
 	port := itoa(ln.Addr().(*net.TCPAddr).Port)
-	hint1 := `{"type":"shadowsocks","tag":"00-勿选-流量:1.0/100.0 重置:3天","server":"127.0.0.1","server_port":` + port + `,"method":"aes-128-gcm","password":"dummy"}`
-	hint2 := `{"type":"trojan","tag":"续费提示","server":"127.0.0.1","server_port":` + port + `,"password":"p"}`
+	hint1 := `{"type":"shadowsocks","tag":"00-勿选-流量:1.0/100.0 重置:3天","server":"0.0.0.0","server_port":` + port + `,"method":"aes-128-gcm","password":"dummy"}`
+	hint2 := `{"type":"trojan","tag":"续费提示","server":"0.0.0.0","server_port":` + port + `,"password":"p"}`
 	// 真节点故意不写服务器地址:probeDirect 对它不发包、直接记 -1(测试自己不出网),测没测到它看结果就知道
 	real := `{"type":"vless","tag":"香港1","uuid":"x"}`
 	d := newPolicyTestDaemon(t)
@@ -191,5 +192,52 @@ func TestFillSelectedNodeSkipsHintNodes(t *testing.T) {
 	}
 	if got := pickMember(nil, nil, nil); got != "" {
 		t.Fatalf("空的组: %q", got)
+	}
+}
+
+// 写着本机地址、却不是提示节点形状的(本机的 socks 代理、回环高端口上的本机转发)照常测速:列表里有它的数,
+// 状态里不报成提示节点。以前凡是回环地址都当提示节点,接本机另一个代理的人选它会被说成"不能上网"、测速也不测。
+func TestProbeLocalChainProxy(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	var accepted atomic.Int32
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			accepted.Add(1)
+			c.Close()
+		}
+	}()
+	port := itoa(ln.Addr().(*net.TCPAddr).Port)
+	d := newPolicyTestDaemon(t)
+	d.settings.Profiles = []settings.Profile{{ID: "p1", Name: "测试", URL: "https://example.invalid/sub"}}
+	d.settings.ActiveProfile = "p1"
+	d.settings.NoExitLookup = true
+	d.profiles["p1"] = prof(t,
+		`{"type":"socks","tag":"本机代理","server":"127.0.0.1","server_port":`+port+`}`,
+		`{"type":"trojan","tag":"本机转发","server":"127.0.0.1","server_port":`+port+`,"password":"p"}`,
+	)
+	res, err := d.server.Dispatch(ipc.MProbeNodes, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, _ := res.(map[string]int)
+	if _, ok := m["本机代理"]; !ok {
+		t.Fatalf("本机的 socks 代理要测: %v", res)
+	}
+	if _, ok := m["本机转发"]; !ok {
+		t.Fatalf("回环高端口上的本机转发要测: %v", res)
+	}
+	if accepted.Load() == 0 {
+		t.Fatal("测速应真连到本机端口")
+	}
+	if v := d.stateView(); len(v.Hints) != 0 {
+		t.Fatalf("它们不是提示节点: %v", v.Hints)
 	}
 }
