@@ -135,33 +135,83 @@ func SaveChecked(path string, base Settings, baseRaw []byte, baseOK bool, s Sett
 // lockFile 写设置文件的跨进程锁:<path>.lock 用 O_EXCL 建出来就算拿到,删掉就是放开。
 // 持锁的只做一次读改写(毫秒级);锁文件放了 staleLock 还在,就是持锁的进程没放就没了(崩溃、被杀),当作已放开。
 // 等不到(lockWait)报错,不硬写。
+//
+// Windows 上删文件不是原子的:持锁的删锁时只要还有句柄开着锁文件(别的等锁的进程正 Stat 它、杀毒软件、索引服务),
+// 名字就处在"删除挂起",这时再建报的是拒绝访问,不是"已存在";删锁碰上别人开着它也会拒绝访问 / 共享冲突。
+// 这些等一下就好(见 isEphemeral):建锁当作锁还被占着接着等,删锁重试,连续 ephemeralWait 都是这样才报真实的错误
+// (那多半是真的没权限)。
 func lockFile(path string) (unlock func(), err error) {
 	lp := path + ".lock"
 	deadline := time.Now().Add(lockWait)
+	var flaky time.Time // 从什么时候起建锁一直碰上瞬时错误
 	for {
-		f, err := os.OpenFile(lp, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+		f, err := openLockFile(lp)
 		if err == nil {
 			_ = f.Close()
-			return func() { _ = os.Remove(lp) }, nil
+			return func() {
+				_ = retryEphemeral(func() error {
+					if err := removeFile(lp); err != nil && !errors.Is(err, os.ErrNotExist) {
+						return err
+					}
+					return nil
+				})
+			}, nil
 		}
-		if !errors.Is(err, os.ErrExist) {
-			if errors.Is(err, os.ErrNotExist) { // 目录还没建:没有别人在写,也没有文件可写,交给写的那一步去报
-				return func() {}, nil
+		switch {
+		case errors.Is(err, os.ErrExist):
+			flaky = time.Time{}
+			if fi, serr := os.Stat(lp); serr == nil && time.Since(fi.ModTime()) > staleLock {
+				_ = removeFile(lp)
+				continue
 			}
+		case errors.Is(err, os.ErrNotExist): // 目录还没建:没有别人在写,也没有文件可写,交给写的那一步去报
+			return func() {}, nil
+		case isEphemeral(err):
+			if flaky.IsZero() {
+				flaky = time.Now()
+			} else if time.Since(flaky) >= ephemeralWait {
+				return nil, fmt.Errorf("锁设置文件: %w", err)
+			}
+		default:
 			return nil, fmt.Errorf("锁设置文件: %w", err)
 		}
-		if fi, serr := os.Stat(lp); serr == nil && time.Since(fi.ModTime()) > staleLock {
-			_ = os.Remove(lp)
-			continue
-		}
 		if time.Now().After(deadline) {
+			if !flaky.IsZero() {
+				return nil, fmt.Errorf("锁设置文件: %w", err)
+			}
 			return nil, errors.New("设置文件正被别的进程写着,稍后再试")
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
 }
 
+// retryEphemeral 做 op,碰上瞬时错误(见 isEphemeral)就隔一会儿再做,连续 ephemeralWait 都失败才返回最后的错误。
+func retryEphemeral(op func() error) error {
+	var since time.Time
+	for {
+		err := op()
+		if err == nil || !isEphemeral(err) {
+			return err
+		}
+		if since.IsZero() {
+			since = time.Now()
+		} else if time.Since(since) >= ephemeralWait {
+			return err
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
 var (
-	lockWait  = 15 * time.Second
-	staleLock = 10 * time.Second
+	lockWait      = 15 * time.Second
+	staleLock     = 10 * time.Second
+	ephemeralWait = 3 * time.Second // 和 Go 工具链在 Windows 上重试同类错误的时长(cmd/internal/robustio 的 2 秒)同一个量级
+
+	// 文件操作经这几个变量走,测试拿它们模拟 Windows 上的瞬时错误
+	openLockFile = func(lp string) (*os.File, error) {
+		return os.OpenFile(lp, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	}
+	removeFile  = os.Remove
+	renameFile  = os.Rename
+	isEphemeral = ephemeralErr
 )

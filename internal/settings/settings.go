@@ -220,7 +220,13 @@ func (s Settings) write(path string) ([]byte, error) {
 	}
 	// 先落盘再改名:断电时宁可是旧文件,也不能是一份截断的(读不出来就退回默认值,见 Load)
 	tmp := path + ".tmp"
-	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	// Windows 上临时文件、设置文件被别的进程(杀毒软件、正在读设置的进程)开着时,建临时文件、改名替换会拒绝访问 /
+	// 共享冲突,等一下就好(见 retryEphemeral);别的平台上没有这种错误,只做一次
+	var f *os.File
+	err = retryEphemeral(func() (err error) {
+		f, err = os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+		return err
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -234,7 +240,7 @@ func (s Settings) write(path string) ([]byte, error) {
 		_ = os.Remove(tmp)
 		return nil, err
 	}
-	if err := os.Rename(tmp, path); err != nil {
+	if err := retryEphemeral(func() error { return renameFile(tmp, path) }); err != nil {
 		return nil, err
 	}
 	return b, nil
