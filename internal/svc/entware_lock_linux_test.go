@@ -92,7 +92,7 @@ func TestEntwareLockUnremovable(t *testing.T) {
 			if ds := entwareDaemonsByScan(r.name); len(ds) != 1 {
 				t.Fatalf("%s:应起了一个守护进程,得 %v\n%s", c.what, ds, out)
 			}
-			if strings.Contains(out, "rm:") || strings.Contains(out, "rmdir:") {
+			if strings.Contains(out, "rm:") || strings.Contains(out, "rmdir:") || strings.Contains(out, "mv:") {
 				t.Fatalf("%s:删不掉的报错不该刷到输出里:\n%s", c.what, out)
 			}
 			// stop 同样不会卡住
@@ -198,6 +198,119 @@ func TestEntwareLockStaleRace(t *testing.T) {
 		round("清理锁被打断留下", 2, 30*time.Second)
 		if d := time.Since(began); d < 3*time.Second {
 			t.Fatalf("清理锁可能有人正拿着,要等一会儿才当它是留下的(只等了 %v)", d)
+		}
+	})
+}
+
+// 梅林(Entware):放锁、清旧锁要删锁目录时,等锁的正往里留记号(.w进程号;记号刚被删、或者记录刚被删读成换了一把,
+// 都会再留)。以前直接 rm -rf:一项项删完最后才 rmdir,记号这时又写进去,rmdir 因为目录不空失败,剩下一把没有记录、
+// 只有记号的锁 —— 等锁的都要等满 LOCKTTL(30 秒)才清得掉,清旧锁时还算一回"清不掉",数满三回就不加锁照样起;
+// 放锁那一下还往标准错误打一行 rm 的报错。现在先把锁目录整个改名挪开再删。
+// 测试进程开几个 goroutine 不停往锁目录里建记号(比真的等锁的勤得多),放锁、清旧锁都要把锁目录删干净、不报错、不耽搁。
+func TestEntwareLockDropUnderWaiterMarks(t *testing.T) {
+	eachToolset(t, func(t *testing.T, busybox bool) {
+		r := newEntwareRig(t, "gvlkdm", busybox)
+		body := strings.Replace(entwareLockSh, "LOCK=/opt/var/run/godusevpn.lock\n", "LOCK="+r.lockDir()+"\n", 1)
+		if body == entwareLockSh {
+			t.Fatalf("锁那一段变了,测试里的替换要跟上:\n%s", entwareLockSh)
+		}
+		d := r.dir
+		// 拿锁 → 等 release 出现 → 放锁
+		r.write("holder", "#!/bin/sh\n"+body+`
+lock
+[ -n "$MYLOCK" ] || echo NOLOCK
+while [ ! -e "`+d+`/release" ]; do :; done
+unlock
+echo DONE
+`, 0o755)
+		sh := "sh"
+		if busybox {
+			sh = filepath.Join(r.bin, "sh")
+		}
+		mark := filepath.Join(r.lockDir(), ".w99999")
+		hammer := func() (stop func()) {
+			done := make(chan struct{})
+			var wg sync.WaitGroup
+			for i := 0; i < 3; i++ {
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					for {
+						select {
+						case <-done:
+							return
+						default:
+						}
+						if f, err := os.OpenFile(mark, os.O_CREATE|os.O_WRONLY, 0o644); err == nil {
+							_ = f.Close()
+						}
+					}
+				}()
+			}
+			return func() { close(done); wg.Wait() }
+		}
+		run := func(what string, limit time.Duration) {
+			t.Helper()
+			ctx, cancel := context.WithTimeout(context.Background(), limit)
+			defer cancel()
+			c := exec.CommandContext(ctx, sh, filepath.Join(d, "holder"))
+			c.Env = r.env
+			b, err := c.CombinedOutput()
+			out := string(b)
+			if ctx.Err() != nil {
+				t.Fatalf("%s:%v 内没拿到锁做完:\n%s", what, limit, out)
+			}
+			if err != nil || strings.Count(out, "DONE") != 1 || strings.Contains(out, "NOLOCK") {
+				t.Fatalf("%s:应拿到锁做完: %v\n%s", what, err, out)
+			}
+			if strings.Contains(out, "rm:") || strings.Contains(out, "rmdir:") || strings.Contains(out, "mv:") {
+				t.Fatalf("%s:不该有删除的报错:\n%s", what, out)
+			}
+		}
+		reset := func() {
+			t.Helper()
+			_ = os.RemoveAll(r.lockDir())
+			r.write("release", "", 0o644) // 拿到锁马上放
+		}
+		// 放锁:持有时记号不停地写进来
+		for i := 0; i < 10; i++ {
+			reset()
+			stop := hammer()
+			run(fmt.Sprintf("放锁 第 %d 回", i+1), 20*time.Second)
+			stop()
+			if r.locked() {
+				ents, _ := os.ReadDir(r.lockDir())
+				t.Fatalf("放锁 第 %d 回:锁目录没删掉,剩下 %v", i+1, ents)
+			}
+		}
+		// 清旧锁:持有者不在了的旧锁里记号不停地写进来,要马上清掉拿到锁(不是等满 LOCKTTL,也不是不加锁照样起)
+		for i := 0; i < 5; i++ {
+			reset()
+			if err := os.MkdirAll(r.lockDir(), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			r.write("run/godusevpn.lock/owner", fmt.Sprintf("%d %d\n", deadPID(t), uptimeSeconds(t)), 0o644)
+			stop := hammer()
+			began := time.Now()
+			run(fmt.Sprintf("清旧锁 第 %d 回", i+1), 40*time.Second)
+			stop()
+			if took := time.Since(began); took > 10*time.Second {
+				t.Fatalf("清旧锁 第 %d 回:用了 %v,应马上清掉", i+1, took)
+			}
+			if r.locked() {
+				ents, _ := os.ReadDir(r.lockDir())
+				t.Fatalf("清旧锁 第 %d 回:锁目录没删掉,剩下 %v", i+1, ents)
+			}
+		}
+		// 挪开后没删完的(挪开前找到目录、挪开后才写进去的那一下)不挡锁,之后放锁时一并清掉
+		reset()
+		if err := os.MkdirAll(r.lockDir()+".dead.1", 0o755); err != nil {
+			t.Fatal(err)
+		}
+		r.write("run/godusevpn.lock.dead.1/.w2", "", 0o644)
+		run("留着挪开的", 10*time.Second)
+		if left, _ := filepath.Glob(r.lockDir() + "*"); len(left) != 0 {
+			t.Fatalf("放锁后不该剩下锁目录或挪开的:%v", left)
 		}
 	})
 }

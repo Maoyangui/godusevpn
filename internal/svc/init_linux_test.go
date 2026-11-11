@@ -254,6 +254,7 @@ func TestRemoveEntware(t *testing.T) {
 		link:                                          "",
 		filepath.Join(lock, "owner"):                  "4242 100\n", // 持有者被 KILL 留下的锁
 		filepath.Join(lock+".clean", ".keep"):         "",           // 清旧锁时被 KILL 留下的清理锁
+		filepath.Join(lock+".dead.77", ".w78"):        "",           // 放锁时挪开、没删完的
 	}
 	for p, s := range files {
 		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
@@ -264,7 +265,7 @@ func TestRemoveEntware(t *testing.T) {
 		}
 	}
 	removeEntware(script, link, lock)
-	for _, p := range []string{script, script + ".tmp", filepath.Join(initd, ".S99godusevpn.123.tmp"), link, lock, lock + ".clean"} {
+	for _, p := range []string{script, script + ".tmp", filepath.Join(initd, ".S99godusevpn.123.tmp"), link, lock, lock + ".clean", lock + ".dead.77"} {
 		if _, err := os.Stat(p); !os.IsNotExist(err) {
 			t.Errorf("卸载后 %s 应删掉(%v)", p, err)
 		}

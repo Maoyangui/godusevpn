@@ -424,6 +424,7 @@ stale() {
 # 还在 —— 说明还是判定的那一把,不是别人清掉之后新建的 —— 才删。清理只要一眨眼,清理锁占着超过 5 秒就是清的那个
 # 被打断留下的,删掉它。
 # 返回 0:删掉了 / 那一把已经不在了,马上再建;1:换了一把或别人正在清,等一秒再看;2:清不掉(/opt 只读之类)。
+# 删不掉时再看一眼:锁目录已经没了算删掉了,记录变了算换了一把(别人放掉又建了),都不算清不掉。
 unstale() {
 	if ! mkdir "$LOCK.clean" 2>/dev/null; then
 		[ -d "$LOCK.clean" ] || return 2
@@ -439,13 +440,26 @@ unstale() {
 	if [ ! -d "$LOCK" ]; then
 		rc=0
 	elif [ -e "$LOCK/.w$$" ] && [ "$(cat "$LOCK/owner" 2>/dev/null)" = "$1" ]; then
-		rm -rf "$LOCK" 2>/dev/null
-		rc=0
-		[ -d "$LOCK" ] && rc=2
+		if droplock || [ ! -d "$LOCK" ]; then
+			rc=0
+		elif [ "$(cat "$LOCK/owner" 2>/dev/null)" = "$1" ]; then
+			rc=2
+		fi
 	fi
 	rmdir "$LOCK.clean" 2>/dev/null
 	CLEANING=
 	return $rc
+}
+# droplock 删掉锁目录:先整个改名挪开(同一目录里改名是原子的),再删挪开的那一份。不直接 rm -rf "$LOCK":它是一项项
+# 删完最后才 rmdir,等锁的这时候正好往里留记号(.w进程号,见 lock;记号刚被删、或者记录刚被删读成换了一把,都会再留),
+# rmdir 就因为目录不空失败,剩下一把没有记录、只有记号的锁,等锁的都要等满 LOCKTTL 才清得掉,清的时候还会被当成清不掉。
+# 挪开之后再往 $LOCK 里留的记号都落空;挪开前已经找到目录、挪开后才写进去的那一下,最多让挪开的那一份删不干净,
+# 不挡锁,下回 droplock 连同别的进程剩下的一起清掉。返回非 0:挪不动(锁已经不在了、/opt 只读之类)。
+droplock() {
+	rm -rf "$LOCK.dead.$$" 2>/dev/null
+	mv "$LOCK" "$LOCK.dead.$$" 2>/dev/null || return 1
+	rm -rf "$LOCK".dead.* 2>/dev/null
+	return 0
 }
 lock() {
 	trap unlock EXIT
@@ -485,12 +499,12 @@ lock() {
 		sleep 1
 		waited=$((waited + 1))
 	done
-	echo "$MYLOCK" > "$LOCK/owner" || { rm -rf "$LOCK"; MYLOCK=; }
+	echo "$MYLOCK" > "$LOCK/owner" || { droplock; MYLOCK=; }
 }
 unlock() {
 	[ -n "$CLEANING" ] && rmdir "$LOCK.clean" 2>/dev/null
 	CLEANING=
-	[ -n "$MYLOCK" ] && [ "$(cat "$LOCK/owner" 2>/dev/null)" = "$MYLOCK" ] && rm -rf "$LOCK"
+	[ -n "$MYLOCK" ] && [ "$(cat "$LOCK/owner" 2>/dev/null)" = "$MYLOCK" ] && droplock
 	MYLOCK=
 	trap - EXIT HUP INT TERM
 	return 0
@@ -609,6 +623,12 @@ func removeEntware(script, bin, lock string) {
 	_ = os.Remove(bin)
 	_ = os.RemoveAll(lock)
 	_ = os.RemoveAll(lock + ".clean") // 清旧锁用的清理锁(见脚本里的 unstale),同样只有被 KILL 才会留下
+	// 放锁时挪开、还没删完的(见脚本里的 droplock)
+	if deads, err := filepath.Glob(lock + ".dead.*"); err == nil {
+		for _, p := range deads {
+			_ = os.RemoveAll(p)
+		}
+	}
 }
 
 // Refresh 守护进程每次启动时调:面板自更新只换程序文件、不重跑 install,旧版装下的启动脚本会一直留着。
