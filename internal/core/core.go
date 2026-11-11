@@ -613,7 +613,7 @@ func (c *Core) ProbeRunning(ctx context.Context, tags []string, link string, onE
 // 返回的 error 只表示"这一轮整个没跑起来";单个节点测不通体现为结果里的 -1。
 //
 // doh 不为空时节点域名经这台 DoH 解析(按地址连),不交给系统解析器:这个临时实例在隧道外,系统解析就是明文问运营商。
-func Probe(ctx context.Context, outbounds []json.RawMessage, tags []string, link, doh string, onEach func(tag string, ms int)) (map[string]int, error) {
+func Probe(ctx context.Context, outbounds []json.RawMessage, tags []string, link, doh string, allow6 bool, onEach func(tag string, ms int)) (map[string]int, error) {
 	want := make(map[string]bool, len(tags))
 	for _, t := range tags {
 		want[t] = true
@@ -639,8 +639,20 @@ func Probe(ctx context.Context, outbounds []json.RawMessage, tags []string, link
 	list = append(list, map[string]any{"type": "direct", "tag": "direct"})
 
 	doc := map[string]any{"log": map[string]any{"level": "warn"}, "outbounds": list}
+	// 节点域名怎么解析:doh 是地址就经它(和真连时一样);关着 IPv6(allow6 为假)时只解析 IPv4 —— 和真连时的 ipv4_only 一样,
+	// 测速也不走 IPv6(route.default_domain_resolver 只写服务器,策略跟着 dns.strategy)
+	var boot []any
 	if doh != "" {
-		doc["dns"] = map[string]any{"servers": []any{map[string]any{"type": "https", "tag": "boot", "server": doh}}}
+		boot = append(boot, map[string]any{"type": "https", "tag": "boot", "server": doh})
+	} else if !allow6 {
+		boot = append(boot, map[string]any{"type": "local", "tag": "boot"})
+	}
+	if len(boot) > 0 {
+		dns := map[string]any{"servers": boot}
+		if !allow6 {
+			dns["strategy"] = "ipv4_only"
+		}
+		doc["dns"] = dns
 		doc["route"] = map[string]any{"default_domain_resolver": "boot"}
 	}
 	raw, err := json.Marshal(doc)

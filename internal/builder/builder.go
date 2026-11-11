@@ -183,8 +183,10 @@ func buildConfig(in Input, rep *Report) ([]byte, error) {
 	if _, ok := in.Profile.Group(selected); ok {
 		groups = in.Profile.Groups
 	}
-	// 这一轮连不上的 IPv6 节点不进自动选择和线路组(见 V6Blocked);一个能用的都不剩时照旧放着,配置得建得起来,界面另有说明
-	rep.V6Blocked = V6Blocked(in.Profile, s, !android && s.TUN && !s.IPv6 && s.DisableNICIPv6, in.V6Only)
+	// 关着 IPv6 时要走 IPv6 的节点不进自动选择和线路组(见 V6Blocked);一个能用的都不剩时照旧放着,配置得建得起来,界面另有说明。
+	// 地址直接写成 IPv6 的还要改经 block 出站:手动选它时内核也不去拨,本机一个 IPv6 包都不发
+	rep.V6Blocked = V6Blocked(in.Profile, s, in.V6Only)
+	viaV6Block := v6Detours(in.Profile, rep.V6Blocked)
 	proxyList := make([]string, 0, 1+len(groups)+len(tags))
 	proxyList = append(proxyList, "auto")
 	for _, g := range groups {
@@ -198,8 +200,14 @@ func buildConfig(in Input, rep *Report) ([]byte, error) {
 	for _, g := range groups {
 		outbounds = append(outbounds, urltestGroup(g.Tag, reachable(g.Members, rep.V6Blocked)))
 	}
-	for _, raw := range in.Profile.Outbounds {
+	for i, raw := range in.Profile.Outbounds {
+		if i < len(tags) && viaV6Block[tags[i]] {
+			raw = viaBlock(raw)
+		}
 		outbounds = append(outbounds, json.RawMessage(raw))
+	}
+	if len(viaV6Block) > 0 {
+		outbounds = append(outbounds, obj("type", "block", "tag", V6BlockTag))
 	}
 	outbounds = append(outbounds, obj("type", "direct", "tag", "direct"))
 

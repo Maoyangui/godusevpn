@@ -151,35 +151,44 @@ func (d *Daemon) applySelected(sel string) error {
 	return nil
 }
 
-// ---- 关着 IPv6 时连不上的 IPv6 节点 ----
+// ---- 关着 IPv6 时不用的 IPv6 节点 ----
 
-// v6BlockedNow 当前订阅里这一轮连不上的 IPv6 节点(见 builder.V6Blocked)。网卡 IPv6 停没停按设置判(wantNICOff),
+// v6BlockedNow 当前订阅里这一轮不用的 IPv6 节点(见 builder.V6Blocked):关着 IPv6 时连它要从本机走 IPv6 的。
 // 只有 IPv6 地址的节点域名用最近一次连接时解析出来的那份。
 func (d *Daemon) v6BlockedNow(s settings.Settings) []string {
 	_, p := d.activeProfile()
 	d.mu.Lock()
 	v6 := d.v6Only
 	d.mu.Unlock()
-	return builder.V6Blocked(p, s, wantNICOff(s), v6)
+	return builder.V6Blocked(p, s, v6)
 }
 
-// selectionBlocked 选中的就是这一轮连不上的 IPv6 节点,或者是成员全是这种节点的线路组。
+// selectionBlocked 这一轮实际落到的选择(builder.SelectedFor)只能用关着 IPv6 时不用的节点:选的就是这种节点、
+// 成员全是这种节点的线路组,或者自动选择(包括选的已经不在订阅里、回落到自动选择)而订阅里的节点全是这种 ——
+// 自动选择那时只能落在它们上面(见 builder 的 reachable)。
 func selectionBlocked(p *profile.Profile, sel string, blocked []string) bool {
-	if p == nil || sel == "" || len(blocked) == 0 {
+	if p == nil || len(blocked) == 0 {
 		return false
 	}
-	if g, ok := p.Group(sel); ok {
-		for _, m := range g.Members {
+	all := func(list []string) bool {
+		for _, m := range list {
 			if !slices.Contains(blocked, m) {
 				return false
 			}
 		}
-		return len(g.Members) > 0
+		return len(list) > 0
 	}
-	return slices.Contains(blocked, sel)
+	eff := builder.SelectedFor(p, sel)
+	if eff == "auto" {
+		return all(p.Tags)
+	}
+	if g, ok := p.Group(eff); ok {
+		return all(g.Members)
+	}
+	return slices.Contains(blocked, eff)
 }
 
-// selectedV6 设置里选的节点(或线路组)这一轮连不上,原因是它只能走 IPv6 而现在关着 IPv6。
+// selectedV6 设置里选的(节点、线路组或自动选择)这一轮连不上,原因是它只能走 IPv6 而现在关着 IPv6。
 func (d *Daemon) selectedV6(s settings.Settings) bool {
 	_, p := d.activeProfile()
 	return selectionBlocked(p, s.Selected, d.v6BlockedNow(s))

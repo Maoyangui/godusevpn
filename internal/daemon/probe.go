@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -66,14 +67,16 @@ func endpoints(p *profile.Profile) []endpoint {
 //
 // resolve 解析节点域名(见 bootResolver),这时候隧道还没起来:交给系统解析器就是把节点域名明文发给运营商,
 // 而真连节点时域名是经 DoH 解析的,连接里也不一定看得到它。localDNS 给退回临时实例的那条路用,是地址时临时实例也走 DoH。
-func probeDirect(ctx context.Context, p *profile.Profile, onEach func(tag string, ms int), logf func(string, ...any), resolve func(context.Context, string) ([]string, error), localDNS string) map[string]int {
+// allow6 是「允许 IPv6」:关着时一个包都不往 IPv6 地址发(解析只取 IPv4、拨号只用 IPv4,临时实例按 ipv4_only 解析);
+// skip 是这一轮不用的 IPv6 节点(见 builder.V6Blocked):不测,直接记不通 —— 测它就是在走 IPv6。
+func probeDirect(ctx context.Context, p *profile.Profile, onEach func(tag string, ms int), logf func(string, ...any), resolve func(context.Context, string) ([]string, error), localDNS string, allow6 bool, skip map[string]bool) map[string]int {
 	res := map[string]int{}
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, 8)
 	var fallback []string // ping 没通的 UDP 节点,稍后用临时实例真连一次
 	for _, e := range endpoints(p) {
-		if e.Server == "" || e.Port <= 0 {
+		if e.Server == "" || e.Port <= 0 || skip[e.Tag] {
 			mu.Lock()
 			res[e.Tag] = -1
 			mu.Unlock()
@@ -95,7 +98,7 @@ func probeDirect(ctx context.Context, p *profile.Profile, onEach func(tag string
 			var d time.Duration
 			var err error
 			if udpProtocols[e.Type] {
-				d, err = pingHost(tctx, e.Server, resolve)
+				d, err = pingHost(tctx, e.Server, resolve, allow6)
 				if err != nil {
 					// ping 不通不等于节点不通:服务器防火墙丢 ICMP、用户所在网络(校园网、公司网)不放行 ICMP
 					// 都很常见,本机开不了原始套接字也走这里。这些节点改用临时实例真连一次再下结论。
@@ -105,7 +108,7 @@ func probeDirect(ctx context.Context, p *profile.Profile, onEach func(tag string
 					return
 				}
 			} else {
-				d, err = tcping(tctx, e.Server, strconv.Itoa(e.Port), resolve)
+				d, err = tcping(tctx, e.Server, strconv.Itoa(e.Port), resolve, allow6)
 			}
 			ms := int(d / time.Millisecond)
 			if ms < 1 {
@@ -129,7 +132,7 @@ func probeDirect(ctx context.Context, p *profile.Profile, onEach func(tag string
 		if settings.IsIP(localDNS) {
 			doh = localDNS
 		}
-		got, err := core.Probe(ctx, p.Outbounds, fallback, "", doh, onEach)
+		got, err := core.Probe(ctx, p.Outbounds, fallback, "", doh, allow6, onEach)
 		if err != nil {
 			// 以前这里失败是完全静默的:界面上那批节点永远没有数字,用户看到的是"点了没反应"。
 			if logf != nil {
@@ -143,8 +146,10 @@ func probeDirect(ctx context.Context, p *profile.Profile, onEach func(tag string
 	return res
 }
 
-// lookupNode 节点域名 → IPv4 地址。resolve 为空(或本来就是地址)时原样返回,由系统解析。
-func lookupNode(ctx context.Context, host string, resolve func(context.Context, string) ([]string, error)) (string, error) {
+// lookupNode 节点域名 → 地址,IPv4 优先(和内核解析节点域名的 prefer_ipv4 / ipv4_only 一样):系统解析器可能把 IPv6 地址排在前面。
+// 关着 IPv6(allow6 为假)时只要 IPv4,只有 IPv6 地址就报错、不去连。resolve 为空(或本来就是地址)时原样返回,
+// 由拨号那一步解析(关着 IPv6 时拨号只用 IPv4,见 tcping)。
+func lookupNode(ctx context.Context, host string, resolve func(context.Context, string) ([]string, error), allow6 bool) (string, error) {
 	if resolve == nil || net.ParseIP(host) != nil {
 		return host, nil
 	}
@@ -152,23 +157,49 @@ func lookupNode(ctx context.Context, host string, resolve func(context.Context, 
 	if err != nil {
 		return "", err
 	}
-	if len(ips) == 0 {
-		return "", errors.New("解析失败")
+	v6 := ""
+	for _, a := range ips {
+		ip := net.ParseIP(strings.TrimSpace(a))
+		switch {
+		case ip == nil:
+		case ip.To4() != nil:
+			return ip.String(), nil
+		case v6 == "":
+			v6 = ip.String()
+		}
 	}
-	return ips[0], nil
+	if v6 != "" && allow6 {
+		return v6, nil
+	}
+	if v6 != "" {
+		return "", errors.New("只有 IPv6 地址,而「允许 IPv6」关着")
+	}
+	return "", errors.New("解析失败")
 }
 
 // probeConnected 连着时给节点列表测速:TCP 类协议直接量网卡到节点的握手,不经节点转发。线路上看到的和真连一样只有地址和端口,
 // 少了一轮代理握手和一条经节点发出去的请求,数字也正是这条线路本身的延迟。只测得出"连得上",账号过期这种要选上之后才看得出。
 // UDP 类协议(hysteria2、tuic)没有 TCP 可握,ICMP 从这里发又会进隧道,只能经出站真连一次。
-func (d *Daemon) probeConnected(ctx context.Context, p *profile.Profile, onEach func(tag string, ms int)) map[string]int {
-	resolve := d.bootResolver(d.getSettings())
+//
+// 关着 IPv6 时同样不走 IPv6:skip(这一轮不用的 IPv6 节点)不测、直接记不通,解析出来的地址只用 IPv4 的。
+func (d *Daemon) probeConnected(ctx context.Context, p *profile.Profile, onEach func(tag string, ms int), skip map[string]bool) map[string]int {
+	s := d.getSettings()
+	resolve := d.bootResolver(s)
 	res := map[string]int{}
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, 8)
 	var udp []string
 	for _, e := range endpoints(p) {
+		if skip[e.Tag] {
+			mu.Lock() // 前面起的那几路已经在往 res 里写了
+			res[e.Tag] = -1
+			mu.Unlock()
+			if onEach != nil {
+				onEach(e.Tag, -1)
+			}
+			continue
+		}
 		if udpProtocols[e.Type] {
 			udp = append(udp, e.Tag)
 			continue
@@ -184,7 +215,7 @@ func (d *Daemon) probeConnected(ctx context.Context, p *profile.Profile, onEach 
 			tctx, cancel := context.WithTimeout(ctx, probeTimeout)
 			defer cancel()
 			v := -1
-			if host, err := lookupNode(tctx, e.Server, resolve); err == nil {
+			if host, err := lookupNode(tctx, e.Server, resolve, s.IPv6); err == nil {
 				if took, err := d.core.DialDirect(tctx, host, e.Port); err == nil {
 					if v = int(took / time.Millisecond); v < 1 {
 						v = 1
@@ -208,14 +239,18 @@ func (d *Daemon) probeConnected(ctx context.Context, p *profile.Profile, onEach 
 	return res
 }
 
-func tcping(ctx context.Context, host, port string, resolve func(context.Context, string) ([]string, error)) (time.Duration, error) {
-	host, err := lookupNode(ctx, host, resolve)
+func tcping(ctx context.Context, host, port string, resolve func(context.Context, string) ([]string, error), allow6 bool) (time.Duration, error) {
+	host, err := lookupNode(ctx, host, resolve, allow6)
 	if err != nil {
 		return 0, err
 	}
 	addr := net.JoinHostPort(host, port)
+	network := "tcp"
+	if !allow6 {
+		network = "tcp4" // 关着 IPv6:域名交给系统解析时也只拨 IPv4,写成 IPv6 地址的直接拨不出去
+	}
 	start := time.Now()
-	c, err := (&net.Dialer{}).DialContext(ctx, "tcp", addr)
+	c, err := (&net.Dialer{}).DialContext(ctx, network, addr)
 	if err != nil {
 		return 0, err
 	}
@@ -232,8 +267,8 @@ func (e *icmpUnavailable) Unwrap() error { return e.err }
 var pingSeq uint32
 
 // pingHost 解析域名(只取 IPv4)后 ping 一次。
-func pingHost(ctx context.Context, host string, resolve func(context.Context, string) ([]string, error)) (time.Duration, error) {
-	host, err := lookupNode(ctx, host, resolve)
+func pingHost(ctx context.Context, host string, resolve func(context.Context, string) ([]string, error), allow6 bool) (time.Duration, error) {
+	host, err := lookupNode(ctx, host, resolve, allow6)
 	if err != nil {
 		return 0, err
 	}

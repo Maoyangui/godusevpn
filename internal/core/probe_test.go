@@ -20,7 +20,7 @@ func TestProbeOfflineUnreachable(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	start := time.Now()
-	res, err := Probe(ctx, outbounds, []string{"hk", "tw", "不存在"}, "", "", nil)
+	res, err := Probe(ctx, outbounds, []string{"hk", "tw", "不存在"}, "", "", true, nil)
 	if err != nil {
 		t.Fatalf("这几个节点内核都解得动,不该报错: %v", err)
 	}
@@ -52,7 +52,7 @@ func TestProbeWritesNothingToWorkingDir(t *testing.T) {
 	defer cancel()
 	_, _ = Probe(ctx, []json.RawMessage{
 		json.RawMessage(`{"type":"anytls","tag":"tw","server":"192.0.2.2","server_port":8443,"password":"p","tls":{"enabled":true,"server_name":"b.example"}}`),
-	}, []string{"tw"}, "", "", nil)
+	}, []string{"tw"}, "", "", false, nil)
 
 	ents, err := os.ReadDir(dir)
 	if err != nil {
@@ -70,7 +70,7 @@ func TestProbeSkipsUnparsableOutbound(t *testing.T) {
 	res, err := Probe(ctx, []json.RawMessage{
 		json.RawMessage(`{"type":"anytls","tag":"好的","server":"192.0.2.2","server_port":8443,"password":"p","tls":{"enabled":true,"server_name":"b.example"}}`),
 		json.RawMessage(`{"type":"这个类型内核不认识","tag":"坏的","server":"192.0.2.3","server_port":443}`),
-	}, []string{"好的", "坏的"}, "", "", nil)
+	}, []string{"好的", "坏的"}, "", "", false, nil)
 	if err == nil {
 		t.Fatal("跳过了坏节点,应该把这件事报上来")
 	}

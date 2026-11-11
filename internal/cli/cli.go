@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -330,7 +331,7 @@ func status(ctx context.Context) error {
 	}
 	fmt.Println("节点:  ", node, fmt.Sprintf("(共 %d 个)", len(v.Nodes)))
 	if v.SelectedV6 {
-		fmt.Println("提示:   选中的节点使用 IPv6 地址,当前已关闭 IPv6,无法连接;打开 IPv6(settings ipv6=on)或换用 IPv4 节点")
+		fmt.Println("提示:  ", v6Hint(v))
 	}
 	s := v.Settings
 	fmt.Printf("设置:   TUN=%v(%s, strict=%v) 混合端口=%d DoH=%s/%s fake-ip=%v IPv6=%v\n", s.TUN, s.TUNStack, s.StrictRoute, s.MixedPort, s.RemoteDNS, s.LocalDNS, s.FakeIP, s.IPv6)
@@ -475,4 +476,26 @@ func nodeCmd(ctx context.Context, args []string) error {
 func Usage() {
 	fmt.Println(buildinfo.DisplayName, buildinfo.Version)
 	fmt.Println("用法: " + Name + " status | connect | disconnect | mode <rule|global|direct> | nodes | node add <分享链接...> | node list | node rm <节点名> | select <节点|线路组> | test [节点|all] | profile [地址] | refresh | settings [k=v …] | rules | devices | device <MAC> <follow|proxy|direct|reject> [名字] | logs [n] [core] | diag | guard clear|status")
+}
+
+// v6Hint 选的这一轮连不上、原因是只能走 IPv6 而「允许 IPv6」关着时的提示:点名是哪个节点 / 哪条线路,说清楚去哪儿改。
+func v6Hint(v ipc.StateView) string {
+	sel := v.Settings.Selected
+	what := "「" + sel + "」只能走 IPv6"
+	if sel == "" || !slices.Contains(v.Nodes, sel) && !isGroup(v, sel) {
+		what = "订阅里的节点全都只能走 IPv6" // 自动选择(选的已经不在订阅里也落在自动选择上)
+	}
+	if isGroup(v, sel) {
+		what = "线路「" + sel + "」的服务器全都只能走 IPv6"
+	}
+	return what + ",而「允许 IPv6」关着,连不上:要用就打开 IPv6(settings ipv6=on,界面里是 设置 → 隐私),或者换别的节点"
+}
+
+func isGroup(v ipc.StateView, tag string) bool {
+	for _, g := range v.Groups {
+		if g.Tag == tag {
+			return true
+		}
+	}
+	return false
 }

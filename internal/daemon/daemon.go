@@ -795,7 +795,7 @@ func (d *Daemon) prepare(ctx context.Context) ([]byte, error) {
 	nodeIPs, noA := resolveNodeHosts(ctx, p, d.bootResolver(s))
 	var v6Only map[string]bool
 	if !s.IPv6 { // 开着 IPv6 时内核解析节点域名按 prefer_ipv4,只有 IPv6 地址的域名照样连得上,不用找
-		v6Only = v6OnlyHosts(ctx, p, nodeIPs, noA, d.bootLookup6(s))
+		v6Only = v6OnlyHosts(ctx, p, nodeIPs, noA, d.bootLookup4(s), d.bootLookup6(s))
 	}
 	cfg, rep, skipped, err := buildValid(d.core, builder.Input{Profile: p, Settings: s, DataDir: paths.DataDir(), ClashSecret: d.secret, RuleSetDir: paths.RuleSets(), LANDNS: netmode.LANResolvers(),
 		ClashPort: clashPort, NodeIPs: nodeIPs, V6Only: v6Only, SelfProcess: selfProcess()})
@@ -821,7 +821,7 @@ func (d *Daemon) prepare(ctx context.Context) ([]byte, error) {
 	}
 	d.noteMissingRuleSets(rep.Missing)
 	if len(rep.V6Blocked) > 0 {
-		d.logf("这 %d 个节点用的是 IPv6 地址,而现在关着 IPv6,连不上;这次连接不会自动选它们: %s", len(rep.V6Blocked), strings.Join(rep.V6Blocked, "、"))
+		d.logf("这 %d 个节点只能走 IPv6,而「允许 IPv6」关着:这次连接不用它们(不进自动选择和线路组,手动选它也连不上): %s", len(rep.V6Blocked), strings.Join(rep.V6Blocked, "、"))
 	}
 	// Do not publish a rendered config if a concurrent settings update raced
 	// with the long subscription/build phase. The state machine will retry with
@@ -2144,7 +2144,7 @@ func (d *Daemon) stateView() ipc.StateView {
 	if a := d.settings.Active(); a != nil {
 		if p := d.profiles[a.ID]; p != nil {
 			v.Groups = p.Groups // 缓存里的订阅解析出来之后不再改,只读着用
-			v.V6Blocked = builder.V6Blocked(p, s, wantNICOff(s), d.v6Only)
+			v.V6Blocked = builder.V6Blocked(p, s, d.v6Only)
 			v.SelectedV6 = selectionBlocked(p, s.Selected, v.V6Blocked)
 		}
 	}
@@ -2359,11 +2359,19 @@ func (d *Daemon) registerHandlers() {
 			d.delays[tag] = ms
 			d.mu.Unlock()
 		}
+		// 关着 IPv6 时不用的 IPv6 节点(见 builder.V6Blocked)不测:测它就是在走 IPv6。直接记不通
+		var skip map[string]bool
+		for _, tag := range d.v6BlockedNow(d.getSettings()) {
+			if skip == nil {
+				skip = map[string]bool{}
+			}
+			skip[tag] = true
+		}
 		var res map[string]int
 		if d.core.Running() {
 			// 已连接:只测内核里有的。列表来自订阅缓存,刚刷新加进来的节点内核里还没有,这些不测、也不给数。选它连上后自然有数。
 			in, _ := d.splitByCore(p)
-			res = d.probeConnected(ctx, in, set)
+			res = d.probeConnected(ctx, in, set, skip)
 		} else {
 			// 未连接:直连量到节点服务器的往返。但「防流量逃逸」的闸还开着的时候不做 —— 那说明用户想连着、
 			// 内核只是暂时没起来(在重启 / 在退避),这时从本机直接发 DNS 查询、ICMP、TCP 握手出去,
@@ -2377,7 +2385,8 @@ func (d *Daemon) registerHandlers() {
 			// 测速途中用户点了连接:装闸前就被取消(holdDirect),剩下的探测一律不再发 —— 它们都从本机直连出去
 			// (系统解析、ICMP、TCP、临时实例)。cancelOnGuard 再兜一层。
 			stop := d.cancelOnGuard(ctx, cancel)
-			res = probeDirect(ctx, p, set, d.logf, d.bootResolver(d.getSettings()), d.getSettings().LocalDNS)
+			s := d.getSettings()
+			res = probeDirect(ctx, p, set, d.logf, d.bootResolver(s), s.LocalDNS, s.IPv6, skip)
 			stop()
 		}
 		// 存一份拷贝,别和返回值共用一个 map:返回值交给控制口在锁外序列化(遍历),而下一次测速每测出一个就往
