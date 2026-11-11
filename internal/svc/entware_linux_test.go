@@ -32,12 +32,17 @@ func TestMain(m *testing.M) {
 //   - run:守护进程。登记进程号(run.<pid>)后一直挂着,收到 TERM / KILL 就没了;
 //   - 设了 FAKE_QUERY:像 godusevpn status 那样问服务在不在跑。把自己的进程号、entwareDaemons(FAKE_QUERY)
 //     (QueryStatus 现在的判断)和只按名字 pidof 的结果(以前的判断)写进 query.out,各占一行;
+//   - idle:不相干的同名进程(像开着的 godusevpn logs -f),只是挂着,收到信号就没了;
 //   - 别的子命令:像 godusevpn install / start / uninstall / stop 那样调启动脚本(sh $FAKE_SCRIPT $FAKE_ACTION),
 //     跑完把退出码和输出写进 caller.out —— 自己被脚本杀了就写不出来。
 func fakeGodusevpn(dir string, args []string) int {
 	if len(args) > 0 && args[0] == "run" {
 		_ = os.WriteFile(filepath.Join(dir, "run."+strconv.Itoa(os.Getpid())), nil, 0o644)
 		time.Sleep(10 * time.Minute) // 测试出了岔子也不会永远留着
+		return 0
+	}
+	if len(args) > 0 && args[0] == "idle" {
+		time.Sleep(10 * time.Minute)
 		return 0
 	}
 	if q := os.Getenv("FAKE_QUERY"); q != "" {
@@ -59,10 +64,10 @@ func fakeGodusevpn(dir string, args []string) int {
 }
 
 // fakeRCFunc 照 Entware 的 /opt/etc/init.d/rc.func 写的替身:按进程名 pidof / killall;start 在后台拉起 "$PROC $ARGS",
-// 等它出现;stop 先 killall 再等它没了;restart = 在跑就 stop,再 start。
+// 等它出现;stop 先 killall 再等它没了;restart = 在跑就 stop,再 start;reconfigure = killall -SIGHUP(按名字全发)。
 const fakeRCFunc = `ACTION=$1
 CALLER=$2
-killall() { sig=TERM; case "$1" in -*) sig=${1#-}; shift ;; esac; p=$(pidof "$1"); [ -z "$p" ] || kill -$sig $p; }
+killall() { sig=TERM; case "$1" in -*) sig=${1#-}; sig=${sig#SIG}; shift ;; esac; p=$(pidof "$1"); [ -z "$p" ] || kill -$sig $p; }
 start() {
 	[ "$ENABLED" = yes ] || return 8
 	if [ -n "$(pidof $PROC)" ]; then echo " already running."; return 0; fi
@@ -85,6 +90,7 @@ for PROC in $PROCS; do
 	stop | kill) check && stop ;;
 	restart) check && stop; start ;;
 	check) check ;;
+	reconfigure) killall -SIGHUP $PROC ;;
 	*) exit 1 ;;
 	esac
 done
@@ -268,6 +274,22 @@ func (r *entwareRig) startDaemon() (int, chan error) {
 	pid := c.Process.Pid
 	waitFor(r.t, "守护进程登记进程号", func() bool { return containsInt(r.alive(), pid) })
 	return pid, done
+}
+
+// idle 起一个不相干的同名进程("名字 idle",像开着的 godusevpn logs -f),返回进程号;测试结束时杀掉、收尸。
+func (r *entwareRig) idle() int {
+	r.t.Helper()
+	c := exec.Command(r.fake, "idle")
+	c.Env = r.env
+	if err := c.Start(); err != nil {
+		r.t.Fatal(err)
+	}
+	done := make(chan struct{})
+	go func() { _ = c.Wait(); close(done) }()
+	r.t.Cleanup(func() { _ = c.Process.Kill(); <-done })
+	pid := c.Process.Pid
+	waitFor(r.t, "同名进程跑起来", func() bool { return fakeAlive(pid, r.name) })
+	return pid
 }
 
 // alive 登记过、现在还活着的冒充守护进程(按进程号排好)。
@@ -616,6 +638,67 @@ func TestEntwareAutostartOnlyGatesBoot(t *testing.T) {
 		if code, out, alive := r.caller("start", startAction(initEntware)); !alive || code != 0 || len(entwareDaemonsByScan(r.name)) != 1 {
 			t.Fatalf("godusevpn start 又能起来: alive=%v code=%d\n%s", alive, code, out)
 		}
+	})
+}
+
+// 梅林(Entware)上用户手动跑 rc.unslung reconfigure:以前脚本的 reconfigure 交给 rc.func,它按名字 killall -HUP godusevpn ——
+// 守护进程不接 SIGHUP、收到就退出(调用者、别的 godusevpn 命令也一样),服务就这么停了,要等看门狗一分钟后才拉。
+// 现在脚本自己处理:重启守护进程(和 restart 一样只按进程号停它),调用者和别的同名进程一个不碰;没在跑就不动
+// (rc.func 的 reconfigure 也只给在跑的进程发信号,从不拉起)。最后用以前的做法(交给 rc.func)对照,确认替身 rc.func
+// 确实会用 HUP 把守护进程、调用者和别的同名进程一起打掉。
+func TestEntwareReconfigureRestartsDaemon(t *testing.T) {
+	eachToolset(t, func(t *testing.T, busybox bool) {
+		r := newEntwareRig(t, "gvrcfg", busybox)
+		bystander := r.idle() // 不相干的同名进程
+
+		// 1. 守护进程在跑,同名的调用者跑 reconfigure:旧的被 TERM 停掉、起了新的,只有一个;调用者活着拿到 0;
+		//    别的同名进程还在;不经 rc.func
+		old, done := r.startDaemon()
+		code, out, alive := r.caller("reconfigure", "reconfigure")
+		if !alive || code != 0 {
+			t.Errorf("跑 reconfigure 的调用者应活着拿到退出码 0: alive=%v code=%d\n%s", alive, code, out)
+		}
+		if !fakeAlive(bystander, r.name) {
+			t.Error("reconfigure 不该碰别的同名进程")
+		}
+		waitSignaled(t, done, syscall.SIGTERM) // 不是 HUP:守护进程不接 SIGHUP,收到就退出
+		waitFor(t, "reconfigure 起了新的守护进程", func() bool { a := r.alive(); return len(a) == 1 && a[0] != old })
+		if got := r.settled(); len(got) != 1 || len(entwareDaemonsByScan(r.name)) != 1 {
+			t.Fatalf("reconfigure 之后应只有一个守护进程: %v", got)
+		}
+		if got := r.log("rc.log"); got != "" {
+			t.Fatalf("reconfigure 不该交给 rc.func(它按名字 killall -HUP),rc.func 收到 %q", got)
+		}
+
+		// 2. rc.unslung reconfigure(调用者不同名),开机自启关着也一样:在跑的就重启
+		r.render(false)
+		cur := r.alive()
+		if out, err := r.run("reconfigure"); err != nil {
+			t.Fatalf("reconfigure: %v\n%s", err, out)
+		}
+		waitFor(t, "reconfigure 又起了新的守护进程", func() bool { a := r.alive(); return len(a) == 1 && a[0] != cur[0] })
+		r.render(true)
+
+		// 3. 没在跑(用户停了):不起,返回 0,标记留着
+		if out, err := r.run("stop"); err != nil {
+			t.Fatalf("stop: %v\n%s", err, out)
+		}
+		waitFor(t, "守护进程停掉", func() bool { return len(r.alive()) == 0 })
+		out, err := r.run("reconfigure")
+		if code := exitCode(err); code != 0 || len(r.settled()) != 0 || !r.marked() {
+			t.Fatalf("没在跑时 reconfigure 不该把它起来: code=%d 守护进程=%v 标记=%v\n%s", code, r.alive(), r.marked(), out)
+		}
+		if !fakeAlive(bystander, r.name) {
+			t.Fatal("reconfigure 不该碰别的同名进程")
+		}
+
+		// 4. 对照:以前的做法(reconfigure 交给 rc.func,按名字 killall -HUP)把守护进程、调用者、别的同名进程全打掉
+		_, done = r.startDaemon()
+		if _, _, alive := r.caller("reconfigure", "reconfigure", "FAKE_SCRIPT="+r.legacy()); alive {
+			t.Fatal("对照失败:交给 rc.func 的 reconfigure 应该连调用者一起用 HUP 打掉(替身和真的 rc.func 不一致?)")
+		}
+		waitSignaled(t, done, syscall.SIGHUP)
+		waitFor(t, "对照里别的同名进程也被 HUP 打掉", func() bool { return !fakeAlive(bystander, r.name) })
 	})
 }
 

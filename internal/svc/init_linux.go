@@ -242,10 +242,11 @@ STOPPED=/opt/var/lib/godusevpn/stopped
 # manual-start,不看开关;restart(面板升级后的重启、rc.unslung restart)自启关着时照样重启正在跑的,没在跑的不起、返回 8。
 # 看门狗也不看开关:定时是起了服务才挂的(开机没起就没有),手动起来的崩了照样拉,和 systemd / procd 关了自启照样重拉一样。
 
-# 起停和 check 都不交给 rc.func:它按名字 pidof / killall $PROCS,而 godusevpn install / start / stop / uninstall 这些
-# 正在调本脚本的命令也叫这个名字 —— start 把调用者当成"已经在跑"而不拉(装完服务没起来,梅林要等看门狗一分钟后拉,
-# 没有 cru 的要等重启);stop 把调用者一起杀掉(卸载做到一半自己没了,闸、自启脚本、看门狗定时全留着);
-# check 只要有一条 godusevpn 命令在跑就说服务活着。
+# 起停、check、reconfigure 都不交给 rc.func:它按名字 pidof / killall $PROCS,而 godusevpn install / start / stop /
+# uninstall 这些正在调本脚本的命令也叫这个名字 —— start 把调用者当成"已经在跑"而不拉(装完服务没起来,梅林要等看门狗
+# 一分钟后拉,没有 cru 的要等重启);stop 把调用者一起杀掉(卸载做到一半自己没了,闸、自启脚本、看门狗定时全留着);
+# check 只要有一条 godusevpn 命令在跑就说服务活着;reconfigure 给所有同名进程发 SIGHUP,守护进程不接这个信号、
+# 收到就退出(调用者、别的 godusevpn 命令也一样)。
 # 这里只认守护进程(拉起来的 "$PROCS $ARGS",命令行第二项是 $ARGS),按进程号发信号,调用者一个都不碰。
 CALLER=$2
 arg2() { { tr '\0' '\n' < /proc/$1/cmdline; } 2>/dev/null | sed -n 2p; }
@@ -309,12 +310,20 @@ watchdog)
 	launch watchdog
 	exit $?
 	;;
-start | manual-start | restart)
+start | manual-start | restart | reconfigure)
 	case "$1" in
 	start) [ "$ENABLED" = yes ] || exit 8 ;;
 	restart) [ "$ENABLED" = yes ] || [ -n "$(daemons)" ] || exit 8 ;;
+	reconfigure)
+		# rc.unslung reconfigure:重启守护进程,设置照新的重新读(rc.func 是按名字发 SIGHUP,见上)。
+		# 没在跑就不动 —— rc.func 的 reconfigure 也只给在跑的进程发信号,从不拉起
+		if [ -z "$(daemons)" ]; then
+			echo " $DESC is not running."
+			exit 0
+		fi
+		;;
 	esac
-	if [ "$1" = restart ]; then
+	if [ "$1" = restart ] || [ "$1" = reconfigure ]; then
 		halt TERM || exit $?
 	fi
 	launch "$1"
