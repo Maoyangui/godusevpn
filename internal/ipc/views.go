@@ -103,6 +103,11 @@ type StateView struct {
 	SelectedV6 bool `json:"selectedV6,omitempty"`
 	// SelNote 设置里选的节点 / 线路组在当前订阅里已经没有了:这一轮实际用的是什么(见 builder.Effective)。界面写明,不让人以为还在用它
 	SelNote *SelNote `json:"selNote,omitempty"`
+	// Hints 订阅里的提示节点(地址只指向本机,见 builder.HintNodes):面板放来显示续费 / 用量信息的,不能上网。
+	// 列表测速不测它们(结果里没有),节点列表标成「提示」
+	Hints []string `json:"hints,omitempty"`
+	// SelectedHint 选中的就是提示节点(或成员全是提示节点的线路组):手动选它照样选得上,界面说一句它不能上网
+	SelectedHint bool `json:"selectedHint,omitempty"`
 }
 
 // ForPage 给界面看的那份状态:设置里去掉凭据(见 settings.Settings.ForPage),订阅去掉带令牌的地址和续费地址

@@ -2,7 +2,6 @@ package daemon
 
 import (
 	"encoding/json"
-	"net"
 	"reflect"
 	"sync"
 	"testing"
@@ -15,15 +14,11 @@ import (
 // 下一次测速每测出一个就往 d.delays 里写 —— 一边遍历一边写是不可恢复的 fatal error,服务进程直接退出。
 // 界面连点两次「测速」、或界面和命令行同时测,就会撞上。
 func TestProbeNodesResultNotSharedWithDelays(t *testing.T) {
-	dead, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	port := dead.Addr().(*net.TCPAddr).Port
-	dead.Close() // 没人听的回环端口:握手立刻被拒,每个节点都会走到"测出一个写一个"
+	// 节点不写服务器地址:一个包都不发、直接记 -1,每个节点照样走"测出一个写一个"。不能用回环地址 ——
+	// 地址只指向本机的是订阅里的提示节点(见 builder.HintNodes),列表测速不测它们,结果里没有
 	var nodes []string
 	for _, tag := range []string{"a", "b", "c", "d", "e", "f", "g", "h"} {
-		nodes = append(nodes, `{"type":"trojan","tag":"`+tag+`","server":"127.0.0.1","server_port":`+itoa(port)+`,"password":"p"}`)
+		nodes = append(nodes, `{"type":"trojan","tag":"`+tag+`","password":"p"}`)
 	}
 	d := newPolicyTestDaemon(t)
 	d.settings.Profiles = []settings.Profile{{ID: "p1", Name: "测试", URL: "https://example.invalid/sub"}}

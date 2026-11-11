@@ -2473,6 +2473,8 @@ func (d *Daemon) stateView() ipc.StateView {
 			v.V6Blocked = builder.V6Blocked(p, s, d.v6Only)
 			v.SelectedV6 = selectionBlocked(p, builder.Effective(p, s), v.V6Blocked)
 			v.SelNote = selNote(p, s)
+			v.Hints = builder.HintNodes(p)
+			v.SelectedHint = selectionBlocked(p, builder.Effective(p, s), v.Hints)
 		}
 	}
 	// 只标当前订阅里名字和内容都没变的:换了订阅、或刷新后机场把节点改成能用的,不再沿用上次连接时的判断
@@ -2720,6 +2722,7 @@ func (d *Daemon) registerHandlers() {
 		if p == nil || len(p.Tags) == 0 {
 			return nil, errors.New("还没有订阅")
 		}
+		p = withoutHints(p)
 		ctx, cancel := context.WithTimeout(context.Background(), probeBudget(len(p.Tags)))
 		defer cancel()
 		// 测出一个就写进去一个:界面在测速期间会轮询 GetNodes,这样延迟是一个一个冒出来的,

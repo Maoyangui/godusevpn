@@ -692,8 +692,8 @@ function updateHome() {
     pp.innerHTML = warns.length ? ICON_WARN + `<span>${esc(warns.join('; '))}</span>` : '';
     pp.title = warns.join('\n'); // 胶囊里放不下全文时,悬停可以看全
   }
-  // 选的节点只能走 IPv6、而现在关着 IPv6:一直挂着说清楚(点名是哪个节点 / 哪条线路),不让人对着「节点不稳」猜
-  wrapPill($('#v6-pill'), v6Text);
+  // 选的节点只能走 IPv6、而现在关着 IPv6,或者选的是订阅里的提示节点(只显示续费 / 用量):一直挂着说清楚(点名是哪个节点 / 哪条线路),不让人对着「节点不稳」猜
+  wrapPill($('#v6-pill'), v6Text || hintPillText(v));
   // 选的节点 / 线路组在订阅里没了:这一轮实际用的是什么(线路只剩一台时用同线路那台;一台不剩才回落自动选择)
   wrapPill($('#sel-pill'), selNoteText(v));
 
@@ -767,6 +767,11 @@ function v6HintText(v) {
   const st = v.state && v.state.status, on = st === 'connected' || st === 'degraded';
   if (on && v.node && v.node !== (sel || 'auto')) text += t('node.v6Borrowed', { n: cleanName(v.node) });
   return text;
+}
+// hintPillText 选的是订阅里的提示节点(只显示续费 / 用量,地址指向本机)时首页挂的那句:照样选得上,但上不了网。
+// 直连模式下流量不经节点,不挂。
+function hintPillText(v) {
+  return v && v.selectedHint && v.mode !== 'direct' ? t('node.hintWhy') : '';
 }
 // selNoteText 设置里选的节点 / 线路组在订阅里没了时写明这一轮用的是什么。订阅里只剩选的这条线路(组成员就是全部节点)时
 // 用的是自动选择,也写一句:不然首页从线路名变成「自动选择」,看着像选择丢了。
@@ -853,6 +858,11 @@ function msText(d, testing) {
   if (d < 0) return t('node.fail');
   return d ? d + ' ms' : '–';
 }
+// msCell 节点 / 线路组那一行的延迟格:提示节点不测速(不转圈、不写"不通"),写「提示」;跳过的、还没进内核的节点空着
+function msCell(n, testing) {
+  if (n.hint) return t('node.hint');
+  return n.unsupported || n.pending ? '' : msText(n.delay, testing);
+}
 let nodeTesting = false, nodeFilter = '', nodeRegion = '', nodeFetchTried = false, nodeSig = '', nodePicking = false;
 async function sheetNodes() {
   nodeFilter = ''; nodeRegion = '';
@@ -927,6 +937,7 @@ function groupSub(n) { return n.now ? t('node.now', { n: n.now }) : t('node.grou
 function groupRow(g, nodes, at, v, v6) {
   const ms = [];
   g.members.forEach(m => { if (at.has(m)) ms.push(nodes[at.get(m)]); });
+  const real = ms.filter(x => !x.hint); // 提示节点不测速,组里有它也只看别的成员
   const st = v.state && v.state.status, online = st === 'connected' || st === 'degraded';
   const current = v.node === g.tag;
   const now = current && online && v.autoNow ? v.autoNow : '';
@@ -934,12 +945,13 @@ function groupRow(g, nodes, at, v, v6) {
   if (now) {
     delay = at.has(now) ? nodes[at.get(now)].delay : 0;
   } else {
-    ms.forEach(x => { if (x.delay > 0 && (!delay || x.delay < delay)) delay = x.delay; });
-    if (!delay && ms.length && ms.every(x => x.delay < 0)) delay = -1;
+    real.forEach(x => { if (x.delay > 0 && (!delay || x.delay < delay)) delay = x.delay; });
+    if (!delay && real.length && real.every(x => x.delay < 0)) delay = -1;
   }
-  return {
-    name: g.tag, group: true, count: g.members.length, members: ms.map(x => x.name), current, now, delay,
+  return { // 「自动 · N 台」不算提示节点:组里自动挑的时候不用它(成员全是提示节点的组照实数)
+    name: g.tag, group: true, count: (g.members.length - (ms.length - real.length)) || g.members.length, members: ms.map(x => x.name), current, now, delay,
     mult: ms.some(x => nodeMult(x.name)), v6: ms.length > 0 && ms.every(x => v6.has(x.name)),
+    hint: ms.length > 0 && !real.length,
   };
 }
 // lineRows 开着「线路自动」时的列表:按 GetNodes 的顺序走,每个线路组插在它第一个成员的位置,组里的成员不再单独列;
@@ -1011,10 +1023,10 @@ function nodeRow(n, i, max, testing) {
     return `<div class="item ${n.current ? 'current' : ''}" data-name="${esc(n.name)}" data-group="1" data-search="${esc(n.members.join(' '))}" data-geo="${gc}" style="animation-delay:${Math.min(i, 12) * 25}ms"><span class="check"></span>
     ${flagHTML(gc, 'sm')}
     <div class="name">
-      <div class="ntop"><b>${esc(cleanName(n.name))}</b>${n.mult ? `<em class="tag warn">${t('node.groupMult')}</em>` : ''}${n.v6 ? `<em class="tag warn">${t('node.v6')}</em>` : ''}</div>
+      <div class="ntop"><b>${esc(cleanName(n.name))}</b>${n.hint ? `<em class="tag">${t('node.hint')}</em>` : ''}${n.mult ? `<em class="tag warn">${t('node.groupMult')}</em>` : ''}${n.v6 ? `<em class="tag warn">${t('node.v6')}</em>` : ''}</div>
       <span class="gsub">${esc(groupSub(n))}</span>
     </div>
-    <span class="ms ${msClass(n.delay)}">${msText(n.delay, testing)}</span></div>`;
+    <span class="ms ${msClass(n.delay)}">${msCell(n, testing)}</span></div>`;
   }
   const code = geoCode(n.name), mult = nodeMult(n.name);
   // 本客户端的内核建不起来的节点(订阅里 naive、SSR 之类):照样列出来、标明,点它只说原因不去选
@@ -1022,10 +1034,10 @@ function nodeRow(n, i, max, testing) {
   return `<div class="item ${n.current ? 'current' : ''}${n.unsupported ? ' unsupported' : ''}" data-name="${esc(n.name)}"${bad} data-geo="${code}" style="animation-delay:${Math.min(i, 12) * 25}ms"><span class="check"></span>
     ${flagHTML(code, 'sm')}
     <div class="name">
-      <div class="ntop"><b>${esc(cleanName(n.name))}</b>${mult ? `<em class="tag warn">${t('node.mult', { n: mult })}</em>` : ''}${n.v6 ? `<em class="tag warn">${t('node.v6')}</em>` : ''}${n.unsupported ? `<em class="tag">${t('node.unsupported')}</em>` : ''}${n.pending ? `<em class="tag">${t('node.pending')}</em>` : ''}${n.type ? `<em class="ntype">${esc(n.type)}</em>` : ''}</div>
+      <div class="ntop"><b>${esc(cleanName(n.name))}</b>${n.hint ? `<em class="tag">${t('node.hint')}</em>` : ''}${mult ? `<em class="tag warn">${t('node.mult', { n: mult })}</em>` : ''}${n.v6 ? `<em class="tag warn">${t('node.v6')}</em>` : ''}${n.unsupported ? `<em class="tag">${t('node.unsupported')}</em>` : ''}${n.pending ? `<em class="tag">${t('node.pending')}</em>` : ''}${n.type ? `<em class="ntype">${esc(n.type)}</em>` : ''}</div>
       <div class="bar"><i style="width:${barWidth(n.delay, max)}"></i></div>
     </div>
-    <span class="ms ${msClass(n.delay)}">${n.unsupported || n.pending ? '' : msText(n.delay, testing)}</span></div>`;
+    <span class="ms ${msClass(n.delay)}">${msCell(n, testing)}</span></div>`;
 }
 async function drawNodes(testing) {
   // 节点面板是不是还开着、还是开它那一次(取节点列表要等,这期间用户可能关了面板、开了模式 / 订阅面板):不是就什么都不画
@@ -1047,14 +1059,16 @@ async function drawNodes(testing) {
   }
   const v = (state && state.view) || {};
   const v6 = new Set(v.v6Blocked || []); // 关着 IPv6 时连不上的 IPv6 节点:标出来
-  nodes.forEach(n => { n.v6 = v6.has(n.name); });
+  // 订阅里的提示节点(地址只指向本机,面板放来显示续费 / 用量的):标「提示」,不测速,以前测出的数也不显示
+  const hints = new Set(v.hints || []);
+  nodes.forEach(n => { n.v6 = v6.has(n.name); n.hint = hints.has(n.name); if (n.hint) n.delay = 0; });
   const hasGroups = groupsOf(v).length > 0, lineOn = lineAutoOn(v);
   const rows = lineOn ? lineRows(nodes, v, v6) : nodes;
   const max = Math.max(1, ...nodes.filter(n => n.delay > 0).map(n => n.delay));
   // 节点集合没变就只改数字,别整块重画:一百来个节点重画一次会先空一下,入场动画还要错峰放完,
   // 滚动位置和筛选框里的字也跟着丢 —— 测速结束那一下看着就是"闪一下白再出来"。
   const sig = (hasGroups ? (lineOn ? 'L|' : 'N|') : '') // 开关翻了 / 线路组出现或消失:整块重画
-    + rows.map(n => n.name + (n.group ? '#' : '') + (n.pending ? '+' : '') + (n.unsupported ? '!' : '') + (n.v6 ? '6' : '')).join(' '); // 新节点重连后用上了,标签要跟着变
+    + rows.map(n => n.name + (n.group ? '#' : '') + (n.pending ? '+' : '') + (n.unsupported ? '!' : '') + (n.v6 ? '6' : '') + (n.hint ? '?' : '')).join(' '); // 新节点重连后用上了,标签要跟着变
   if (sig === nodeSig && patchNodes(rows, max, testing)) return;
   nodeSig = sig;
   const st = v.state && v.state.status, online = st === 'connected' || st === 'degraded';
@@ -1088,6 +1102,7 @@ async function drawNodes(testing) {
       else if (nodesOpen()) { nodeSig = ''; await drawNodes(false); } // 关掉又重新打开了节点面板:按新的选择重画,不替人关
       const nst = nv && nv.state && nv.state.status;
       if (nv && nv.selectedV6) toast(v6HintText(nv) || t('node.v6Hint', { n: cleanName(it.dataset.name) }), 'err'); // 选的节点只能走 IPv6,而现在关着 IPv6
+      else if (nv && nv.selectedHint) toast(t('node.hintWhy'), 'err'); // 选的是订阅里的提示节点:照样选上,说一句它不能上网
       else if (it.dataset.group && online && nst && nst !== 'connected' && nst !== 'degraded') toast(t('node.lineAutoReconnect'));
     } catch (e) {
       toast(errText(e), 'err');
@@ -1120,7 +1135,7 @@ function patchNodes(nodes, max, testing) {
     if (!it) return false;
     it.classList.toggle('current', !!n.current);
     const ms = it.querySelector('.ms');
-    if (ms) { ms.className = 'ms ' + msClass(n.delay); ms.innerHTML = n.name === 'auto' || n.unsupported || n.pending ? '' : msText(n.delay, testing); } // 跳过的、还没进内核的节点不测速
+    if (ms) { ms.className = 'ms ' + msClass(n.delay); ms.innerHTML = n.name === 'auto' ? '' : msCell(n, testing); } // 提示节点、跳过的、还没进内核的节点不测速
     const bar = it.querySelector('.bar i');
     if (bar) bar.style.width = barWidth(n.delay, max);
     if (n.name === 'auto') {

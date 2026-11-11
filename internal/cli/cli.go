@@ -76,19 +76,7 @@ func Main(args []string) int {
 		var v ipc.StateView
 		if err = call(ctx, ipc.MGetState, nil, &v); err == nil {
 			for _, n := range v.Nodes {
-				mark := "  "
-				if n == v.Node {
-					mark = "* "
-				}
-				ms := ""
-				if d, ok := v.Delays[n]; ok {
-					if d < 0 {
-						ms = "  不通"
-					} else {
-						ms = fmt.Sprintf("  %d ms", d)
-					}
-				}
-				fmt.Println(mark + n + ms)
+				fmt.Println(nodeLine(v, n))
 			}
 			printGroups(v)
 		}
@@ -356,6 +344,26 @@ func status(ctx context.Context) error {
 		fmt.Printf("隧道:   判废 %d 次,重建 %d 次%s\n", tv.Sick, tv.Rebuilds, last)
 	}
 	return nil
+}
+
+// nodeLine 节点列表的一行:当前项带 *,后面是最近一次列表测速的延迟。提示节点(面板放来显示续费 / 用量信息的,
+// 地址只指向本机)不测速,写明它不能上网,不显示成"不通"。
+func nodeLine(v ipc.StateView, n string) string {
+	mark := "  "
+	if n == v.Node {
+		mark = "* "
+	}
+	ms := ""
+	if slices.Contains(v.Hints, n) {
+		ms = "  提示(只显示续费 / 用量信息,不能上网)"
+	} else if d, ok := v.Delays[n]; ok {
+		if d < 0 {
+			ms = "  不通"
+		} else {
+			ms = fmt.Sprintf("  %d ms", d)
+		}
+	}
+	return mark + n + ms
 }
 
 // printGroups nodes 命令的后半:订阅里的线路组和各自的成员(当前选中的带 *)。没有就什么都不打。

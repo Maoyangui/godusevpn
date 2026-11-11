@@ -44,6 +44,27 @@ func probeBudget(n int) time.Duration {
 	return d
 }
 
+// withoutHints 列表测速要测的节点:去掉提示节点(地址只指向本机,见 builder.HintNodes)的订阅子集,没有提示节点时原样返回。
+// 提示节点连不到任何远端服务器,测它一个包都不该发:测出来不是"不通",就是正好撞上本机开着的端口,UDP 类的 ping 127.0.0.1
+// 还会量出 1 毫秒、排在最快。结果里不给它们数,界面按 StateView.Hints 标成「提示」。
+func withoutHints(p *profile.Profile) *profile.Profile {
+	hints := builder.HintNodes(p)
+	if len(hints) == 0 {
+		return p
+	}
+	skip := make(map[string]bool, len(hints))
+	for _, h := range hints {
+		skip[h] = true
+	}
+	keep := make([]string, 0, len(p.Tags))
+	for _, t := range p.Tags {
+		if !skip[t] {
+			keep = append(keep, t)
+		}
+	}
+	return p.Subset(keep)
+}
+
 var udpProtocols = map[string]bool{"hysteria": true, "hysteria2": true, "tuic": true, "wireguard": true}
 
 type endpoint struct {

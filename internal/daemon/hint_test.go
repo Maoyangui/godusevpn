@@ -2,8 +2,11 @@ package daemon
 
 import (
 	"encoding/json"
+	"net"
 	"reflect"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/Maoyangui/godusevpn/internal/builder"
 	"github.com/Maoyangui/godusevpn/internal/core"
@@ -77,5 +80,91 @@ func TestSetLineAutoSkipsHintNodes(t *testing.T) {
 	}
 	if v := res.(ipc.StateView); v.Settings.Selected != "hk-A" || v.Settings.LineAuto {
 		t.Fatalf("关掉线路自动应固定到 hk-A(跳过排第一的提示节点): %q %v", v.Settings.Selected, v.Settings.LineAuto)
+	}
+}
+
+// 列表测速不测提示节点(地址只指向本机,见 builder.HintNodes):一个包都不发,结果和状态里都没有它们的数,界面按
+// StateView.Hints 标成「提示」。提示节点指向一个真在听的回环端口 —— 要是还测,握手会落到它上面、量出一两毫秒排到最快。
+// 只有提示节点的订阅(到期 / 用尽后有的面板只给一条提示)测速也不报错,结果是空的。
+func TestProbeNodesSkipsHintNodes(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	var accepted atomic.Int32
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			accepted.Add(1)
+			c.Close()
+		}
+	}()
+	port := itoa(ln.Addr().(*net.TCPAddr).Port)
+	hint1 := `{"type":"shadowsocks","tag":"00-勿选-流量:1.0/100.0 重置:3天","server":"127.0.0.1","server_port":` + port + `,"method":"aes-128-gcm","password":"dummy"}`
+	hint2 := `{"type":"trojan","tag":"续费提示","server":"127.0.0.1","server_port":` + port + `,"password":"p"}`
+	// 真节点故意不写服务器地址:probeDirect 对它不发包、直接记 -1(测试自己不出网),测没测到它看结果就知道
+	real := `{"type":"vless","tag":"香港1","uuid":"x"}`
+	d := newPolicyTestDaemon(t)
+	d.settings.Profiles = []settings.Profile{{ID: "p1", Name: "测试", URL: "https://example.invalid/sub"}}
+	d.settings.ActiveProfile = "p1"
+	d.profiles["p1"] = prof(t, hint1, real, hint2)
+
+	res, err := d.server.Dispatch(ipc.MProbeNodes, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m, ok := res.(map[string]int); !ok || !reflect.DeepEqual(m, map[string]int{"香港1": -1}) {
+		t.Fatalf("测速结果里只该有真节点: %v", res)
+	}
+	time.Sleep(200 * time.Millisecond)
+	if n := accepted.Load(); n != 0 {
+		t.Fatalf("提示节点不该测,它指向的本机端口却被连了 %d 次", n)
+	}
+	v := d.stateView()
+	if !reflect.DeepEqual(v.Delays, map[string]int{"香港1": -1}) {
+		t.Fatalf("状态里的测速结果也只该有真节点(界面靠它显示): %v", v.Delays)
+	}
+	if want := []string{"00-勿选-流量:1.0/100.0 重置:3天", "续费提示"}; !reflect.DeepEqual(v.Hints, want) || v.SelectedHint {
+		t.Fatalf("状态里要按订阅里的顺序报出提示节点,没选它们时 SelectedHint 为假: %v %v", v.Hints, v.SelectedHint)
+	}
+
+	d.profiles["p1"] = prof(t, hint1, hint2)
+	res, err = d.server.Dispatch(ipc.MProbeNodes, nil)
+	if m, ok := res.(map[string]int); err != nil || !ok || len(m) != 0 {
+		t.Fatalf("只有提示节点时一个都不测、也不报错: %v %v", res, err)
+	}
+	time.Sleep(200 * time.Millisecond)
+	if n := accepted.Load(); n != 0 {
+		t.Fatalf("提示节点不该测,本机端口却被连了 %d 次", n)
+	}
+}
+
+// 手动选提示节点和以前一样选得上;状态里带 SelectedHint,界面据此说一句它不能上网。成员全是提示节点的线路组同样算;
+// 组里混着真节点、选真节点或自动选择都不算。
+func TestSelectHintNodeFlagged(t *testing.T) {
+	d := lineDaemon(t)
+	p := hintProfile(t)
+	p.Groups = append(p.Groups, profile.Group{Tag: "续费", Members: []string{"00-勿选-流量:1.0/100.0 重置:3天", "hk-续费提示"}})
+	d.profiles["p1"] = p
+	for _, c := range []struct {
+		tag  string
+		want bool
+	}{{"hk-续费提示", true}, {"hk-A", false}, {"续费", true}, {"hk", false}, {"00-勿选-流量:1.0/100.0 重置:3天", true}, {"auto", false}} {
+		raw, _ := json.Marshal(map[string]string{"tag": c.tag})
+		res, err := d.Dispatch(ipc.MSelectNode, raw)
+		if err != nil {
+			t.Fatalf("选 %q: %v", c.tag, err)
+		}
+		v := res.(ipc.StateView)
+		if v.SelectedHint != c.want {
+			t.Fatalf("选 %q:SelectedHint = %v,应 %v", c.tag, v.SelectedHint, c.want)
+		}
+		if want := map[bool]string{true: "", false: c.tag}[c.tag == "auto"]; v.Settings.Selected != want {
+			t.Fatalf("选 %q 应照旧选上: %q", c.tag, v.Settings.Selected)
+		}
 	}
 }
