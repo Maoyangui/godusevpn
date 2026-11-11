@@ -2,11 +2,13 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"regexp"
 	"slices"
 	"strings"
 	"time"
 
+	"github.com/Maoyangui/godusevpn/internal/core"
 	"github.com/Maoyangui/godusevpn/internal/paths"
 	"github.com/Maoyangui/godusevpn/internal/ruleset"
 	"github.com/Maoyangui/godusevpn/internal/state"
@@ -66,8 +68,13 @@ func (d *Daemon) classifyStart(err error) error {
 // 切节点是就地生效的,不重启内核、不断隧道。
 // **不改设置里的 Selected**:用户挑的那个节点 / 线路是他的意愿,下次重建连接(重连、重启服务)时仍按它来;
 // 这里只是临时借一条路。借过去之后不会自己切回。
-// 返回 true 表示确实换了,值得再给一轮观察期。
+//
+// 测速要等(组里正在测的那一轮测完、再测一轮,最长几十秒),这期间用户可能已经改了选择:每次切 proxy 之前核对选择代数
+// (selGen),变了就放弃这次切换 —— 用户的新选择已经就地生效,给它一轮观察期。不拿 settingsOpMu:选节点持着它 restart,
+// restart 要等的正是跑这里的状态机 goroutine,拿了就死锁。
+// 返回 true 表示确实换了(或者用户换了、组正在自己换),值得再给一轮观察期。
 func (d *Daemon) recoverRoute(ctx context.Context) bool {
+	gen := d.selGen.Load() // 先取代数再读设置:读到的设置一定不比这个代数旧
 	s := d.getSettings()
 	if s.Selected == "" {
 		return false // 本来就是自动选择:内核自己会换,这里帮不上忙
@@ -79,7 +86,15 @@ func (d *Daemon) recoverRoute(ctx context.Context) bool {
 	if members, ok := d.core.Members(s.Selected); ok {
 		// 选的是线路组(内核里有这一组)
 		d.logf("线路组「%s」一直不通,先在这一组的服务器里换一台", s.Selected)
-		if d.recoverInGroup(ctx, s.Selected) {
+		switch d.recoverInGroup(ctx, s.Selected, gen) {
+		case groupRecovered, groupYielded:
+			return true
+		case groupUnknown:
+			if ctx.Err() != nil {
+				return false // 连接正在拆(断开、重连):不用救了
+			}
+			// 不知道是"还在测"还是"整组不通",就不能跨线路借道:这一轮测完,组里有通的会自己换过去
+			d.logf("线路组「%s」等不到测速结果,先不借别的线路,再观察一轮", s.Selected)
 			return true
 		}
 		skip = append(skip, members...)
@@ -89,9 +104,9 @@ func (d *Daemon) recoverRoute(ctx context.Context) bool {
 	}
 	tctx, cancel := context.WithTimeout(ctx, 45*time.Second)
 	defer cancel()
-	delays, err := settledGroupTest(tctx, func(c context.Context) (map[string]uint16, error) { return d.core.GroupTest(c, "auto") }, 2*time.Second, 3)
+	delays, err := d.settledTest(tctx, "auto")
 	if err != nil {
-		d.logf("临时换线:测速失败 %v", err)
+		d.logf("临时换线:测速没有结果 %v", err)
 		return false
 	}
 	best, bestMs := "", 0
@@ -107,55 +122,164 @@ func (d *Daemon) recoverRoute(ctx context.Context) bool {
 		d.logf("临时换线:一个通的节点都没有")
 		return false
 	}
-	if err := d.core.Select("proxy", best); err != nil {
+	yielded, err := d.recoverSwitch(ctx, gen, best)
+	switch {
+	case yielded:
+		d.logf("临时换线:测速期间选择已经改了,不再切到「%s」", best)
+		return true
+	case err != nil:
 		d.logf("临时换线:切到「%s」失败 %v", best, err)
 		return false
 	}
-	_ = d.core.CloseAllConnections()
 	d.setPing(bestMs)
 	d.clearExit()
 	d.logf("临时换线:已切到「%s」(%d ms);设置里选的仍是「%s」,重新连接或手动再选它时才会用回它", best, bestMs, s.Selected)
 	return true
 }
 
+// groupRecovery 组内自救的结果。
+type groupRecovery int
+
+const (
+	groupDown      groupRecovery = iota // 真测完了一轮,整组不通
+	groupRecovered                      // 组里有通的,已经换过去
+	groupYielded                        // 测的这段时间里用户改了选择:没切
+	groupUnknown                        // 等不到真测出来的结果(组一直在测、超时、连接在拆):不能当整组不通
+)
+
 // recoverInGroup 线路组在组里自救:只测这一组的成员,有通的就由组自己换过去(proxy 先前被临时换线借走了的,切回这一组)。
-func (d *Daemon) recoverInGroup(ctx context.Context, group string) bool {
+func (d *Daemon) recoverInGroup(ctx context.Context, group string, gen uint64) groupRecovery {
 	tctx, cancel := context.WithTimeout(ctx, 45*time.Second)
 	defer cancel()
-	delays, err := settledGroupTest(tctx, func(c context.Context) (map[string]uint16, error) { return d.core.GroupTest(c, group) }, 2*time.Second, 3)
+	delays, err := d.settledTest(tctx, group)
 	if err != nil {
-		d.logf("线路组「%s」组内测速失败: %v", group, err)
-		return false
+		d.logf("线路组「%s」组内测速没有结果: %v", group, err)
+		if errors.Is(err, errStillTesting) || tctx.Err() != nil {
+			return groupUnknown
+		}
+		return groupDown
 	}
 	if len(delays) == 0 { // 结果里只有测通的那几台
-		return false
+		return groupDown
 	}
-	if now, _, err := d.core.Group("proxy"); err == nil && now != group {
-		if err := d.core.Select("proxy", group); err != nil {
-			d.logf("线路组「%s」组内有通的,但切回这一组失败: %v", group, err)
-			return false
-		}
+	// 原来那台已经不通:切回这一组(要是被借走了)并掐掉老连接,应用重连就走组里新换上的那台
+	yielded, err := d.recoverSwitch(ctx, gen, group)
+	switch {
+	case yielded:
+		d.logf("线路组「%s」组内有通的,但测速期间选择已经改了,不再切回这一组", group)
+		return groupYielded
+	case err != nil && ctx.Err() != nil:
+		return groupUnknown
+	case err != nil:
+		d.logf("线路组「%s」组内有通的,但切回这一组失败: %v", group, err)
+		return groupDown
 	}
-	_ = d.core.CloseAllConnections() // 原来那台已经不通:掐掉老连接,应用重连就走组里新换上的那台
 	now := d.groupNow(group)
 	d.setPing(int(delays[now]))
 	d.clearExit()
 	d.logf("线路组「%s」换到「%s」(%d ms)", group, now, delays[now])
-	return true
+	return groupRecovered
 }
 
-// settledGroupTest 测一轮测速组。sing-box 碰上组里正在测的一轮会立刻返回空结果(不是"整组不通"):
-// 空结果就隔 wait 再测,最多 tries 次 —— 正在测的那一轮完了之后再测出来的才算数,不能凭一个空结果就跨线路换线。
-func settledGroupTest(ctx context.Context, test func(context.Context) (map[string]uint16, error), wait time.Duration, tries int) (map[string]uint16, error) {
-	for i := 1; ; i++ {
-		res, err := test(ctx)
-		if err != nil || len(res) > 0 || i >= tries {
-			return res, err
+// recoverSwitch 自救把 proxy 切到 tag(已经在它上面就不切),再掐掉老连接。先核对:连接在拆(ctx 结束)就不动;
+// 测速这段时间里用户改了选择(代数变了)就放弃,返回 yielded。和就地换选择(applySelected)用同一把锁:
+// 核对完、切过去之前,用户的切换插不进来;用户的切换在这之后到,就由它盖过来。
+func (d *Daemon) recoverSwitch(ctx context.Context, gen uint64, tag string) (yielded bool, err error) {
+	d.selMu.Lock()
+	defer d.selMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	if d.selGen.Load() != gen {
+		return true, nil
+	}
+	if now, _, err := d.core.Group("proxy"); err != nil || now != tag {
+		if err := d.core.Select("proxy", tag); err != nil {
+			return false, err
 		}
+	}
+	_ = d.core.CloseAllConnections()
+	return false, nil
+}
+
+// settledTest 测一轮测速组,拿真测出来的结果(见 settledGroupTest):组里正在测就先等这一轮测完,最多等一轮测速的上限。
+func (d *Daemon) settledTest(ctx context.Context, tag string) (map[string]uint16, error) {
+	n := 1
+	if m, ok := d.core.Members(tag); ok {
+		n = len(m)
+	}
+	return settledGroupTest(ctx,
+		func(c context.Context) (map[string]uint16, error) { return d.core.GroupTest(c, tag) },
+		func() (bool, bool) { return d.core.GroupBusy(tag) },
+		250*time.Millisecond, core.RoundLimit(n))
+}
+
+// errStillTesting 等满一轮测速的上限,组还在测:结果未知 —— 不能当"整组不通"。
+var errStillTesting = errors.New("测速组一直在测,等不到这一轮的结果")
+
+// quickEmpty 说不清组在不在测时(core.GroupBusy 读不到标记),多快回来的空结果算"撞上了正在测的一轮":
+// sing-box 碰上在测的一轮是立刻返回,真测一轮至少要拨一次号。
+const quickEmpty = 200 * time.Millisecond
+
+// settledGroupTest 测一轮测速组,返回真测出来的结果。sing-box 碰上组里正在测的一轮(定时测速、点线路之后的现测、
+// 网络变化时内核自己的全测)会立刻回一个空结果 —— 和"真测完、全不通"一模一样,凭它跨线路换线就错了。所以:
+//   - 先问组是不是在测(busy),在测就等这一轮测完:隔 poll 看一次,最多等 maxWait(一轮测速的上限,见 core.RoundLimit),
+//     ctx 结束就停;等满了还在测,返回 errStillTesting(结果未知)。
+//   - 然后测一轮自己的。回了空结果、而组此刻没在测:真测完了,整组不通 —— 当场认定,不再重测(重测就是把整组的服务器
+//     再挨个带着凭据连一遍)。回空结果时组又在测(撞上了刚开始的一轮):等它测完再来。
+//   - busy 说不清时(known 为假)退回保守的做法:很快回来的空结果当作撞上了在测的一轮,隔 poll 再试,直到 maxWait;
+//     测了一会儿才回来的空结果算真测过。
+//
+// 极端情况下"问过不在测"和"开测"之间恰好有一轮瞬间测完(成员全有新鲜的历史、什么都不用测的那种,只在内核启动时出现),
+// 会把那一下的空结果当真;自救只在连上好几分钟之后才会走到这里,碰不上。
+func settledGroupTest(ctx context.Context, test func(context.Context) (map[string]uint16, error), busy func() (bool, bool), poll, maxWait time.Duration) (map[string]uint16, error) {
+	deadline := time.Now().Add(maxWait)
+	pause := func() error {
+		t := time.NewTimer(poll)
+		defer t.Stop()
 		select {
 		case <-ctx.Done():
-			return res, nil
-		case <-time.After(wait):
+			return ctx.Err()
+		case <-t.C:
+			return nil
+		}
+	}
+	for {
+		for { // 先等正在测的那一轮测完
+			b, known := busy()
+			if !known || !b {
+				break
+			}
+			if !time.Now().Before(deadline) {
+				return nil, errStillTesting
+			}
+			if err := pause(); err != nil {
+				return nil, err
+			}
+		}
+		start := time.Now()
+		res, err := test(ctx)
+		if err != nil || len(res) > 0 {
+			return res, err
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, err // 这一轮被截断了:没测完的不算"不通"
+		}
+		b, known := busy()
+		switch {
+		case known && !b:
+			return res, nil // 真测完了一轮,此刻也没人在测:整组不通
+		case !known && time.Since(start) >= quickEmpty:
+			return res, nil // 说不清在不在测:测了一会儿才回来的空结果算真测过
+		}
+		if !time.Now().Before(deadline) {
+			if known {
+				return nil, errStillTesting
+			}
+			return res, nil // 说不清在不在测,等满一轮的上限还是很快回空结果:按不通算
+		}
+		if err := pause(); err != nil {
+			return nil, err
 		}
 	}
 }

@@ -120,13 +120,19 @@ func (d *Daemon) applySelected(sel string) error {
 	if tag == "" {
 		tag = "auto"
 	}
-	if err := d.core.Select("proxy", tag); err != nil {
-		return err
+	// 和自救切 proxy 那一下串行(见 recoverRoute):自救要么在这之前切完、被这里盖过去,要么核对代数时就放弃
+	d.selMu.Lock()
+	err := d.core.Select("proxy", tag)
+	if err == nil {
+		// 选择组只对新连接生效:不掐掉老连接,用户会看到"选了新节点,连接列表里还是老节点",
+		// 长连接(Telegram、推送、anytls 的连接池)能挂十几分钟不断。掐掉后应用自己重连,就都走新节点了。
+		if cerr := d.core.CloseAllConnections(); cerr != nil {
+			d.logf("切节点后掐断旧连接失败(旧连接会继续用老节点): %v", cerr)
+		}
 	}
-	// 选择组只对新连接生效:不掐掉老连接,用户会看到"选了新节点,连接列表里还是老节点",
-	// 长连接(Telegram、推送、anytls 的连接池)能挂十几分钟不断。掐掉后应用自己重连,就都走新节点了。
-	if err := d.core.CloseAllConnections(); err != nil {
-		d.logf("切节点后掐断旧连接失败(旧连接会继续用老节点): %v", err)
+	d.selMu.Unlock()
+	if err != nil {
+		return err
 	}
 	// 换了节点,出口多半也变了:先抹掉旧值,再在后台重新测延迟与出口
 	d.clearExit()

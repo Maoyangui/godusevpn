@@ -98,3 +98,69 @@ func TestQuietAutoLineGroup(t *testing.T) {
 		t.Fatalf("对普通节点调 Group 应报不是选择组: %v", err)
 	}
 }
+
+// GroupBusy 认得出测速组"正在测":sing-box 碰上正在测的一轮会立刻回一个空结果,和"真测完、全不通"长得一模一样,
+// 守护进程的组内自救要靠这个分清"还在测"和"整组不通"(不然撞上定时测速那一轮就会误判、跨线路借道)。
+// 读的是 sing-box 内部的标记:换了 sing-box 版本这条测试会先红。
+func TestGroupBusy(t *testing.T) {
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		<-release // 测速请求一直挂着,这一轮就一直"在测"
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+	defer close(release)
+	c := New(nil)
+	if busy, known := c.GroupBusy("G"); busy || known {
+		t.Fatal("内核没跑时说不清")
+	}
+	c.QuietAuto([]string{"m"}) // 启动那一轮跳过它:这一轮什么时候开始由测试来定
+	cfg := `{"log":{"disabled":true},"outbounds":[
+	  {"type":"selector","tag":"proxy","outbounds":["G","m"],"default":"G"},
+	  {"type":"urltest","tag":"G","outbounds":["m"],"url":"` + srv.URL + `/","interval":"24h","idle_timeout":"25h"},
+	  {"type":"direct","tag":"m"},{"type":"direct","tag":"direct"}],
+	  "experimental":{"cache_file":{"enabled":true,"path":"` + cachePath(t) + `"}}}`
+	if err := c.Start([]byte(cfg)); err != nil {
+		t.Fatal(err)
+	}
+	defer c.Stop()
+	wait := func(want bool) {
+		t.Helper()
+		deadline := time.Now().Add(5 * time.Second)
+		for time.Now().Before(deadline) {
+			busy, known := c.GroupBusy("G")
+			if !known {
+				t.Fatal("内核在跑、G 是测速组:应当说得清在不在测")
+			}
+			if busy == want {
+				return
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+		t.Fatalf("等不到 GroupBusy = %v", want)
+	}
+	wait(false) // 启动那一轮(什么都不用测)早就完了
+	done := make(chan map[string]uint16, 1)
+	go func() {
+		res, _ := c.GroupTest(context.Background(), "G")
+		done <- res
+	}()
+	wait(true)
+	if res, err := c.GroupTest(context.Background(), "G"); err != nil || len(res) != 0 {
+		t.Fatalf("正在测时再叫一次:sing-box 立刻回空结果: %v %v", res, err)
+	}
+	release <- struct{}{} // 放行那一轮的测速请求
+	if res := <-done; res["m"] == 0 {
+		t.Fatalf("那一轮应真测出 m: %v", res)
+	}
+	wait(false)
+	if _, known := c.GroupBusy("proxy"); known {
+		t.Fatal("选择组(不是测速组)说不清")
+	}
+	if _, known := c.GroupBusy("m"); known {
+		t.Fatal("单个节点说不清")
+	}
+	if RoundLimit(3) < 15*time.Second || RoundLimit(25) < 3*15*time.Second {
+		t.Fatalf("一轮测速的上限按 sing-box 每台 15 秒、10 台一批算: %v %v", RoundLimit(3), RoundLimit(25))
+	}
+}

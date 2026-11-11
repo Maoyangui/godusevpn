@@ -10,10 +10,12 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+	"unsafe"
 
 	"github.com/sagernet/sing/common/logger"
 	M "github.com/sagernet/sing/common/metadata"
@@ -21,11 +23,13 @@ import (
 	sb "github.com/sagernet/sing-box"
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/common/urltest"
+	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/experimental/cachefile"
 	"github.com/sagernet/sing-box/experimental/clashmode"
 	"github.com/sagernet/sing-box/include"
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/option"
+	"github.com/sagernet/sing-box/protocol/group"
 	"github.com/sagernet/sing/service"
 )
 
@@ -519,7 +523,8 @@ func (c *Core) URLTest(ctx context.Context, tag, link string) (int, error) {
 
 // GroupTest 让自动选择组测一轮全部成员并按结果换到最快的(等价于 Clash API 的 /group/{tag}/delay)。
 // 配置里把 sing-box 自己的定时测速关了(builder.autoGroup),什么时候测由守护进程按"定时测速(分钟)"来叫。
-// 组里正在测就直接返回空结果(sing-box 自己有个 checking 标记),不会叠着测两轮。
+// 组里正在测就直接返回空结果(sing-box 自己有个 checking 标记),不会叠着测两轮 —— 这个空结果和"真测完、全不通"
+// 长得一模一样,要分清就先问 GroupBusy。
 func (c *Core) GroupTest(ctx context.Context, tag string) (map[string]uint16, error) {
 	box, _, ok := c.snapshot()
 	if !ok {
@@ -534,6 +539,53 @@ func (c *Core) GroupTest(ctx context.Context, tag string) (map[string]uint16, er
 		return nil, fmt.Errorf("%q 不是自动选择组", tag)
 	}
 	return g.URLTest(ctx)
+}
+
+// GroupBusy 测速组此刻是不是正在测一轮(不管是谁叫的:守护进程的定时测速 / 现测,还是内核自己启动时、网络变化时那一轮)。
+// known 为假是说不清:内核没跑、不是测速组,或者 sing-box 换了版本、读不到那个标记 —— 调用方要退回保守的做法。
+//
+// sing-box 不给读这个标记的接口(URLTestGroup.checking),只能按字段名去取。读的是一个原子量,不会和它自己的读写打架;
+// 字段名变了取不到就当说不清,core 的测试钉着当前这个版本上取得到。
+func (c *Core) GroupBusy(tag string) (busy, known bool) {
+	box, _, ok := c.snapshot()
+	if !ok {
+		return false, false
+	}
+	ob, found := box.Outbound().Outbound(tag)
+	if !found {
+		return false, false
+	}
+	flag := checkingFlag(ob)
+	if flag == nil {
+		return false, false
+	}
+	return flag.Load(), true
+}
+
+// checkingFlag 取 sing-box 测速组"正在测"的那个原子标记;取不到返回 nil。
+func checkingFlag(ob adapter.Outbound) *atomic.Bool {
+	u, isURLTest := ob.(*group.URLTest)
+	if !isURLTest || u == nil {
+		return nil
+	}
+	g := reflect.ValueOf(u).Elem().FieldByName("group")
+	if !g.IsValid() || g.Kind() != reflect.Pointer || g.IsNil() {
+		return nil // 组还没 Start(内核起来之后才有)
+	}
+	f := g.Elem().FieldByName("checking")
+	if !f.IsValid() || f.Type() != reflect.TypeFor[atomic.Bool]() || !f.CanAddr() {
+		return nil
+	}
+	return (*atomic.Bool)(unsafe.Pointer(f.UnsafeAddr()))
+}
+
+// RoundLimit n 个成员的测速组测一轮最长要多久:sing-box 每台最多等 C.TCPTimeout(15 秒),10 台一批并发
+// (protocol/group/urltest.go 的 URLTestOutbounds),再留两秒余量。等"正在测的那一轮"测完,最多等这么久。
+func RoundLimit(n int) time.Duration {
+	if n < 1 {
+		n = 1
+	}
+	return time.Duration((n+9)/10)*C.TCPTimeout + 2*time.Second
 }
 
 // ProbeRunning 内核在跑时给一批出站各测一次延迟(并发 8 路),返回 节点 → 毫秒,-1 = 不通。

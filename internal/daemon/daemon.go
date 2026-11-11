@@ -140,6 +140,13 @@ type Daemon struct {
 	directHeld map[uint64]context.CancelFunc
 	directSeq  uint64
 	tunnel     ipc.TunnelView // 会话看护的记录(见 session_policy.go)
+
+	// selGen 用户的选择(选中的节点 / 线路组、「线路自动」、当前订阅)每变一次加一(setSettings 里比出来)。
+	// 自救测速要等好几十秒,切 proxy 之前拿它核对这期间用户有没有改选,改过就放弃(见 recoverRoute)。
+	selGen atomic.Uint64
+	// selMu 切 proxy 那一下串行:自救"核对代数 + 切过去"和就地换选择(applySelected)不交错 ——
+	// 要么自救先切、用户的随后盖过来,要么自救核对时就看到代数变了。只包住内核调用,不碰别的锁。
+	selMu sync.Mutex
 }
 
 type persisted struct {
@@ -475,6 +482,9 @@ func (d *Daemon) setSettings(s settings.Settings) error {
 		return err
 	}
 	d.mu.Lock()
+	if s.Selected != d.settings.Selected || s.LineAuto != d.settings.LineAuto || s.ActiveProfile != d.settings.ActiveProfile {
+		d.selGen.Add(1) // 用户改了选择:正在跑的自救切 proxy 之前会看到(见 recoverRoute)
+	}
 	d.settings = s
 	d.settingsGeneration++
 	d.settingsOK = true // 刚刚整份写成功了,文件从此可信 —— 之前读不出来的那次到此为止

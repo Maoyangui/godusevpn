@@ -393,32 +393,101 @@ func TestRecoverRouteLineGroup(t *testing.T) {
 	})
 }
 
-// 组里正在测的那一轮,sing-box 直接回空结果:等它测完再看,不能凭一个空结果就判整组不通、跨线路换线。
+// 组里正在测的那一轮,sing-box 直接回空结果:等它测完再看,不能凭一个空结果就判整组不通、跨线路换线;
+// 真测完一轮还是空的就是整组不通,当场认定,不再重测。
 func TestSettledGroupTest(t *testing.T) {
-	n := 0
-	res, err := settledGroupTest(context.Background(), func(context.Context) (map[string]uint16, error) {
-		n++
-		if n < 3 {
-			return map[string]uint16{}, nil
+	ctx := context.Background()
+	never := func() (bool, bool) { return false, true }
+	t.Run("正在测:等这一轮测完再测自己的", func(t *testing.T) {
+		polls, calls := 0, 0
+		busy := func() (bool, bool) { polls++; return polls <= 3, true }
+		res, err := settledGroupTest(ctx, func(context.Context) (map[string]uint16, error) {
+			calls++
+			return map[string]uint16{"a": 80}, nil
+		}, busy, time.Millisecond, time.Second)
+		if err != nil || res["a"] != 80 || calls != 1 {
+			t.Fatalf("在测的时候不去叫(叫了只会拿到空结果),测完再测一轮: %v %v 测了 %d 次", res, err, calls)
 		}
-		return map[string]uint16{"a": 80}, nil
-	}, time.Millisecond, 5)
-	if err != nil || res["a"] != 80 || n != 3 {
-		t.Fatalf("空结果要隔一会儿再测: %v %v 测了 %d 次", res, err, n)
-	}
-	n = 0
-	res, _ = settledGroupTest(context.Background(), func(context.Context) (map[string]uint16, error) {
-		n++
-		return map[string]uint16{}, nil
-	}, time.Millisecond, 3)
-	if len(res) != 0 || n != 3 {
-		t.Fatalf("真的整组不通:测满次数就认: %v %d", res, n)
-	}
-	if _, err := settledGroupTest(context.Background(), func(context.Context) (map[string]uint16, error) {
-		return nil, errors.New("内核未运行")
-	}, time.Millisecond, 3); err == nil {
-		t.Fatal("出错直接返回")
-	}
+	})
+	t.Run("真测完全不通:只测一轮", func(t *testing.T) {
+		calls := 0
+		res, err := settledGroupTest(ctx, func(context.Context) (map[string]uint16, error) {
+			calls++
+			return map[string]uint16{}, nil
+		}, never, time.Millisecond, time.Second)
+		if err != nil || len(res) != 0 || calls != 1 {
+			t.Fatalf("整组不通当场认定,不再重测: %v %v 测了 %d 次", res, err, calls)
+		}
+	})
+	t.Run("一直在测:等满一轮的上限也不当成不通", func(t *testing.T) {
+		calls := 0
+		_, err := settledGroupTest(ctx, func(context.Context) (map[string]uint16, error) {
+			calls++
+			return map[string]uint16{}, nil
+		}, func() (bool, bool) { return true, true }, time.Millisecond, 30*time.Millisecond)
+		if !errors.Is(err, errStillTesting) || calls != 0 {
+			t.Fatalf("应报 errStillTesting(结果未知),不该当整组不通: %v,测了 %d 次", err, calls)
+		}
+	})
+	t.Run("撞上刚开始的一轮:等它完了再测", func(t *testing.T) {
+		calls, polls := 0, 0
+		busy := func() (bool, bool) {
+			polls++
+			return calls == 1 && polls < 6, true // 第一次叫之后才发现有一轮在测
+		}
+		res, err := settledGroupTest(ctx, func(context.Context) (map[string]uint16, error) {
+			calls++
+			if calls == 1 {
+				return map[string]uint16{}, nil
+			}
+			return map[string]uint16{"b": 90}, nil
+		}, busy, time.Millisecond, time.Second)
+		if err != nil || res["b"] != 90 || calls != 2 {
+			t.Fatalf("撞上的空结果不算:等那一轮完了再测: %v %v 测了 %d 次", res, err, calls)
+		}
+	})
+	t.Run("说不清在不在测:秒回的空结果再试,测了一会儿的空结果算数", func(t *testing.T) {
+		unknown := func() (bool, bool) { return false, false }
+		calls := 0
+		res, _ := settledGroupTest(ctx, func(context.Context) (map[string]uint16, error) {
+			calls++
+			if calls < 3 {
+				return map[string]uint16{}, nil
+			}
+			return map[string]uint16{"c": 70}, nil
+		}, unknown, time.Millisecond, time.Second)
+		if res["c"] != 70 || calls != 3 {
+			t.Fatalf("秒回的空结果可能是撞上了在测的一轮: %v 测了 %d 次", res, calls)
+		}
+		calls = 0
+		res, _ = settledGroupTest(ctx, func(context.Context) (map[string]uint16, error) {
+			calls++
+			time.Sleep(quickEmpty + 20*time.Millisecond)
+			return map[string]uint16{}, nil
+		}, unknown, time.Millisecond, time.Second)
+		if len(res) != 0 || calls != 1 {
+			t.Fatalf("测了一会儿才回来的空结果是真测过的: %v 测了 %d 次", res, calls)
+		}
+	})
+	t.Run("出错、取消", func(t *testing.T) {
+		if _, err := settledGroupTest(ctx, func(context.Context) (map[string]uint16, error) {
+			return nil, errors.New("内核未运行")
+		}, never, time.Millisecond, time.Second); err == nil {
+			t.Fatal("出错直接返回")
+		}
+		cctx, cancel := context.WithCancel(ctx)
+		cancel()
+		if _, err := settledGroupTest(cctx, func(context.Context) (map[string]uint16, error) {
+			return map[string]uint16{}, nil
+		}, func() (bool, bool) { return true, true }, time.Millisecond, time.Second); !errors.Is(err, context.Canceled) {
+			t.Fatalf("取消了就别再等: %v", err)
+		}
+		if _, err := settledGroupTest(cctx, func(context.Context) (map[string]uint16, error) {
+			return map[string]uint16{}, nil // 被截断的一轮
+		}, never, time.Millisecond, time.Second); !errors.Is(err, context.Canceled) {
+			t.Fatalf("被截断的一轮不算整组不通: %v", err)
+		}
+	})
 }
 
 // 选中线路组时配置照样过得了内核干跑(和生成时一样剔掉建不起来的节点、线路组跟着剪)。
