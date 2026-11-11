@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -323,7 +324,7 @@ echo DONE
 // 不是这里建不了。以前一律算一回"建不成 / 清不掉",一次等锁里数满三回就不加锁进去,和拿着锁的同时在锁里
 // (GitHub 的 ubuntu runner 上 TestEntwareLockStaleRace 第 1 轮就这么出过三个 OVERLAP)。脚本里的 mkdir 换成一个
 // 函数,前几回对锁目录 / 清理锁假装"被别人抢先了"(不建、返回失败,目录照样不在),确定地造出这个交错:目录建得了时
-// 要接着等、拿到锁,不能不加锁进去。名字上是个文件(怎么都建不成)时照旧试几回就不加锁照样起,不卡住。
+// 要接着等、拿到锁,不能不加锁进去。名字上是个文件或 FIFO(怎么都建不成)时照旧试几回就不加锁照样起,不卡住、不空转。
 func TestEntwareLockLostRaceNotCounted(t *testing.T) {
 	eachToolset(t, func(t *testing.T, busybox bool) {
 		r := newEntwareRig(t, "gvlklr", busybox)
@@ -392,5 +393,30 @@ echo DONE
 			t.Fatalf("锁目录的名字上是个文件,应不加锁照样起:\n%s", out)
 		}
 		_ = os.Remove(r.lockDir())
+		// 名字上是个 FIFO(socket、设备文件同理):不是普通文件也一样怎么都建不成,要照文件那样试几回就不加锁照样起。
+		// 以前只认普通文件和链接,FIFO 被当成"被抢先"马上再建,锁目录上一直空转(不 sleep),清理锁上一直等
+		if err := syscall.Mkfifo(r.lockDir(), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if out := run("-", 10*time.Second); !strings.Contains(out, "NOLOCK") {
+			t.Fatalf("锁目录的名字上是个 FIFO,应不加锁照样起:\n%s", out)
+		}
+		_ = os.Remove(r.lockDir())
+		// 有一把持有者不在了的旧锁,清理锁的名字上是个 FIFO:清不掉,试三回(每回隔一秒)就不加锁照样起
+		if err := os.MkdirAll(r.lockDir(), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		r.write("run/godusevpn.lock/owner", fmt.Sprintf("%d %d\n", deadPID(t), uptimeSeconds(t)), 0o644)
+		if err := syscall.Mkfifo(r.lockDir()+".clean", 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if out := run("-", 15*time.Second); !strings.Contains(out, "NOLOCK") {
+			t.Fatalf("清理锁的名字上是个 FIFO,应试几回就不加锁照样起:\n%s", out)
+		}
+		if left, _ := filepath.Glob(r.lockDir() + ".dead.*"); len(left) != 0 {
+			t.Fatalf("试建用的目录不该留下:%v", left)
+		}
+		_ = os.Remove(r.lockDir() + ".clean")
+		_ = os.RemoveAll(r.lockDir())
 	})
 }
