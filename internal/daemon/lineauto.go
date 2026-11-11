@@ -64,11 +64,13 @@ func lineAutoAfterSelect(p *profile.Profile, sel string, cur bool) bool {
 // lineAutoSelection 翻「线路自动」时当前选择怎么换算:
 //   - 打开:选的是某个线路组里的节点 → 换成那个线路组;自动选择、不属于任何组的节点不变(只换列表的显示)。
 //   - 关闭:选的是线路组 → 固定到组里此刻在用的那台(now 给,内核在跑时才有);内核没跑、或那台已经不在组里,
-//     取第一台这一轮连得上的(blocked 是自动选择不用的节点:提示节点、连不上的 IPv6 节点,见 autoSkippedNow;全是的话照样取第一台)。
+//     取第一台这一轮连得上的 —— 自动选择不用的节点有两种(见 autoSkippedNow):提示节点(hints,地址只指向本机,怎么都连不上)、
+//     关着 IPv6 时的 IPv6 节点(v6,打开 IPv6 就能用)。和配置里线路组剔成员的次序一样(builder:先剔提示节点,再剔 IPv6
+//     节点,剔光了宁可留着 IPv6 节点):两种都不是的没有,就取第一台不是提示节点的;全是提示节点才取第一台。
 //     选的线路组在订阅里已经没了(线路只剩一台):固定到这一轮正在用的同线路那一台(fallback = settings.SelectedNode,
 //     选的是节点时为空;见 builder.Effective)。
 //     选的线路组成员成了全部节点(订阅里只剩这一条线路,见 profile.Profile.Whole):这一轮落在自动选择上,固定到它此刻在用的那台。
-func lineAutoSelection(p *profile.Profile, sel string, on bool, now func(group string) string, blocked []string, fallback string) string {
+func lineAutoSelection(p *profile.Profile, sel string, on bool, now func(group string) string, hints, v6 []string, fallback string) string {
 	if p == nil || sel == "" {
 		return sel
 	}
@@ -98,12 +100,27 @@ func lineAutoSelection(p *profile.Profile, sel string, on bool, now func(group s
 			return n
 		}
 	}
-	for _, m := range g.Members {
-		if !slices.Contains(blocked, m) {
+	return pickMember(g.Members, hints, v6)
+}
+
+// pickMember 线路组里挑一台固定下来(关掉线路自动、记 SelectedNode 时),分三轮:先挑既不是提示节点、也不是这一轮不用的
+// IPv6 节点的;没有就挑第一台不是提示节点的(打开 IPv6、换个网络就能用);全是提示节点才取第一台。和配置里线路组剔成员的
+// 次序一样(builder:先剔提示节点,再剔 IPv6 节点,剔光了宁可留着 IPv6 节点)。members 为空返回空。
+func pickMember(members, hints, v6 []string) string {
+	for _, m := range members {
+		if !slices.Contains(hints, m) && !slices.Contains(v6, m) {
 			return m
 		}
 	}
-	return g.Members[0]
+	for _, m := range members {
+		if !slices.Contains(hints, m) {
+			return m
+		}
+	}
+	if len(members) > 0 {
+		return members[0]
+	}
+	return ""
 }
 
 // groupNow 内核里这个测速组此刻选中的节点;内核没跑、或者没有这一组返回空。
@@ -177,11 +194,11 @@ func (d *Daemon) v6BlockedNow(s settings.Settings) []string {
 	return builder.V6Blocked(p, s, v6)
 }
 
-// autoSkippedNow 当前订阅里自动选择不用的节点:提示节点(地址只指向本机,见 builder.HintNodes)在前,
-// 这一轮连不上的 IPv6 节点在后 —— 和配置里自动选择、线路组剔掉的是同一批。
-func (d *Daemon) autoSkippedNow(s settings.Settings) []string {
+// autoSkippedNow 当前订阅里自动选择不用的节点,分开给:提示节点(地址只指向本机,见 builder.HintNodes)、
+// 这一轮连不上的 IPv6 节点 —— 和配置里自动选择、线路组剔掉的是同一批;两种的轻重不同,见 lineAutoSelection。
+func (d *Daemon) autoSkippedNow(s settings.Settings) (hints, v6 []string) {
 	_, p := d.activeProfile()
-	return append(builder.HintNodes(p), d.v6BlockedNow(s)...)
+	return builder.HintNodes(p), d.v6BlockedNow(s)
 }
 
 // selectionBlocked 这一轮实际落到的选择(eff,见 builder.Effective)只能用关着 IPv6 时不用的节点:选的就是这种节点、
@@ -265,12 +282,16 @@ func (d *Daemon) reconcileLineGroup(id string, old, fresh *profile.Profile) {
 	} else if alive(s.SelectedNode) {
 		pick = s.SelectedNode
 	} else {
+		var left []string
 		for _, m := range og.Members {
 			if alive(m) {
-				pick = m
-				break
+				left = append(left, m)
 			}
 		}
+		d.mu.Lock()
+		v6 := d.v6Only
+		d.mu.Unlock()
+		pick = pickMember(left, builder.HintNodes(fresh), builder.V6Blocked(fresh, s, v6)) // 提示节点、这一轮不用的 IPv6 节点排后面
 	}
 	if pick == "" {
 		d.logf("线路组「%s」在订阅里没了,这条线路的服务器也一台都不剩:这一轮回落到自动选择", s.Selected)

@@ -669,7 +669,7 @@ func (d *Daemon) revertSettings(prev, wrote settings.Settings) error {
 
 // fillSelectedNode 选的是线路组时记着"线路组用不了的时候用哪台"(settings.SelectedNode:退回旧版本时磁盘上 selected 写的就是它,
 // 线路组从订阅里没了时这一轮也用它)。已经记着的还在组里就留着 —— 调用方可以先填上更合适的(用户原来在用的那台、
-// 组里此刻在用的那台);不然取第一台这一轮能用的。经控制口来的整份设置里没有它:选择没变就沿用原来记的。
+// 组里此刻在用的那台);不然取第一台这一轮能用的(blocked 是这一轮不用的 IPv6 节点;提示节点同样跳过,见 pickMember)。经控制口来的整份设置里没有它:选择没变就沿用原来记的。
 // 选的是节点、自动选择就清空;选的东西在订阅里已经没有了(线路组没了)就保留 —— 这时候正要靠它(见 builder.Effective)。
 // 选的线路组成员成了全部节点(订阅里只剩这一条线路,见 profile.Profile.Whole)照线路组算:这一轮用的是自动选择,
 // 记着的这台只给退回旧版本时用,也得是这条线路上的。换了订阅时不沿用别的订阅里记的那台。
@@ -695,16 +695,7 @@ func fillSelectedNode(s *settings.Settings, cur settings.Settings, p *profile.Pr
 		if slices.Contains(g.Members, s.SelectedNode) {
 			return
 		}
-		s.SelectedNode = ""
-		for _, m := range g.Members {
-			if !slices.Contains(blocked, m) {
-				s.SelectedNode = m
-				return
-			}
-		}
-		if len(g.Members) > 0 {
-			s.SelectedNode = g.Members[0]
-		}
+		s.SelectedNode = pickMember(g.Members, builder.HintNodes(p), blocked)
 		return
 	}
 	if s.ActiveProfile != cur.ActiveProfile {
@@ -2680,7 +2671,8 @@ func (d *Daemon) registerHandlers() {
 		for try := 0; ; try++ {
 			snap := d.getSettings()
 			_, prof := d.activeProfile()
-			next = lineAutoSelection(prof, snap.Selected, in.On, d.groupNow, d.autoSkippedNow(snap), snap.SelectedNode)
+			hints, v6 := d.autoSkippedNow(snap)
+			next = lineAutoSelection(prof, snap.Selected, in.On, d.groupNow, hints, v6, snap.SelectedNode)
 			changed = next != snap.Selected
 			_, err = d.editSettings(func(cur *settings.Settings) error {
 				if cur.Selected != snap.Selected || cur.SelectedNode != snap.SelectedNode || cur.ActiveProfile != snap.ActiveProfile {

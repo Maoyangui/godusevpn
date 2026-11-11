@@ -165,20 +165,38 @@ func TestLineAutoConversions(t *testing.T) {
 		{"jp", false, []string{"jp-A", "jp-B"}, "jp-A"},
 		{"us", false, nil, "us"},
 	} {
-		if got := lineAutoSelection(p, c.sel, c.on, now, c.blocked, ""); got != c.want {
+		if got := lineAutoSelection(p, c.sel, c.on, now, nil, c.blocked, ""); got != c.want {
 			t.Fatalf("选 %q 时把开关拨到 %v:得 %q,应 %q", c.sel, c.on, got, c.want)
 		}
 	}
 	// 内核里那一台已经不在组里(订阅刷新后换了):取第一台
-	if got := lineAutoSelection(p, "hk", false, func(string) string { return "已删" }, nil, ""); got != "hk-A" {
+	if got := lineAutoSelection(p, "hk", false, func(string) string { return "已删" }, nil, nil, ""); got != "hk-A" {
 		t.Fatalf("得 %q", got)
 	}
 	// 选的线路组在订阅里没了(线路只剩一台):关掉时固定到这一轮正在用的同线路那一台
-	if got := lineAutoSelection(p, "旧线路", false, nil, nil, "hk-B"); got != "hk-B" {
+	if got := lineAutoSelection(p, "旧线路", false, nil, nil, nil, "hk-B"); got != "hk-B" {
 		t.Fatalf("组没了时关掉:固定到同线路那一台,得 %q", got)
 	}
-	if got := lineAutoSelection(p, "旧线路", false, nil, nil, "已删"); got != "旧线路" {
+	if got := lineAutoSelection(p, "旧线路", false, nil, nil, nil, "已删"); got != "旧线路" {
 		t.Fatalf("那一台也没了:不动,得 %q", got)
+	}
+	// 关闭时组里没有一台这一轮连得上:提示节点(地址只指向本机,怎么都连不上)和关着 IPv6 时的 IPv6 节点(打开 IPv6 就能用)
+	// 不是一回事 —— 和配置里线路组剔成员的次序一样(builder:先剔提示节点,再剔 IPv6 节点,剔光了宁可留着 IPv6 节点),
+	// 宁可固定到 IPv6 节点,不固定到提示节点;全是提示节点才取第一台
+	for _, c := range []struct {
+		hints, v6 []string
+		want      string
+	}{
+		{[]string{"jp-A"}, []string{"jp-B"}, "jp-B"}, // 第一台是提示节点、第二台是 IPv6 节点 → IPv6 节点
+		{[]string{"jp-B"}, []string{"jp-A"}, "jp-A"},
+		{[]string{"jp-A"}, nil, "jp-B"},
+		{nil, []string{"jp-A"}, "jp-B"},
+		{[]string{"jp-A", "jp-B"}, nil, "jp-A"}, // 全是提示节点:照样取第一台
+		{nil, []string{"jp-A", "jp-B"}, "jp-A"},
+	} {
+		if got := lineAutoSelection(p, "jp", false, nil, c.hints, c.v6, ""); got != c.want {
+			t.Fatalf("关闭线路自动(内核没跑),提示节点 %v、IPv6 节点 %v:得 %q,应 %q", c.hints, c.v6, got, c.want)
+		}
 	}
 }
 
@@ -568,10 +586,10 @@ func TestOutdatedCacheRefreshesAfterConnect(t *testing.T) {
 // 选的线路组没了、订阅里冒出个同名的普通节点(第三方):关掉「线路自动」时固定到记着的同线路那台,不固定到同名节点上。
 func TestLineAutoOffGroupTurnedNode(t *testing.T) {
 	p := &profile.Profile{Tags: []string{"hy", "hy-A", "jp"}}
-	if got := lineAutoSelection(p, "hy", false, nil, nil, "hy-A"); got != "hy-A" {
+	if got := lineAutoSelection(p, "hy", false, nil, nil, nil, "hy-A"); got != "hy-A" {
 		t.Fatalf("固定到 %q,应当是记着的 hy-A", got)
 	}
-	if got := lineAutoSelection(p, "hy", false, nil, nil, ""); got != "hy" {
+	if got := lineAutoSelection(p, "hy", false, nil, nil, nil, ""); got != "hy" {
 		t.Fatalf("选的本来就是节点 hy:不变,得到 %q", got)
 	}
 }

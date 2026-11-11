@@ -69,9 +69,10 @@ func TestSetLineAutoSkipsHintNodes(t *testing.T) {
 	d := lineDaemon(t)
 	d.profiles["p1"] = hintProfile(t)
 	d.settings.Selected, d.settings.LineAuto = "hk", true
-	want := []string{"00-勿选-流量:1.0/100.0 重置:3天", "hk-续费提示", "v6"} // 提示节点在前;关着 IPv6,写成 IPv6 地址的不用(不分平台)
-	if got := d.autoSkippedNow(d.getSettings()); !reflect.DeepEqual(got, want) {
-		t.Fatalf("自动选择不用的节点: %v,应 %v", got, want)
+	wantHints := []string{"00-勿选-流量:1.0/100.0 重置:3天", "hk-续费提示"}
+	wantV6 := []string{"v6"} // 关着 IPv6,写成 IPv6 地址的不用(不分平台)
+	if hints, v6 := d.autoSkippedNow(d.getSettings()); !reflect.DeepEqual(hints, wantHints) || !reflect.DeepEqual(v6, wantV6) {
+		t.Fatalf("自动选择不用的节点: 提示节点 %v、IPv6 节点 %v,应 %v、%v", hints, v6, wantHints, wantV6)
 	}
 	raw, _ := json.Marshal(map[string]bool{"on": false})
 	res, err := d.Dispatch(ipc.MSetLineAuto, raw)
@@ -166,5 +167,29 @@ func TestSelectHintNodeFlagged(t *testing.T) {
 		if want := map[bool]string{true: "", false: c.tag}[c.tag == "auto"]; v.Settings.Selected != want {
 			t.Fatalf("选 %q 应照旧选上: %q", c.tag, v.Settings.Selected)
 		}
+	}
+}
+
+// 选了线路组时记下的「线路组用不了时用哪台」(SelectedNode,退回旧版本时磁盘上 selected 写的就是它)同样跳过提示节点:
+// 组里排第一的是「续费提示」时记 hk-A,不记一个怎么都连不上的;只剩提示节点和 IPv6 节点时记 IPv6 节点。
+func TestFillSelectedNodeSkipsHintNodes(t *testing.T) {
+	p := hintProfile(t)
+	s := settings.Default()
+	s.Selected = "hk"
+	fillSelectedNode(&s, settings.Default(), p, nil)
+	if s.SelectedNode != "hk-A" {
+		t.Fatalf("记的应是 hk-A(跳过排第一的提示节点): %q", s.SelectedNode)
+	}
+	p.Groups = []profile.Group{{Tag: "hk", Members: []string{"hk-续费提示", "v6"}}}
+	s.SelectedNode = ""
+	fillSelectedNode(&s, settings.Default(), p, []string{"v6"})
+	if s.SelectedNode != "v6" {
+		t.Fatalf("只剩提示节点和 IPv6 节点时记 IPv6 节点: %q", s.SelectedNode)
+	}
+	if got := pickMember([]string{"a", "b"}, []string{"a", "b"}, nil); got != "a" {
+		t.Fatalf("全是提示节点时取第一台: %q", got)
+	}
+	if got := pickMember(nil, nil, nil); got != "" {
+		t.Fatalf("空的组: %q", got)
 	}
 }
