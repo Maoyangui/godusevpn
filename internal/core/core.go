@@ -465,6 +465,31 @@ func (c *Core) Untested(tag string) (member string, untested, ok bool) {
 	return member, history.LoadURLTestHistory(member) == nil, true
 }
 
+// Remember 测速组 tag 此刻落在的那台没有测速记录时补一条:刚经它测通了,用了 ms 毫秒。
+// 只在那台眼下没记录时写,不覆盖组自己测出来的记录。
+// 为什么要补:经那台的一次拨号失败(网络抖一下、目标连不上、握手超时一次)就会删掉它的记录,而健康检查走的是 proxy,
+// 测通了也不写记录;不补的话,这台要到下一轮定时测速(默认 10 分钟,没流量不测)才有记录,这期间它真挂了,
+// 线路巡检(daemon 的 lineWatchTick)认不出"刚挂",只能等三分钟一次的定时健康检查。
+func (c *Core) Remember(tag string, ms int) {
+	member, untested, ok := c.Untested(tag)
+	if !ok || !untested {
+		return
+	}
+	c.mu.Lock()
+	history := c.history
+	c.mu.Unlock()
+	if history == nil {
+		return
+	}
+	if ms < 1 {
+		ms = 1 // 0 在测速组里是"没测通"
+	}
+	if ms > 65535 {
+		ms = 65535
+	}
+	history.StoreURLTestHistory(member, &adapter.URLTestHistory{Time: time.Now(), Delay: uint16(ms)})
+}
+
 // Select 在选择组里选一个节点。
 func (c *Core) Select(group, tag string) error {
 	box, _, ok := c.snapshot()

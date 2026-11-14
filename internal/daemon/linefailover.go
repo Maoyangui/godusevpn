@@ -47,6 +47,11 @@ func (d *Daemon) lineGroupNow() string {
 func (d *Daemon) probeProxy(ctx context.Context) (int, error) {
 	ms, err := d.core.URLTest(ctx, "proxy", builder.TestURL)
 	if err == nil {
+		// 经线路组测通了:组落在的那台要是没有测速记录(上一次经它的拨号偶然失败删掉的),补上这一条。
+		// 不补的话巡检对这台"已经敲过",它之后真挂了也不会再敲(见 core.Remember、lineWatchTick)
+		if g := d.lineGroupNow(); g != "" {
+			d.core.Remember(g, ms)
+		}
 		return ms, nil
 	}
 	if ms, ok := d.lineFailover(ctx); ok {
@@ -90,8 +95,13 @@ func (d *Daemon) lineFailover(ctx context.Context) (int, bool) {
 		return 0, false
 	}
 	now := d.groupNow(group)
+	if delays[was] != 0 {
+		// 在用的那台这一轮其实测得通:健康检查那一下是偶发失败。组可能因为别的成员快出 tolerance 已经换过去了,
+		// 但老连接走的那台是好的,不掐;新连接自然走新的那台。交给状态机的节奏
+		return 0, false
+	}
 	if now == was || delays[now] == 0 {
-		return 0, false // 在用的那台这一轮测得通(或者换上的那台没测出来):不换、不掐连接,交给状态机的节奏
+		return 0, false // 组没换(或者换上的那台没测出来):不掐连接,交给状态机的节奏
 	}
 	yielded, err := d.recoverSwitch(ctx, gen, group)
 	switch {

@@ -19,7 +19,11 @@ const (
 	nodeUp int32 = iota
 	nodeHang
 	nodeDrop
+	nodeSlow // 照常转发,只是每条连接多憋 slowExtra 才答复(测出来比平时慢,但是通的)
 )
+
+// slowExtra nodeSlow 时每条连接多憋的时间:比组的 tolerance(50 毫秒)大得多。
+const slowExtra = 400 * time.Millisecond
 
 // fakeSocksNode 本机回环上的假节点:最简单的 SOCKS5(不认证、只做 CONNECT),socks 出站连它。state 随时可改,
 // 下一条连接起生效;delay 是每条连接答复前先憋这么久(让这台测出来更慢)。accepted 数一共收下了多少条连接。
@@ -61,6 +65,9 @@ func newFakeSocksNode(t *testing.T, delay time.Duration) *fakeSocksNode {
 				continue
 			case nodeDrop:
 				_ = c.Close()
+				continue
+			case nodeSlow:
+				go serveSocks(c, delay+slowExtra)
 				continue
 			}
 			go serveSocks(c, delay)

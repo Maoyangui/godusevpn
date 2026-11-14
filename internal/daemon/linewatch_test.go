@@ -76,3 +76,49 @@ func TestLineWatchKicksHealthCheck(t *testing.T) {
 		t.Fatal("不在线路组上(手动节点):不管")
 	}
 }
+
+// 11-12 核验发现的盲区:经在用那台的一次拨号偶然失败(目标连不上、网络抖一下)删掉了它的测速记录,巡检敲了一次健康检查,
+// 健康检查经 proxy 测通了却不写记录 —— 这台一直"没有记录"、巡检认为已经敲过,之后它真挂了巡检也不再敲,
+// 只能等三分钟一次的定时健康检查。现在健康检查经线路组测通时把记录补上(core.Remember),巡检就重新待命。
+func TestLineWatchRearmsAfterHealthyCheck(t *testing.T) {
+	a, b := newFakeSocksNode(t, 0), newFakeSocksNode(t, 100*time.Millisecond)
+	d := lineDaemon(t)
+	lineFailoverCore(t, d, a, b)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	_, _ = d.core.URLTest(ctx, "proxy", "http://127.0.0.1:1/") // A 好好的,只是这次的目标连不上:记录被删
+	cancel()
+	if !d.lineWatchTick() {
+		t.Fatal("前提:记录被删,应敲一次")
+	}
+	if err := d.health(context.Background()); err != nil {
+		t.Fatalf("A 是好的,健康检查应通过: %v", err)
+	}
+	if _, untested, _ := d.core.Untested("G"); untested {
+		t.Fatal("健康检查经线路组测通了,应把在用那台的记录补上")
+	}
+	if d.lineWatchTick() {
+		t.Fatal("记录回来了:不该再敲")
+	}
+	a.state.Store(nodeDrop) // 现在 A 真挂了
+	ctx, cancel = context.WithTimeout(context.Background(), 5*time.Second)
+	_, _ = d.core.URLTest(ctx, "proxy", "http://www.gstatic.com/generate_204")
+	cancel()
+	if !d.lineWatchTick() {
+		t.Fatal("盲区:A 真挂了,巡检却不再敲")
+	}
+}
+
+// 健康检查那一下偶发失败,而在用的 A 这一轮其实测得通、只是组里 B 快出 tolerance 以上:sing-box 测完这一轮自己会把组换到 B,
+// 但 A 上的老连接是好的,不能为此把所有连接都掐掉(以前会走 recoverSwitch → CloseAllConnections,还当成"换线成功")。
+func TestLineFailoverNoKillWhenCurrentStillWorks(t *testing.T) {
+	a, b := newFakeSocksNode(t, 0), newFakeSocksNode(t, 100*time.Millisecond)
+	d := lineDaemon(t)
+	lineFailoverCore(t, d, a, b)
+	a.state.Store(nodeSlow) // A 还通,只是现在比 B 慢 300 毫秒
+	if _, ok := d.lineFailover(context.Background()); ok {
+		t.Fatal("在用的 A 这一轮测得通:不算换线、不掐连接")
+	}
+	if now := d.groupNow("G"); now != "B" {
+		t.Logf("组这一轮落在 %q(sing-box 按 tolerance 自己决定换不换,这里只关心没有掐连接)", now)
+	}
+}
