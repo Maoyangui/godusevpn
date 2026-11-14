@@ -115,6 +115,12 @@ func (a *App) startup(ctx context.Context) {
 	}
 	go a.loop()
 	go a.updateLoop()
+	// 装过的(当前版本)和更旧的安装包清掉:以前从来不删,一台电脑的 %TEMP%\godusevpn-update 攒了 31 个(约 500 MB)
+	go func() {
+		if err := update.CleanStale(filepath.Join(os.TempDir(), "godusevpn-update"), buildinfo.Version); err != nil {
+			a.logf("清理旧安装包: %v", err)
+		}
+	}()
 }
 
 func (a *App) domReady(context.Context) {

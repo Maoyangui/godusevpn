@@ -162,6 +162,10 @@ func New(b Backend, o Options) *Service {
 // Run 每 1.5 秒推一次状态(有人订阅时),按内核状态开关速度流,定时查更新;阻塞到 ctx 结束。
 func (s *Service) Run(ctx context.Context) {
 	s.ctx = ctx
+	// 系统安装器装完的 APK、解包失败那次留下的安装包:当前版本和更旧的清掉,比当前新的留着(见 update.CleanStale)
+	if err := update.CleanStale(updateDir(), buildinfo.Version); err != nil {
+		s.b.Logf("清理旧安装包: %v", err)
+	}
 	go s.updateLoop(ctx)
 	t := time.NewTicker(1500 * time.Millisecond)
 	defer t.Stop()

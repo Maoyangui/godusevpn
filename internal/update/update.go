@@ -340,6 +340,7 @@ func Download(ctx context.Context, rel *Release, dir string, client *http.Client
 		return "", err
 	}
 	path := filepath.Join(dir, assetName(rel.Version))
+	removeOtherInstallers(dir, filepath.Base(path)) // 以前旧安装包从来不删,一台电脑攒了 31 个(见 cleanup.go)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rel.InstallerURL, nil)
 	if err != nil {
 		return "", err
@@ -365,6 +366,7 @@ func Download(ctx context.Context, rel *Release, dir string, client *http.Client
 		if n > 0 {
 			if _, werr := f.Write(buf[:n]); werr != nil {
 				f.Close()
+				os.Remove(path) // 半截文件不会被装,下次也认不出来,别留着占地方
 				return "", werr
 			}
 			h.Write(buf[:n])
@@ -378,10 +380,14 @@ func Download(ctx context.Context, rel *Release, dir string, client *http.Client
 		}
 		if rerr != nil {
 			f.Close()
+			os.Remove(path) // 下到一半断了 / 被取消:不留半截文件
 			return "", rerr
 		}
 	}
-	f.Close()
+	if err := f.Close(); err != nil {
+		os.Remove(path)
+		return "", err
+	}
 	// 校验和拿不到就拒装,不是跳过 —— 这个更新器是以管理员身份静默安装的,
 	// "没校验成功"和"校验失败"必须一样对待。每次发布都会带 SHA256SUMS,拿不到本身就说明不对劲。
 	if rel.SumsURL == "" {
