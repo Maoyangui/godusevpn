@@ -12,6 +12,8 @@
 
 **先看看再装?** [在线演示](https://maoyangui.github.io/godusevpn/demo/) 就是客户端里那一份界面跑在示例数据上:不用装、不连任何服务,连接、换节点、切模式、编规则都能点,刷新即恢复。
 
+**还没有订阅、不想自己搭建?** 直接[选购节点](https://godusevpn.org/subscription/),导入就能用。
+
 <p align="center">
   <img src="docs/screenshots/home.png" alt="首页:出口地址、实时速度与最近一分钟的曲线" width="250">
   <img src="docs/screenshots/nodes.png" alt="节点列表:地区旗帜、延迟条、按地区筛选" width="250">
