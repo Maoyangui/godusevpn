@@ -253,6 +253,10 @@ hysteria2 / TUIC 出站是一条长会话,网页请求都是里面开的流。�
 
 诊断包里的 state 多了一段 `tunnel`(`rebuilds` 重建次数、`sick` 判废次数、`lastAt` / `lastNode` / `lastReason` 最近一次的时间、节点与原因),只计当前在用的节点;`godusevpn status` 显示为「隧道:判废 N 次,重建 N 次」。断了网先看这里:判废次数在涨说明会话在坏、看护在修;一直不涨而网页照样打不开,就不是这一层的事。Android 上这一层只做"判废拆会话",预热与立刻体检暂只在桌面 / 路由器端。
 
+## 交流
+
+Telegram:[@yangweii](https://t.me/yangweii) · 群聊:[t.me/godusevpncn](https://t.me/godusevpncn)。问题和建议也可以提 [Issue](https://github.com/Maoyangui/godusevpn/issues)。
+
 ## 许可证
 
 GPL-3.0,与内嵌的 sing-box 一致。
