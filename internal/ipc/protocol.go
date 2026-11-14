@@ -17,13 +17,15 @@ const (
 	MDisconnect       = "Disconnect"
 	MSetMode          = "SetMode"
 	MSelectNode       = "SelectNode"
+	MSetLineAuto      = "SetLineAuto" // 「线路自动」开关:{on};顺带把当前选择换算成线路组 / 组里正在用的那台
 	MTestLatency      = "TestLatency"
 	MProbeNodes       = "ProbeNodes" // 全部节点各测一次延迟;内核没跑时起临时实例测,结果缓存在状态里
 	MGetProfile       = "GetProfile"
 	MSetProfileURL    = "SetProfileURL"
 	MRefreshProfile   = "RefreshProfile"
 	MGetSettings      = "GetSettings"
-	MSetSettings      = "SetSettings"
+	MSetSettings      = "SetSettings"    // 整份存设置;带着读到的版本(Rev)时只合并相对那一版改了的字段,面板密码不经它改
+	MSetWebPassword   = "SetWebPassword" // 改面板密码:{password}(明文,服务这边加盐哈希);空串 = 清除
 	MGetLogs          = "GetLogs"
 	MDiagnose         = "Diagnose"
 	MPing             = "Ping"

@@ -4,15 +4,22 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"golang.org/x/net/dns/dnsmessage"
+
 	"github.com/Maoyangui/godusevpn/internal/builder"
+	"github.com/Maoyangui/godusevpn/internal/ipc"
 	"github.com/Maoyangui/godusevpn/internal/settings"
+	"github.com/Maoyangui/godusevpn/internal/state"
 )
 
 // 闸开着时,服务自己直连拉订阅的域名解析必须走 DoH(从本服务进程发出),不能交给系统解析器:
@@ -204,5 +211,114 @@ func TestGuardArmedOnlySealed(t *testing.T) {
 	d.guardOn, d.guardArming, d.settings.Mode = false, true, settings.ModeRule
 	if !d.guardArmed() {
 		t.Fatal("正在装严格全局的闸时也要拦")
+	}
+}
+
+// 关着 IPv6 时,服务自己不经代理发出的请求只走 IPv4:没连接时拉订阅(闸开没开两种)、手动检查更新 / 下载安装包 / 补规则集
+// (SelfHTTP)、DoH 解析,地址写成 IPv6 的在拨号这一步就被拒(*net.AddrError,一个包都不发)。开着 IPv6 时照常去拨。
+// 拨的都是本机回环上没人听的端口,不出本机。
+func TestDirectRequestsIPv4OnlyWhenIPv6Off(t *testing.T) {
+	d := newPolicyTestDaemon(t)
+	d.http = d.plainHTTP(5 * time.Second) // NewWithOptions 里就是这样装的
+	get := func(name string, c *http.Client, url string) error {
+		t.Helper()
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+		resp, err := c.Do(req)
+		if err == nil {
+			resp.Body.Close()
+			t.Fatalf("%s:回环 9 端口不该有人应答", name)
+		}
+		return err
+	}
+	clients := func() map[string]*http.Client {
+		self, err := d.SelfHTTP(5 * time.Second)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return map[string]*http.Client{"directHTTP(闸没开)": d.directHTTP(), "SelfHTTP": self}
+	}
+	var ae *net.AddrError
+	for _, allow6 := range []bool{false, true} {
+		d.mu.Lock()
+		d.settings.IPv6 = allow6
+		d.mu.Unlock()
+		for name, c := range clients() {
+			err := get(name, c, "http://[::1]:9/")
+			if !allow6 && !errors.As(err, &ae) {
+				t.Fatalf("%s:关着 IPv6 还去拨 IPv6 地址了:%v", name, err)
+			}
+			if allow6 && errors.As(err, &ae) {
+				t.Fatalf("%s:开着 IPv6 应当照常去拨:%v", name, err)
+			}
+		}
+	}
+
+	// 闸开着时那一份(按地址拨号、域名经 DoH)同样只拨 IPv4
+	d.mu.Lock()
+	d.settings.IPv6 = false
+	d.settings.NoDirect, d.settings.Mode, d.settings.LocalDNS = true, settings.ModeGlobal, "127.0.0.1"
+	d.guardOn = true
+	d.mu.Unlock()
+	if err := get("directHTTP(闸开着)", d.directHTTP(), "http://[::1]:9/"); !errors.As(err, &ae) {
+		t.Fatalf("闸开着:关着 IPv6 还去拨 IPv6 地址了:%v", err)
+	}
+
+	// DoH 服务器自己写成 IPv6 地址:关着 IPv6 时拨号这一步就不去连它;「本地 DNS」填的是 IPv6 地址时换成按地址连的公共 DoH
+	// (和配置里一致,见 builder.LocalDNS)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	for _, qt := range []dnsmessage.Type{dnsmessage.TypeA, dnsmessage.TypeAAAA} {
+		if _, err := queryDoH(ctx, "::1", "example.com", qt, false); !errors.As(err, &ae) {
+			t.Fatalf("关着 IPv6 还去连 IPv6 地址的 DoH(%v):%v", qt, err)
+		}
+	}
+	s := d.getSettings()
+	s.LocalDNS = "2001:db8::53"
+	if got := builder.LocalDNS(s); got != builder.SealedBootstrapDoH {
+		t.Fatalf("关着 IPv6 时「本地 DNS」填 IPv6 地址:应换成 %s,得到 %s", builder.SealedBootstrapDoH, got)
+	}
+	s.IPv6 = true
+	if got := builder.LocalDNS(s); got != "2001:db8::53" {
+		t.Fatalf("开着 IPv6 时照用:得到 %s", got)
+	}
+}
+
+// 界面、命令行等一次控制调用的上限不短于守护进程里最长的同步处理:连着时拉订阅的整条回退链,之后再备新配置、停旧起新(留一分钟)。
+// 桌面端、命令行都按这个等(桌面端是 Windows / macOS 才编译的包,这里看源码)。
+func TestCallersWaitAsLongAsDaemon(t *testing.T) {
+	if need := fetchChainBudget() + state.PrepareTimeout + time.Minute; ipc.SlowCallTimeout < need {
+		t.Fatalf("ipc.SlowCallTimeout=%v,守护进程最长要 %v", ipc.SlowCallTimeout, need)
+	}
+	b, err := os.ReadFile("../../cmd/godusevpn/app.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := funcBody(t, strings.ReplaceAll(string(b), "\r\n", "\n"), "func (a *App) call(method string, params, result any) error {")
+	if !strings.Contains(body, "ipc.SlowCallTimeout") {
+		t.Fatalf("桌面端调守护进程没按 ipc.SlowCallTimeout 等:\n%s", body)
+	}
+}
+
+// 界面等后台刷新订阅(refreshProfileBg)的兜底时限不短于守护进程这一趟的上限:连着时整条回退链,拉到了还可能重连、备新配置。
+// 短了的话后台还在刷(稍后可能成功),界面已先报「太慢」。
+func TestUIRefreshWaitCoversFetchChain(t *testing.T) {
+	b, err := os.ReadFile("../../web/dist/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := strings.ReplaceAll(string(b), "\r\n", "\n")
+	m := regexp.MustCompile(`(?m)^const REFRESH_WAIT_MS = (\d+);`).FindStringSubmatch(src)
+	if m == nil {
+		t.Fatal("app.js 里找不到 REFRESH_WAIT_MS")
+	}
+	ms, _ := strconv.Atoi(m[1])
+	if need := fetchChainBudget() + state.PrepareTimeout; time.Duration(ms)*time.Millisecond < need {
+		t.Fatalf("界面等后台刷新 %dms,守护进程最长要 %v", ms, need)
+	}
+	i := strings.Index(src, "async function refreshProfileBg(")
+	if i < 0 || !strings.Contains(src[i:i+600], "REFRESH_WAIT_MS)") {
+		t.Fatal("refreshProfileBg 没按 REFRESH_WAIT_MS 等")
 	}
 }

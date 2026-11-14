@@ -45,14 +45,13 @@ func main() {
 			fail(fmt.Errorf("需要 root 权限(TUN 与路由)"))
 		}
 		if err := svc.Run(runDaemon); err != nil {
+			daemon.RecordFailure(err) // 没起来的原因也进 crash.log,诊断包带得出来
 			fail(err)
 		}
 	case "repair":
 		// 界面的「修复」:不走 uninstall(那会撤闸、还原网卡 IPv6 与 DNS)。先停并等旧进程真的退出 ——
 		// launchctl bootout 是异步的,紧接着 bootstrap 可能撞上还没退的旧进程而失败,服务就停着没人拉起。
-		// 只在 macOS 上这么做。Linux 的 install 本来就只是注册并启动(界面也没有「修复」);而 Entware(梅林)上
-		// Stop 是 killall godusevpn、QueryStatus 是 pidof godusevpn —— 正在跑的这条 repair 自己也叫这个名字,
-		// 会被一起杀掉,或者永远"还在跑"。
+		// 只在 macOS 上这么做。Linux 的 install 本来就只是注册并启动(界面也没有「修复」),服务在跑时 start 什么都不动。
 		if runtime.GOOS == "darwin" {
 			_ = svc.Stop()
 			for i := 0; i < 30 && svc.QueryStatus() == "running"; i++ {
@@ -69,21 +68,21 @@ func main() {
 		if err := paths.Ensure(); err != nil {
 			fail(err)
 		}
-		s, lerr := settings.Load(paths.Settings())
 		pw := ""
-		if lerr != nil {
-			// 读不出来(损坏、来自更新的版本):绝不拿默认值覆盖 —— 那会把用户的订阅和隐私设置抹成默认(规则模式),
-			// 重启后的守护进程就按规则模式撤闸、还原 DNS。守护进程自己会带着默认值起来但不动现有保护,
-			// 用户在界面里保存一次设置即可修复。
-			fmt.Println("注意:设置文件读不出来,原文件保留不覆盖:", lerr)
-		} else {
+		// 读改写在设置文件的锁里一次做完(见 settings.Update):正在跑的旧服务这期间写的不被盖掉
+		s, lerr := settings.Update(paths.Settings(), func(s *settings.Settings) error {
 			if s.WebPublic() && s.WebPassword == "" {
 				pw = settings.RandomPassword()
 				_ = s.SetWebPassword(pw)
 			}
-			if err := s.Save(paths.Settings()); err != nil {
-				fail(err)
-			}
+			return nil
+		})
+		if lerr != nil {
+			// 读不出来(损坏、来自更新的版本):绝不拿默认值覆盖 —— 那会把用户的订阅和隐私设置抹成默认(规则模式),
+			// 重启后的守护进程就按规则模式撤闸、还原 DNS。守护进程自己会带着默认值起来但不动现有保护,
+			// 用户在界面里保存一次设置即可修复。
+			pw = ""
+			fmt.Println("注意:设置文件没有更新,原文件保留不覆盖:", lerr)
 		}
 		if err := svc.Install(exe); err != nil {
 			fail(err)
@@ -190,6 +189,12 @@ func main() {
 
 // runDaemon 守护进程 + 面板一起跑。
 func runDaemon(ctx context.Context) error {
+	// 由初始化系统拉起时(systemd 收进 journald、procd 收进 logread、launchd 写进日志文件、梅林接到崩溃记录文件),
+	// 内核日志之类(带连接目标)不往标准错误写,那里只留崩溃和没起来的原因;在终端里前台跑的不动。
+	// 要在内核起来之前做:sing-box 建日志时取的是那一刻的 os.Stderr
+	if svc.KeepStderrForCrashes() {
+		daemon.QuietLibraryLogs()
+	}
 	daemon.CaptureCrashes(true)
 	d, err := daemon.New()
 	if err != nil {
@@ -221,29 +226,27 @@ func runDaemon(ctx context.Context) error {
 	return d.Run(ctx)
 }
 
-// setPassword 服务在跑就经控制口改(立即生效),没跑就直接改文件。
+// setPassword 服务在跑就经控制口改(立即生效;只改密码这一项,和界面、命令行别的保存互不覆盖),
+// 没跑就在设置文件的锁里只改这一项(见 settings.Update)。
 func setPassword(pw string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	probe := settings.Settings{}
+	if err := probe.SetWebPassword(pw); err != nil {
+		return err // 太短之类:两条路都不用试
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	var s settings.Settings
-	if err := ipc.Call(ctx, ipc.MGetSettings, nil, &s); err == nil {
-		if err := s.SetWebPassword(pw); err != nil {
-			return err
-		}
-		return ipc.Call(ctx, ipc.MSetSettings, s, &s)
+	err := ipc.Call(ctx, ipc.MSetWebPassword, map[string]string{"password": pw}, nil)
+	if !errors.Is(err, ipc.ErrNoService) {
+		return err
 	}
 	if err := paths.Ensure(); err != nil {
 		return err
 	}
-	s, err := settings.Load(paths.Settings())
-	if err != nil {
-		// 读不出来时拿到的是默认值,存回去等于把订阅、规则全抹掉
-		return fmt.Errorf("设置文件读不出来,没有改密码(改了会把整份设置覆盖成默认值): %w", err)
+	if _, err := settings.Update(paths.Settings(), func(s *settings.Settings) error { return s.SetWebPassword(pw) }); err != nil {
+		// 读不出来时拿到的是默认值,存回去等于把订阅、规则全抹掉:Update 不存
+		return fmt.Errorf("没有改密码(设置文件读不出来时改了会把整份设置覆盖成默认值): %w", err)
 	}
-	if err := s.SetWebPassword(pw); err != nil {
-		return err
-	}
-	return s.Save(paths.Settings())
+	return nil
 }
 
 // printPanel 装完 / 查状态时把面板地址完整打出来:监听 0.0.0.0 就把本机每个地址都列出来,监听回环就顺带提示怎么开放给局域网。
@@ -318,8 +321,10 @@ func localIPv4() []string {
 	return out
 }
 
+// fail 打出原因后以 1 退出。守护进程改过标准错误的道(KeepStderrForCrashes)之后 os.Stderr 是 /dev/null,
+// 原因要写到原来的标准错误(CrashStderr):系统日志、launchd 的日志文件、梅林的崩溃记录文件里才看得到服务为什么没起来。
 func fail(err error) {
-	fmt.Fprintln(os.Stderr, "失败:", err)
+	fmt.Fprintln(svc.CrashStderr(), "失败:", err)
 	os.Exit(1)
 }
 

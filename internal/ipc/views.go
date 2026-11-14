@@ -64,8 +64,8 @@ type StateView struct {
 	Protocol   int            `json:"protocol"`
 	State      state.Snapshot `json:"state"`
 	Mode       string         `json:"mode"`              // rule / global / direct
-	Node       string         `json:"node"`              // proxy 组当前项
-	AutoNow    string         `json:"autoNow,omitempty"` // 自动选择组当前落在哪个节点(内核在跑时才有)
+	Node       string         `json:"node"`              // proxy 组当前项(节点、auto 或线路组)
+	AutoNow    string         `json:"autoNow,omitempty"` // proxy 落在测速组(自动选择或线路组)上时,组里实际在用的节点(内核在跑时才有)
 	Nodes      []string       `json:"nodes"`
 	Delays     map[string]int `json:"delays,omitempty"`     // 最近一次全节点测速(节点 → 毫秒,-1 不通);内核没跑时界面靠它显示
 	Ping       int            `json:"ping,omitempty"`       // 当前节点最近一次测得的延迟(毫秒):连上后立刻测一次,之后每次健康检查顺带更新
@@ -94,6 +94,64 @@ type StateView struct {
 	// Tunnel 隧道会话的看护记录(hysteria2 / tuic 这类一条 QUIC 会话承载全部流量的节点)。
 	// 出事时凭它一眼分清是"会话废了被重建"还是别的:以前这些事一点痕迹都不留。
 	Tunnel *TunnelView `json:"tunnel,omitempty"`
+	// Groups 当前订阅里的线路组(同一条线路部署在多台服务器上,见 profile.Group)。没有就不显示「线路自动」开关
+	Groups []profile.Group `json:"groups,omitempty"`
+	// V6Blocked 这一轮不用的 IPv6 节点(关着 IPv6 时要从本机走 IPv6 的,见 builder.V6Blocked):节点列表标成「IPv6 节点」
+	V6Blocked []string `json:"v6Blocked,omitempty"`
+	// SelectedV6 这一轮实际落到的选择(选的节点、成员全是这种节点的线路组,或者自动选择而节点全是这种)就是上面那种:
+	// 首页要明说为什么连不上、怎么办
+	SelectedV6 bool `json:"selectedV6,omitempty"`
+	// SelNote 设置里选的节点 / 线路组在当前订阅里已经没有了:这一轮实际用的是什么(见 builder.Effective)。界面写明,不让人以为还在用它
+	SelNote *SelNote `json:"selNote,omitempty"`
+	// Hints 订阅里的提示节点(地址只指向本机,见 builder.HintNodes):面板放来显示续费 / 用量信息的,不能上网。
+	// 列表测速不测它们(结果里没有),节点列表标成「提示」
+	Hints []string `json:"hints,omitempty"`
+	// SelectedHint 选中的就是提示节点(或成员全是提示节点的线路组):手动选它照样选得上,界面说一句它不能上网
+	SelectedHint bool `json:"selectedHint,omitempty"`
+}
+
+// ForPage 给界面看的那份状态:设置里去掉凭据(见 settings.Settings.ForPage),订阅去掉带令牌的地址和续费地址
+// (见 ProfileView.ForPage)。不改原来那份。
+func (v StateView) ForPage() StateView {
+	v.Settings = v.Settings.ForPage()
+	if v.Profile != nil {
+		p := v.Profile.ForPage()
+		v.Profile = &p
+	}
+	if v.Profiles != nil {
+		v.Profiles = ProfilesForPage(v.Profiles)
+	}
+	return v
+}
+
+// ForPage 给页面的那份订阅:去掉带令牌的订阅地址和续费地址。页面平时只看名字、用量、刷新状态和错误;
+// 只有订阅管理页(要标「未加密」、编辑地址、续费按钮)另取带地址的那份(页面方法 GetProfilesWithLinks)。
+// 局域网明文访问网页面板时,状态推送、刷新订阅这些天天走的请求路上都看得见。
+func (p ProfileView) ForPage() ProfileView {
+	p.URL, p.WebPage = "", ""
+	return p
+}
+
+// ProfilesForPage 同 ProfileView.ForPage,整个列表;不改原来那份。nil 照旧是 nil。
+func ProfilesForPage(ps []ProfileView) []ProfileView {
+	if ps == nil {
+		return nil
+	}
+	out := make([]ProfileView, len(ps))
+	for i, p := range ps {
+		out[i] = p.ForPage()
+	}
+	return out
+}
+
+// SelNote 选的东西订阅里没了。
+type SelNote struct {
+	Gone  string `json:"gone"`            // 设置里选的(节点或线路组)
+	Group bool   `json:"group,omitempty"` // 选的是线路组
+	Now   string `json:"now,omitempty"`   // 线路组没了时改用的同线路那一台;空 = 回落自动选择
+	// Whole 线路组其实还在,只是订阅里只剩这一条线路(组成员就是全部节点,见 profile.Profile.Whole):这一轮用自动选择,
+	// 也就是在这条线路的几台里挑;面板加回别的线路后自动回到线路自动。
+	Whole bool `json:"whole,omitempty"`
 }
 
 // TunnelView 隧道会话的看护记录,本次服务运行期间累计。

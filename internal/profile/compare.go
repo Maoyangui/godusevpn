@@ -1,6 +1,9 @@
 package profile
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"slices"
+)
 
 // canonical 把一条出站的 JSON 规整成键序固定的紧凑形式。同样的内容,面板发来的、缓存里存过一遍的、
 // 改过名字重新编码的,字节都可能不一样,比内容得先规整;规整不了(不是合法 JSON)就原样比。
@@ -70,6 +73,7 @@ func Diff(a, b *Profile) Change {
 }
 
 // Subset 只留这些 tag 的节点(下标对齐),别的字段照抄;找不到的 tag 略过。
+// 线路组跟着剪:不在子集里的成员去掉,剪到一个不剩的组丢掉;只剩一个的照留(sing-box 允许,选中的组不会因为一台建不起来就消失)。
 func (p *Profile) Subset(tags []string) *Profile {
 	if p == nil {
 		return &Profile{}
@@ -79,11 +83,25 @@ func (p *Profile) Subset(tags []string) *Profile {
 		want[t] = true
 	}
 	q := *p
-	q.Outbounds, q.Tags = nil, nil
+	q.Outbounds, q.Tags, q.Groups = nil, nil, nil
+	q.Whole = slices.Clone(p.Whole) // 名字而已,照抄(它的成员就是子集的全部节点)
+	kept := make(map[string]bool, len(tags))
 	for i, t := range p.Tags {
 		if want[t] && i < len(p.Outbounds) {
 			q.Outbounds = append(q.Outbounds, p.Outbounds[i])
 			q.Tags = append(q.Tags, t)
+			kept[t] = true
+		}
+	}
+	for _, g := range p.Groups {
+		var members []string
+		for _, m := range g.Members {
+			if kept[m] {
+				members = append(members, m)
+			}
+		}
+		if len(members) > 0 {
+			q.Groups = append(q.Groups, Group{Tag: g.Tag, Members: members})
 		}
 	}
 	return &q

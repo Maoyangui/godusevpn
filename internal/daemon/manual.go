@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/Maoyangui/godusevpn/internal/ipc"
@@ -86,6 +87,7 @@ func buildManual(outs []json.RawMessage) (*profile.Profile, error) {
 		return nil, err
 	}
 	p.Manual = true
+	p.Groups = nil // 手动节点是一个一个加的,没有线路组(贴进来的配置里就算带着测速组也不认)
 	return p, nil
 }
 
@@ -201,25 +203,33 @@ func (d *Daemon) saveManualNodes(nodes []map[string]any, replace, name string) (
 		}
 	}
 
-	s := d.getSettings()
 	first := false
+	var id string
 	if sp == nil {
 		name = strings.TrimSpace(name)
 		if name == "" {
 			name = "手动节点"
 		}
-		s.Profiles = append(s.Profiles, settings.Profile{ID: settings.NewID(), Name: name, Manual: true})
-		sp = &s.Profiles[len(s.Profiles)-1]
-		if len(s.Profiles) == 1 {
-			s.ActiveProfile, first = sp.ID, true
+		id = settings.NewID()
+	} else {
+		id = sp.ID
+	}
+	// 在此刻的设置上只改这几项(见 updateSettings):读到 sp 之后别处改的设置不被盖回去
+	if _, err := d.editSettings(func(s *settings.Settings) error {
+		if sp == nil {
+			s.Profiles = append(s.Profiles, settings.Profile{ID: id, Name: name, Manual: true})
+			if len(s.Profiles) == 1 {
+				s.ActiveProfile, first = id, true
+			}
+		} else if !slices.ContainsFunc(s.Profiles, func(p settings.Profile) bool { return p.ID == id }) {
+			return errNoProfile // 这期间这条订阅被删了
 		}
-	}
-	id := sp.ID
-	// 编辑时改了名字:手动选着这个节点的话跟过去,不然保存后"当前节点"就对不上了
-	if replace != "" && s.ActiveProfile == id && s.Selected == replace {
-		s.Selected = np.Tags[at]
-	}
-	if err := d.setSettings(s); err != nil {
+		// 编辑时改了名字:手动选着这个节点的话跟过去,不然保存后"当前节点"就对不上了
+		if replace != "" && s.ActiveProfile == id && s.Selected == replace {
+			s.Selected = np.Tags[at]
+		}
+		return nil
+	}); err != nil {
 		return nil, err
 	}
 	d.setProfileCache(id, np)
@@ -264,12 +274,14 @@ func (d *Daemon) removeManualNode(tag string) ([]ipc.ProfileView, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := d.getSettings()
-	if s.ActiveProfile == sp.ID && s.Selected == tag {
-		s.Selected = "" // 正用着的节点被删了:回到自动选择
-		if err := d.setSettings(s); err != nil {
-			return nil, err
+	if err := d.updateSettings(func(s *settings.Settings) bool {
+		if s.ActiveProfile != sp.ID || s.Selected != tag {
+			return false
 		}
+		s.Selected = "" // 正用着的节点被删了:回到自动选择
+		return true
+	}); err != nil {
+		return nil, err
 	}
 	d.setProfileCache(sp.ID, np)
 	d.afterRefresh(sp.ID)

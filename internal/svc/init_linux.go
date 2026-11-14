@@ -12,8 +12,11 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
+
+	"golang.org/x/sys/unix"
 
 	"github.com/Maoyangui/godusevpn/internal/paths"
 )
@@ -232,30 +235,336 @@ PREARGS=""
 DESC=$PROCS
 PATH=/opt/bin:/opt/sbin:/sbin:/bin:/usr/sbin:/usr/bin
 
-# 梅林没有 systemd / procd 那样的崩溃重拉:start 时挂一条每分钟的 cru 定时,服务没在跑就拉起来。
-# 用户主动 stop 留个标记,定时看到它就不拉;再 start(开机也是 start)时去掉。
+# 梅林没有 systemd / procd 那样的崩溃重拉:起服务时挂一条每分钟的 cru 定时,服务没在跑就拉起来。
+# 用户主动 stop 留个标记,定时看到它就不拉;再起服务(开机也算)时去掉。
 STOPPED=/opt/var/lib/godusevpn/stopped
+
+# 开机自启的开关(ENABLED)只管开机,和 systemd / procd 一样:rc.unslung 开机时调的是 start,自启关着就照 rc.func
+# 返回 8、不起,标记和定时也不动(手动跑 rc.unslung start、本脚本的 start 也一样)。godusevpn start / install 起服务调的是
+# manual-start,不看开关;restart(面板升级后的重启、rc.unslung restart)自启关着时照样重启正在跑的,没在跑的不起、返回 8。
+# 看门狗也不看开关:定时是起了服务才挂的(开机没起就没有),手动起来的崩了照样拉,和 systemd / procd 关了自启照样重拉一样。
+
+# 起停、check、reconfigure 都不交给 rc.func:它按名字 pidof / killall $PROCS,而 godusevpn install / start / stop /
+# uninstall 这些正在调本脚本的命令也叫这个名字 —— start 把调用者当成"已经在跑"而不拉(装完服务没起来,梅林要等看门狗
+# 一分钟后拉,没有 cru 的要等重启);stop 把调用者一起杀掉(卸载做到一半自己没了,闸、自启脚本、看门狗定时全留着);
+# check 只要有一条 godusevpn 命令在跑就说服务活着;reconfigure 给所有同名进程发 SIGHUP,守护进程不接这个信号、
+# 收到就退出(调用者、别的 godusevpn 命令也一样)。
+# 这里只认守护进程(拉起来的 "$PROCS $ARGS",命令行第二项是 $ARGS),按进程号发信号,调用者一个都不碰。
+CALLER=$2
+arg2() { { tr '\0' '\n' < /proc/$1/cmdline; } 2>/dev/null | sed -n 2p; }
+daemons() {
+	for p in $(pidof $PROCS); do
+		[ "$(arg2 $p)" = "$ARGS" ] && echo $p
+	done
+}
+# gone 停掉的这些进程都没了:/proc 里没有了,或者进程号已经给了别的程序。退出了、还没收尸的(僵尸)不算 ——
+# 有的 pidof 把僵尸也当成在跑,停完紧接着只按名字查的(用户自己的脚本之类)会以为服务还在。
+gone() {
+	for p in "$@"; do
+		[ -d /proc/$p ] || continue
+		[ "$(sed -n 's/.*) \(.\) .*/\1/p' /proc/$p/stat 2>/dev/null)" = Z ] && return 1
+		[ "$(arg2 $p)" = "$ARGS" ] && return 1
+	done
+	return 0
+}
+halt() {
+	echo " Shutting down $DESC..."
+	pids=$(daemons)
+	[ -z "$pids" ] || kill -$1 $pids 2>/dev/null
+	i=0
+	until gone $pids; do
+		if [ $i -ge 15 ]; then
+			echo " $DESC is still running ($pids), failed."
+			return 255
+		fi
+		sleep 1
+		i=$((i + 1))
+	done
+	echo " done."
+}
+` + entwareLockSh + `# ERRLOG 留守护进程运行时崩溃(fatal error、panic)时直接写到标准错误的原因和全部 goroutine 的栈(守护进程自己的 crash.log
+# 只抄得到栈,fatal error 那一行原因只在这里),以及没起来的原因。脚本这里只管轮转和每次拉起记的一行抬头,标准错误照旧
+# 接 /dev/null:守护进程平时也往标准错误写 —— 内核在 info 级给每条连接记一行目标 —— 是它自己一起来把标准错误(fd 2)
+# 接到这个文件、同时把平时写的那些改去 /dev/null(连接目标默认不落盘,见 svc.KeepStderrForCrashes)。脚本要是直接把
+# 标准错误接过去,拉起的却是没有这一步的旧版本程序(手动换回旧版、解包目录里的新版先跑了 start 换了脚本),每条连接目标
+# 就都写进了这个文件。只给 root 看(0600);超过 ERRMAX 就在拉起时整份挪成 .1、只留一份旧的(一次崩溃的栈就可能几百 KB,
+# 原因在最前面,截尾巴会把它截掉)。建不成(/opt 只读之类)就不记抬头,照样起。
+ERRLOG=/opt/var/log/godusevpn.stderr.log
+ERRMAX=262144
+errlog() {
+	mkdir -p "${ERRLOG%/*}" 2>/dev/null && (umask 077 && : >> "$ERRLOG") 2>/dev/null || return 1
+	size=$(wc -c < "$ERRLOG" 2>/dev/null | tr -dc 0-9)
+	if [ "${size:-0}" -gt $ERRMAX ] && mv -f "$ERRLOG" "$ERRLOG.1" 2>/dev/null; then
+		chmod 600 "$ERRLOG.1" 2>/dev/null
+		(umask 077 && : >> "$ERRLOG") 2>/dev/null || return 1
+	fi
+	chmod 600 "$ERRLOG" 2>/dev/null
+	echo "== $(date '+%Y-%m-%d %H:%M:%S') 由 ${CALLER:-$1} 拉起" >> "$ERRLOG" 2>/dev/null
+}
+# launch 照 rc.func 的 start:守护进程已经在跑就不再起(重复 start 没事);否则在后台拉起,等它出现,最多 10 秒,
+# 出现了才算起来了。整段拿着锁(见上)。开机自启的开关不在这里看(只有开机的 start 看,见上)。
+# "用户停了"的标记也在锁里看、在锁里去:看门狗($1 是 watchdog)拿到锁再看一次,有标记就不拉 —— 它在锁外看那一眼之后、
+# 拿到锁之前,用户的 stop 可能已经写下标记停完了;起服务的去掉标记(用户要它起来),和 stop 在锁里写标记前后分明,
+# 同时跑的 start 和 stop 谁后拿到锁就照谁的,不会出现停着、标记却被去掉(一分钟后看门狗又拉起来)的情形。
+launch() {
+	lock
+	if [ "$1" = watchdog ]; then
+		if [ -f "$STOPPED" ]; then
+			unlock
+			return 0
+		fi
+	else
+		rm -f "$STOPPED"
+	fi
+	echo " Starting $DESC..."
+	if [ -n "$(daemons)" ]; then
+		unlock
+		echo " $DESC is already running."
+		return 0
+	fi
+	errlog "$1"
+	$PREARGS $PROCS $ARGS >/dev/null 2>/dev/null &
+	i=0
+	until [ -n "$(daemons)" ]; do
+		if [ $i -ge 10 ]; then
+			unlock
+			echo " $DESC failed to start."
+			logger "Failed to start $DESC from ${CALLER:-$1}." 2>/dev/null
+			return 255
+		fi
+		sleep 1
+		i=$((i + 1))
+	done
+	unlock
+	logger "Started $DESC from ${CALLER:-$1}." 2>/dev/null
+	echo " done."
+}
+
 case "$1" in
 watchdog)
-	[ "$ENABLED" = yes ] || exit 0
 	[ -f "$STOPPED" ] && exit 0
-	pidof $PROCS >/dev/null && exit 0
-	set -- start
+	[ -n "$(daemons)" ] && exit 0
+	launch watchdog
+	exit $?
 	;;
-start | restart)
-	rm -f "$STOPPED"
+start | manual-start | restart | reconfigure)
+	case "$1" in
+	start) [ "$ENABLED" = yes ] || exit 8 ;;
+	restart) [ "$ENABLED" = yes ] || [ -n "$(daemons)" ] || exit 8 ;;
+	reconfigure)
+		# rc.unslung reconfigure:重启守护进程,设置照新的重新读(rc.func 是按名字发 SIGHUP,见上)。
+		# 没在跑就不动 —— rc.func 的 reconfigure 也只给在跑的进程发信号,从不拉起
+		if [ -z "$(daemons)" ]; then
+			echo " $DESC is not running."
+			exit 0
+		fi
+		;;
+	esac
+	if [ "$1" = restart ] || [ "$1" = reconfigure ]; then
+		halt TERM || exit $?
+	fi
+	launch "$1"
+	rc=$?
+	# 标记在 launch 里、拿着锁去掉;定时挂在拉起之后(拉起那一段有锁,看门狗赶上整分钟那一下也只会起一个)。
+	# 没拉起来也照样挂,看门狗每分钟再试
 	command -v cru >/dev/null 2>&1 && cru a $PROCS "* * * * * /opt/etc/init.d/S99godusevpn watchdog"
+	exit $rc
 	;;
 stop | kill)
+	# 写标记、停守护进程都拿着拉起那一段的锁:守护进程崩着时 stop 撞上看门狗,看门狗可能已经看过标记(还没写)、正在拉起,
+	# 刚拉起的还没出现,不在锁里的话 stop 一个都停不到就报 done,守护进程随后起来、一直跑着。拿到锁时那边要么已经拉起来了
+	# (这里停掉它),要么还没拿到锁(拿到后看到标记,不拉)
+	lock
 	mkdir -p "${STOPPED%/*}" && touch "$STOPPED"
+	if [ "$1" = kill ]; then halt KILL; else halt TERM; fi
+	rc=$?
+	unlock
+	exit $rc
+	;;
+check)
+	if [ -n "$(daemons)" ]; then
+		echo " Checking $DESC... alive."
+		exit 0
+	fi
+	echo " Checking $DESC... dead."
+	exit 1
 	;;
 esac
 
 . /opt/etc/init.d/rc.func
 `
 
+// entwareLockSh 启动脚本里拉起那一段用的锁(lock / unlock),单独拿出来测试里好直接跑。
+const entwareLockSh = `# 拉起那一段(查有没有在跑 → 没有就拉起 → 等它出现)同一时间只让一个脚本做:不然守护进程刚崩时,用户手动起服务恰好
+# 撞上看门狗整分钟的那一下,两边都查到没在跑,就各拉起一个。stop / kill 也拿这把锁,写"用户停了"的标记和停守护进程
+# 都在锁里(见下面 stop 那段)。BusyBox 和 Entware 上不保证有 flock,用 mkdir 建锁目录,再在里面独占地建 owner
+# (两步都成才是拿到了,见 take),owner 里写持有者的进程号和开机秒数(/proc/uptime,不受改系统时间影响)。拿不到就
+# 隔一秒再试;持有者已经不在了、锁拿了超过 LOCKTTL 秒(正常最多十几秒)、或者是重启前留下的(锁在 /opt 上,重启不丢),
+# 当成没放掉的旧锁清掉(见 unstale)。旧锁清不掉(/opt 被重新挂成只读之类)就照锁目录建不成那样,试三回之后不加锁照以前
+# 那样起,不会一直等下去。拿着锁时被 TERM / INT / HUP 打断也先放锁。
+LOCK=/opt/var/run/godusevpn.lock
+LOCKTTL=30
+MYLOCK=
+CLEANING=
+uptime_s() { read -r s _ < /proc/uptime; echo "${s%%.*}"; }
+# stale 锁的记录($1:"进程号 开机秒数")作不作数:持有者不在了(退出了没收尸的也算;进程号是自己的,说明是重启前
+# 留下的)、开机秒数比现在还大(重启前留下的)、或者拿了超过 LOCKTTL 秒,都不作数。记录不全(刚建还没写上、写坏了)
+# 的不在这里判,由 lock 自己计时。
+stale() {
+	case "$1" in *" "*) ;; *) return 1 ;; esac
+	pid=${1%% *} up=${1#* }
+	case "$pid:$up" in *[!0-9:]* | :* | *: | 0?* | *:0?*) return 1 ;; esac
+	now=$(uptime_s)
+	[ "$now" -lt "$up" ] || [ $((now - up)) -gt $LOCKTTL ] || [ "$pid" = $$ ] || [ ! -d /proc/$pid ] && return 0
+	[ "$(sed -n 's/.*) \(.\) .*/\1/p' /proc/$pid/stat 2>/dev/null)" = Z ]
+}
+# unstale 清掉判定为旧锁的那一把($1 是判定时看到的记录)。"看记录"和"删"是两步:几个等锁的同时判定同一把旧锁时,
+# 先删的紧接着建好了自己的新锁,后删的还拿着判定时的结论,就会把这把新锁删掉,两边都进了锁里。所以清旧锁要先拿
+# 清理锁($LOCK.clean,也是建目录再认领,见 take),拿着它再看一眼:记录没变、本进程在这一把里留的记号(.w进程号,见 lock)
+# 还在 —— 说明还是判定的那一把,不是别人清掉之后新建的 —— 才删。清理只要一眨眼,清理锁占着超过 5 秒就是清的那个
+# 被打断留下的,删掉它。
+# 返回 0:删掉了 / 那一把已经不在了,马上再建;1:换了一把或别人正在清,等一秒再看;2:清不掉(/opt 只读之类)。
+# 删不掉时再看一眼:锁目录已经没了算删掉了,记录变了算换了一把(别人放掉又建了),都不算清不掉。
+unstale() {
+	if ! take "$LOCK.clean" by; then
+		if [ ! -d "$LOCK.clean" ]; then
+			cantmk "$LOCK.clean" && return 2
+			return 1
+		fi
+		cleanwait=$((cleanwait + 1))
+		if [ $cleanwait -ge 5 ]; then
+			rm -rf "$LOCK.clean" 2>/dev/null
+			[ -d "$LOCK.clean" ] && cantmk "$LOCK.clean" && return 2
+			cleanwait=0
+		fi
+		return 1
+	fi
+	CLEANING=1 cleanwait=0 rc=1
+	if [ ! -d "$LOCK" ]; then
+		rc=0
+	elif [ -e "$LOCK/.w$$" ] && [ "$(cat "$LOCK/owner" 2>/dev/null)" = "$1" ]; then
+		if droplock || [ ! -d "$LOCK" ]; then
+			rc=0
+		elif [ "$(cat "$LOCK/owner" 2>/dev/null)" = "$1" ]; then
+			rc=2
+		fi
+	fi
+	unclean
+	CLEANING=
+	return $rc
+}
+# take 把目录 $1 当锁拿:mkdir 建成了还不算,还要在里面用 set -C(noclobber)的重定向独占地建成认领文件 $2 才算拿到。
+# 不能只看 mkdir 的返回值:Ubuntu 26.04 默认的 uutils coreutils 0.8.0 的 mkdir 先看目录在不在、不在才建,建的时候
+# 内核报 EEXIST(别人恰好在这中间建了)只要那里是个目录就当建成、返回 0(上游 issue 13970,2026 年 8 月才修),几个一起建同一个
+# 目录会有两个都"建成" —— 锁就不排他了,两边同时在锁里。set -C 的重定向是 shell 自己 O_CREAT|O_EXCL 打开(dash、
+# BusyBox ash 都是),不经外部命令,同一个名字只有一个能建成。认领文件由拿到的那个放锁时连目录一起挪走(锁目录,
+# 见 droplock)或者先删掉再 rmdir(清理锁,见 unclean),在那之前一直占着,后来的认领都建不成。
+# 返回 0:拿到了;认领不成,却既没有认领文件、目录也还在,就是这里写不进去(满了之类):也返回 0,由拿到之后写记录那步
+# 照写不进去处理(以前就是这样)。返回 1:没拿到(目录已经在了、别人先认领了、或者目录刚被挪走)。
+take() {
+	mkdir "$1" 2>/dev/null || return 1
+	(set -C; : > "$1/$2") 2>/dev/null && return 0
+	[ -e "$1/$2" ] || [ ! -d "$1" ] && return 1
+	return 0
+}
+# unclean 放掉清理锁:先删认领文件再 rmdir。不用 rm -rf:这中间要是有人刚认领了它(mkdir 谎报建成、晚一步才认领的),
+# 会连他的认领一起删掉;rmdir 碰上目录里有别人的认领就删不掉,清理锁照样归那个人。
+unclean() {
+	rm -f "$LOCK.clean/by" 2>/dev/null
+	rmdir "$LOCK.clean" 2>/dev/null
+}
+# droplock 删掉锁目录:先整个改名挪开(同一目录里改名是原子的),再删挪开的那一份。不直接 rm -rf "$LOCK":它是一项项
+# 删完最后才 rmdir,等锁的这时候正好往里留记号(.w进程号,见 lock;记号刚被删、或者记录刚被删读成换了一把,都会再留),
+# rmdir 就因为目录不空失败,剩下一把没有记录、只有记号的锁,等锁的都要等满 LOCKTTL 才清得掉,清的时候还会被当成清不掉。
+# 挪开之后再往 $LOCK 里留的记号都落空;挪开前已经找到目录、挪开后才写进去的那一下,最多让挪开的那一份删不干净,
+# 不挡锁,下回 droplock 连同别的进程剩下的一起清掉。返回非 0:挪不动(锁已经不在了、/opt 只读之类)。
+droplock() {
+	rm -rf "$LOCK.dead.$$" 2>/dev/null
+	mv "$LOCK" "$LOCK.dead.$$" 2>/dev/null || return 1
+	rm -rf "$LOCK".dead.* 2>/dev/null
+	return 0
+}
+# cantmk 目录 $1(锁目录或清理锁)建不成、再一看又不在时,是不是真建不了:那个名字上有个不是目录的东西(普通文件、
+# FIFO、socket、设备文件)或者链接(不是这里建的,怎么都建不成;不能只认普通文件,别的也建不成,却会被当成"被抢先",
+# 在锁目录上马上再建、一直空转,在清理锁上一直等;也不能只看 -e,unstale 强删清理锁之后那处调用时它正是个目录,
+# 那是被强删后别人又建了,不是建不成),或者锁目录所在的地方建不了目录(/opt 只读之类,拿一个只有本进程用的名字
+# 真建一下;和 droplock 挪开用的同名,留下了也由 droplock、卸载清掉)。都不是,就只是别人正好在这中间把它放掉了
+# —— 建得了,只是被别人抢先 —— 不算一回"建不成 / 清不掉":以前算,等锁的一多、机器一忙,一次等锁里撞上几回很平常,
+# 数满三回就不加锁进去了,和拿着锁的同时在里面。
+cantmk() {
+	{ [ -e "$1" ] && [ ! -d "$1" ]; } || [ -L "$1" ] && return 0
+	rm -rf "$LOCK.dead.$$" 2>/dev/null
+	mkdir "$LOCK.dead.$$" 2>/dev/null || return 0
+	rmdir "$LOCK.dead.$$" 2>/dev/null
+	return 1
+}
+lock() {
+	trap unlock EXIT
+	trap 'unlock; exit 129' HUP
+	trap 'unlock; exit 130' INT
+	trap 'unlock; exit 143' TERM
+	mkdir -p "${LOCK%/*}" 2>/dev/null
+	seen=- waited=0 tries=0 cleanwait=0
+	# 记录在每次建目录之前算好,拿到了紧接着写进去:认领到写上记录之间越短,别人看到"没记录"的锁越少
+	until MYLOCK="$$ $(uptime_s)"; take "$LOCK" owner; do
+		if [ ! -d "$LOCK" ]; then
+			# 锁目录不在却建不成:真建不了(/opt 只读之类,见 cantmk)就数一回,三回之后不加锁照以前那样起;
+			# 只是别人刚好在这中间建了又放掉的,不数,马上再建
+			if cantmk "$LOCK"; then
+				tries=$((tries + 1))
+				[ $tries -ge 3 ] && { MYLOCK=; return 0; }
+			fi
+			continue
+		fi
+		owner=$(cat "$LOCK/owner" 2>/dev/null)
+		# 换了一把就重新计时,并在这一把里留个记号(unstale 靠它认出还是不是这一把):记录变了,或者记录一样、
+		# 记号却没了(这一把被清掉、又建了一把还没写上记录的)。记号写不进去(只读)就照记录计时。
+		# 用 touch 不用 ": >":锁目录随时可能被放掉,特殊内建命令的重定向失败会让整个脚本退出
+		if [ "$owner" != "$seen" ]; then
+			seen=$owner waited=0
+			touch "$LOCK/.w$$" 2>/dev/null
+		elif [ ! -e "$LOCK/.w$$" ] && touch "$LOCK/.w$$" 2>/dev/null; then
+			waited=0
+		fi
+		if stale "$owner" || [ $waited -ge $LOCKTTL ]; then
+			unstale "$owner"
+			case $? in
+			0) continue ;;
+			2)
+				tries=$((tries + 1))
+				[ $tries -ge 3 ] && { MYLOCK=; return 0; }
+				;;
+			esac
+		fi
+		sleep 1
+		waited=$((waited + 1))
+	done
+	echo "$MYLOCK" > "$LOCK/owner" || { droplock; MYLOCK=; }
+}
+unlock() {
+	[ -n "$CLEANING" ] && unclean
+	CLEANING=
+	[ -n "$MYLOCK" ] && [ "$(cat "$LOCK/owner" 2>/dev/null)" = "$MYLOCK" ] && droplock
+	MYLOCK=
+	trap - EXIT HUP INT TERM
+	return 0
+}
+`
+
 // entwareWatchdog 看门狗定时的 cru 编号与命令(和脚本里那行一致)。
 var entwareWatchdog = []string{"a", name, "* * * * * /opt/etc/init.d/S99" + name + " watchdog"}
+
+// entwareManualStart 程序(godusevpn start / install)起服务时调 Entware 脚本的动作。脚本的 start 留给开机时的 rc.unslung,
+// 照 rc.func 看开机自启的开关,关着就不起、返回 8;程序起服务和 systemd / procd 上一样不看开关,所以用脚本自己的这个动作。
+const entwareManualStart = "manual-start"
+
+// startAction 程序起服务时交给初始化系统的动作。
+func startAction(k initKind) string {
+	if k == initEntware {
+		return entwareManualStart
+	}
+	return "start"
+}
 
 func unitPath() string {
 	switch detect() {
@@ -303,7 +612,8 @@ func Install(exe string) error {
 				return fmt.Errorf("建 %s 链接: %w", target, err)
 			}
 		}
-		return os.WriteFile(unitPath(), []byte(entwareScript), 0o755)
+		// 重装时服务可能正在跑,看门狗的 sh 可能正读着旧脚本:换文件不原地改(见 replaceFile)
+		return replaceFile(unitPath(), []byte(entwareScript), 0o755)
 	}
 	return errors.New("没识别出初始化系统(systemd / procd / Entware),请手动配置自启:" + exe + " run")
 }
@@ -327,19 +637,44 @@ func Uninstall() error {
 		_ = os.Remove(unitPath())
 		removeGuardUnit(k)
 	case initEntware:
-		if _, err := exec.LookPath("cru"); err == nil {
-			_, _ = sh("cru", "d", name) // 看门狗定时
-		}
-		_ = os.Remove(unitPath())
-		_ = os.Remove("/opt/bin/" + name)
+		removeEntware(unitPath(), "/opt/bin/"+name, entwareLock)
 	}
 	return nil
+}
+
+// entwareLock 启动脚本拉起那一段的锁目录(和脚本里的 LOCK 一致)。
+const entwareLock = "/opt/var/run/" + name + ".lock"
+
+// removeEntware 卸载 Entware 上的自启:script 是启动脚本,bin 是 /opt/bin 里的链接,lock 是拉起那一段的锁目录。
+// 先删看门狗定时和脚本(之后不会再有脚本来拿锁),再删:改写脚本时被打断留下的临时文件(旧版本的 S99godusevpn.tmp
+// 名字以 S 开头,留着的话开机时 rc.unslung 还会把它当启动脚本跑;现在的是 .S99godusevpn.*.tmp,见 replaceFile)、
+// 锁目录(正常都会放掉,只有持有锁的脚本被 KILL 才会留下,卸载完没有脚本再来清它)。
+func removeEntware(script, bin, lock string) {
+	if _, err := exec.LookPath("cru"); err == nil {
+		_, _ = sh("cru", "d", name) // 看门狗定时
+	}
+	_ = os.Remove(script)
+	_ = os.Remove(script + ".tmp")
+	if tmps, err := filepath.Glob(filepath.Join(filepath.Dir(script), "."+filepath.Base(script)+".*.tmp")); err == nil {
+		for _, p := range tmps {
+			_ = os.Remove(p)
+		}
+	}
+	_ = os.Remove(bin)
+	_ = os.RemoveAll(lock)
+	_ = os.RemoveAll(lock + ".clean") // 清旧锁用的清理锁(见脚本里的 unstale),同样只有被 KILL 才会留下
+	// 放锁时挪开、还没删完的(见脚本里的 droplock)
+	if deads, err := filepath.Glob(lock + ".dead.*"); err == nil {
+		for _, p := range deads {
+			_ = os.RemoveAll(p)
+		}
+	}
 }
 
 // Refresh 守护进程每次启动时调:面板自更新只换程序文件、不重跑 install,旧版装下的启动脚本会一直留着。
 // 只动已经装好的(手动 `godusevpn run`、没装服务的不碰)。systemd / procd 补上开机闸单元;
 // Entware 的脚本(看门狗)不带程序路径,和当前模板不同就按原来的开关状态重写(先写临时文件再改名:脚本可能正被 sh 读着),
-// 再补上看门狗定时 —— 服务正在起,说明用户没停它。
+// 是启动脚本拉起来的就再补上看门狗定时 —— 服务正在起,说明用户没停它(前台跑的不补,见 refreshEntware)。
 func Refresh() error {
 	k := detect()
 	if !exists(unitPath()) {
@@ -361,26 +696,65 @@ func Refresh() error {
 	if k != initEntware {
 		return nil
 	}
-	b, err := os.ReadFile(unitPath())
+	return refreshEntware(unitPath())
+}
+
+// refreshEntware Refresh 在 Entware 上的那一段:p 是已装的启动脚本。
+// 补挂看门狗定时是给旧版本的脚本擦屁股的(v0.7.9 之前的脚本起服务时不挂定时),只给启动脚本拉起来的守护进程补:
+// 用户在终端里前台跑的 godusevpn run(调试)补挂了的话,Ctrl-C 停掉之后一分钟内就被看门狗拉到后台去 —— 前台停掉
+// 不留"用户停了"的标记,看门狗当它崩了。
+func refreshEntware(p string) error {
+	enabled, err := refreshEntwareScript(p)
 	if err != nil {
 		return err
 	}
-	want, enabled := entwareScriptLike(string(b))
-	if string(b) != want {
-		tmp := unitPath() + ".tmp"
-		if err := os.WriteFile(tmp, []byte(want), 0o755); err != nil {
-			return err
-		}
-		if err := os.Rename(tmp, unitPath()); err != nil {
-			_ = os.Remove(tmp)
-			return err
-		}
-	}
-	if _, err := exec.LookPath("cru"); err != nil || !enabled {
-		return nil // 不是梅林(没有 cru),或者自启关着
+	if _, err := exec.LookPath("cru"); err != nil || !enabled || !launchedByScript() {
+		// 不是梅林(没有 cru);自启关着(这时在跑的是用户手动起的,当前的脚本起它的时候已经挂上了);
+		// 或者不是启动脚本拉起来的(前台跑的)
+		return nil
 	}
 	_, err = sh("cru", entwareWatchdog...)
 	return err
+}
+
+// launchedByScript 本进程是不是启动脚本在后台拉起来的:新旧脚本(连同 Entware 的 rc.func)都是
+// "$PROCS $ARGS >/dev/null ... &",标准输出接 /dev/null,sh 给后台命令的标准输入也是 /dev/null;在终端里前台跑的
+// 标准输入输出连着终端(输出接到管道、文件的也不算)。
+func launchedByScript() bool { return isDevNull(os.Stdin) && isDevNull(os.Stdout) }
+
+// isDevNull f 是不是 /dev/null。
+func isDevNull(f *os.File) bool {
+	a, err := f.Stat()
+	if err != nil {
+		return false
+	}
+	b, err := os.Stat(os.DevNull)
+	if err != nil {
+		return false
+	}
+	if os.SameFile(a, b) {
+		return true
+	}
+	as, aok := a.Sys().(*syscall.Stat_t)
+	bs, bok := b.Sys().(*syscall.Stat_t)
+	return aok && bok && a.Mode()&os.ModeCharDevice != 0 && b.Mode()&os.ModeCharDevice != 0 && as.Rdev == bs.Rdev
+}
+
+// refreshEntwareScript 已装的 Entware 脚本(p)和当前模板不同就按原来的开关状态重写(换文件不原地改,权限照旧,见 replaceFile:
+// 脚本可能正被 sh 读着)。返回开机自启开着没有。
+// 顺带清掉旧版本改写时用的临时文件 p.tmp:改写被打断(断电、被杀)时留下的,名字以 S 开头、可执行,开机时 rc.unslung
+// 会把它当成另一份启动脚本跑(半截的话就是跑一份坏脚本);脚本已经是当前模板时也清。
+func refreshEntwareScript(p string) (enabled bool, err error) {
+	_ = os.Remove(p + ".tmp")
+	b, err := os.ReadFile(p)
+	if err != nil {
+		return false, err
+	}
+	want, enabled := entwareScriptLike(string(b))
+	if string(b) == want {
+		return enabled, nil
+	}
+	return enabled, replaceFile(p, []byte(want), modeOf(p, 0o755))
 }
 
 // mainUnitText 当前版本的服务单元。
@@ -442,7 +816,24 @@ func ctl(action string) error {
 	return errors.New("没识别出初始化系统")
 }
 
-func Start() error { return ctl("start") }
+// Start 让初始化系统起服务;已经在跑就什么都不做。开机自启关着也照样起(那个开关只管开机)。
+func Start() error {
+	if err := needRoot(); err != nil {
+		return err
+	}
+	ensureCurrentEntwareScript()
+	return ctl(startAction(detect()))
+}
+
+// ensureCurrentEntwareScript 起停之前把已装的 Entware 脚本换成当前模板(开机自启的开关照抄)。手工换了程序、或面板升级后
+// 守护进程没起来时,磁盘上还是旧版本写的脚本:它的起停交给 rc.func,按名字 pidof / killall godusevpn ——
+// 正在调它的本进程(godusevpn start / install / stop / uninstall)在 start 时被当成"已经在跑"而不拉,在 stop 时被一起杀掉。
+// 换不了也照样起停,结果和以前一样。
+func ensureCurrentEntwareScript() {
+	if detect() == initEntware && exists(unitPath()) {
+		_, _ = refreshEntwareScript(unitPath())
+	}
+}
 
 // Restart 让初始化系统重启本服务,交出去就返回。调用方可能正是这个服务自己(应用内升级换完文件):
 // 在本进程里先 Stop 再 Start,Stop 就把自己杀了,Start 永远轮不到,服务一直停着。
@@ -463,7 +854,8 @@ func Restart() error {
 		return err
 	}
 	// procd / Entware 的 restart 是脚本里的 stop 再 start:脱离本进程跑(自成一个会话),本进程被停掉它也跑得完。
-	// Entware 的 stop 按进程名 killall godusevpn,这个脚本进程不叫这个名字,杀不到它。
+	// Entware 脚本的 stop 只按进程号停 "godusevpn run" 那个守护进程(就是发起重启的本进程),脚本进程不受影响;
+	// 开机自启关着时脚本的 restart 照样重启正在跑的(就是本进程)。
 	c := exec.Command(argv[0], argv[1:]...)
 	c.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	if err := c.Start(); err != nil {
@@ -496,6 +888,7 @@ func Stop() error {
 	if unitPath() == "" || !exists(unitPath()) {
 		return nil
 	}
+	ensureCurrentEntwareScript()
 	return ctl("stop")
 }
 
@@ -524,7 +917,9 @@ func QueryStatus() string {
 		}
 		return "stopped"
 	case initEntware:
-		if _, err := sh("pidof", name); err == nil {
+		// 和启动脚本一样只认守护进程:只按名字 pidof 的话,正在跑 godusevpn status 的本进程自己就算一个,
+		// 服务没在跑也报"在跑"。
+		if len(entwareDaemons(name)) > 0 {
 			return "running"
 		}
 		return "stopped"
@@ -532,7 +927,70 @@ func QueryStatus() string {
 	return "stopped"
 }
 
+// entwareDaemons 名字叫 proc、命令行第二项是 run 的进程号 —— Entware 启动脚本拉起来的守护进程,和脚本里的 daemons
+// 是同一个判断:名字照 rc.func 用 pidof 认,再只留命令行第二项是 run(脚本里的 ARGS)的。godusevpn status / start /
+// install 这些命令也叫这个名字,只按名字认就把它们也算成服务。退出了、还没收尸的(僵尸)命令行是空的,不算。
+func entwareDaemons(proc string) []int {
+	out, err := exec.Command("pidof", proc).Output()
+	if err != nil {
+		return nil // 一个都没有(pidof 退出码 1),或者没有 pidof
+	}
+	var pids []int
+	for _, f := range strings.Fields(string(out)) {
+		pid, err := strconv.Atoi(f)
+		if err != nil {
+			continue
+		}
+		b, err := os.ReadFile("/proc/" + f + "/cmdline")
+		if err != nil {
+			continue // 刚好退出了
+		}
+		if args := strings.Split(string(b), "\x00"); len(args) > 1 && args[1] == "run" {
+			pids = append(pids, pid)
+		}
+	}
+	return pids
+}
+
 func Status() string { return QueryStatus() }
+
+// ioctlReadTermios 取终端属性的 ioctl(isTerminal 用)。
+const ioctlReadTermios = unix.TCGETS
+
+// KeepStderrForCrashes 守护进程一启动就调(内核起来之前),见 quietStderr:由初始化系统拉起的(标准错误不是终端)把 Go 这一层
+// 写标准错误的改去 /dev/null,原来的 fd 2 只留给崩溃和没起来的原因。
+// 梅林(Entware)上由启动脚本拉起时(标准错误是 /dev/null),先把 fd 2 接到 paths.EntwareStderrLog:梅林没有收标准错误的
+// 系统日志,不接的话运行时崩溃的原因(fatal error 那一行只写 fd 2)哪儿都不留。由守护进程自己接、不由脚本接,是因为脚本
+// 拉起的未必是有这一步的新版本(见脚本里 ERRLOG 那段)。返回改没改(改了之后 CrashStderr 是原来那个)。
+func KeepStderrForCrashes() bool {
+	crashLog := ""
+	if detect() == initEntware && launchedByScript() {
+		crashLog = paths.EntwareStderrLog
+	}
+	return keepStderrForCrashes(crashLog)
+}
+
+// keepStderrForCrashes crashLog 非空且标准错误是 /dev/null 时先把 fd 2 接到它,再照 quietStderr 改道。
+func keepStderrForCrashes(crashLog string) bool {
+	if crashLog != "" && isDevNull(os.Stderr) {
+		_ = attachStderr(crashLog)
+	}
+	return quietStderr()
+}
+
+// attachStderr 把 fd 2 接到文件 p(追加;只给 root 看,0600;上一级目录不在就建)。接不上(/opt 只读之类)就不动。
+func attachStderr(p string) error {
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		return err
+	}
+	f, err := os.OpenFile(p, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0o600)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	_ = f.Chmod(0o600)
+	return unix.Dup3(int(f.Fd()), 2, 0)
+}
 
 // Enabled 是否开机自启。
 func Enabled() bool {
@@ -573,12 +1031,58 @@ func SetEnabled(on bool) error {
 		_, err := sh(unitPath(), a)
 		return err
 	case initEntware:
-		b, err := os.ReadFile(unitPath())
-		if err != nil {
-			return err
-		}
-		s := strings.ReplaceAll(strings.ReplaceAll(string(b), "ENABLED=yes", "ENABLED=no"), "ENABLED=no", map[bool]string{true: "ENABLED=yes", false: "ENABLED=no"}[on])
-		return os.WriteFile(unitPath(), []byte(s), 0o755)
+		return setEntwareEnabled(unitPath(), on)
 	}
 	return errors.New("没识别出初始化系统")
+}
+
+// setEntwareEnabled 改已装的 Entware 启动脚本 p 里开机自启的开关(ENABLED)。和 Refresh 一样换文件不原地改(见 replaceFile):
+// 看门狗每分钟、起停时都有 sh 可能正读着这个脚本。
+func setEntwareEnabled(p string, on bool) error {
+	b, err := os.ReadFile(p)
+	if err != nil {
+		return err
+	}
+	s := strings.ReplaceAll(strings.ReplaceAll(string(b), "ENABLED=yes", "ENABLED=no"), "ENABLED=no", map[bool]string{true: "ENABLED=yes", false: "ENABLED=no"}[on])
+	if s == string(b) {
+		return nil
+	}
+	return replaceFile(p, []byte(s), modeOf(p, 0o755))
+}
+
+// replaceFile 把 p 换成内容 data、权限 mode 的新文件:同目录先建一个临时文件写好、设好权限、落盘,再改名盖过去。
+// 原地截断重写的话,正在读它的进程会读到空的、半截的内容 —— sh 跑脚本是边读边执行的(BusyBox 的 ash 一次只读一小段),
+// 改名之后正在读的接着读旧的那份,新打开的读新的。临时文件名以 . 开头、带随机后缀:Entware 的 rc.unslung 开机时按 S*
+// 找可执行的脚本挨个跑,改写被打断留下的临时文件不能被它当成另一份启动脚本;几个进程同时改写也各写各的,不会写进同一个文件。
+func replaceFile(p string, data []byte, mode os.FileMode) error {
+	f, err := os.CreateTemp(filepath.Dir(p), "."+filepath.Base(p)+".*.tmp")
+	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	_, err = f.Write(data)
+	if err == nil {
+		err = f.Chmod(mode)
+	}
+	if err == nil {
+		err = f.Sync()
+	}
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err == nil {
+		err = os.Rename(tmp, p)
+	}
+	if err != nil {
+		_ = os.Remove(tmp)
+	}
+	return err
+}
+
+// modeOf p 现在的权限位(用户改过的照旧,比如去掉执行位、不让 rc.unslung 开机时跑它);p 不在就用 def。
+func modeOf(p string, def os.FileMode) os.FileMode {
+	if st, err := os.Stat(p); err == nil {
+		return st.Mode().Perm()
+	}
+	return def
 }

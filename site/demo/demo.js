@@ -13,11 +13,16 @@
     { name: '🇯🇵 日本2-大阪 0.5倍', type: 'vless', delay: 141 },
     { name: 'JP-Tokyo-03', type: 'vless', delay: 155 },
     { name: '韩国1-首尔', type: 'vless', delay: 143 },
+    // 线路「日本3」部署在两台服务器上(面板 m-ui 0.7.17 起给这种线路出线路组):打开「线路自动」后合成一项
+    { name: '日本3-东京', type: 'vless', delay: 128 },
+    { name: '日本3-大阪 x2', type: 'vless', delay: 117 },
     { name: '新加坡1', type: 'anytls', delay: 120 },
     { name: '新加坡2-专线 x3', type: 'anytls', delay: 118 },
     { name: '西班牙3-高带宽', type: 'anytls', delay: 157 },
     { name: 'US-Los Angeles 01', type: 'trojan', delay: 210 },
     { name: '美国2-圣何塞', type: 'trojan', delay: 233 },
+    // 只能走 IPv6 的节点:「允许 IPv6」关着(出厂就是关)时不用,列表里标「IPv6 节点」,测速不测
+    { name: '美国3-IPv6', type: 'vless', delay: -1 },
     { name: '英国-伦敦1', type: 'vless', delay: 248 },
     { name: '德国1-法兰克福', type: 'vless', delay: 261 },
     { name: '法国1-巴黎', type: 'vless', delay: 254 },
@@ -40,6 +45,9 @@
     '🇯🇵 日本2-大阪 0.5倍': ['160.16.72.11', 'JP', 'Osaka', 'Osaka', 'SAKURA Internet'],
     'JP-Tokyo-03': ['45.32.42.7', 'JP', 'Tokyo', 'Tokyo', 'Vultr'],
     '韩国1-首尔': ['141.164.34.8', 'KR', 'Seoul', 'Seoul', 'Vultr'],
+    '日本3-东京': ['45.76.98.21', 'JP', 'Tokyo', 'Tokyo', 'Vultr'],
+    '日本3-大阪 x2': ['45.76.98.21', 'JP', 'Tokyo', 'Tokyo', 'Vultr'], // 同一条线路:入口在大阪,出口还是这条线路的
+
     '新加坡1': ['139.180.130.22', 'SG', 'Singapore', 'Singapore', 'Vultr'],
     '新加坡2-专线 x3': ['128.199.90.14', 'SG', 'Singapore', 'Singapore', 'DigitalOcean'],
     '西班牙3-高带宽': ['104.28.196.19', 'ES', 'Zaragoza', 'Aragon', 'Cloudflare, Inc.'],
@@ -62,7 +70,7 @@
     probeMinutes: 10, updateHours: 12, remoteDns: 'https://1.1.1.1/dns-query', localDns: 'https://223.5.5.5/dns-query',
     fakeIp: true, ipv6: false, disableNicIpv6: true, adBlock: false, logLevel: 'info', logDays: 7,
     netMode: 'local', lanSubnets: [], webListen: '127.0.0.1:9800', bypassApps: ['steam.exe'],
-    mode: 'rule', selected: '香港3-高带宽',
+    mode: 'rule', selected: '香港3-高带宽', lineAuto: false,
     ruleGroups: [
       { id: 'g1', name: '流媒体', outbound: 'proxy', enabled: true, rules: [{ type: 'domain_suffix', value: 'netflix.com' }, { type: 'domain_suffix', value: 'disneyplus.com' }, { type: 'geosite', value: 'youtube' }] },
       { id: 'g2', name: '公司内网', outbound: 'direct', enabled: true, rules: [{ type: 'domain_suffix', value: 'corp.example.com' }, { type: 'ip_cidr', value: '10.8.0.0/16' }] },
@@ -77,7 +85,15 @@
     exitIp: '', exitLoc: '', exitCity: '', exitRegion: '', exitIsp: '',
     uptime: 4127,
     profile: null, profiles: [], settings,
+    groups: [{ tag: '日本3', members: ['日本3-东京', '日本3-大阪 x2'] }], // 订阅里的线路组(见上)
+    v6Blocked: ['美国3-IPv6'], selectedV6: false,
   };
+  const groupOf = name => view.groups.find(g => g.members.includes(name));
+  const groupBy = tag => view.groups.find(g => g.tag === tag);
+  // fastest 一组节点里此刻最快的那台(只看测得通的;IPv6 节点这一轮不用)
+  const fastest = names => NODES.filter(n => names.includes(n.name) && n.delay > 0 && !view.v6Blocked.includes(n.name)).sort((a, b) => a.delay - b.delay)[0];
+  // inUse 这一轮实际在用的那台:自动选择、线路组看测速结果,手动选的就是它
+  const inUse = () => (view.node === 'auto' || groupBy(view.node) ? view.autoNow : view.node);
   const PROFILE = {
     id: 'p1', name: '演示订阅', url: 'https://panel.example.com/sub/demo', active: true,
     webPage: 'https://example.com/buy', // 演示里的续费地址,真实客户端读的是面板发的 Profile-Web-Page-Url
@@ -86,8 +102,7 @@
   };
   view.profile = PROFILE; view.profiles = [PROFILE];
   const applyExit = () => {
-    const name = view.node === 'auto' ? view.autoNow : view.node;
-    const e = EXIT[name];
+    const e = view.selectedV6 ? null : EXIT[inUse()];
     if (!e || view.state.status !== 'connected') { view.exitIp = view.exitLoc = view.exitCity = view.exitRegion = view.exitIsp = ''; return; }
     [view.exitIp, view.exitLoc, view.exitCity, view.exitRegion, view.exitIsp] = e;
   };
@@ -104,7 +119,7 @@
   // 内核日志:几条像样的连接(进程 → 域名 → 走隧道 / 直连 / 拦截),格式和客户端落盘的一样;拦截那一行是 debug 级别
   const coreLogs = () => {
     if (view.state.status !== 'connected') return [];
-    const node = view.node && view.node !== 'auto' ? view.node : '香港3-高带宽';
+    const node = inUse() || '香港3-高带宽';
     const proto = (NODES.find(x => x.name === node) || {}).type || 'anytls';
     const C = [
       ['C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe', 'claude.ai', '203.0.113.10', 'tunnel'],
@@ -161,10 +176,10 @@
     view.state.status = 'preparing'; push(); await sleep(450);
     view.state.status = 'starting'; push(); await sleep(700);
     view.state.status = 'connected'; view.uptime = 0;
-    const n = NODES.find(x => x.name === (view.node === 'auto' ? view.autoNow : view.node));
-    view.ping = n && n.delay > 0 ? n.delay : 96;
+    const n = NODES.find(x => x.name === inUse());
+    view.ping = view.selectedV6 ? 0 : n && n.delay > 0 ? n.delay : 96;
     applyExit();
-    log('已连接 ' + (view.node === 'auto' ? view.autoNow : view.node) + ' ' + view.ping + ' ms');
+    log('已连接 ' + inUse() + ' ' + view.ping + ' ms');
     if (view.exitIp) log('出口 ' + view.exitIp + ' · ' + view.exitLoc + ' ' + view.exitCity + ' · ' + view.exitIsp);
     push();
   }
@@ -233,29 +248,52 @@
     SelectNode: async n => {
       view.node = n;
       settings.selected = n === 'auto' ? '' : n;
-      const name = n === 'auto' ? view.autoNow : n;
+      // 选线路组 → 线路自动开;选组里的某一台 → 关(要的就是这一台);自动选择、独立节点不动
+      if (groupBy(n)) { settings.lineAuto = true; const f = fastest(groupBy(n).members); if (f) view.autoNow = f.name; }
+      else if (groupOf(n)) settings.lineAuto = false;
+      else if (n === 'auto') { const f = fastest(NODES.map(x => x.name)); if (f) view.autoNow = f.name; }
+      view.selectedV6 = view.v6Blocked.includes(n); // 选的只能走 IPv6,而「允许 IPv6」关着:照样选上,首页写明
+      const name = inUse();
       const nn = NODES.find(x => x.name === name);
-      view.ping = nn && nn.delay > 0 ? nn.delay : 0;
+      view.ping = !view.selectedV6 && nn && nn.delay > 0 ? nn.delay : 0;
       applyExit();
       for (const c of conns) if (c.chain !== 'direct') c.chain = name + ' → proxy';
-      log('切换节点 → ' + name);
+      log(view.selectedV6 ? '「' + n + '」只能走 IPv6,而「允许 IPv6」关着:连不上' : '切换节点 → ' + name);
       push();
+      return view;
+    },
+    // 翻「线路自动」:打开时选的是组里的某一台就换成这条线路;关掉时选的是线路就固定到组里此刻在用的那台
+    SetLineAuto: async on => {
+      const sel = settings.selected;
+      settings.lineAuto = !!on;
+      if (on && groupOf(sel)) { const g = groupOf(sel); const f = fastest(g.members); view.node = settings.selected = g.tag; if (f) view.autoNow = f.name; }
+      else if (!on && groupBy(sel)) { const pin = groupBy(sel).members.includes(view.autoNow) ? view.autoNow : groupBy(sel).members[0]; view.node = settings.selected = pin; }
+      applyExit();
+      log('线路自动 → ' + (on ? '开' : '关'));
+      push();
+      return view;
     },
     SetMode: async m => { view.mode = m; settings.mode = m; view.guard = m !== 'direct' ? 'on' : ''; log('模式 → ' + m); push(); },
     Connect: connect,
     Disconnect: disconnect,
     TestAll: async () => {
       await sleep(1100);
-      for (const n of NODES) if (n.delay > 0) n.delay = Math.max(38, n.delay + (Math.random() * 46 - 23 | 0));
-      const best = NODES.filter(n => n.delay > 0).sort((a, b) => a.delay - b.delay)[0];
+      for (const n of NODES) if (n.delay > 0 && !view.v6Blocked.includes(n.name)) n.delay = Math.max(38, n.delay + (Math.random() * 46 - 23 | 0));
+      const g = groupBy(view.node);
+      const best = fastest(g ? g.members : NODES.map(n => n.name));
       if (best) view.autoNow = best.name;
-      if (view.node === 'auto') { view.ping = best.delay; applyExit(); }
+      if (best && (view.node === 'auto' || g)) { view.ping = best.delay; applyExit(); }
       log('全部节点测速完成,最快 ' + view.autoNow);
       push();
     },
     TestLatency: async () => view.ping || 0,
     GetSettings: async () => JSON.parse(JSON.stringify(settings)),
-    SaveSettings: async s => { settings = Object.assign(settings, s); view.settings = settings; log('设置已保存'); push(); return JSON.parse(JSON.stringify(settings)); },
+    SaveSettings: async s => {
+      settings = Object.assign(settings, s); view.settings = settings;
+      view.v6Blocked = settings.ipv6 ? [] : ['美国3-IPv6']; // 打开「允许 IPv6」后这台就能用了
+      view.selectedV6 = view.v6Blocked.includes(view.node);
+      log('设置已保存'); push(); return JSON.parse(JSON.stringify(settings));
+    },
     GetAutostart: async () => true,
     SetAutostart: async () => null,
     GetConnections: async () => (on() ? conns.map(c => ({ ...c })) : []),

@@ -477,6 +477,86 @@ jobs:
           fi
           ls -la out
 
+      # 已装的用户只能装同一把密钥签的包来升级:签名证书一变,老用户就再也升不了级(只能卸了重装)。出包后用 apksigner
+      # 取每个包的签名证书 SHA-256,和上一个正式版(releases/latest,不含预发布)的安卓包比,不一致就让构建失败。
+      # 还没有正式版、或上一版没有安卓包时跳过;没有签名密钥(fork 的 PR)时出的是 debug 包,不比。
+      # 上一版的指纹按它的标签缓存:同一个正式版只下载一次它的安装包,不让每次构建都去刷它的下载数;打标签发布时不用缓存,现下现比。
+      - name: 上一个正式版
+        id: prev
+        if: env.ANDROID_KEYSTORE_B64 != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          if tag=$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name 2>"$RUNNER_TEMP/prev.err"); then
+            if [ -z "$tag" ]; then
+              echo "::error::上一个正式版的标签是空的,没法核对签名证书"
+              exit 1
+            fi
+            echo "tag=$tag" >> "$GITHUB_OUTPUT"
+            echo "上一个正式版:$tag"
+          elif grep -q "HTTP 404" "$RUNNER_TEMP/prev.err"; then
+            echo "还没有正式版:这次不比签名证书"
+          else
+            echo "::error::查不到上一个正式版,没法核对签名证书:$(cat "$RUNNER_TEMP/prev.err")"
+            exit 1
+          fi
+
+      - name: 上一个正式版的签名证书指纹(按标签缓存)
+        if: env.ANDROID_KEYSTORE_B64 != '' && steps.prev.outputs.tag != '' && !startsWith(github.ref, 'refs/tags/')
+        uses: actions/cache@v4
+        with:
+          path: prev-apk-cert
+          key: prev-apk-cert-${{ steps.prev.outputs.tag }}
+
+      - name: 签名证书与上一个正式版一致
+        if: env.ANDROID_KEYSTORE_B64 != '' && steps.prev.outputs.tag != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PREV: ${{ steps.prev.outputs.tag }}
+        run: |
+          set -euo pipefail
+          signer=$(ls "$ANDROID_HOME"/build-tools/*/apksigner 2>/dev/null | sort -V | tail -1 || true)
+          if [ -z "$signer" ]; then
+            echo "::error::找不到 apksigner(\$ANDROID_HOME/build-tools),没法核对签名证书"
+            exit 1
+          fi
+          # 一个包可以有好几个签名者:全部证书的 SHA-256 去重排序后拼起来比。读不出来(签名坏了)时为空
+          certs() { "$signer" verify --print-certs "$1" | sed -n 's/.*certificate SHA-256 digest: //p' | sort -u | paste -sd, - || true; }
+          if [ ! -s prev-apk-cert/sha256 ]; then
+            names=$(gh release view "$PREV" -R "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name')
+            pick() { printf '%s\n' "$names" | grep -E -- "$1" | head -1 || true; }
+            name=$(pick '-android-arm64\.apk$')
+            [ -n "$name" ] || name=$(pick '-android-universal\.apk$')
+            [ -n "$name" ] || name=$(pick '-android-.*\.apk$')
+            if [ -z "$name" ]; then
+              echo "上一个正式版 $PREV 没有安卓安装包:这次不比签名证书"
+              exit 0
+            fi
+            mkdir -p prev-apk prev-apk-cert
+            gh release download "$PREV" -R "$GITHUB_REPOSITORY" -p "$name" -D prev-apk
+            want=$(certs "prev-apk/$name")
+            if [ -z "$want" ]; then
+              echo "::error::读不出上一个正式版 $PREV 的安装包 $name 的签名证书"
+              exit 1
+            fi
+            echo "$want" > prev-apk-cert/sha256
+            echo "$PREV $name" > prev-apk-cert/source
+          fi
+          want=$(cat prev-apk-cert/sha256)
+          echo "上一个正式版的签名证书 SHA-256:$want(取自 $(cat prev-apk-cert/source 2>/dev/null || echo "$PREV"))"
+          fail=0
+          for apk in out/*.apk; do
+            got=$(certs "$apk")
+            if [ "$got" = "$want" ]; then
+              echo "一致:$(basename "$apk")"
+            else
+              fail=1
+              echo "::error::$(basename "$apk") 的签名证书和上一个正式版 $PREV 不一致:新包 ${got:-读不出来},上一版 $want。已装的用户只能装同一把密钥签的包来升级,证书一变他们就再也升不了级 —— 检查仓库机密 ANDROID_KEYSTORE_B64 / ANDROID_KEY_ALIAS 是不是换了或填错了"
+            fi
+          done
+          exit $fail
+
       - uses: actions/upload-artifact@v4
         with:
           name: android-${{ needs.version.outputs.version }}

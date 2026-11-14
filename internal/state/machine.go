@@ -44,6 +44,9 @@ const (
 	CodeCoreStart = "E_CORE_START"
 	CodeCoreCrash = "E_CORE_CRASH"
 	CodeNodeDown  = "E_NODE_DOWN"
+	// CodeNodeV6 正在用的节点是 IPv6 地址、而这一轮关着 IPv6(见 builder.V6Blocked):连不上不是节点坏了,是设置挡着。
+	// 状态机按节点不通处理(降级、自救),界面据此说清楚原因和去哪儿改
+	CodeNodeV6 = "E_NODE_V6"
 	// 隐私保护前置条件未满足时必须退避重试，不能继续启动数据面。
 	CodePrivacyGuard = "E_PRIVACY_GUARD"
 	CodePrivacyNIC   = "E_PRIVACY_NIC"
@@ -240,6 +243,10 @@ func (m *Machine) isClosed() bool {
 	return m.closed
 }
 
+// PrepareTimeout 换新配置时备配置(拉订阅、解析节点地址、生成、干跑)最多等这么久。界面、命令行等一次控制调用的上限
+// (ipc.SlowCallTimeout)要比它长:不然新配置还在备,界面先报超时,过一会儿又自己连好了。
+const PrepareTimeout = 3 * time.Minute
+
 // Restart 配置或订阅变了:想连的话换新配置重来一遍,不想连的什么都不做。
 // 先把新配置备好(拉订阅、解析节点地址、生成、干跑)再停旧内核 —— 准备阶段旧内核还在跑,
 // 断流的窗口只剩停与起那一下;新配置备不出来就不动旧的,原样连着并返回错误。
@@ -247,7 +254,7 @@ func (m *Machine) Restart() error {
 	if !m.Wanted() {
 		return nil
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), PrepareTimeout)
 	defer cancel()
 	cfg, err := m.d.Prepare(ctx) // 这一步最长三分钟,不能持着 opMu —— 那会把用户点的断开堵到 IPC 超时
 	if err != nil {
@@ -278,7 +285,7 @@ func (m *Machine) RestartChecked(rollback func() error) error {
 	if !m.Wanted() {
 		return nil
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), PrepareTimeout)
 	defer cancel()
 	cfg, err := m.d.Prepare(ctx)
 	if err != nil {

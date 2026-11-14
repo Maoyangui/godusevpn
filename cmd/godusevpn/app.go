@@ -20,6 +20,7 @@ import (
 	"github.com/Maoyangui/godusevpn/internal/autostart"
 	"github.com/Maoyangui/godusevpn/internal/buildinfo"
 	"github.com/Maoyangui/godusevpn/internal/clash"
+	"github.com/Maoyangui/godusevpn/internal/directnet"
 	"github.com/Maoyangui/godusevpn/internal/ipc"
 	"github.com/Maoyangui/godusevpn/internal/paths"
 	"github.com/Maoyangui/godusevpn/internal/settings"
@@ -67,6 +68,9 @@ type App struct {
 	trafficStop context.CancelFunc
 	tray        *trayUI
 	updating    bool
+	// viewGen 返回整份状态的方法(stateCall)每写一次缓存加一。后台 refresh 拿状态之前记下它,回来时变了就不拿
+	// 自己那份盖缓存:那份可能是在这次切换之前取的,盖上去节点列表又按旧选择打勾(mu 管)
+	viewGen uint64
 }
 
 func newApp(minimized bool, link string) *App {
@@ -111,6 +115,12 @@ func (a *App) startup(ctx context.Context) {
 	}
 	go a.loop()
 	go a.updateLoop()
+	// 装过的(当前版本)和更旧的安装包清掉:以前从来不删,一台电脑的 %TEMP%\godusevpn-update 攒了 31 个(约 500 MB)
+	go func() {
+		if err := update.CleanStale(filepath.Join(os.TempDir(), "godusevpn-update"), buildinfo.Version); err != nil {
+			a.logf("清理旧安装包: %v", err)
+		}
+	}()
 }
 
 func (a *App) domReady(context.Context) {
@@ -181,12 +191,17 @@ func (a *App) loop() {
 func (a *App) refresh() {
 	ctx, cancel := context.WithTimeout(a.ctx, 3*time.Second)
 	defer cancel()
+	a.mu.Lock()
+	gen := a.viewGen
+	a.mu.Unlock()
 	var view ipc.StateView
 	err := ipc.Call(ctx, ipc.MGetState, nil, &view)
 	a.mu.Lock()
 	a.state.Service = err == nil
 	if err == nil {
-		a.state.View = view
+		if a.viewGen == gen { // 这期间切换过(stateCall 写了更新的):不拿可能更旧的这份盖它,下一轮再取
+			a.state.View = view.ForPage() // 页面拿到的状态不带凭据(面板密码哈希、订阅地址),和网页面板一样;托盘也用不着它们
+		}
 	} else {
 		a.state.View.State.Status = "disconnected"
 		a.state.Up, a.state.Down = 0, 0
@@ -282,8 +297,10 @@ func (a *App) clashClient() (*clash.Client, error) {
 	return clash.New(info.Port, info.Secret), nil
 }
 
+// call 调一个控制方法。等多久见 ipc.SlowCallTimeout:换选择、改设置、切订阅要备新配置,守护进程那边最长要好几分钟,
+// 等得比它短的话界面先报超时、过一会儿又自己连好了。
 func (a *App) call(method string, params, result any) error {
-	ctx, cancel := context.WithTimeout(a.ctx, 90*time.Second)
+	ctx, cancel := context.WithTimeout(a.ctx, ipc.SlowCallTimeout)
 	defer cancel()
 	err := ipc.Call(ctx, method, params, result)
 	if errors.Is(err, ipc.ErrNoService) {
@@ -339,9 +356,17 @@ func (a *App) pokeUpdate(force bool) {
 // PokeUpdate 页面打开抽屉时戳一下(有节流)。
 func (a *App) PokeUpdate() { go a.pokeUpdate(false) }
 
+// allowIPv6 服务给的设置里「允许 IPv6」开没开;服务连不上(拿不到此刻的设置)时按关着算。
+func (a *App) allowIPv6() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.state.Service && a.state.View.Settings.IPv6
+}
+
 // checkUpdate 先直连 GitHub;不通而内核在跑时改走本机混合端口再试一次(TUN 关着的场合)。
+// 直连那一次关着 IPv6 时只走 IPv4(见 directnet):界面进程自己发的请求同样守「关着 IPv6 就不走 IPv6」。
 func (a *App) checkUpdate(ctx context.Context) (*update.Release, error) {
-	rel, err := update.Check(ctx, buildinfo.Version, true, nil)
+	rel, err := update.Check(ctx, buildinfo.Version, true, directnet.Client(20*time.Second, a.allowIPv6))
 	if err == nil {
 		return rel, nil
 	}
@@ -384,7 +409,7 @@ func (a *App) ApplyUpdate() error {
 	a.mu.Unlock()
 	defer func() { a.mu.Lock(); a.updating = false; a.mu.Unlock() }()
 	dir := filepath.Join(os.TempDir(), "godusevpn-update")
-	path, err := update.Download(a.ctx, rel, dir, nil, func(done, total int64) {
+	path, err := update.Download(a.ctx, rel, dir, directnet.Client(30*time.Minute, a.allowIPv6), func(done, total int64) {
 		runtime.EventsEmit(a.ctx, "update-progress", map[string]int64{"done": done, "total": total})
 	})
 	if err != nil {
@@ -448,31 +473,42 @@ func (a *App) GetState() UIState {
 }
 
 func (a *App) Connect() (ipc.StateView, error) {
-	var v ipc.StateView
-	err := a.call(ipc.MConnect, nil, &v)
-	go a.refresh()
-	return v, err
+	return a.stateCall(ipc.MConnect, nil)
 }
 
 func (a *App) Disconnect() (ipc.StateView, error) {
-	var v ipc.StateView
-	err := a.call(ipc.MDisconnect, nil, &v)
-	go a.refresh()
-	return v, err
+	return a.stateCall(ipc.MDisconnect, nil)
 }
 
 func (a *App) SetMode(mode string) (ipc.StateView, error) {
+	return a.stateCall(ipc.MSetMode, map[string]string{"mode": mode})
+}
+
+func (a *App) SelectNode(tag string) (ipc.StateView, error) {
+	return a.stateCall(ipc.MSelectNode, map[string]string{"tag": tag})
+}
+
+// stateCall 调一个返回整份状态的方法(连接、切模式、选节点、线路自动、切订阅)。返回给页面的去掉凭据;
+// 成功了先把它写进缓存再返回 —— 页面拿到返回值马上就重画节点列表(GetNodes 读的就是这份缓存),
+// 只靠后台那次 refresh 的话,它可能还没回来,内核没跑时列表就按旧的选择打勾。
+func (a *App) stateCall(method string, params any) (ipc.StateView, error) {
 	var v ipc.StateView
-	err := a.call(ipc.MSetMode, map[string]string{"mode": mode}, &v)
+	err := a.call(method, params, &v)
+	v = v.ForPage()
+	if err == nil {
+		a.mu.Lock()
+		a.state.View = v
+		a.viewGen++
+		a.mu.Unlock()
+	}
 	go a.refresh()
 	return v, err
 }
 
-func (a *App) SelectNode(tag string) (ipc.StateView, error) {
-	var v ipc.StateView
-	err := a.call(ipc.MSelectNode, map[string]string{"tag": tag}, &v)
-	go a.refresh()
-	return v, err
+// SetLineAuto 节点面板顶上的「线路自动」开关:打开时按线路合并显示,选中的节点换成它所在的线路组;
+// 关掉时选中的线路组固定到组里此刻在用的那台。返回换算之后的状态,页面据此立刻重画。
+func (a *App) SetLineAuto(on bool) (ipc.StateView, error) {
+	return a.stateCall(ipc.MSetLineAuto, map[string]bool{"on": on})
 }
 
 // NodeInfo 节点页一行。
@@ -555,6 +591,10 @@ func (a *App) SetProfileURL(url string) (*ipc.ProfileView, error) {
 	var p *ipc.ProfileView
 	err := a.call(ipc.MSetProfileURL, map[string]string{"url": strings.TrimSpace(url)}, &p)
 	go a.refresh()
+	if p != nil {
+		pp := p.ForPage()
+		p = &pp
+	}
 	return p, err
 }
 
@@ -564,10 +604,21 @@ func (a *App) RefreshProfile(id string, async bool) ([]ipc.ProfileView, error) {
 	var out []ipc.ProfileView
 	err := a.call(ipc.MRefreshProfile, map[string]any{"id": id, "async": async}, &out)
 	go a.refresh()
-	return out, err
+	return ipc.ProfilesForPage(out), err
 }
 
+// GetProfiles 订阅列表,不带订阅地址和续费地址(和网页面板一样,见 ipc.ProfileView.ForPage);订阅管理页另取 GetProfilesWithLinks。
 func (a *App) GetProfiles() ([]ipc.ProfileView, error) {
+	var out []ipc.ProfileView
+	err := a.call(ipc.MGetProfiles, nil, &out)
+	if out == nil {
+		out = []ipc.ProfileView{}
+	}
+	return ipc.ProfilesForPage(out), err
+}
+
+// GetProfilesWithLinks 订阅管理页用的订阅列表:带订阅地址和续费地址(标「未加密」、编辑地址、续费按钮要用)。
+func (a *App) GetProfilesWithLinks() ([]ipc.ProfileView, error) {
 	var out []ipc.ProfileView
 	err := a.call(ipc.MGetProfiles, nil, &out)
 	if out == nil {
@@ -594,14 +645,14 @@ func (a *App) ParseNodeLinks(text string) (ipc.ParsedNodes, error) {
 func (a *App) SaveManualNodes(nodes []map[string]any, replace, name string) ([]ipc.ProfileView, error) {
 	var out []ipc.ProfileView
 	err := a.call(ipc.MSaveManualNodes, map[string]any{"nodes": nodes, "replace": replace, "name": name}, &out)
-	return out, err
+	return ipc.ProfilesForPage(out), err
 }
 
 // RemoveManualNode 删一个手动节点。
 func (a *App) RemoveManualNode(tag string) ([]ipc.ProfileView, error) {
 	var out []ipc.ProfileView
 	err := a.call(ipc.MRemoveManualNode, map[string]string{"tag": tag}, &out)
-	return out, err
+	return ipc.ProfilesForPage(out), err
 }
 
 // AddProfile 新增订阅(服务会先拉一次,拉不到就不加);第一条会自动成为当前订阅。
@@ -609,21 +660,18 @@ func (a *App) AddProfile(name, url string) ([]ipc.ProfileView, error) {
 	var out []ipc.ProfileView
 	err := a.call(ipc.MAddProfile, map[string]string{"name": name, "url": strings.TrimSpace(url)}, &out)
 	go a.refresh()
-	return out, err
+	return ipc.ProfilesForPage(out), err
 }
 
 func (a *App) RemoveProfile(id string) ([]ipc.ProfileView, error) {
 	var out []ipc.ProfileView
 	err := a.call(ipc.MRemoveProfile, map[string]string{"id": id}, &out)
 	go a.refresh()
-	return out, err
+	return ipc.ProfilesForPage(out), err
 }
 
 func (a *App) SelectProfile(id string) (ipc.StateView, error) {
-	var v ipc.StateView
-	err := a.call(ipc.MSelectProfile, map[string]string{"id": id}, &v)
-	go a.refresh()
-	return v, err
+	return a.stateCall(ipc.MSelectProfile, map[string]string{"id": id})
 }
 
 // UpdateProfile 改名或改地址(空字段表示不改)。
@@ -631,20 +679,28 @@ func (a *App) UpdateProfile(id, name, url string) ([]ipc.ProfileView, error) {
 	var out []ipc.ProfileView
 	err := a.call(ipc.MRenameProfile, map[string]string{"id": id, "name": name, "url": strings.TrimSpace(url)}, &out)
 	go a.refresh()
-	return out, err
+	return ipc.ProfilesForPage(out), err
 }
 
+// GetSettings 给页面的设置不带凭据(面板密码哈希、订阅地址,见 settings.ForPage)。
 func (a *App) GetSettings() (settings.Settings, error) {
 	var s settings.Settings
 	err := a.call(ipc.MGetSettings, nil, &s)
-	return s, err
+	return s.ForPage(), err
 }
 
+// SaveSettings 页面拿到的设置带着版本号(Rev):服务只把相对那一版改了的字段合并上去,设置页打开之后命令行、别的界面改的不被盖掉;
+// 密码、订阅列表服务那边不看页面给的。没带版本号(旧页面)时整份存,原样存回去会把密码清掉,所以照旧带上此刻的。
 func (a *App) SaveSettings(s settings.Settings) (settings.Settings, error) {
+	var cur settings.Settings
+	if err := a.call(ipc.MGetSettings, nil, &cur); err != nil {
+		return settings.Settings{}, err
+	}
+	s.WebPassword = cur.WebPassword
 	var out settings.Settings
 	err := a.call(ipc.MSetSettings, s, &out)
 	go a.refresh()
-	return out, err
+	return out.ForPage(), err
 }
 
 func (a *App) GetLogs(lines int, core bool) ([]string, error) {

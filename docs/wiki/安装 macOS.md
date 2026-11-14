@@ -41,6 +41,7 @@ Gatekeeper 的「来自互联网」隔离标记是**浏览器下载时**打上�
 | `/usr/local/bin/godusevpn` | 守护进程兼命令行,注册成 launchd 服务(`/Library/LaunchDaemons/com.maoyangui.godusevpn.plist`)开机自启 |
 | `/Applications/godusevpn.app` | 图形界面,启动台里叫「佛跳墙」 |
 | `/Library/Application Support/godusevpn/` | 设置、订阅缓存、`config.json`、日志、诊断包 |
+| `/Library/Logs/godusevpn.launchd.log` | launchd 收的守护进程标准错误:只有崩溃的原因和栈、没起来的原因,不记访问记录(内核日志看界面的日志页) |
 | `~/Library/Application Support/godusevpn/ui.json` | 界面偏好(语言、主题) |
 
 ## 这一端的几件特殊事

@@ -215,7 +215,21 @@ func main() {
 
 func runDaemon(ctx context.Context) error {
 	// 以服务身份跑时把标准错误整个接到 crash.log;前台 run 留给控制台
-	daemon.CaptureCrashes(svc.IsService())
+	service := svc.IsService()
+	daemon.CaptureCrashes(service)
+	// 服务模式下内核日志之类(带连接目标)不往标准错误写(见 svc.KeepStderrForCrashes),要在内核起来之前做
+	if svc.KeepStderrForCrashes() {
+		daemon.QuietLibraryLogs()
+	}
+	err := serve(ctx)
+	if err != nil && service {
+		// 服务没有能看的标准错误(main 里那句"服务运行失败"只在 SCM 都没连上时才有):没起来、出错退出的原因记进 crash.log
+		daemon.RecordFailure(err)
+	}
+	return err
+}
+
+func serve(ctx context.Context) error {
 	d, err := daemon.New()
 	if err != nil {
 		return err

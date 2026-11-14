@@ -25,20 +25,110 @@ func TestUpdateDirIsPrivate(t *testing.T) {
 	}
 }
 
-type fakeBackend struct{}
+const (
+	pwHash   = "c2FsdA$deadbeefcafe"                  // 面板密码的加盐哈希
+	subToken = "https://panel.example/sub/TOKEN-9f3a" // 带令牌的订阅地址
+	renewURL = "https://panel.example/renew?u=TOKEN-9f3a"
+)
 
-func (fakeBackend) Dispatch(method string, _ json.RawMessage) (any, error) {
-	if method == ipc.MGetState {
-		return ipc.StateView{Settings: settings.Settings{WebPassword: "c2FsdA$deadbeef"}}, nil
-	}
-	return nil, nil
+// secretBackend 服务给的每样东西都带着凭据(状态里的设置、订阅;设置本身),记下页面方法最后存回去的设置。
+type secretBackend struct{ saved settings.Settings }
+
+func secretSettings() settings.Settings {
+	s := settings.Default()
+	s.WebPassword = pwHash
+	s.Profiles = []settings.Profile{{ID: "p1", Name: "一", URL: subToken}}
+	s.ActiveProfile = "p1"
+	return s
 }
-func (fakeBackend) Logf(string, ...any) {}
 
-// 面板密码哈希不给页面:GetSettings 早就抹了,GetState 推的状态里也带着设置,同样要抹(状态每 1.5 秒推一次)。
-func TestStateHidesWebPasswordHash(t *testing.T) {
-	st := New(fakeBackend{}, Options{}).State()
-	if st.View.Settings.WebPassword != "" {
-		t.Fatalf("状态里带着面板密码哈希: %q", st.View.Settings.WebPassword)
+func secretView() ipc.StateView {
+	pv := ipc.ProfileView{ID: "p1", Name: "一", URL: subToken, WebPage: renewURL, Active: true}
+	return ipc.StateView{Node: "香港1", Settings: secretSettings(), Profile: &pv, Profiles: []ipc.ProfileView{pv}}
+}
+
+func (b *secretBackend) Dispatch(method string, params json.RawMessage) (any, error) {
+	switch method {
+	case ipc.MGetSettings:
+		return secretSettings(), nil
+	case ipc.MSetSettings:
+		_ = json.Unmarshal(params, &b.saved)
+		return b.saved, nil
+	case ipc.MGetClashInfo:
+		return ipc.ClashInfo{}, nil
+	case ipc.MGetProfiles, ipc.MRefreshProfile, ipc.MAddProfile, ipc.MRemoveProfile, ipc.MRenameProfile, ipc.MSaveManualNodes, ipc.MRemoveManualNode:
+		return secretView().Profiles, nil // 订阅列表:服务给的每一条都带着地址和续费地址
+	case ipc.MSetProfileURL:
+		return secretView().Profile, nil
+	}
+	return secretView(), nil // 连接、断开、切模式、选节点、线路自动、切订阅、取状态:都回整份状态
+}
+func (*secretBackend) Logf(string, ...any) {}
+
+// 经网页面板(和 Android 的页面桥)交给页面的状态、设置里一律不带凭据:面板密码哈希(单轮加盐 SHA-256,拿到能离线爆破)、
+// 带令牌的订阅地址、续费地址。状态每 1.5 秒推一次,连接、切模式、选节点、线路自动、切订阅的返回值也是整份状态 ——
+// 局域网明文访问时路上都看得见。早先只有 GetState 和 GetSettings 抹了哈希,别的几条照原样带着。
+func TestPageNeverSeesCredentials(t *testing.T) {
+	b := &secretBackend{}
+	svc := New(b, Options{})
+	check := func(what string, res any) {
+		t.Helper()
+		raw, err := json.Marshal(res)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, secret := range []string{pwHash, "TOKEN-9f3a"} {
+			if strings.Contains(string(raw), secret) {
+				t.Fatalf("%s 交给页面的结果里带着凭据 %q: %s", what, secret, raw)
+			}
+		}
+	}
+	check("状态推送", svc.State())
+	for _, m := range []struct {
+		name string
+		args []json.RawMessage
+	}{
+		{"GetState", nil}, {"Connect", nil}, {"Disconnect", nil},
+		{"SetMode", []json.RawMessage{json.RawMessage(`"global"`)}},
+		{"SelectNode", []json.RawMessage{json.RawMessage(`"香港1"`)}},
+		{"SetLineAuto", []json.RawMessage{json.RawMessage(`true`)}},
+		{"SelectProfile", []json.RawMessage{json.RawMessage(`"p1"`)}},
+		{"GetSettings", nil},
+		// 订阅列表:刷新订阅(首页订阅面板的刷新图标、节点面板没节点时的自动拉取)、确认刷新结果、增删改订阅、手动节点,
+		// 页面都只看名字、用量、刷新状态和错误
+		{"GetProfiles", nil},
+		{"RefreshProfile", []json.RawMessage{json.RawMessage(`"p1"`), json.RawMessage(`true`)}},
+		{"AddProfile", []json.RawMessage{json.RawMessage(`"二"`), json.RawMessage(`"https://panel.example/sub/other"`)}},
+		{"RemoveProfile", []json.RawMessage{json.RawMessage(`"p2"`)}},
+		{"UpdateProfile", []json.RawMessage{json.RawMessage(`"p1"`), json.RawMessage(`"新名字"`), json.RawMessage(`""`)}},
+		{"SaveManualNodes", []json.RawMessage{json.RawMessage(`[]`), json.RawMessage(`""`), json.RawMessage(`"手动"`)}},
+		{"RemoveManualNode", []json.RawMessage{json.RawMessage(`"n1"`)}},
+		{"SetProfileURL", []json.RawMessage{json.RawMessage(`"https://panel.example/sub/other"`)}},
+	} {
+		res, err := svc.Call(m.name, m.args)
+		if err != nil {
+			t.Fatalf("%s: %v", m.name, err)
+		}
+		check(m.name, res)
+	}
+	// 设置页拿到的是去掉哈希的那份、原样存回来:不能因此把面板密码清掉(服务那边要收到原来的哈希),返回给页面的照样不带
+	page, _ := svc.Call("GetSettings", nil)
+	in, _ := json.Marshal(page)
+	res, err := svc.Call("SaveSettings", []json.RawMessage{in})
+	if err != nil {
+		t.Fatal(err)
+	}
+	check("SaveSettings", res)
+	if b.saved.WebPassword != pwHash {
+		t.Fatalf("保存设置把面板密码弄丢了: %q", b.saved.WebPassword)
+	}
+	// 只有订阅管理页取带地址的那份:标「未加密」、编辑地址、续费按钮要用
+	res, err = svc.Call("GetProfilesWithLinks", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := json.Marshal(res)
+	if !strings.Contains(string(raw), subToken) || !strings.Contains(string(raw), "renew?u=") {
+		t.Fatalf("订阅管理页要拿到地址和续费地址: %s", raw)
 	}
 }

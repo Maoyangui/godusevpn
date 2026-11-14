@@ -3,12 +3,12 @@
 //	status                 当前状态、模式、节点、订阅
 //	connect / disconnect
 //	mode rule|global|direct
-//	nodes                  节点列表(当前项带 *)
-//	select <节点名|auto>
+//	nodes                  节点列表(当前项带 *;提示节点、关着 IPv6 时的 IPv6 节点标出来),订阅里有线路组时后面再列线路组与成员
+//	select <节点名|线路组名|auto>
 //	test [节点名]          经该节点(默认当前 proxy 组)测延迟
 //	profile [订阅地址]     查看或设置订阅
 //	refresh                立刻刷新订阅
-//	settings [key=value …] 查看或修改设置
+//	settings [key=value …] 查看或修改设置;lineAuto=on|off 走「线路自动」开关(顺带换算当前选择)
 //	rules                  规则组
 //	logs [n] [core]        最近 n 行服务 / 内核日志
 //	diag                   诊断信息(JSON)
@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -36,13 +37,16 @@ var (
 	InstallHint = "服务未运行:先以管理员身份执行 godusevpn-svc install"
 )
 
+// callTimeout 一条命令最多等多久:select、mode、settings 这些要备新配置,守护进程那边最长要好几分钟(见 ipc.SlowCallTimeout)。
+const callTimeout = ipc.SlowCallTimeout
+
 // Main 执行一条命令,返回进程退出码。args 不含程序名。
 func Main(args []string) int {
 	if len(args) < 1 {
 		Usage()
 		return 2
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), callTimeout)
 	defer cancel()
 	cmd, args := args[0], args[1:]
 	var err error
@@ -72,41 +76,29 @@ func Main(args []string) int {
 		var v ipc.StateView
 		if err = call(ctx, ipc.MGetState, nil, &v); err == nil {
 			for _, n := range v.Nodes {
-				mark := "  "
-				if n == v.Node {
-					mark = "* "
-				}
-				ms := ""
-				if d, ok := v.Delays[n]; ok {
-					if d < 0 {
-						ms = "  不通"
-					} else {
-						ms = fmt.Sprintf("  %d ms", d)
-					}
-				}
-				fmt.Println(mark + n + ms)
+				fmt.Println(nodeLine(v, n))
 			}
+			printGroups(v)
 		}
 	case "select":
 		if len(args) != 1 {
-			err = errors.New("用法: select <节点名|auto>")
+			err = errors.New("用法: select <节点名|线路组名|auto>")
 			break
 		}
 		var v ipc.StateView
 		if err = call(ctx, ipc.MSelectNode, map[string]string{"tag": args[0]}, &v); err == nil {
 			fmt.Println("当前节点:", v.Node)
+			for _, l := range selectionNotes(v) {
+				fmt.Println("提示:", l)
+			}
 		}
 	case "test":
 		if len(args) == 1 && args[0] == "all" {
 			var res map[string]int
 			if err = call(ctx, ipc.MProbeNodes, nil, &res); err == nil {
-				for k, ms := range res {
-					if ms < 0 {
-						fmt.Printf("%s: 不通\n", k)
-					} else {
-						fmt.Printf("%s: %d ms\n", k, ms)
-					}
-				}
+				var v ipc.StateView
+				_ = call(ctx, ipc.MGetState, nil, &v) // 拿不到也照样打结果,只是标不出 IPv6 节点
+				printProbe(v, res)
 			}
 			break
 		}
@@ -150,10 +142,20 @@ func Main(args []string) int {
 			break
 		}
 		if len(args) > 0 {
-			for _, kv := range args {
+			// lineAuto 只归「线路自动」开关管(保存设置时服务沿用原值):拦下来单独调,其余照常一起保存
+			rest, lineAuto, lerr := takeLineAuto(args)
+			if err = lerr; err != nil {
+				break
+			}
+			for _, kv := range rest {
 				k, v, ok := strings.Cut(kv, "=")
 				if !ok {
 					err = fmt.Errorf("参数需为 key=value: %s", kv)
+					break
+				}
+				if k == "webPassword" || k == "rev" {
+					// 密码只经 passwd 改(服务那边加盐哈希、只动这一项);rev 是读设置时带的版本号,存回去按它合并别处这期间的修改
+					err = fmt.Errorf("%s 不能这样改(改面板密码用 passwd)", k)
 					break
 				}
 				if s, err = s.Apply(k, v); err != nil {
@@ -163,10 +165,21 @@ func Main(args []string) int {
 			if err != nil {
 				break
 			}
-			err = call(ctx, ipc.MSetSettings, s, &s)
+			if len(rest) > 0 {
+				if err = call(ctx, ipc.MSetSettings, s, &s); err != nil {
+					break
+				}
+			}
+			if lineAuto != nil {
+				var v ipc.StateView
+				if err = call(ctx, ipc.MSetLineAuto, map[string]bool{"on": *lineAuto}, &v); err != nil {
+					break
+				}
+				s = v.Settings
+			}
 		}
 		if err == nil {
-			s.WebPassword = "" // 哈希也不用给人看
+			s.WebPassword, s.Rev = "", 0 // 哈希也不用给人看;版本号只给存回去时合并用
 			b, _ := json.MarshalIndent(s, "", "  ")
 			fmt.Println(string(b))
 		}
@@ -297,6 +310,41 @@ func status(ctx context.Context) error {
 	if err := call(ctx, ipc.MGetState, nil, &v); err != nil {
 		return err
 	}
+	printStatus(v)
+	return nil
+}
+
+// printProbe test all 的结果:按节点列表的顺序打(列表里没有的排在后面,按名字排),一行一个。关着 IPv6 时只能走 IPv6 的节点
+// (见 ipc.StateView.V6Blocked)服务不测、直接记不通,这里写明是没测,和 nodes 里的标法一样;拿不到状态时照原样打。
+func printProbe(v ipc.StateView, res map[string]int) {
+	names := make([]string, 0, len(res))
+	seen := make(map[string]bool, len(res))
+	for _, n := range v.Nodes {
+		if _, ok := res[n]; ok && !seen[n] {
+			names, seen[n] = append(names, n), true
+		}
+	}
+	var rest []string
+	for n := range res {
+		if !seen[n] {
+			rest = append(rest, n)
+		}
+	}
+	slices.Sort(rest)
+	for _, n := range append(names, rest...) {
+		switch ms := res[n]; {
+		case slices.Contains(v.V6Blocked, n):
+			fmt.Printf("%s: %s\n", n, v6Untested)
+		case ms < 0:
+			fmt.Printf("%s: 不通\n", n)
+		default:
+			fmt.Printf("%s: %d ms\n", n, ms)
+		}
+	}
+}
+
+// printStatus status 命令的输出。
+func printStatus(v ipc.StateView) {
 	fmt.Printf("%s %s(服务 v%s)\n", buildinfo.DisplayName, buildinfo.Version, v.Version)
 	st := string(v.State.Status)
 	if v.State.Error != "" {
@@ -307,7 +355,14 @@ func status(ctx context.Context) error {
 		fmt.Println("已连接:", (time.Duration(v.Uptime) * time.Second).String())
 	}
 	fmt.Println("模式:  ", v.Mode)
-	fmt.Println("节点:  ", v.Node, fmt.Sprintf("(共 %d 个)", len(v.Nodes)))
+	node := v.Node
+	if v.AutoNow != "" && v.AutoNow != v.Node {
+		node += "(实际在用 " + v.AutoNow + ")"
+	}
+	fmt.Println("节点:  ", node, nodeCountNote(v))
+	for _, l := range selectionNotes(v) {
+		fmt.Println("提示:  ", l)
+	}
 	s := v.Settings
 	fmt.Printf("设置:   TUN=%v(%s, strict=%v) 混合端口=%d DoH=%s/%s fake-ip=%v IPv6=%v\n", s.TUN, s.TUNStack, s.StrictRoute, s.MixedPort, s.RemoteDNS, s.LocalDNS, s.FakeIP, s.IPv6)
 	if s.WebListen != "" {
@@ -322,7 +377,122 @@ func status(ctx context.Context) error {
 		}
 		fmt.Printf("隧道:   判废 %d 次,重建 %d 次%s\n", tv.Sick, tv.Rebuilds, last)
 	}
-	return nil
+}
+
+// v6Tag 关着 IPv6 时只能走 IPv6 的节点(见 ipc.StateView.V6Blocked)在 nodes 里的标注,和网页界面的「IPv6 节点」一样;
+// v6Untested 是 test all 里的。
+const (
+	v6Tag      = "IPv6 节点(「允许 IPv6」关着,这一轮不用)"
+	v6Untested = "IPv6 节点(「允许 IPv6」关着,没测)"
+)
+
+// nodeTotal 订阅里真正的节点数:列表首项 auto(自动选择)不是节点,内核 proxy 组里的线路组名(订阅缓存还没有时
+// 列表取自内核)也不是。和界面上写的「N 个节点」一样。
+func nodeTotal(v ipc.StateView) int {
+	n := 0
+	for _, tag := range v.Nodes {
+		if tag != "auto" && !isGroup(v, tag) {
+			n++
+		}
+	}
+	return n
+}
+
+// nodeCountNote status 节点那一行后面的括号:订阅里共几个节点,关着 IPv6 时其中几个这一轮不用。
+func nodeCountNote(v ipc.StateView) string {
+	if len(v.V6Blocked) > 0 {
+		return fmt.Sprintf("(共 %d 个节点,其中 %d 个是 IPv6 节点、「允许 IPv6」关着,这一轮不用)", nodeTotal(v), len(v.V6Blocked))
+	}
+	return fmt.Sprintf("(共 %d 个节点)", nodeTotal(v))
+}
+
+// nodeLine 节点列表的一行:当前项带 *,后面是最近一次列表测速的延迟。提示节点(面板放来显示续费 / 用量信息的,
+// 地址只指向本机)不测速,写明它不能上网,不显示成"不通";关着 IPv6 时只能走 IPv6 的节点同样不测,标成「IPv6 节点」
+// (网页界面一样标,不用先测一次速才看出来)。
+func nodeLine(v ipc.StateView, n string) string {
+	mark := "  "
+	if n == v.Node {
+		mark = "* "
+	}
+	ms := ""
+	if slices.Contains(v.Hints, n) {
+		ms = "  提示(只显示续费 / 用量信息,不能上网)"
+	} else if slices.Contains(v.V6Blocked, n) {
+		ms = "  " + v6Tag // 测速时它不测、直接记不通:那个"不通"不显示,显示原因
+	} else if d, ok := v.Delays[n]; ok {
+		if d < 0 {
+			ms = "  不通"
+		} else {
+			ms = fmt.Sprintf("  %d ms", d)
+		}
+	}
+	return mark + n + ms
+}
+
+// selectionNotes 选中的节点(或线路组)这一轮连不上时的说明,一条一行:status 和 select 都打(和网页界面一样)。
+// 关着 IPv6 时选了 IPv6 节点;选了提示节点(订阅放来显示续费 / 用量信息的,地址指向本机)—— 手动选它照样选得上、
+// 状态照样显示已连接,却上不了网,不说一句的话要等健康检查失败才看到一句笼统的"节点不可用"。
+func selectionNotes(v ipc.StateView) []string {
+	var out []string
+	if v.SelectedHint {
+		out = append(out, "选中的是提示节点(订阅用来显示续费 / 用量信息的,地址指向本机),不能上网;换一个节点(godusevpn nodes 看列表)")
+	}
+	if v.SelectedV6 {
+		out = append(out, v6Hint(v))
+	}
+	return out
+}
+
+// printGroups nodes 命令的后半:订阅里的线路组和各自的成员(当前选中的带 *)。没有就什么都不打。
+func printGroups(v ipc.StateView) {
+	if len(v.Groups) == 0 {
+		return
+	}
+	on := "关"
+	if v.Settings.LineAuto {
+		on = "开"
+	}
+	fmt.Printf("线路组(线路自动:%s;select <线路组名> 就在组里自动用最快的那台):\n", on)
+	for _, g := range v.Groups {
+		mark := "  "
+		if g.Tag == v.Node || g.Tag == v.Settings.Selected {
+			mark = "* "
+		}
+		// 关着 IPv6 时只能走 IPv6 的成员标出来(线路自动不用它们);成员全是这种的线路整条标,和网页界面的线路行一样
+		members, blocked := make([]string, len(g.Members)), 0
+		for i, m := range g.Members {
+			members[i] = m
+			if slices.Contains(v.V6Blocked, m) {
+				members[i], blocked = m+"(IPv6)", blocked+1
+			}
+		}
+		tail := ""
+		if blocked > 0 && blocked == len(g.Members) {
+			tail = "  " + v6Tag
+		}
+		fmt.Println(mark + g.Tag + ":" + strings.Join(members, " / ") + tail)
+	}
+}
+
+// takeLineAuto 从 settings 的参数里挑出 lineAuto=on|off(它要单独调 SetLineAuto),返回剩下的参数。
+func takeLineAuto(args []string) (rest []string, on *bool, err error) {
+	for _, kv := range args {
+		k, v, ok := strings.Cut(kv, "=")
+		if !ok || k != "lineAuto" {
+			rest = append(rest, kv)
+			continue
+		}
+		var b bool
+		switch strings.ToLower(strings.TrimSpace(v)) {
+		case "on", "true", "yes", "1":
+			b = true
+		case "off", "false", "no", "0":
+		default:
+			return nil, nil, fmt.Errorf("lineAuto 的值只能是 on 或 off: %s", v)
+		}
+		on = &b
+	}
+	return rest, on, nil
 }
 
 func printProfile(p *ipc.ProfileView) {
@@ -410,5 +580,27 @@ func nodeCmd(ctx context.Context, args []string) error {
 
 func Usage() {
 	fmt.Println(buildinfo.DisplayName, buildinfo.Version)
-	fmt.Println("用法: " + Name + " status | connect | disconnect | mode <rule|global|direct> | nodes | node add <分享链接...> | node list | node rm <节点名> | select <节点> | test [节点|all] | profile [地址] | refresh | settings [k=v …] | rules | devices | device <MAC> <follow|proxy|direct|reject> [名字] | logs [n] [core] | diag | guard clear|status")
+	fmt.Println("用法: " + Name + " status | connect | disconnect | mode <rule|global|direct> | nodes | node add <分享链接...> | node list | node rm <节点名> | select <节点|线路组> | test [节点|all] | profile [地址] | refresh | settings [k=v …] | rules | devices | device <MAC> <follow|proxy|direct|reject> [名字] | logs [n] [core] | diag | guard clear|status")
+}
+
+// v6Hint 选的这一轮连不上、原因是只能走 IPv6 而「允许 IPv6」关着时的提示:点名是哪个节点 / 哪条线路,说清楚去哪儿改。
+func v6Hint(v ipc.StateView) string {
+	sel := v.Settings.Selected
+	what := "「" + sel + "」只能走 IPv6"
+	if sel == "" || !slices.Contains(v.Nodes, sel) && !isGroup(v, sel) {
+		what = "订阅里的节点全都只能走 IPv6" // 自动选择(选的已经不在订阅里也落在自动选择上)
+	}
+	if isGroup(v, sel) {
+		what = "线路「" + sel + "」的服务器全都只能走 IPv6"
+	}
+	return what + ",而「允许 IPv6」关着,连不上:要用就打开 IPv6(settings ipv6=on,界面里是 设置 → 隐私),或者换别的节点"
+}
+
+func isGroup(v ipc.StateView, tag string) bool {
+	for _, g := range v.Groups {
+		if g.Tag == tag {
+			return true
+		}
+	}
+	return false
 }

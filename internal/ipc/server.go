@@ -17,13 +17,14 @@ type Server struct {
 	handlers map[string]Handler
 	ln       net.Listener
 	logf     func(string, ...any)
+	idle     time.Duration // 见 idleTimeout;Listen 之前定好,之后只读
 }
 
 func NewServer(logf func(string, ...any)) *Server {
 	if logf == nil {
 		logf = func(string, ...any) {}
 	}
-	return &Server{handlers: map[string]Handler{}, logf: logf}
+	return &Server{handlers: map[string]Handler{}, logf: logf, idle: idleTimeout}
 }
 
 func (s *Server) Handle(method string, h Handler) {
@@ -62,9 +63,13 @@ func (s *Server) Close() error {
 	return nil
 }
 
+// idleTimeout 连接上等下一条请求、写回一条应答各最多这么久。处理器本身跑多久不在这里限:换新配置的方法要好几分钟
+// (见 SlowCallTimeout),以前整条连接只给 60 秒,处理器还没跑完连接就到期,应答写不回去,调用方只能等到自己超时。
+const idleTimeout = 60 * time.Second
+
 func (s *Server) serve(conn net.Conn) {
 	defer conn.Close()
-	_ = conn.SetDeadline(time.Now().Add(60 * time.Second))
+	_ = conn.SetDeadline(time.Now().Add(s.idle))
 	r := bufio.NewReaderSize(conn, 1<<20)
 	w := bufio.NewWriter(conn)
 	for {
@@ -78,6 +83,7 @@ func (s *Server) serve(conn net.Conn) {
 			resp.Error = "请求不是合法 JSON"
 		} else {
 			resp.ID = req.ID
+			_ = conn.SetDeadline(time.Time{}) // 处理器跑多久都行:调用方自己带着等多久(见 Call)
 			s.mu.RLock()
 			h := s.handlers[req.Method]
 			s.mu.RUnlock()
@@ -102,12 +108,13 @@ func (s *Server) serve(conn net.Conn) {
 			}
 		}
 		b, _ := json.Marshal(resp)
+		_ = conn.SetDeadline(time.Now().Add(s.idle)) // 写回应答、等下一条请求
 		w.Write(b)
 		w.WriteByte('\n')
 		if err := w.Flush(); err != nil {
 			return
 		}
-		_ = conn.SetDeadline(time.Now().Add(60 * time.Second))
+		_ = conn.SetDeadline(time.Now().Add(s.idle))
 	}
 }
 
@@ -152,6 +159,15 @@ var (
 	// errImpostor 控制口对面不是佛跳墙服务(Windows 上有人抢注了管道名,见 verifyPipeServer)。
 	errImpostor = errors.New("控制口被别的程序占着,不是佛跳墙服务;重启电脑后再试")
 )
+
+// SlowCallTimeout 界面、命令行等一次控制调用最多等多久。要不短于守护进程里最长的那种同步处理:
+// 连着时拉订阅的整条回退链(当前节点、强测自动选择组、自动选择三次、直连,约 5 分 40 秒,见 daemon.fetchChainBudget)
+// 之后再换新配置(备配置最多 state.PrepareTimeout,再停旧起新)。以前桌面端只等 90 秒、命令行 60 秒:
+// 新配置还在备,界面先报超时,过一会儿又自己连好了。
+//
+// 取舍:不改成"先返回、做完再推送" —— 那要三个前端(桌面、网页面板、Android)都改成按推送收结果,
+// 守护进程这些处理本身都有上限,等得起;代价是守护进程真卡住时界面要等满这么久才报错(别的按钮照常能点,断开另走一条连接)。
+const SlowCallTimeout = 10 * time.Minute
 
 func Call(ctx context.Context, method string, params any, result any) error {
 	dctx, cancel := context.WithTimeout(ctx, 3*time.Second)

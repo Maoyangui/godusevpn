@@ -178,3 +178,52 @@ func TestHealsRedactedProfileURLOnStart(t *testing.T) {
 		t.Fatalf("恢复后应写回磁盘,得到 %q", reloaded.Profiles[0].URL)
 	}
 }
+
+// 梅林(Entware)上启动脚本把守护进程的标准错误接到 paths.EntwareStderrLog:运行时 fatal error 的原因那一行只在那里有,
+// crash.log 里只有栈(见 CaptureCrashes)。诊断包要把它也带上(和 crash.log 一样取摘要:只要有崩溃内容的段,原因在前),
+// .1 是超过 256KB 时挪走的那份。没有这个文件的(别的平台)不带。
+func TestExportDiagIncludesEntwareStderr(t *testing.T) {
+	d := diagDaemon(t)
+	dir := t.TempDir()
+	old := entwareStderrLog
+	entwareStderrLog = dir + "/godusevpn.stderr.log"
+	t.Cleanup(func() { entwareStderrLog = old })
+	readZip := func() map[string]string {
+		t.Helper()
+		path, err := d.exportDiag()
+		if err != nil {
+			t.Fatal(err)
+		}
+		zr, err := zip.OpenReader(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer zr.Close()
+		files := map[string]string{}
+		for _, f := range zr.File {
+			rc, _ := f.Open()
+			b, _ := io.ReadAll(rc)
+			rc.Close()
+			files[f.Name] = string(b)
+		}
+		return files
+	}
+	if files := readZip(); files["godusevpn.stderr.log"] != "" || files["godusevpn.stderr.log.1"] != "" {
+		t.Fatal("没有这个文件时诊断包里不该有")
+	}
+	cur := "== 2026-11-11 10:00:00 由 manual-start 拉起\n== 2026-11-11 10:05:00 由 watchdog 拉起\n" +
+		"fatal error: concurrent map writes\n\ngoroutine 42 [running]:\nmain.crash()\n"
+	if err := os.WriteFile(entwareStderrLog, []byte(cur), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(entwareStderrLog+".1", []byte("== 2026-11-10 09:00:00 由 start 拉起\npanic: 上一份里的崩溃\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	files := readZip()
+	if got := files["godusevpn.stderr.log"]; !strings.Contains(got, "fatal error: concurrent map writes") || !strings.Contains(got, "goroutine 42") || strings.Contains(got, "10:00:00") {
+		t.Fatalf("诊断包要带上标准错误里的崩溃记录(只要有崩溃内容的段):\n%s", got)
+	}
+	if got := files["godusevpn.stderr.log.1"]; !strings.Contains(got, "panic: 上一份里的崩溃") {
+		t.Fatalf("诊断包要带上挪走的那份:\n%s", got)
+	}
+}

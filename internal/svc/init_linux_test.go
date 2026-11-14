@@ -1,10 +1,11 @@
 package svc
 
 import (
+	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -26,78 +27,16 @@ func TestRestartHandsOffToInitSystem(t *testing.T) {
 	}
 }
 
-// 梅林(Entware)的看门狗:真跑一遍脚本(rc.func / pidof / cru 换成临时目录里的假货)。
-// 起服务时挂上定时、去掉"用户停了"的标记;stop 留标记;定时看到标记、或服务在跑、或自启关着就不拉,否则拉起来。
-func TestEntwareWatchdog(t *testing.T) {
-	sh, err := exec.LookPath("sh")
-	if err != nil {
-		t.Skip("没有 sh")
+// 程序起服务交给初始化系统的动作:Entware 用脚本自己的 manual-start(脚本的 start 留给开机时的 rc.unslung,它看开机自启
+// 的开关,关着就不起),别的照旧是 start(systemctl start / procd 的 start 本来就不看自启)。
+func TestStartAction(t *testing.T) {
+	if got := startAction(initEntware); got != "manual-start" || !strings.Contains(entwareScript, "start | manual-start | restart") {
+		t.Fatalf("Entware 起服务要用脚本里认的 manual-start,得 %q", got)
 	}
-	dir := t.TempDir()
-	bin := filepath.Join(dir, "bin")
-	if err := os.MkdirAll(bin, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	write := func(p, s string) {
-		t.Helper()
-		if err := os.WriteFile(p, []byte(s), 0o755); err != nil {
-			t.Fatal(err)
+	for _, k := range []initKind{initSystemd, initProcd} {
+		if got := startAction(k); got != "start" {
+			t.Fatalf("systemd / procd 起服务照旧是 start,得 %q", got)
 		}
-	}
-	write(filepath.Join(bin, "pidof"), "#!/bin/sh\n[ -f "+filepath.Join(dir, "running")+" ]\n")
-	write(filepath.Join(bin, "cru"), "#!/bin/sh\necho \"$*\" >> "+filepath.Join(dir, "cru.log")+"\n")
-	write(filepath.Join(dir, "rc.func"), "echo \"$1\" >> "+filepath.Join(dir, "rc.log")+"\n")
-	stopped := filepath.Join(dir, "state", "stopped")
-	render := func(enabled bool) string {
-		s, _ := entwareScriptLike(map[bool]string{true: "ENABLED=yes", false: "ENABLED=no"}[enabled])
-		s = strings.Replace(s, "/opt/etc/init.d/rc.func", filepath.Join(dir, "rc.func"), 1)
-		s = strings.Replace(s, "/opt/var/lib/godusevpn/stopped", stopped, 1)
-		s = strings.Replace(s, "PATH=/opt/bin:", "PATH="+bin+":/opt/bin:", 1)
-		p := filepath.Join(dir, "S99godusevpn")
-		write(p, s)
-		return p
-	}
-	run := func(script, action string) (rc, cru string) {
-		t.Helper()
-		_ = os.Remove(filepath.Join(dir, "rc.log"))
-		_ = os.Remove(filepath.Join(dir, "cru.log"))
-		if out, err := exec.Command(sh, script, action).CombinedOutput(); err != nil {
-			t.Fatalf("%s: %v\n%s", action, err, out)
-		}
-		b1, _ := os.ReadFile(filepath.Join(dir, "rc.log"))
-		b2, _ := os.ReadFile(filepath.Join(dir, "cru.log"))
-		return strings.TrimSpace(string(b1)), strings.TrimSpace(string(b2))
-	}
-	marked := func() bool { _, err := os.Stat(stopped); return err == nil }
-	on := render(true)
-
-	if rc, _ := run(on, "stop"); rc != "stop" || !marked() {
-		t.Fatalf("stop 要照常交给 rc.func 并留下标记: rc=%q 标记=%v", rc, marked())
-	}
-	if rc, _ := run(on, "watchdog"); rc != "" {
-		t.Fatalf("用户停了的服务定时不该拉起来,rc.func 收到 %q", rc)
-	}
-	rc, cru := run(on, "start")
-	if rc != "start" || marked() || cru != "a godusevpn * * * * * /opt/etc/init.d/S99godusevpn watchdog" {
-		t.Fatalf("start 要去掉标记、挂上定时: rc=%q 标记=%v cru=%q", rc, marked(), cru)
-	}
-	if strings.Join(entwareWatchdog, " ") != cru {
-		t.Fatalf("守护进程补挂的定时要和脚本里的一致: %q ≠ %q", strings.Join(entwareWatchdog, " "), cru)
-	}
-	write(filepath.Join(dir, "running"), "")
-	if rc, _ := run(on, "watchdog"); rc != "" {
-		t.Fatalf("服务在跑时定时不该再拉,rc.func 收到 %q", rc)
-	}
-	_ = os.Remove(filepath.Join(dir, "running"))
-	if rc, _ := run(on, "watchdog"); rc != "start" {
-		t.Fatalf("服务没在跑、也不是用户停的(崩了):定时要拉起来,rc.func 收到 %q", rc)
-	}
-	run(on, "stop")
-	if rc, _ := run(on, "restart"); rc != "restart" || marked() {
-		t.Fatalf("restart(面板升级走这条)要去掉标记: rc=%q 标记=%v", rc, marked())
-	}
-	if rc, _ := run(render(false), "watchdog"); rc != "" {
-		t.Fatalf("开机自启关着时定时不该拉,rc.func 收到 %q", rc)
 	}
 }
 
@@ -110,6 +49,235 @@ func TestEntwareScriptRefreshKeepsEnabled(t *testing.T) {
 	}
 	if s, on := entwareScriptLike(strings.Replace(old, "ENABLED=no", "ENABLED=yes", 1)); !on || s != entwareScript {
 		t.Fatal("自启开着的直接换成当前模板")
+	}
+}
+
+// 起停服务前先把旧版本写的脚本换成当前模板(旧脚本的起停交给 rc.func 按名字 pidof / killall:start 把调它的本进程
+// 当成"已经在跑"而不拉,stop 把本进程一起杀),开机自启的开关照抄;已经是当前模板的不动。先写临时文件再改名,
+// 权限照旧(以前临时文件按 0755 写,用户去掉执行位、不让开机自动跑的,一换模板又变回可执行),临时文件不留下。
+// 旧版本的临时文件名是 S99godusevpn.tmp:改写被打断时留下来,名字以 S 开头、可执行,开机时 rc.unslung 会把它当成
+// 另一份启动脚本跑,脚本已经是当前模板时也要清掉。
+func TestRefreshEntwareScriptBeforeStop(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "S99godusevpn")
+	old := "#!/bin/sh\nENABLED=no\nPROCS=godusevpn\nARGS=\"run\"\ncase \"$1\" in\nstop | kill)\n\ttouch /opt/var/lib/godusevpn/stopped\n\t;;\nesac\n. /opt/etc/init.d/rc.func\n"
+	if err := os.WriteFile(p, []byte(old), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	on, err := refreshEntwareScript(p)
+	b, _ := os.ReadFile(p)
+	want, _ := entwareScriptLike(old)
+	if err != nil || on || string(b) != want || !strings.Contains(string(b), "halt TERM") || !strings.Contains(string(b), "launch \"$1\"") {
+		t.Fatalf("旧脚本应换成当前模板、自启保持关着: on=%v err=%v\n%s", on, err, b)
+	}
+	if m := perm(t, p); m != 0o700 {
+		t.Fatalf("换模板时权限要照旧(0700),得 %o", m)
+	}
+	onlyFile(t, dir, "S99godusevpn", "换模板")
+	// 已经是当前模板:不动(同一个文件),旧版本留下的 S99godusevpn.tmp 清掉
+	if err := os.WriteFile(p+".tmp", []byte(old[:40]), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	before := inode(t, p)
+	if on, err := refreshEntwareScript(p); err != nil || on {
+		t.Fatalf("再来一次不该出错: %v %v", on, err)
+	}
+	if inode(t, p) != before {
+		t.Fatal("已经是当前模板的不该再写")
+	}
+	onlyFile(t, dir, "S99godusevpn", "旧版本留下的临时文件")
+	if _, err := refreshEntwareScript(filepath.Join(t.TempDir(), "没有")); err == nil {
+		t.Fatal("脚本不在时要报出来")
+	}
+}
+
+// onlyFile dir 里只有 name 这一个文件(改写脚本没留下临时文件)。
+func onlyFile(t *testing.T, dir, name, what string) {
+	t.Helper()
+	ents, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, e := range ents {
+		names = append(names, e.Name())
+	}
+	if len(names) != 1 || names[0] != name {
+		t.Fatalf("%s:目录里只该有 %s,得 %q", what, name, names)
+	}
+}
+
+// inode p 的 inode 号(看改写是原地改的还是改名盖过去的)。
+func inode(t *testing.T, p string) uint64 {
+	t.Helper()
+	st, err := os.Stat(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return st.Sys().(*syscall.Stat_t).Ino
+}
+
+// perm p 的权限位。
+func perm(t *testing.T, p string) os.FileMode {
+	t.Helper()
+	st, err := os.Stat(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return st.Mode().Perm()
+}
+
+// 面板里开关开机自启(SetEnabled)改的是已装的 Entware 启动脚本,而看门狗每分钟、起停时都有 sh 可能正读着它(BusyBox 的 sh
+// 边读边执行,一次只读一小段)。以前原地截断重写(os.WriteFile),读的那边会读到空的、半截的脚本;现在和 Refresh 一样先写
+// 同目录的临时文件再改名盖过去:正在读的接着读旧的那份,新打开的读新的,任何时候读到的都是完整的一版。权限照旧(用户去掉
+// 执行位、不让开机自动跑的,改完还是那样);临时文件不留下。一边反复开关、一边不停地读,读到的每一份都要完整。
+func TestSetEntwareEnabledAtomic(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "S99godusevpn")
+	on, _ := entwareScriptLike("ENABLED=yes")
+	off, _ := entwareScriptLike("ENABLED=no")
+	if err := os.WriteFile(p, []byte(on), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// 1. 关掉:内容对、换成了另一个文件(改名盖过去,不是原地改写)、权限照旧、没留下临时文件
+	before := inode(t, p)
+	if err := setEntwareEnabled(p, false); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(p); string(b) != off {
+		t.Fatalf("关掉开机自启后脚本不对:\n%s", b)
+	}
+	if inode(t, p) == before {
+		t.Fatal("要先写临时文件再改名盖过去,不能原地改写(看门狗、起停的 sh 可能正读着)")
+	}
+	if m := perm(t, p); m != 0o755 {
+		t.Fatalf("权限要照旧(0755),得 %o", m)
+	}
+	onlyFile(t, dir, "S99godusevpn", "关掉开机自启")
+
+	// 2. 用户改过的权限照旧:0700 打开后还是 0700;去掉执行位的(0644)关掉后还是 0644
+	for _, c := range []struct {
+		mode os.FileMode
+		on   bool
+		want string
+	}{{0o700, true, on}, {0o644, false, off}} {
+		if err := os.Chmod(p, c.mode); err != nil {
+			t.Fatal(err)
+		}
+		if err := setEntwareEnabled(p, c.on); err != nil {
+			t.Fatal(err)
+		}
+		if b, _ := os.ReadFile(p); string(b) != c.want {
+			t.Fatalf("开关之后脚本不对:\n%s", b)
+		}
+		if m := perm(t, p); m != c.mode {
+			t.Fatalf("权限要照旧(%o),得 %o", c.mode, m)
+		}
+		onlyFile(t, dir, "S99godusevpn", "开关开机自启")
+	}
+
+	// 3. 一边反复开关,一边不停地读(像看门狗、起停时的 sh):读到的每一份都得是完整的开或关那一版
+	if err := os.Chmod(p, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	var (
+		reads, bad int
+		samples    []string
+		stop       = make(chan struct{})
+		done       = make(chan struct{})
+	)
+	go func() {
+		defer close(done)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			b, err := os.ReadFile(p)
+			reads++
+			if err != nil || (string(b) != on && string(b) != off) {
+				bad++
+				if len(samples) < 5 {
+					samples = append(samples, fmt.Sprintf("%d 字节 %v", len(b), err))
+				}
+			}
+		}
+	}()
+	for i := 0; i < 3000; i++ {
+		if err := setEntwareEnabled(p, i%2 == 0); err != nil {
+			close(stop)
+			<-done
+			t.Fatal(err)
+		}
+	}
+	close(stop)
+	<-done
+	if bad > 0 {
+		t.Fatalf("反复开关时读到不完整的脚本 %d 次(共读了 %d 次),例如 %v", bad, reads, samples)
+	}
+	onlyFile(t, dir, "S99godusevpn", "反复开关之后")
+
+	// 4. 脚本不在:报出来
+	if err := setEntwareEnabled(filepath.Join(dir, "没有"), true); err == nil {
+		t.Fatal("脚本不在时要报出来")
+	}
+}
+
+// 梅林(Entware)上卸载:看门狗定时、启动脚本、/opt/bin 里的链接之外,拉起那一段的锁目录(连同清旧锁用的清理锁)也删掉 ——
+// 正常都会放掉,只有持有锁的脚本被 KILL 才会留下,卸载完没有脚本再来清它。启动脚本改写时被打断留下的临时文件(旧版本的 S99godusevpn.tmp,现在的
+// .S99godusevpn.*.tmp)也一起删。同目录里别的启动脚本不碰。
+func TestRemoveEntware(t *testing.T) {
+	dir := t.TempDir()
+	initd := filepath.Join(dir, "init.d")
+	bin := filepath.Join(dir, "bin")
+	for _, d := range []string{initd, bin} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// 假 cru:只记账
+	cruLog := filepath.Join(dir, "cru.log")
+	if err := os.WriteFile(filepath.Join(bin, "cru"), []byte("#!/bin/sh\necho \"$*\" >> "+cruLog+"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+":"+os.Getenv("PATH"))
+	script := filepath.Join(initd, "S99godusevpn")
+	link := filepath.Join(dir, "godusevpn")
+	lock := filepath.Join(dir, "run", "godusevpn.lock")
+	files := map[string]string{
+		script:          entwareScript,
+		script + ".tmp": "#!/bin/sh\n", // 旧版本改写时被打断留下的
+		filepath.Join(initd, ".S99godusevpn.123.tmp"): "#!/bin/sh\n", // 现在的临时文件被打断留下的
+		filepath.Join(initd, "S50other"):              "#!/bin/sh\n", // 别的服务的,不能碰
+		link:                                          "",
+		filepath.Join(lock, "owner"):                  "4242 100\n", // 持有者被 KILL 留下的锁
+		filepath.Join(lock+".clean", ".keep"):         "",           // 清旧锁时被 KILL 留下的清理锁
+		filepath.Join(lock+".dead.77", ".w78"):        "",           // 放锁时挪开、没删完的
+	}
+	for p, s := range files {
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(s), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	removeEntware(script, link, lock)
+	for _, p := range []string{script, script + ".tmp", filepath.Join(initd, ".S99godusevpn.123.tmp"), link, lock, lock + ".clean", lock + ".dead.77"} {
+		if _, err := os.Stat(p); !os.IsNotExist(err) {
+			t.Errorf("卸载后 %s 应删掉(%v)", p, err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(initd, "S50other")); err != nil {
+		t.Errorf("别的启动脚本不能碰: %v", err)
+	}
+	if b, _ := os.ReadFile(cruLog); strings.TrimSpace(string(b)) != "d "+name {
+		t.Errorf("要删掉看门狗定时(cru d %s),得 %q", name, b)
+	}
+	if !strings.Contains(entwareScript, "\nLOCK="+entwareLock+"\n") {
+		t.Errorf("卸载删的锁目录(%s)要和启动脚本里的 LOCK 一致", entwareLock)
 	}
 }
 

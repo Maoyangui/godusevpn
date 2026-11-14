@@ -120,10 +120,11 @@ type ConnRow struct {
 }
 
 type Service struct {
-	b   Backend
-	o   Options
-	mu  sync.Mutex
-	ctx context.Context
+	b    Backend
+	o    Options
+	mu   sync.Mutex
+	pwMu sync.Mutex // 保存设置与改面板密码串行(见 Call 的 SaveSettings)
+	ctx  context.Context
 
 	subs map[chan Event]struct{}
 
@@ -161,6 +162,10 @@ func New(b Backend, o Options) *Service {
 // Run 每 1.5 秒推一次状态(有人订阅时),按内核状态开关速度流,定时查更新;阻塞到 ctx 结束。
 func (s *Service) Run(ctx context.Context) {
 	s.ctx = ctx
+	// 系统安装器装完的 APK、解包失败那次留下的安装包:当前版本和更旧的清掉,比当前新的留着(见 update.CleanStale)
+	if err := update.CleanStale(updateDir(), buildinfo.Version); err != nil {
+		s.b.Logf("清理旧安装包: %v", err)
+	}
 	go s.updateLoop(ctx)
 	t := time.NewTicker(1500 * time.Millisecond)
 	defer t.Stop()
@@ -242,7 +247,7 @@ func (s *Service) dispatch(method string, params any, out any) error {
 	return json.Unmarshal(b, out)
 }
 
-// Settings 守护进程当前设置(含密码哈希;给页面前要抹掉)。
+// Settings 守护进程当前设置(含密码哈希、订阅地址;给页面前要过 ForPage)。
 func (s *Service) Settings() settings.Settings {
 	var st settings.Settings
 	_ = s.dispatch(ipc.MGetSettings, nil, &st)
@@ -270,7 +275,7 @@ func (s *Service) clashClient() (*clash.Client, error) {
 func (s *Service) State() State {
 	var view ipc.StateView
 	err := s.dispatch(ipc.MGetState, nil, &view)
-	view.Settings.WebPassword = "" // 和 GetSettings 一样不把面板密码哈希给页面:状态每 1.5 秒推一次,局域网明文访问时一路都带着它
+	view = view.ForPage() // 和 GetSettings 一样不把密码哈希、订阅地址给页面:状态每 1.5 秒推一次,局域网明文访问时一路都带着它
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	st := State{Service: err == nil, SvcState: "running", View: view, Up: s.up, Down: s.down, TotalUp: s.totUp, TotalDown: s.totDown, Lang: s.prefs.Lang, Theme: s.prefs.Theme,
@@ -362,19 +367,25 @@ func (s *Service) CallJSON(name, argsJSON string) (string, error) {
 // Call 执行一个页面方法(参数按位置)。
 func (s *Service) Call(name string, args []json.RawMessage) (any, error) {
 	ctx := s.ctx
-	view := func(method string, params any) (any, error) {
+	view := func(method string, params any) (any, error) { // 连接、切模式、选节点、线路自动、切订阅都返回新状态:同样去掉凭据
 		var v ipc.StateView
 		err := s.dispatch(method, params, &v)
-		return v, err
+		return v.ForPage(), err
 	}
-	profiles := func(method string, params any) (any, error) {
+	// 订阅列表(刷新、增删改订阅、手动节点都回全部订阅)给页面的那份不带订阅地址和续费地址(见 ipc.ProfileView.ForPage);
+	// 只有订阅管理页取带地址的那份(GetProfilesWithLinks)
+	profileList := func(method string, params any, links bool) (any, error) {
 		var out []ipc.ProfileView
 		err := s.dispatch(method, params, &out)
 		if out == nil {
 			out = []ipc.ProfileView{}
 		}
+		if !links {
+			out = ipc.ProfilesForPage(out)
+		}
 		return out, err
 	}
+	profiles := func(method string, params any) (any, error) { return profileList(method, params, false) }
 	devices := func(method string, params any) (any, error) {
 		var out []ipc.DeviceView
 		err := s.dispatch(method, params, &out)
@@ -401,6 +412,8 @@ func (s *Service) Call(name string, args []json.RawMessage) (any, error) {
 		return view(ipc.MSetMode, map[string]string{"mode": arg[string](args, 0)})
 	case "SelectNode":
 		return view(ipc.MSelectNode, map[string]string{"tag": arg[string](args, 0)})
+	case "SetLineAuto": // 节点面板顶上的「线路自动」开关(Android 与 Linux 网页面板共用这一条)
+		return view(ipc.MSetLineAuto, map[string]bool{"on": arg[bool](args, 0)})
 	case "GetNodes":
 		return s.nodes(ctx)
 	case "TestAll":
@@ -416,11 +429,17 @@ func (s *Service) Call(name string, args []json.RawMessage) (any, error) {
 	case "SetProfileURL":
 		var p *ipc.ProfileView
 		err := s.dispatch(ipc.MSetProfileURL, map[string]string{"url": strings.TrimSpace(arg[string](args, 0))}, &p)
+		if p != nil {
+			pp := p.ForPage()
+			p = &pp
+		}
 		return p, err
 	case "RefreshProfile": // 第二个参数为真 = 后台刷新、立刻返回(结果随状态推送回来)
 		return profiles(ipc.MRefreshProfile, map[string]any{"id": arg[string](args, 0), "async": arg[bool](args, 1)})
 	case "GetProfiles":
 		return profiles(ipc.MGetProfiles, nil)
+	case "GetProfilesWithLinks": // 订阅管理页:标「未加密」、编辑地址、续费按钮要用地址,只有这一处取
+		return profileList(ipc.MGetProfiles, nil, true)
 	case "AddProfile":
 		return profiles(ipc.MAddProfile, map[string]string{"name": arg[string](args, 0), "url": strings.TrimSpace(arg[string](args, 1))})
 	case "RemoveProfile":
@@ -448,23 +467,22 @@ func (s *Service) Call(name string, args []json.RawMessage) (any, error) {
 	case "RemoveDevice":
 		return devices(ipc.MRemoveDevice, map[string]string{"mac": arg[string](args, 0)})
 	case "GetSettings":
-		st := s.Settings()
-		st.WebPassword = "" // 不把哈希给页面
-		return st, nil
+		return s.Settings().ForPage(), nil // 不把密码哈希、订阅地址给页面
 	case "SaveSettings":
 		in := arg[settings.Settings](args, 0)
-		in.WebPassword = s.Settings().WebPassword // 密码另有接口改
+		// 页面拿到的是去掉密码哈希的那份。带着版本号(Rev)存时服务不看这一项(密码只归 SetWebPassword 管);
+		// 没带的(旧页面)整份存,原样存回去会把密码清掉,所以带上此刻的,并和改密码串行
+		s.pwMu.Lock()
+		in.WebPassword = s.Settings().WebPassword
 		var out settings.Settings
 		err := s.dispatch(ipc.MSetSettings, in, &out)
-		out.WebPassword = ""
-		return out, err
+		s.pwMu.Unlock()
+		return out.ForPage(), err
 	case "SetWebPassword":
-		st := s.Settings()
-		if err := st.SetWebPassword(arg[string](args, 0)); err != nil {
-			return nil, err
-		}
-		var out settings.Settings
-		return nil, s.dispatch(ipc.MSetSettings, st, &out)
+		s.pwMu.Lock()
+		defer s.pwMu.Unlock()
+		// 只改密码这一项(服务那边在设置的锁里改):不拿整份设置存回去,免得盖掉这期间别处改的
+		return nil, s.dispatch(ipc.MSetWebPassword, map[string]string{"password": arg[string](args, 0)}, nil)
 	case "GetLogs":
 		var lines []string
 		err := s.dispatch(ipc.MGetLogs, map[string]any{"lines": arg[int](args, 0), "core": arg[bool](args, 1)}, &lines)

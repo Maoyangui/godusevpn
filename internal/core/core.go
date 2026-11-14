@@ -10,10 +10,13 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+	"unsafe"
 
 	"github.com/sagernet/sing/common/logger"
 	M "github.com/sagernet/sing/common/metadata"
@@ -21,11 +24,13 @@ import (
 	sb "github.com/sagernet/sing-box"
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/common/urltest"
+	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/experimental/cachefile"
 	"github.com/sagernet/sing-box/experimental/clashmode"
 	"github.com/sagernet/sing-box/include"
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/option"
+	"github.com/sagernet/sing-box/protocol/group"
 	"github.com/sagernet/sing/service"
 )
 
@@ -36,6 +41,7 @@ type Core struct {
 	box       *sb.Box
 	ctx       context.Context
 	cancel    context.CancelFunc
+	history   *urltest.HistoryStorage // 测速组的测速记录(sing-box 各组共用的那一份),见 Untested
 	running   bool
 	logw      log.PlatformWriter
 	started   time.Time
@@ -268,13 +274,12 @@ func (c *Core) Start(raw []byte) error {
 		return errors.New("内核已在运行")
 	}
 	ctx, cancel := c.newContext()
-	if len(c.quietAuto) > 0 {
-		history := urltest.NewHistoryStorage()
-		for _, tag := range c.quietAuto {
-			history.StoreURLTestHistory(tag, &adapter.URLTestHistory{Time: time.Now()})
-		}
-		ctx = service.ContextWithPtr(ctx, history)
+	// 测速记录自己建一份放进上下文(不放 sing-box 也是这样建一份):QuietAuto 要往里预记,Untested 要读它
+	history := urltest.NewHistoryStorage()
+	for _, tag := range c.quietAuto {
+		history.StoreURLTestHistory(tag, &adapter.URLTestHistory{Time: time.Now()})
 	}
+	ctx = service.ContextWithPtr(ctx, history)
 	opt, err := parse(ctx, raw)
 	if err != nil {
 		cancel()
@@ -290,7 +295,7 @@ func (c *Core) Start(raw []byte) error {
 		cancel()
 		return fmt.Errorf("启动内核: %w", err)
 	}
-	c.box, c.ctx, c.cancel, c.running, c.started = box, ctx, cancel, true, time.Now()
+	c.box, c.ctx, c.cancel, c.history, c.running, c.started = box, ctx, cancel, history, true, time.Now()
 	return nil
 }
 
@@ -298,7 +303,7 @@ func (c *Core) Start(raw []byte) error {
 func (c *Core) Stop() error {
 	c.mu.Lock()
 	box, cancel := c.box, c.cancel
-	c.box, c.ctx, c.cancel, c.running = nil, nil, nil, false
+	c.box, c.ctx, c.cancel, c.history, c.running = nil, nil, nil, nil, false
 	c.mu.Unlock()
 	if box == nil {
 		return nil
@@ -414,6 +419,77 @@ func (c *Core) Group(tag string) (now string, all []string, err error) {
 	return g.Now(), g.All(), nil
 }
 
+// Members 选择组 / 测速组的全部成员;不是组(单个节点、没有这个出站、内核没跑)返回 false。
+// 只看成员、不读当前项:sing-box 的测速组读当前项(Now)和它自己测完换选择之间没有同步,只想知道"是不是组、组里有谁"
+// 的地方(定时测速挑目标、换线时认线路组)用这个,不去碰那个字段。
+func (c *Core) Members(tag string) ([]string, bool) {
+	box, _, ok := c.snapshot()
+	if !ok {
+		return nil, false
+	}
+	ob, found := box.Outbound().Outbound(tag)
+	if !found {
+		return nil, false
+	}
+	g, isGroup := ob.(adapter.OutboundGroup)
+	if !isGroup {
+		return nil, false
+	}
+	return g.All(), true
+}
+
+// Untested 测速组此刻落在哪台(member),以及那台眼下有没有测速记录(untested = 没有)。
+// sing-box 的测速组经某台连接失败(拨号出错:服务器连不上、握手超时)、或者一轮测速里它没测通,就把它的记录删掉,
+// 但不会因此换到别的成员 —— 要等下一轮测速才换(配置里关了它自己的定时测速)。所以"组落在一台没有记录的成员上"
+// 就是这台刚刚连不上的证据;只读内存,不发任何网络请求。不是测速组、内核没跑:ok 为假。
+// 启动时预记的"刚测过"(QuietAuto)也算有记录。
+func (c *Core) Untested(tag string) (member string, untested, ok bool) {
+	c.mu.Lock()
+	box, history, running := c.box, c.history, c.running
+	c.mu.Unlock()
+	if !running || box == nil || history == nil {
+		return "", false, false
+	}
+	ob, found := box.Outbound().Outbound(tag)
+	if !found {
+		return "", false, false
+	}
+	g, isURLTest := ob.(adapter.URLTestGroup)
+	if !isURLTest {
+		return "", false, false
+	}
+	member = g.Now()
+	if member == "" {
+		return "", false, false
+	}
+	return member, history.LoadURLTestHistory(member) == nil, true
+}
+
+// Remember 测速组 tag 此刻落在的那台没有测速记录时补一条:刚经它测通了,用了 ms 毫秒。
+// 只在那台眼下没记录时写,不覆盖组自己测出来的记录。
+// 为什么要补:经那台的一次拨号失败(网络抖一下、目标连不上、握手超时一次)就会删掉它的记录,而健康检查走的是 proxy,
+// 测通了也不写记录;不补的话,这台要到下一轮定时测速(默认 10 分钟,没流量不测)才有记录,这期间它真挂了,
+// 线路巡检(daemon 的 lineWatchTick)认不出"刚挂",只能等三分钟一次的定时健康检查。
+func (c *Core) Remember(tag string, ms int) {
+	member, untested, ok := c.Untested(tag)
+	if !ok || !untested {
+		return
+	}
+	c.mu.Lock()
+	history := c.history
+	c.mu.Unlock()
+	if history == nil {
+		return
+	}
+	if ms < 1 {
+		ms = 1 // 0 在测速组里是"没测通"
+	}
+	if ms > 65535 {
+		ms = 65535
+	}
+	history.StoreURLTestHistory(member, &adapter.URLTestHistory{Time: time.Now(), Delay: uint16(ms)})
+}
+
 // Select 在选择组里选一个节点。
 func (c *Core) Select(group, tag string) error {
 	box, _, ok := c.snapshot()
@@ -500,7 +576,8 @@ func (c *Core) URLTest(ctx context.Context, tag, link string) (int, error) {
 
 // GroupTest 让自动选择组测一轮全部成员并按结果换到最快的(等价于 Clash API 的 /group/{tag}/delay)。
 // 配置里把 sing-box 自己的定时测速关了(builder.autoGroup),什么时候测由守护进程按"定时测速(分钟)"来叫。
-// 组里正在测就直接返回空结果(sing-box 自己有个 checking 标记),不会叠着测两轮。
+// 组里正在测就直接返回空结果(sing-box 自己有个 checking 标记),不会叠着测两轮 —— 这个空结果和"真测完、全不通"
+// 长得一模一样,要分清就先问 GroupBusy。
 func (c *Core) GroupTest(ctx context.Context, tag string) (map[string]uint16, error) {
 	box, _, ok := c.snapshot()
 	if !ok {
@@ -515,6 +592,53 @@ func (c *Core) GroupTest(ctx context.Context, tag string) (map[string]uint16, er
 		return nil, fmt.Errorf("%q 不是自动选择组", tag)
 	}
 	return g.URLTest(ctx)
+}
+
+// GroupBusy 测速组此刻是不是正在测一轮(不管是谁叫的:守护进程的定时测速 / 现测,还是内核自己启动时、网络变化时那一轮)。
+// known 为假是说不清:内核没跑、不是测速组,或者 sing-box 换了版本、读不到那个标记 —— 调用方要退回保守的做法。
+//
+// sing-box 不给读这个标记的接口(URLTestGroup.checking),只能按字段名去取。读的是一个原子量,不会和它自己的读写打架;
+// 字段名变了取不到就当说不清,core 的测试钉着当前这个版本上取得到。
+func (c *Core) GroupBusy(tag string) (busy, known bool) {
+	box, _, ok := c.snapshot()
+	if !ok {
+		return false, false
+	}
+	ob, found := box.Outbound().Outbound(tag)
+	if !found {
+		return false, false
+	}
+	flag := checkingFlag(ob)
+	if flag == nil {
+		return false, false
+	}
+	return flag.Load(), true
+}
+
+// checkingFlag 取 sing-box 测速组"正在测"的那个原子标记;取不到返回 nil。
+func checkingFlag(ob adapter.Outbound) *atomic.Bool {
+	u, isURLTest := ob.(*group.URLTest)
+	if !isURLTest || u == nil {
+		return nil
+	}
+	g := reflect.ValueOf(u).Elem().FieldByName("group")
+	if !g.IsValid() || g.Kind() != reflect.Pointer || g.IsNil() {
+		return nil // 组还没 Start(内核起来之后才有)
+	}
+	f := g.Elem().FieldByName("checking")
+	if !f.IsValid() || f.Type() != reflect.TypeFor[atomic.Bool]() || !f.CanAddr() {
+		return nil
+	}
+	return (*atomic.Bool)(unsafe.Pointer(f.UnsafeAddr()))
+}
+
+// RoundLimit n 个成员的测速组测一轮最长要多久:sing-box 每台最多等 C.TCPTimeout(15 秒),10 台一批并发
+// (protocol/group/urltest.go 的 URLTestOutbounds),再留两秒余量。等"正在测的那一轮"测完,最多等这么久。
+func RoundLimit(n int) time.Duration {
+	if n < 1 {
+		n = 1
+	}
+	return time.Duration((n+9)/10)*C.TCPTimeout + 2*time.Second
 }
 
 // ProbeRunning 内核在跑时给一批出站各测一次延迟(并发 8 路),返回 节点 → 毫秒,-1 = 不通。
@@ -538,38 +662,95 @@ func (c *Core) ProbeRunning(ctx context.Context, tags []string, link string, onE
 //   - **只放要测的那几个出站,而且逐个先验一遍。** 原来是把订阅里全部出站一股脑塞进去,
 //     只要有一个内核解不动(比如 1.14 已经把 wireguard 从 outbounds 挪走了),整份配置解析失败,
 //     **所有**节点都测不出来。现在坏的那个自己跳过,别的照测。
+//   - **带中转的节点(detour)连它链上的中转一起放。** 只放它自己的话内核找不到中转,整个实例起不来;
+//     中转只是放进去给它拨号用,不测(要测的话它自己也在 tags 里)。链断了(指向订阅里没有的出站、成环)
+//     或者链上有一个解不动,只有这个节点测不了。
 //
 // 返回的 error 只表示"这一轮整个没跑起来";单个节点测不通体现为结果里的 -1。
 //
 // doh 不为空时节点域名经这台 DoH 解析(按地址连),不交给系统解析器:这个临时实例在隧道外,系统解析就是明文问运营商。
-func Probe(ctx context.Context, outbounds []json.RawMessage, tags []string, link, doh string, onEach func(tag string, ms int)) (map[string]int, error) {
-	want := make(map[string]bool, len(tags))
-	for _, t := range tags {
-		want[t] = true
-	}
+func Probe(ctx context.Context, outbounds []json.RawMessage, tags []string, link, doh string, allow6 bool, onEach func(tag string, ms int)) (map[string]int, error) {
 	bctx, cancel := newContext(nil)
 	defer cancel()
 
-	list := make([]any, 0, len(tags)+1)
-	var bad []string
+	type node struct {
+		raw    json.RawMessage
+		detour string
+		err    error
+		parsed bool
+	}
+	byTag := make(map[string]*node, len(outbounds))
+	var order []string
 	for _, o := range outbounds {
 		var head struct {
-			Tag string `json:"tag"`
+			Tag    string `json:"tag"`
+			Detour string `json:"detour"`
 		}
-		if json.Unmarshal(o, &head) != nil || !want[head.Tag] {
+		if json.Unmarshal(o, &head) != nil || head.Tag == "" || byTag[head.Tag] != nil {
 			continue
 		}
-		if err := parseOutbound(bctx, o); err != nil {
-			bad = append(bad, head.Tag)
+		byTag[head.Tag] = &node{raw: o, detour: head.Detour}
+		order = append(order, head.Tag)
+	}
+	buildable := func(n *node) bool {
+		if !n.parsed {
+			n.err, n.parsed = parseOutbound(bctx, n.raw), true
+		}
+		return n.err == nil
+	}
+	include := map[string]bool{} // 放进临时实例的:要测的,和它们链上的中转
+	var probe, bad, broken []string
+	for _, tag := range tags {
+		n := byTag[tag]
+		if n == nil {
 			continue
 		}
-		list = append(list, o)
+		if !buildable(n) {
+			bad = append(bad, tag)
+			continue
+		}
+		chain, ok := []string{tag}, true
+		for cur := n; cur.detour != "" && cur.detour != "direct"; {
+			next := byTag[cur.detour]
+			if next == nil || slices.Contains(chain, cur.detour) || !buildable(next) {
+				ok = false
+				break
+			}
+			chain = append(chain, cur.detour)
+			cur = next
+		}
+		if !ok {
+			broken = append(broken, tag)
+			continue
+		}
+		for _, t := range chain {
+			include[t] = true
+		}
+		probe = append(probe, tag)
+	}
+	list := make([]any, 0, len(include)+1)
+	for _, tag := range order {
+		if include[tag] {
+			list = append(list, byTag[tag].raw)
+		}
 	}
 	list = append(list, map[string]any{"type": "direct", "tag": "direct"})
 
 	doc := map[string]any{"log": map[string]any{"level": "warn"}, "outbounds": list}
+	// 节点域名怎么解析:doh 是地址就经它(和真连时一样);关着 IPv6(allow6 为假)时只解析 IPv4 —— 和真连时的 ipv4_only 一样,
+	// 测速也不走 IPv6(route.default_domain_resolver 只写服务器,策略跟着 dns.strategy)
+	var boot []any
 	if doh != "" {
-		doc["dns"] = map[string]any{"servers": []any{map[string]any{"type": "https", "tag": "boot", "server": doh}}}
+		boot = append(boot, map[string]any{"type": "https", "tag": "boot", "server": doh})
+	} else if !allow6 {
+		boot = append(boot, map[string]any{"type": "local", "tag": "boot"})
+	}
+	if len(boot) > 0 {
+		dns := map[string]any{"servers": boot}
+		if !allow6 {
+			dns["strategy"] = "ipv4_only"
+		}
+		doc["dns"] = dns
 		doc["route"] = map[string]any{"default_domain_resolver": "boot"}
 	}
 	raw, err := json.Marshal(doc)
@@ -589,8 +770,9 @@ func Probe(ctx context.Context, outbounds []json.RawMessage, tags []string, link
 		return map[string]int{}, fmt.Errorf("启动测速实例: %w", err)
 	}
 	defer box.Close()
-	res := probeBox(ctx, box, tags, link, onEach)
-	for _, tag := range bad { // 内核解不动的节点报 -1,而不是在界面上留个空白让人以为"还没测"
+	res := probeBox(ctx, box, probe, link, onEach)
+	// 内核解不动的、中转接不上的节点报 -1,而不是在界面上留个空白让人以为"还没测"
+	for _, tag := range append(slices.Clone(bad), broken...) {
 		if _, ok := res[tag]; !ok {
 			res[tag] = -1
 			if onEach != nil {
@@ -598,8 +780,15 @@ func Probe(ctx context.Context, outbounds []json.RawMessage, tags []string, link
 			}
 		}
 	}
+	var why []string
 	if len(bad) > 0 {
-		return res, fmt.Errorf("这些节点内核解不动,已跳过: %s", strings.Join(bad, "、"))
+		why = append(why, "这些节点内核解不动,已跳过: "+strings.Join(bad, "、"))
+	}
+	if len(broken) > 0 {
+		why = append(why, "这些节点的中转(detour)在订阅里找不到、成环或建不起来,已跳过: "+strings.Join(broken, "、"))
+	}
+	if len(why) > 0 {
+		return res, errors.New(strings.Join(why, ";"))
 	}
 	return res, nil
 }

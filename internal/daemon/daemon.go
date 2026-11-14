@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -63,14 +64,23 @@ type Daemon struct {
 	lastNICWarn string
 	probeMu     sync.Mutex
 	probeAt     time.Time // auto 组上次测完一轮全部节点的时间,autoProbeLoop 按它算下一次
+	failoverAt  time.Time // 上一次线路组组内换线(lineFailover)开测的时间,probeMu 管
+	lostKicked  string    // 线路组在用的那台连接失败、巡检已为它敲过健康检查的那一次(组名和成员名),probeMu 管
 	core        *core.Core
 	settings    settings.Settings
 	// settingsGeneration changes on every persisted settings update. A prepare
 	// can run for minutes while the user edits settings; the generation binds a
 	// rendered config to the exact settings snapshot that produced it.
-	configPublishMu            sync.RWMutex // publish settings vs. starting a rendered config
-	preparedMu                 sync.Mutex   // bind cfg bytes and metadata through start
-	settingsGeneration         uint64
+	configPublishMu    sync.RWMutex // publish settings vs. starting a rendered config
+	preparedMu         sync.Mutex   // bind cfg bytes and metadata through start
+	settingsGeneration uint64
+	// settingsHist 最近几版设置(版本号 → 那一版):经控制口整份存回来的设置带着它读到的版本,按那一版合并(见 settings.Merge3)。
+	settingsHist map[uint64]settings.Settings
+	// diskBase / diskRaw 上次读到或写下的设置文件(设置与原始字节):存之前看文件有没有被别的进程改过(见 settings.SaveChecked)。
+	// diskOK 为假:读的那次没读出来,手上是默认值,存的时候整份覆盖(覆盖前另存一份,见 writeSettings)。
+	diskBase                   settings.Settings
+	diskRaw                    []byte
+	diskOK                     bool
 	preparedSettingsGeneration uint64
 	preparedSettingsValid      bool
 	preparedConfigHash         [sha256.Size]byte
@@ -80,6 +90,7 @@ type Daemon struct {
 	refreshing                 map[string]*refreshCall     // 订阅 id → 正在跑的那次刷新:同一条订阅不叠第二条回退链
 	refreshQueued              map[string]bool             // 界面点的后台刷新:goroutine 还没登记进 refreshing 时也要显示"正在刷新"
 	unsupported                map[string]skippedNode      // 最近一次备配置时内核建不起来、被剔掉的节点(tag → 原因与当时的出站)
+	v6Only                     map[string]bool             // 最近一次备配置时解析出来、只有 IPv6 地址的节点域名(见 builder.V6Blocked)
 	running                    *profile.Profile            // 正在跑的内核是按哪份订阅生成的;刷新后拿它和缓存比,决定动不动隧道
 	prepared                   *profile.Profile            // prepare 刚按它生成了配置、内核还没起:start 成功后转成 running
 	guardOn                    bool                        // 「防流量逃逸」的闸此刻开着
@@ -93,6 +104,7 @@ type Daemon struct {
 	nicWarn      string     // 非严格模式下网卡 IPv6 没能停用:照常连,首页标出来(严格全局仍拒绝连接,见 nicReady)
 	persistedOK  bool       // persisted 状态文件可被可靠读取;未知时不撤保护、不自动连接
 	connOpMu     sync.Mutex // MConnect / MDisconnect 串行:两者交错会让落盘意愿与状态机相反
+	persistMu    sync.Mutex // savePersisted 串行(见那里)
 	// settingsOK 设置文件读出来了。读不出来时用的是默认值,而默认值(模式=规则)会让
 	// syncGuard 判定"不该有闸"、syncNICIPv6 判定"该还原" —— 等于拿一份猜出来的设置去放宽用户的保护。
 	// 所以未知时一律保持现状:不撤闸、不还原网卡 IPv6、不自动连接。用户在界面里保存一次设置就恢复正常。
@@ -121,16 +133,18 @@ type Daemon struct {
 	server       *ipc.Server
 	secret       string
 	http         *http.Client
-	delays       map[string]int // 最近一次全节点测速结果
-	ping         int            // 当前节点最近一次测得的延迟(毫秒):健康检查本来就要测一次,顺手记下来给界面用
-	exitIP       string         // 经当前节点出去时对外露出的地址
-	exitLoc      string         // 出口所在国家的两位代码
-	exitCity     string         // 出口所在城市
-	exitRegion   string         // 出口所在一级行政区
-	exitISP      string         // 出口那条线路的运营商 / 机房
-	exitNode     string         // 上面那些是哪个节点测出来的:自动选择在后台换了节点就得重测
-	exitAt       time.Time      // 上次测出口的时间:节点没变也隔一阵子复查一次
-	exitGen      uint64         // 出口查询的代数:换节点 / 重连就加一,慢的旧查询回来发现代数变了就丢弃,不会把旧节点的出口盖到新节点上
+	plainOnce    sync.Once       // plainTr 第一次用时建
+	plainTr      *http.Transport // 闸没开时服务自己直连共用的 Transport(关着 IPv6 只拨 IPv4,见 plainHTTP)
+	delays       map[string]int  // 最近一次全节点测速结果
+	ping         int             // 当前节点最近一次测得的延迟(毫秒):健康检查本来就要测一次,顺手记下来给界面用
+	exitIP       string          // 经当前节点出去时对外露出的地址
+	exitLoc      string          // 出口所在国家的两位代码
+	exitCity     string          // 出口所在城市
+	exitRegion   string          // 出口所在一级行政区
+	exitISP      string          // 出口那条线路的运营商 / 机房
+	exitNode     string          // 上面那些是哪个节点测出来的:自动选择在后台换了节点就得重测
+	exitAt       time.Time       // 上次测出口的时间:节点没变也隔一阵子复查一次
+	exitGen      uint64          // 出口查询的代数:换节点 / 重连就加一,慢的旧查询回来发现代数变了就丢弃,不会把旧节点的出口盖到新节点上
 	noListen     bool
 
 	missingSets []builder.MissingRuleSet // 上一次生成配置时本地没有、因此摘掉了的规则集(界面要提示,连上之后要去补)
@@ -139,6 +153,17 @@ type Daemon struct {
 	directHeld map[uint64]context.CancelFunc
 	directSeq  uint64
 	tunnel     ipc.TunnelView // 会话看护的记录(见 session_policy.go)
+
+	// selGen 用户的选择(选中的节点 / 线路组、「线路自动」、当前订阅)每变一次加一(setSettings 里比出来)。
+	// 自救测速要等好几十秒,切 proxy 之前拿它核对这期间用户有没有改选,改过就放弃(见 recoverRoute)。
+	selGen atomic.Uint64
+	// selMu 切 proxy 那一下串行:自救"核对代数 + 切过去"和就地换选择(applySelected)不交错 ——
+	// 要么自救先切、用户的随后盖过来,要么自救核对时就看到代数变了。只包住内核调用,不碰别的锁。
+	selMu sync.Mutex
+	// connGen 内核每成功起来一次加一:旧版本存的订阅缓存每次连接只补拉一次(见 maybeRefresh),按它认"这次连接"。
+	connGen atomic.Uint64
+	// outdatedTried 订阅 id → 补拉旧缓存那次是哪一次连接里试的(d.mu 管)
+	outdatedTried map[string]uint64
 }
 
 type persisted struct {
@@ -169,10 +194,10 @@ func NewWithOptions(o Options) (*Daemon, error) {
 		noListen: o.NoListen, releaseTun: o.ReleaseTun,
 		log:      logx.New(filepath.Join(paths.Logs(), "service.log"), 5<<20, 3),
 		coreLog:  logx.New(filepath.Join(paths.Logs(), "core.log"), 5<<20, 3),
-		http:     &http.Client{Timeout: 30 * time.Second},
 		profiles: map[string]*profile.Profile{},
 		fetchErr: map[string]string{}, fetchLink: map[string]string{},
 	}
+	d.http = d.plainHTTP(30 * time.Second) // 关着 IPv6 只拨 IPv4
 	if installErr != nil {
 		d.logf("内置规则集铺不下去(少几条规则,连接不受影响): %v", installErr)
 	}
@@ -186,8 +211,9 @@ func NewWithOptions(o Options) (*Daemon, error) {
 	if o.Platform != nil {
 		d.core.SetPlatform(o.Platform)
 	}
-	s, err := settings.Load(paths.Settings())
+	s, raw, err := settings.LoadRaw(paths.Settings())
 	d.settingsOK = err == nil
+	d.diskBase, d.diskRaw, d.diskOK = s.Clone(), raw, err == nil
 	if err != nil {
 		// 设置决定「防流量逃逸」与网卡 IPv6 策略,损坏 / 不可读时确实不能拿默认值去覆盖并撤保护。
 		// 但 m29 的做法是整个服务拒绝启动 —— 那把用户关在了门外:Windows 上托盘只剩一句"服务未运行",
@@ -198,7 +224,7 @@ func NewWithOptions(o Options) (*Daemon, error) {
 		d.logf("设置读不出来,先用默认值起来,但不会动现有的隐私保护(去设置页保存一次即可修复,原文件会先另存一份): %v", err)
 	}
 	d.settings = s
-	d.settingsGeneration = 1
+	d.settingsGeneration = firstGeneration()
 	d.persistedOK = true
 	d.applyLogRetention()
 	d.initCoreLog(s.CoreLogDisk)
@@ -272,8 +298,10 @@ func (d *Daemon) loadProfileCaches() {
 	}
 	if healed && d.settingsOK {
 		// 设置读不出来时手上这份是默认值,写回去等于把用户损坏但仍有救的文件抹成空白。
-		if err := d.settings.Save(paths.Settings()); err != nil {
+		if saved, err := d.saveSettingsFile(d.settings); err != nil {
 			d.logf("恢复订阅链接后写设置失败: %v", err)
+		} else {
+			d.settings = saved
 		}
 	}
 	if legacy, err := profile.Load(paths.LegacyProfileCache()); err == nil {
@@ -312,6 +340,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 	d.reconcileGuard()
 	d.reconcileNICIPv6()
 	go d.autoProbeLoop(ctx)
+	go d.lineWatchLoop(ctx)
 	if netmode.GuardInstallable() {
 		go d.guardWatchLoop(ctx)
 	}
@@ -402,16 +431,22 @@ func (d *Daemon) persistedStateOK() bool {
 	return d.persistedOK
 }
 
+// savePersisted 落盘连接状态(想不想连着)。persistMu 串行:同一时刻只有一个在写,后到的改名后落盘,磁盘上就是它的值;
+// 临时文件每次另起一个名字(os.CreateTemp,同目录才能原子改名):以前固定写 state.json.tmp,两个调用交错时
+// 一个改完名、另一个的改名就报"文件不存在",还可能把写了一半的内容改名成 state.json。
 func (d *Daemon) savePersisted(p persisted) error {
 	b, err := json.Marshal(p)
 	if err != nil {
 		return err
 	}
-	tmp := paths.State() + ".tmp"
-	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	d.persistMu.Lock()
+	defer d.persistMu.Unlock()
+	dst := paths.State()
+	f, err := os.CreateTemp(filepath.Dir(dst), filepath.Base(dst)+".*.tmp") // 权限 0600
 	if err != nil {
 		return err
 	}
+	tmp := f.Name()
 	if _, err = f.Write(b); err == nil {
 		err = f.Sync()
 	}
@@ -422,7 +457,7 @@ func (d *Daemon) savePersisted(p persisted) error {
 		_ = os.Remove(tmp)
 		return err
 	}
-	if err := os.Rename(tmp, paths.State()); err != nil {
+	if err := os.Rename(tmp, dst); err != nil {
 		_ = os.Remove(tmp)
 		return err
 	}
@@ -451,35 +486,241 @@ func (d *Daemon) getSettings() settings.Settings {
 	return d.settings.Clone()
 }
 
-func (d *Daemon) setSettings(s settings.Settings) error {
-	if err := s.Validate(); err != nil {
-		return err
+// 写设置一律"在此刻的设置上只改自己那几项"(updateSettings / editSettings / writeSettings):不再有"先 getSettings 读整份、
+// 改几项、再整份写回"的写法 —— 读和写之间别人改的(面板密码、设备、订阅、选择……)会被这份旧快照盖回去。
+
+// updateSettings 读改写一气呵成:fn 改的是此刻的设置(和别的写设置互斥,不会把这期间别人写的盖掉),返回 false 表示不用改。
+// fn 里别碰内核、别拿别的锁(持着 configPublishMu)。
+func (d *Daemon) updateSettings(fn func(s *settings.Settings) bool) error {
+	_, err := d.writeSettings(func(cur settings.Settings) (settings.Settings, bool) {
+		ok := fn(&cur)
+		return cur, ok
+	})
+	return err
+}
+
+// editSettings 同 updateSettings,fn 能报错(报错就不写、原样返回;报 errUnchanged 是不用写,不算错);返回写下的那份。
+func (d *Daemon) editSettings(fn func(s *settings.Settings) error) (settings.Settings, error) {
+	var fnErr error
+	s, err := d.writeSettings(func(cur settings.Settings) (settings.Settings, bool) {
+		fnErr = fn(&cur)
+		return cur, fnErr == nil
+	})
+	if errors.Is(fnErr, errUnchanged) {
+		return s, nil
 	}
+	if fnErr != nil {
+		return s, fnErr
+	}
+	return s, err
+}
+
+// errUnchanged editSettings 的 fn 说"不用改"。
+var errUnchanged = errors.New("settings unchanged")
+
+// writeSettings 落盘并换上新设置。next 拿到的是此刻的设置(深拷贝),返回要写的那份;false 表示不用写。
+// 返回写下的那份(不用写时是此刻的设置)。
+func (d *Daemon) writeSettings(next func(cur settings.Settings) (settings.Settings, bool)) (settings.Settings, error) {
 	d.configPublishMu.Lock()
 	defer d.configPublishMu.Unlock()
 	d.mu.Lock()
+	cur := d.settings.Clone()
 	unreadable := !d.settingsOK
 	d.mu.Unlock()
+	s, ok := next(cur)
+	if !ok {
+		return cur, nil
+	}
+	if err := s.Validate(); err != nil {
+		return cur, err
+	}
+	d.mu.Lock()
+	p, v6 := d.profiles[s.ActiveProfile], d.v6Only
+	d.mu.Unlock()
+	fillSelectedNode(&s, cur, p, builder.V6Blocked(p, s, v6))
 	if unreadable {
 		// 原文件读不出来、手上是默认值:这一存就把它整份覆盖。先另存一份,留不下就不存
 		bak, err := settings.Preserve(paths.Settings())
 		if err != nil {
-			return fmt.Errorf("原设置文件读不出来,另存一份失败,先不覆盖它: %w", err)
+			return cur, fmt.Errorf("原设置文件读不出来,另存一份失败,先不覆盖它: %w", err)
 		}
 		if bak != "" {
 			d.logf("原设置文件读不出来,已另存为 %s,现在按新设置覆盖", bak)
 		}
 	}
-	if err := s.Save(paths.Settings()); err != nil {
-		return err
+	s, err := d.saveSettingsFile(s) // 别的进程这期间写过文件:它改的那几项合并进来
+	if err != nil {
+		return cur, err
 	}
 	d.mu.Lock()
+	if s.Selected != d.settings.Selected || s.LineAuto != d.settings.LineAuto || s.ActiveProfile != d.settings.ActiveProfile {
+		d.selGen.Add(1) // 用户改了选择:正在跑的自救切 proxy 之前会看到(见 recoverRoute)
+	}
 	d.settings = s
 	d.settingsGeneration++
+	d.rememberRev(d.settingsGeneration, s)
 	d.settingsOK = true // 刚刚整份写成功了,文件从此可信 —— 之前读不出来的那次到此为止
 	d.mu.Unlock()
 	d.applyLogRetention()
-	return nil
+	return s.Clone(), nil
+}
+
+// saveSettingsFile 设置落盘:别的进程(服务没跑时的命令行、「恢复网络」的离线兜底)这期间写过文件,就在文件现在的内容上
+// 合并这次改的字段(见 settings.SaveChecked)。返回实际存下的那份,记成下一次的 base。调用方保证不并发(writeSettings 持着
+// configPublishMu;启动时只有一个人)。
+func (d *Daemon) saveSettingsFile(s settings.Settings) (settings.Settings, error) {
+	d.mu.Lock()
+	base, raw, ok := d.diskBase, d.diskRaw, d.diskOK
+	d.mu.Unlock()
+	saved, wrote, err := settings.SaveChecked(paths.Settings(), base, raw, ok, s)
+	if err != nil {
+		return s, err
+	}
+	d.mu.Lock()
+	d.diskBase, d.diskRaw, d.diskOK = saved.Clone(), wrote, true
+	d.mu.Unlock()
+	return saved, nil
+}
+
+// firstGeneration 这个服务进程的设置从第几版数起:随机挑一个(小于 2^52,页面 JS 的数字照样精确)。版本号经控制口给出去,
+// 存回来时按它找出发的那一版(见 MSetSettings);每次启动都从 1 数的话,设置页在旧进程下打开、服务这期间重启过(自动更新、
+// 崩溃重启),带回来的旧版本号会对上新进程的另一版,按错的基准合并 —— 页面没改的字段被旧值盖掉,改了的反倒被当成没改。
+// 随机起点下,别的进程给出去的版本号落进本进程记着的那几版里的机会是 settingsKeep/2^52,认不出就让人重开设置。
+func firstGeneration() uint64 {
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return uint64(time.Now().UnixNano())&(1<<52-1) | 1
+	}
+	return binary.LittleEndian.Uint64(b[:])&(1<<52-1) | 1
+}
+
+// settingsKeep 记多少版设置(见 settingsHist)。选节点、刷新订阅也会出新版,设置页开着放一阵子也够用。
+const settingsKeep = 128
+
+// rememberRev 记下一版设置。调用方持着 d.mu。
+func (d *Daemon) rememberRev(rev uint64, s settings.Settings) {
+	if rev == 0 {
+		return
+	}
+	if d.settingsHist == nil {
+		d.settingsHist = map[uint64]settings.Settings{}
+	}
+	if _, ok := d.settingsHist[rev]; ok {
+		return
+	}
+	s = s.Clone()
+	s.Rev = 0
+	d.settingsHist[rev] = s
+	for k := range d.settingsHist {
+		if k+settingsKeep <= rev {
+			delete(d.settingsHist, k)
+		}
+	}
+}
+
+// settingsWithRev 此刻的设置,带上版本号(经控制口给出去的那份;存回来时按这一版合并,见 MSetSettings)。
+func (d *Daemon) settingsWithRev() settings.Settings {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	s := d.settings.Clone()
+	s.Rev = d.settingsGeneration
+	d.rememberRev(s.Rev, d.settings)
+	return s
+}
+
+// settingsAt 记着的那一版设置;认不出(太旧、不是这个服务进程给出去的)返回 false。
+func (d *Daemon) settingsAt(rev uint64) (settings.Settings, bool) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	s, ok := d.settingsHist[rev]
+	return s.Clone(), ok
+}
+
+// rollbackSelection 换选择(选节点、翻「线路自动」、保存设置里改的选择)要重建配置、而新配置备不出来时(旧内核照跑,
+// 返回「切换失败,保持当前连接」):把落盘的选择退回 prev,和正在跑的对得上 —— 界面按失败把开关拨回去,
+// 设置里却留着新选择的话,下一次重连会悄悄按它连,再拨一次开关又成了空操作。只退选择这几项;
+// 这期间选择又被改过(不是我们写的那份)就不动。
+func (d *Daemon) rollbackSelection(prev, wrote settings.Settings) {
+	if err := d.updateSettings(func(cur *settings.Settings) bool {
+		if cur.Selected != wrote.Selected || cur.LineAuto != wrote.LineAuto || cur.ActiveProfile != prev.ActiveProfile {
+			return false
+		}
+		cur.Selected, cur.LineAuto, cur.SelectedNode = prev.Selected, prev.LineAuto, prev.SelectedNode
+		return true
+	}); err != nil {
+		d.logf("切换失败后退回原来的选择没成功: %v", err)
+	}
+}
+
+// errSelectionMoved 在写设置外面按读到的选择算好的结果,写的时候选择已经被别人改了(见 MSetLineAuto)。
+var errSelectionMoved = errors.New("selection changed meanwhile")
+
+// errNoProfile 要改的那条订阅已经没了(可能是刚被别处删的)。
+var errNoProfile = errors.New("没有这条订阅")
+
+// revertSettings 把 prev → wrote 这次改了的顶层字段在此刻的设置上退回 prev 的值(见 settings.Merge3):这期间别人改的别的字段留着。
+func (d *Daemon) revertSettings(prev, wrote settings.Settings) error {
+	var mergeErr error
+	_, err := d.writeSettings(func(cur settings.Settings) (settings.Settings, bool) {
+		var m settings.Settings
+		if m, mergeErr = settings.Merge3(wrote, cur, prev); mergeErr != nil {
+			return cur, false
+		}
+		if m.Selected != cur.Selected {
+			m.SelectedNode = prev.SelectedNode // 选择退回去了:线路组用不了时用的那台也跟着退
+		}
+		return m, true
+	})
+	if mergeErr != nil {
+		return mergeErr
+	}
+	return err
+}
+
+// fillSelectedNode 选的是线路组时记着"线路组用不了的时候用哪台"(settings.SelectedNode:退回旧版本时磁盘上 selected 写的就是它,
+// 线路组从订阅里没了时这一轮也用它)。已经记着的还在组里就留着 —— 调用方可以先填上更合适的(用户原来在用的那台、
+// 组里此刻在用的那台);不然取第一台这一轮能用的(blocked 是这一轮不用的 IPv6 节点;提示节点同样跳过,见 pickMember)。经控制口来的整份设置里没有它:选择没变就沿用原来记的。
+// 选的是节点、自动选择就清空;选的东西在订阅里已经没有了(线路组没了)就保留 —— 这时候正要靠它(见 builder.Effective)。
+// 选的线路组成员成了全部节点(订阅里只剩这一条线路,见 profile.Profile.Whole)照线路组算:这一轮用的是自动选择,
+// 记着的这台只给退回旧版本时用,也得是这条线路上的。换了订阅时不沿用别的订阅里记的那台。
+//
+// SelectedNode 和 Selected 写成同一个名字,是"明说了选的就是这个节点"(见 MSelectNode):清空。
+func fillSelectedNode(s *settings.Settings, cur settings.Settings, p *profile.Profile, blocked []string) {
+	s.SelectedGroup = "" // 只在磁盘上用(见 settings.Save)
+	if s.SelectedNode == "" && s.Selected == cur.Selected && s.ActiveProfile == cur.ActiveProfile {
+		s.SelectedNode = cur.SelectedNode
+	}
+	if s.Selected == "" || s.SelectedNode == s.Selected {
+		s.SelectedNode = ""
+		return
+	}
+	if p == nil {
+		return
+	}
+	g, ok := p.Group(s.Selected)
+	if !ok {
+		g, ok = p.WholeGroup(s.Selected)
+	}
+	if ok {
+		if slices.Contains(g.Members, s.SelectedNode) {
+			return
+		}
+		s.SelectedNode = pickMember(g.Members, builder.HintNodes(p), blocked)
+		return
+	}
+	if s.ActiveProfile != cur.ActiveProfile {
+		s.SelectedNode = ""
+		return
+	}
+	if slices.Contains(p.Tags, s.Selected) {
+		// 选的名字现在是个普通节点。原来选的是线路组(记着同线路那一台)、这次也没改选择:留着 —— 服务器端不再出这个组、
+		// 订阅里冒出个同名节点(外部订阅的第三方节点)时,不按名字跟过去,这一轮用记着的那台(见 builder.Effective)。
+		// 用户在列表里明点了这个节点,MSelectNode 会把 SelectedNode 写成它自己,在上面就清掉了。
+		if s.Selected == cur.Selected && s.SelectedNode != "" && s.SelectedNode == cur.SelectedNode && builder.LineSelected(cur) {
+			return
+		}
+		s.SelectedNode = ""
+	}
 }
 
 func (d *Daemon) settingsSnapshot() (settings.Settings, uint64) {
@@ -623,16 +864,28 @@ func (d *Daemon) noteFetchErr(id string, err error) {
 // (防逃逸下域名改经 DoH 解析,见 directHTTP)。
 // 订阅无效 / 到期这类错误不换路径,直接返回。
 func (d *Daemon) fetchProfile(ctx context.Context, url string) (*profile.Profile, error) {
+	return d.fetchProfileVia(ctx, url, false)
+}
+
+// fetchProfileVia tunnelOnly 为真时只经当前代理拉一次:不让 auto 组强测全部节点、不走最后那一跳直连,内核没跑就不拉 ——
+// 给"可有可无"的补拉用(旧版本存的缓存认出线路组,见 maybeRefresh)。
+func (d *Daemon) fetchProfileVia(ctx context.Context, url string, tunnelOnly bool) (*profile.Profile, error) {
 	if !d.core.Running() {
+		if tunnelOnly {
+			return nil, state.Errf(state.CodeProfileNet, "没连上,不在隧道外拉")
+		}
 		return d.fetchWith(ctx, url, d.directHTTP())
 	}
-	routes := []string{"proxy", "auto", "auto", "auto", "direct"} // 当前代理一次、auto 三次、最后直连
+	routes := fetchRoutes // 当前代理一次、auto 三次、最后直连
+	if tunnelOnly {
+		routes = routes[:1]
+	}
 	var last error
 	for i, tag := range routes {
 		if tag == "auto" && i == 1 && d.getSettings().Selected != "" {
-			d.groupTest(ctx) // 手动选节点时 auto 组平时不测(见 core.QuietAuto);当前节点拉不到了才靠它找一条通的
+			d.groupTest(ctx, "auto") // 手动选节点 / 线路组时 auto 组平时不测(见 core.QuietAuto);当前节点拉不到了才靠它找一条通的
 		}
-		cl, err := d.core.HTTPClient(tag, 30*time.Second)
+		cl, err := d.core.HTTPClient(tag, fetchTry)
 		if err != nil {
 			continue
 		}
@@ -655,10 +908,25 @@ func (d *Daemon) fetchProfile(ctx context.Context, url string) (*profile.Profile
 		select { // 隔两秒再试下一条路径;调用方等不及了就别再往下试
 		case <-ctx.Done():
 			return nil, last
-		case <-time.After(2 * time.Second):
+		case <-time.After(fetchGap):
 		}
 	}
 	return nil, last
+}
+
+// 连着时拉订阅的回退链:每条路径一次最多 fetchTry,路径之间隔 fetchGap;第一次走 auto 之前还可能强测一轮自动选择组(groupTestMax)。
+var fetchRoutes = []string{"proxy", "auto", "auto", "auto", "direct"}
+
+const (
+	fetchTry     = 30 * time.Second
+	fetchGap     = 2 * time.Second
+	groupTestMax = 3 * time.Minute // groupTest 的上限
+)
+
+// fetchChainBudget 连着时拉一次订阅最长要多久(整条回退链走完)。界面、命令行等一次控制调用的上限(ipc.SlowCallTimeout)按它算。
+func fetchChainBudget() time.Duration {
+	n := time.Duration(len(fetchRoutes))
+	return n*fetchTry + (n-1)*fetchGap + groupTestMax
 }
 
 // fetchWith 用给定客户端拉一次,并把错误映射成错误码。
@@ -682,8 +950,9 @@ func (d *Daemon) fetchWith(ctx context.Context, url string, client *http.Client)
 
 // refreshCall 一次进行中的订阅刷新;done 关掉之后 err 就是它的结果。
 type refreshCall struct {
-	done chan struct{}
-	err  error
+	done       chan struct{}
+	err        error
+	tunnelOnly bool // 只经隧道拉的那种(见 fetchProfileVia):它失败了,要完整回退链的调用方得自己再走一遍
 }
 
 // refreshProfile 拉指定订阅并更新缓存,返回节点是否有变化。
@@ -692,17 +961,29 @@ type refreshCall struct {
 // 每一次都会从头再走一遍"代理 → auto → 直连",严格全局下就是多一次直连。后来的等那一次的结果,
 // 只报成败、不报"有变化"(变化由发起的那一方处理,免得重连两遍)。
 func (d *Daemon) refreshProfile(ctx context.Context, id string) (changed bool, err error) {
+	return d.refreshProfileVia(ctx, id, false)
+}
+
+// refreshProfileVia tunnelOnly 见 fetchProfileVia。
+func (d *Daemon) refreshProfileVia(ctx context.Context, id string, tunnelOnly bool) (changed bool, err error) {
 	d.mu.Lock()
-	if c := d.refreshing[id]; c != nil {
+	for {
+		c := d.refreshing[id]
+		if c == nil {
+			break
+		}
 		d.mu.Unlock()
 		select {
 		case <-c.done:
-			return false, c.err
 		case <-ctx.Done():
 			return false, ctx.Err()
 		}
+		if c.err == nil || !c.tunnelOnly || tunnelOnly {
+			return false, c.err
+		}
+		d.mu.Lock() // 在跑的那次只经隧道、没拉到:这边要的是完整回退链,自己再走一遍
 	}
-	c := &refreshCall{done: make(chan struct{})}
+	c := &refreshCall{done: make(chan struct{}), tunnelOnly: tunnelOnly}
 	if d.refreshing == nil {
 		d.refreshing = map[string]*refreshCall{}
 	}
@@ -737,12 +1018,15 @@ func (d *Daemon) refreshProfile(ctx context.Context, id string) (changed bool, e
 		d.noteFetchErr(id, err)
 		return false, err
 	}
-	np, err := d.fetchProfile(ctx, url)
+	np, err := d.fetchProfileVia(ctx, url, tunnelOnly)
 	if err != nil {
-		d.noteFetchErr(id, err)
+		if !tunnelOnly { // 补拉没拉到不算这条订阅出错(缓存照样能用,界面不必挂错误)
+			d.noteFetchErr(id, err)
+		}
 		return false, err
 	}
 	d.setProfileCache(id, np)
+	d.reconcileLineGroup(id, old, np) // 选中的线路组在新订阅里没了:记一台同线路还在的
 	return old == nil || !sameNodes(old, np), nil
 }
 
@@ -776,13 +1060,23 @@ func (d *Daemon) prepare(ctx context.Context) ([]byte, error) {
 		} else {
 			_, p = d.activeProfile()
 			d.logf("订阅「%s」已更新:%d 个节点", a.Name, len(p.Outbounds))
+			// 刷新时选中的线路组没了、记了一台同线路的(reconcileLineGroup):这是刷新自己写的,配置按写过之后的设置生成;
+			// 这期间别的设置变了照旧整份重来(见下面的代数核对)
+			if s2, gen2 := d.settingsSnapshot(); gen2 != settingsGeneration && onlySelectedNodeChanged(s, s2) {
+				s, settingsGeneration = s2, gen2
+			}
 		}
 	} else if stale {
 		d.logf("订阅缓存已过期:防流量逃逸开着,先用缓存连上,再经代理刷新(当前代理 → auto → 最后才直连)")
 	}
 	clashPort := d.pickClashPort(s.ClashPort)
+	nodeIPs, noA := resolveNodeHosts(ctx, p, d.bootResolver(s))
+	var v6Only map[string]bool
+	if !s.IPv6 { // 开着 IPv6 时内核解析节点域名按 prefer_ipv4,只有 IPv6 地址的域名照样连得上,不用找
+		v6Only = v6OnlyHosts(ctx, p, nodeIPs, noA, d.bootLookup4(s), d.bootLookup6(s))
+	}
 	cfg, rep, skipped, err := buildValid(d.core, builder.Input{Profile: p, Settings: s, DataDir: paths.DataDir(), ClashSecret: d.secret, RuleSetDir: paths.RuleSets(), LANDNS: netmode.LANResolvers(),
-		ClashPort: clashPort, NodeIPs: resolveNodeHosts(ctx, p, d.bootResolver(s)), SelfProcess: selfProcess()})
+		ClashPort: clashPort, NodeIPs: nodeIPs, V6Only: v6Only, SelfProcess: selfProcess()})
 	for tag, why := range skipped {
 		d.logf("节点「%s」本客户端建不起来,这次连接先跳过它: %s", tag, why)
 	}
@@ -798,11 +1092,21 @@ func (d *Daemon) prepare(ctx context.Context) ([]byte, error) {
 	}
 	d.mu.Lock()
 	d.unsupported = bad
+	d.v6Only = v6Only
 	d.mu.Unlock()
 	if err != nil {
 		return nil, err
 	}
 	d.noteMissingRuleSets(rep.Missing)
+	if len(rep.V6Blocked) > 0 {
+		d.logf("这 %d 个节点只能走 IPv6,而「允许 IPv6」关着:这次连接不用它们(不进自动选择和线路组,手动选它也连不上): %s", len(rep.V6Blocked), strings.Join(rep.V6Blocked, "、"))
+	}
+	if len(rep.Hints) > 0 {
+		d.logf("这 %d 个节点的地址是本机(127.0.0.1 这类),是订阅里显示用量 / 到期 / 续费的提示,不是能连的节点;自动选择和线路组不会用它们: %s", len(rep.Hints), strings.Join(rep.Hints, "、"))
+		if slices.Contains(rep.Hints, s.Selected) {
+			d.logf("选中的「%s」就是这种提示节点,连上也不通:换一个节点,或改回自动选择", s.Selected)
+		}
+	}
 	// Do not publish a rendered config if a concurrent settings update raced
 	// with the long subscription/build phase. The state machine will retry with
 	// the current policy, keeping DNS/route/privacy settings coherent.
@@ -826,6 +1130,12 @@ func (d *Daemon) prepare(ctx context.Context) ([]byte, error) {
 	d.preparedConfigHash = sha256.Sum256(cfg)
 	d.mu.Unlock()
 	return cfg, nil
+}
+
+// onlySelectedNodeChanged 两份设置只差"线路组用不了时用哪台"(settings.SelectedNode)。
+func onlySelectedNodeChanged(a, b settings.Settings) bool {
+	a.SelectedNode = b.SelectedNode
+	return reflect.DeepEqual(a, b)
 }
 
 // skippedNode 一个被剔掉的节点:原因,和判它时的出站内容(内容变了就不再沿用这个判断)。
@@ -911,20 +1221,13 @@ func (d *Daemon) start(cfg []byte) error {
 	}
 	// 内核启动时先读缓存里记着的模式与选中节点、盖过配置(见 core.PresetCache),起之前按这份配置对齐
 	d.mu.Lock()
-	var tags []string
-	if d.prepared != nil {
-		tags = d.prepared.Tags
-	}
+	prepared := d.prepared
 	d.mu.Unlock()
-	mode, sel := builder.ModeName(s.Mode), builder.DefaultSelected(tags, s.Selected)
+	mode, sel := builder.ModeName(s.Mode), builder.Effective(prepared, s)
 	if err := core.PresetCache(builder.CachePath(paths.DataDir()), mode, "proxy", sel); err != nil {
 		d.logf("内核缓存里的模式 / 节点没对齐,起来之后再纠正: %v", err)
 	}
-	if sel != "auto" || s.Mode == settings.ModeDirect {
-		d.core.QuietAuto(tags) // 手动选了节点、直连模式:这次连接不碰别的节点
-	} else {
-		d.core.QuietAuto(nil)
-	}
+	d.core.QuietAuto(quietTags(prepared, sel, s.Mode == settings.ModeDirect)) // 这次连接只碰用得到的节点
 	if err := d.core.Start(cfg); err != nil {
 		return d.classifyStart(err)
 	}
@@ -951,6 +1254,8 @@ func (d *Daemon) start(cfg []byte) error {
 	d.mu.Lock()
 	d.running = d.prepared // 起来了,这份订阅才是内核在用的
 	d.mu.Unlock()
+	// 新的一次连接(旧缓存的补拉按它每次连接补一次,见 maybeRefresh)
+	d.connGen.Add(1)
 	d.clashPort.Store(int32(d.preparedClashPortValue())) // 界面按它连 Clash API;同理要等真起来了才算数
 	d.markProbed()                                       // sing-box 启动时(PostStart)自己会把 auto 组全测一轮,定时测速从这时候起算
 	d.guardTunUp()
@@ -966,6 +1271,10 @@ func (d *Daemon) start(cfg []byte) error {
 		d.refreshExit(d.beginExit(d.currentNode()))
 	}()
 	go d.fillMissingRuleSets() // 隧道通了才去补规则集:直连多半拿不到 GitHub
+	if d.selectedV6(s) {
+		// 选的是这一轮连不上的 IPv6 节点:马上做一次健康检查,别让界面挂着「已连接」干等三分钟才知道不通
+		d.machine.CheckNow()
+	}
 	// 缓存过期而起内核前没刷新的(严格全局,见 refreshBeforeStart),现在经代理链刷新
 	go d.maybeRefresh(context.Background())
 	if s.TUN {
@@ -1037,9 +1346,9 @@ func (d *Daemon) health(ctx context.Context) error {
 		// 隐私没过也要探一次节点:节点挂了照样要走正常的阶梯(降级 → 换线 → 重建),
 		// 不能被隐私 Degraded 挡住,否则闸修不好的那段时间节点死了也没人管。
 		if !direct {
-			if _, err := d.core.URLTest(ctx, "proxy", builder.TestURL); err != nil {
+			if _, err := d.probeProxy(ctx); err != nil {
 				d.setPing(0)
-				return state.Errf(state.CodeNodeDown, "当前节点不可用: %v", err)
+				return d.nodeDown(err)
 			}
 		}
 		return perr
@@ -1047,10 +1356,10 @@ func (d *Daemon) health(ctx context.Context) error {
 	if direct {
 		return nil
 	}
-	ms, err := d.core.URLTest(ctx, "proxy", builder.TestURL)
+	ms, err := d.probeProxy(ctx)
 	if err != nil {
 		d.setPing(0)
-		return state.Errf(state.CodeNodeDown, "当前节点不可用: %v", err)
+		return d.nodeDown(err)
 	}
 	d.setPing(ms)
 	// 出口跟着"此刻实际在用哪个节点"走。自动选择模式下内核会自己切到更快的一个,
@@ -1064,6 +1373,15 @@ func (d *Daemon) health(ctx context.Context) error {
 		go d.refreshExit(d.beginExit(now))
 	}
 	return nil
+}
+
+// nodeDown 当前节点测不通时报给状态机的错误。正在用的是这一轮连不上的 IPv6 节点(关着 IPv6,见 builder.V6Blocked)时
+// 换成单独的错误码:界面据此说清楚原因和该去哪儿改,而不是笼统一句"当前节点不可用"。
+func (d *Daemon) nodeDown(err error) error {
+	if now := d.currentNode(); now != "" && slices.Contains(d.v6BlockedNow(d.getSettings()), now) {
+		return state.Errf(state.CodeNodeV6, "%v", err)
+	}
+	return state.Errf(state.CodeNodeDown, "当前节点不可用: %v", err)
 }
 
 // restart 重建配置重连:内核停了再起,隧道要断几秒,所以能就地改的(切节点、自动 / 手动、
@@ -1174,9 +1492,10 @@ func (d *Daemon) switchModeLive(mode string) error {
 	return nil
 }
 
-func (d *Daemon) restartForPrivacySettings(prev settings.Settings) error {
-	next := d.getSettings()
-	relax := privacyRelaxes(prev, next)
+// restartForPrivacySettings 换了隐私相关设置后重建连接。prev 是改之前的设置,wrote 是这次写下的那份:收紧方向重建失败时
+// 只把 prev → wrote 改了的那几项退回去(revertSettings),这期间别人改的(面板密码、设备……)不跟着退。
+func (d *Daemon) restartForPrivacySettings(prev, wrote settings.Settings) error {
+	relax := privacyRelaxes(prev, wrote)
 	hold := prev.GuardOn() && d.machine.Wanted()
 	nicHold := wantNICOff(prev) && d.machine.Wanted()
 	d.mu.Lock()
@@ -1191,12 +1510,16 @@ func (d *Daemon) restartForPrivacySettings(prev settings.Settings) error {
 		d.mu.Unlock()
 	}()
 	var rollback func() error
+	var rollbackErr error
 	if !relax {
-		rollback = func() error { return d.setSettings(prev) }
+		rollback = func() error {
+			rollbackErr = d.revertSettings(prev, wrote)
+			return rollbackErr
+		}
 	}
 	err := d.machine.RestartChecked(rollback)
 	current := d.getSettings()
-	if err != nil && !relax && !reflect.DeepEqual(current, prev) {
+	if err != nil && !relax && rollbackErr != nil {
 		// 收紧方向:重启失败、回滚设置也失败。此刻设置文件是新值、数据面按旧配置在跑(RestartChecked
 		// 失败时旧数据面保留)。闸与网卡 IPv6 由 syncGuard / syncNICIPv6 按当前设置继续对齐;
 		// 这里把事实报出去,不再用永久 hold 把撤闸路径一起锁死。
@@ -1577,29 +1900,48 @@ func (d *Daemon) protectWarnText() string {
 	return d.protectWarn
 }
 
-// groupTest 让 auto 组测一轮全部节点并换到最快的,记下时间。sing-box 自己的定时测速在配置里关掉了
-// (builder.autoGroup),什么时候测由这里叫:切到自动选择时立刻一次,之后 autoProbeLoop 按"定时测速(分钟)"来。
-func (d *Daemon) groupTest(ctx context.Context) {
-	// 超时要按节点数给。sing-box 是并发分批测的,节点多时 20 秒根本测不完,而 ctx 一到期
+// groupTest 让测速组(auto,或选中的线路组)测一轮自己的成员并换到最快的,记下时间。sing-box 自己的定时测速在配置里关掉了
+// (builder.urltestGroup),什么时候测由这里叫:切到自动选择 / 线路组时立刻一次,之后 autoProbeLoop 按"定时测速(分钟)"来。
+// 线路组只测这一组自己的服务器,不碰别的节点。
+func (d *Daemon) groupTest(ctx context.Context, tag string) {
+	// 超时要按成员数给。sing-box 是并发分批测的,节点多时 20 秒根本测不完,而 ctx 一到期
 	// 没轮到的那些会被当成"测失败"清掉历史 —— 下次自动选择就只能在测过的那几个里挑。
 	// 每个节点算 400ms,下限 20 秒、上限 3 分钟(和定时测速的最小间隔留足余量)。
 	budget := 20 * time.Second
-	if _, all, err := d.core.Group("auto"); err == nil && len(all) > 0 {
+	if all, ok := d.core.Members(tag); ok && len(all) > 0 {
 		budget = time.Duration(len(all)) * 400 * time.Millisecond
 		if budget < 20*time.Second {
 			budget = 20 * time.Second
 		}
-		if budget > 3*time.Minute {
-			budget = 3 * time.Minute
+		if budget > groupTestMax {
+			budget = groupTestMax
 		}
 	}
 	tctx, cancel := context.WithTimeout(ctx, budget)
 	defer cancel()
-	if _, err := d.core.GroupTest(tctx, "auto"); err != nil {
-		d.logf("自动选择组测速失败: %v", err)
+	if _, err := d.core.GroupTest(tctx, tag); err != nil {
+		if tag == "auto" {
+			d.logf("自动选择组测速失败: %v", err)
+		} else {
+			d.logf("线路组「%s」测速失败: %v", tag, err)
+		}
 		return
 	}
 	d.markProbed()
+}
+
+// probeTarget proxy 组此刻落在哪个测速组上(自动选择,或某条线路组):定时测速、切过去之后的现测都测它。
+// 落在单个节点上(手动选的、临时换线借的)返回空 —— 那时候后台不测别的节点。
+// 看的是内核里的实际状态而不是设置:设置里选的线路组 / 节点已经不在订阅里时,这一轮其实落在自动选择上,照样要测。
+func (d *Daemon) probeTarget() string {
+	now, _, err := d.core.Group("proxy")
+	if err != nil || now == "" {
+		return ""
+	}
+	if _, ok := d.core.Members(now); !ok {
+		return "" // 单个节点
+	}
+	return now
 }
 
 func (d *Daemon) markProbed() {
@@ -1608,8 +1950,8 @@ func (d *Daemon) markProbed() {
 	d.probeMu.Unlock()
 }
 
-// autoProbeLoop "定时测速(分钟)":自动选择时每隔这么久让 auto 组测一轮全部节点并换到最快的。手动指定节点时不测
-// (后台每几分钟把上百个节点全连一遍没有意义,打开节点列表时会现测)。以前这个间隔写在 auto 组的配置里,
+// autoProbeLoop "定时测速(分钟)":自动选择时每隔这么久让 auto 组测一轮它的成员(全部可用节点,IPv6 节点和提示节点不在组里)并换到最快的;选的是线路组时只测这一组。
+// 手动指定节点时不测(后台每几分钟把上百个节点全连一遍没有意义,打开节点列表时会现测)。以前这个间隔写在 auto 组的配置里,
 // 自动 / 手动之间切一次就得重建配置重连,断几秒网;现在配置不随模式变,切换就地完成,改间隔也即刻生效。
 func (d *Daemon) autoProbeLoop(ctx context.Context) {
 	t := time.NewTicker(15 * time.Second)
@@ -1621,7 +1963,11 @@ func (d *Daemon) autoProbeLoop(ctx context.Context) {
 		case <-t.C:
 		}
 		s := d.getSettings()
-		if s.Selected != "" || s.Mode == settings.ModeDirect || !d.core.Running() {
+		if s.Mode == settings.ModeDirect || !d.core.Running() {
+			continue
+		}
+		target := d.probeTarget()
+		if target == "" {
 			continue
 		}
 		every := time.Duration(s.ProbeMinutes) * time.Minute
@@ -1632,7 +1978,7 @@ func (d *Daemon) autoProbeLoop(ctx context.Context) {
 		due := time.Since(d.probeAt) >= every
 		d.probeMu.Unlock()
 		if due && d.hadTraffic() {
-			d.groupTest(ctx)
+			d.groupTest(ctx, target)
 		}
 	}
 }
@@ -1773,16 +2119,15 @@ func nicRetryDue(quiet bool, last, now time.Time) bool {
 	return !quiet || now.Sub(last) >= nicQuietRetry
 }
 
-// currentNode 内核里 proxy 组此刻实际落在哪个节点;自动选择时是 auto 组选中的那个。
+// currentNode 内核里 proxy 组此刻实际落在哪个节点;落在测速组(自动选择、线路组)上时是组里选中的那个。
+// 出口查询、健康检查里"节点变了就重查出口"都按它,线路组在组里换了服务器同样算换了节点。
 func (d *Daemon) currentNode() string {
 	now, _, err := d.core.Group("proxy")
 	if err != nil {
 		return ""
 	}
-	if now == "auto" {
-		if inner, _, err := d.core.Group("auto"); err == nil {
-			return inner
-		}
+	if inner, _, err := d.core.Group(now); err == nil {
+		return inner
 	}
 	return now
 }
@@ -1924,16 +2269,43 @@ func (d *Daemon) clearExit() {
 // 不做得更勤是因为没必要 —— 出口真变了几乎都是因为换了节点,而换节点是立刻就重测的。
 const exitMaxAge = 10 * time.Minute
 
-// maybeRefresh 定时刷新当前订阅;节点变了就重连。
+// maybeRefresh 定时刷新当前订阅;节点变了就重连。旧版本存的缓存(Outdated:节点照样能用,只是没认出线路组)也在这里补拉:
+// 连上之后只经隧道拉一次 —— 拉不到不强测全部节点、不在隧道外直连面板,同一次连接里也不再试(每 10 分钟一轮的定时刷新
+// 不会一遍遍重来),下次连上再补;缓存真过期了照旧走完整的回退链。不挡第一次连接(见 profile.Outdated)。
 func (d *Daemon) maybeRefresh(ctx context.Context) {
 	s := d.getSettings()
 	a, p := d.activeProfile()
-	if a == nil || (p != nil && p.URL == a.URL && !p.Stale(time.Duration(s.UpdateHours)*time.Hour)) {
+	if a == nil {
 		return
 	}
-	changed, err := d.refreshProfile(ctx, a.ID)
+	tunnelOnly := false
+	if p != nil && p.URL == a.URL && !p.Stale(time.Duration(s.UpdateHours)*time.Hour) {
+		if !p.Outdated() || !d.core.Running() {
+			return
+		}
+		gen := d.connGen.Load()
+		d.mu.Lock()
+		last, seen := d.outdatedTried[a.ID]
+		tried := seen && last == gen
+		if !tried {
+			if d.outdatedTried == nil {
+				d.outdatedTried = map[string]uint64{}
+			}
+			d.outdatedTried[a.ID] = gen
+		}
+		d.mu.Unlock()
+		if tried {
+			return
+		}
+		tunnelOnly = true
+	}
+	changed, err := d.refreshProfileVia(ctx, a.ID, tunnelOnly)
 	if err != nil {
-		d.logf("定时刷新订阅失败: %v", err)
+		if tunnelOnly {
+			d.logf("旧版本存的订阅缓存补拉没成功(经隧道拉的,这次连接不再试): %v", err)
+		} else {
+			d.logf("定时刷新订阅失败: %v", err)
+		}
 		return
 	}
 	if changed {
@@ -1946,9 +2318,10 @@ func (d *Daemon) maybeRefresh(ctx context.Context) {
 // 用域名写的节点,在隧道里是靠嗅探到的 SNI 命中直连规则的;不带 TLS 的协议嗅不出域名,那时就只能按地址认。
 // 解析不出来不算错(退回只按域名匹配),所以整体给一个短超时,不让它拖慢连接。
 // lookup 是解析函数(见 bootResolver:防逃逸下只用加密 DoH);为 nil 表示这一轮不解析。
-func resolveNodeHosts(ctx context.Context, p *profile.Profile, lookup func(context.Context, string) ([]string, error)) map[string][]string {
+// noA 是问到了、但没有 A 记录的那些域名(DoH 只问 A,见 lookupDoH):是不是只有 IPv6 地址,由 v6OnlyHosts 再判。
+func resolveNodeHosts(ctx context.Context, p *profile.Profile, lookup func(context.Context, string) ([]string, error)) (ips map[string][]string, noA map[string]bool) {
 	if p == nil || lookup == nil {
-		return nil
+		return nil, nil
 	}
 	hosts := map[string]bool{}
 	for _, hp := range p.Servers() {
@@ -1962,7 +2335,7 @@ func resolveNodeHosts(ctx context.Context, p *profile.Profile, lookup func(conte
 		hosts[h] = true
 	}
 	if len(hosts) == 0 {
-		return nil
+		return nil, nil
 	}
 	ctx, cancel := context.WithTimeout(ctx, 4*time.Second)
 	defer cancel()
@@ -1974,6 +2347,14 @@ func resolveNodeHosts(ctx context.Context, p *profile.Profile, lookup func(conte
 		go func(h string) {
 			defer wg.Done()
 			addrs, err := lookup(ctx, h)
+			if errors.Is(err, errNoARecord) {
+				mu.Lock()
+				if noA == nil {
+					noA = map[string]bool{}
+				}
+				noA[h] = true
+				mu.Unlock()
+			}
 			if err != nil || len(addrs) == 0 {
 				return
 			}
@@ -1984,9 +2365,9 @@ func resolveNodeHosts(ctx context.Context, p *profile.Profile, lookup func(conte
 	}
 	wg.Wait()
 	if len(out) == 0 {
-		return nil
+		return nil, noA
 	}
-	return out
+	return out, noA
 }
 
 func sameNodes(a, b *profile.Profile) bool {
@@ -2031,6 +2412,10 @@ func (d *Daemon) stateView() ipc.StateView {
 	s := d.getSettings()
 	profiles, active := d.profileViews()
 	v := ipc.StateView{Version: buildinfo.Version, Protocol: ipc.Version, State: d.machine.Snapshot(), Mode: s.Mode, Node: s.Selected, Profile: active, Profiles: profiles, Settings: s, Uptime: int64(d.core.Uptime().Seconds())}
+	if _, cur := d.activeProfile(); cur != nil {
+		// 没连着时显示这一轮连上会用的(选的东西订阅里没了时回落的那一个,见 builder.Effective),不是设置里那个已经不在的名字
+		v.Node = builder.Effective(cur, s)
+	}
 	if v.Node == "" {
 		v.Node = "auto"
 	}
@@ -2040,9 +2425,11 @@ func (d *Daemon) stateView() ipc.StateView {
 		}
 		if now, _, err := d.core.Group("proxy"); err == nil {
 			v.Node = now
-		}
-		if now, _, err := d.core.Group("auto"); err == nil {
-			v.AutoNow = now
+			// 只在 proxy 落在测速组(自动选择、线路组)上时才填:手动选了节点时 auto 组带着启动时预记的假历史,
+			// 它"选中"的那个从没测过,填出去通知栏、首页就会显示一个根本没在用的节点
+			if inner, _, err := d.core.Group(now); err == nil {
+				v.AutoNow = inner
+			}
 		}
 	}
 	// 节点列表直接来自最新的订阅缓存,不来自内核:刷新拿到的增删立刻反映在列表里,正在用的连接一点不动。
@@ -2080,6 +2467,16 @@ func (d *Daemon) stateView() ipc.StateView {
 	}
 	if want {
 		v.NICWarn = d.nicWarn
+	}
+	if a := d.settings.Active(); a != nil {
+		if p := d.profiles[a.ID]; p != nil {
+			v.Groups = p.Groups // 缓存里的订阅解析出来之后不再改,只读着用
+			v.V6Blocked = builder.V6Blocked(p, s, d.v6Only)
+			v.SelectedV6 = selectionBlocked(p, builder.Effective(p, s), v.V6Blocked)
+			v.SelNote = selNote(p, s)
+			v.Hints = builder.HintNodes(p)
+			v.SelectedHint = selectionBlocked(p, builder.Effective(p, s), v.Hints)
+		}
 	}
 	// 只标当前订阅里名字和内容都没变的:换了订阅、或刷新后机场把节点改成能用的,不再沿用上次连接时的判断
 	if a := d.settings.Active(); a != nil && len(d.unsupported) > 0 {
@@ -2143,7 +2540,7 @@ func (d *Daemon) registerHandlers() {
 		return map[string]string{"path": p}, nil
 	})
 	h(ipc.MConnect, func(json.RawMessage) (any, error) {
-		// 连接与断开互斥:两个并发调用会各自 savePersisted(同一个 .tmp 路径)并交错调用状态机,
+		// 连接与断开互斥:两个并发调用会各自 savePersisted 并交错调用状态机,
 		// 落盘的 Wanted 可能和状态机的意愿相反,重启后按落盘值重连或撤闸就错了。
 		d.connOpMu.Lock()
 		defer d.connOpMu.Unlock()
@@ -2190,15 +2587,19 @@ func (d *Daemon) registerHandlers() {
 		if err != nil {
 			return nil, err
 		}
-		s := d.getSettings()
-		prev := s
-		s.Mode = strings.ToLower(strings.TrimSpace(in.Mode))
-		if err := d.setSettings(s); err != nil {
+		mode := strings.ToLower(strings.TrimSpace(in.Mode))
+		var prev, s settings.Settings // s:改完的那份(和以前一样不含写的时候补的 SelectedNode),下面拿它和 prev 比
+		if _, err := d.editSettings(func(cur *settings.Settings) error {
+			prev = cur.Clone()
+			cur.Mode = mode
+			s = cur.Clone()
+			return nil
+		}); err != nil {
 			return nil, err
 		}
 		if d.core.Running() && s.Mode != prev.Mode {
 			if needsPrivacyRebuild(prev, s) || !d.modeSwitchIsLive(prev, s) || d.switchModeLive(s.Mode) != nil {
-				if err := d.restartForPrivacySettings(prev); err != nil {
+				if err := d.restartForPrivacySettings(prev, s); err != nil {
 					return nil, &ipc.CallError{Code: state.CodeOf(err), Msg: "切换模式失败,已保持旧配置与隐私保护: " + err.Error()}
 				}
 			}
@@ -2206,8 +2607,9 @@ func (d *Daemon) registerHandlers() {
 			// 规则模式有闸、直连没有。漏了的话切到直连后防火墙还按规则拦着,要等下一轮巡检才撤。
 			d.syncGuard()
 			d.syncTunDNS()
-			if prev.Mode == settings.ModeDirect && s.Selected == "" {
-				go d.groupTest(context.Background()) // 直连模式下 auto 组没测过(见 core.QuietAuto):现测一轮,不然它不知道选哪个
+			if target := d.probeTarget(); prev.Mode == settings.ModeDirect && target != "" {
+				// 直连模式下测速组没测过(见 core.QuietAuto):现测一轮,不然它不知道选哪个。线路组只测这一组
+				go d.groupTest(context.Background(), target)
 			}
 			return d.stateView(), nil
 		}
@@ -2220,56 +2622,101 @@ func (d *Daemon) registerHandlers() {
 		return d.stateView(), nil
 	})
 	h(ipc.MSelectNode, func(p json.RawMessage) (any, error) {
+		// 和切模式、保存设置一样串行:选择、「线路自动」开关、保存设置都会读改写 Selected / LineAuto
+		d.settingsOpMu.Lock()
+		defer d.settingsOpMu.Unlock()
 		in, err := ipc.Decode[struct {
 			Tag string `json:"tag"`
 		}](p)
 		if err != nil {
 			return nil, err
 		}
-		tag := strings.TrimSpace(in.Tag)
-		s := d.getSettings()
-		s.Selected = tag
-		if tag == "auto" {
-			s.Selected = ""
+		sel := strings.TrimSpace(in.Tag)
+		if sel == "auto" {
+			sel = ""
 		}
-		if err := d.setSettings(s); err != nil {
+		_, prof := d.activeProfile()
+		_, group := prof.Group(sel)
+		// 选的是节点(或自动选择):明说了就是它(SelectedNode 写成它自己)。不这样的话,原来选的线路组没了、冒出个同名节点之后,
+		// 用户明点这个节点也还当成"线路组没了、用记着的那台"(见 fillSelectedNode)。
+		// 选的是线路组:退回旧版本时用的那一台(见 settings.SelectedNode)记组里此刻在用的;内核里还没有这一组就照旧。
+		// 问内核放在写设置外面(写设置时不碰内核)
+		node := sel
+		if group {
+			node = d.groupNow(sel)
+		}
+		var prev, s settings.Settings
+		if _, err := d.editSettings(func(cur *settings.Settings) error {
+			prev = cur.Clone()
+			cur.Selected = sel
+			cur.LineAuto = lineAutoAfterSelect(prof, sel, cur.LineAuto)
+			if !group || node != "" {
+				cur.SelectedNode = node
+			}
+			s = cur.Clone()
+			return nil
+		}); err != nil {
 			return nil, err
 		}
-		if !d.core.Running() {
-			return d.stateView(), nil
-		}
-		// 自动 / 手动之间切换也是就地换:定时测速不再写在配置里(autoProbeLoop 按设置叫),配置不随模式变,
-		// 不用重建重连。以前这里要重启内核,每切一次断几秒网。
-		// 选的节点内核里还没有(刚刷新加进来的)、或者参数已经跟内核用的那份不一样:就地换不了,重建配置重连
-		if d.needRebuildFor(s.Selected) {
-			if err := d.restart(); err != nil {
-				return nil, &ipc.CallError{Code: state.CodeOf(err), Msg: "切换失败,保持当前连接: " + err.Error()}
-			}
-			return d.stateView(), nil
-		}
-		if err := d.core.Select("proxy", tag); err != nil {
+		if err := d.applySelected(s.Selected); err != nil {
+			d.rollbackSelection(prev, s)
 			return nil, err
 		}
-		// 选择组只对新连接生效:不掐掉老连接,用户会看到"选了新节点,连接列表里还是老节点",
-		// 长连接(Telegram、推送、anytls 的连接池)能挂十几分钟不断。掐掉后应用自己重连,就都走新节点了。
-		if err := d.core.CloseAllConnections(); err != nil {
-			d.logf("切节点后掐断旧连接失败(旧连接会继续用老节点): %v", err)
+		return d.stateView(), nil
+	})
+	h(ipc.MSetLineAuto, func(p json.RawMessage) (any, error) {
+		d.settingsOpMu.Lock()
+		defer d.settingsOpMu.Unlock()
+		in, err := ipc.Decode[struct {
+			On bool `json:"on"`
+		}](p)
+		if err != nil {
+			return nil, err
 		}
-		// 换了节点,出口多半也变了:先抹掉旧值,再在后台重新测延迟与出口
-		d.clearExit()
-		d.setPing(0)
-		go func() {
-			// 切到自动选择:先让 auto 组现测一轮换到最快的,首页的延迟 / 出口才是新节点的
-			if s.Selected == "" {
-				d.groupTest(context.Background())
+		// 换成哪个要问内核(线路组此刻在用哪台),在写设置外面按读到的选择算好;写的时候选择已经被别人改了(自动换线路、
+		// 删订阅、改手动节点)就按新的再算一遍。写只动选择这几项,别的字段(面板密码、设备……)不碰
+		var prev, s settings.Settings
+		var next string
+		var changed bool
+		for try := 0; ; try++ {
+			snap := d.getSettings()
+			_, prof := d.activeProfile()
+			hints, v6 := d.autoSkippedNow(snap)
+			next = lineAutoSelection(prof, snap.Selected, in.On, d.groupNow, hints, v6, snap.SelectedNode)
+			changed = next != snap.Selected
+			_, err = d.editSettings(func(cur *settings.Settings) error {
+				if cur.Selected != snap.Selected || cur.SelectedNode != snap.SelectedNode || cur.ActiveProfile != snap.ActiveProfile {
+					return errSelectionMoved
+				}
+				prev = cur.Clone()
+				if in.On && changed {
+					cur.SelectedNode = cur.Selected // 从组里的某一台换成线路组:线路组用不了时(退回旧版本)就用原来这台
+				}
+				cur.LineAuto, cur.Selected = in.On, next
+				s = cur.Clone()
+				return nil
+			})
+			if !errors.Is(err, errSelectionMoved) || try >= 2 {
+				break
 			}
-			ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
-			defer cancel()
-			if ms, err := d.core.URLTest(ctx, "proxy", builder.TestURL); err == nil {
-				d.setPing(ms)
+		}
+		if errors.Is(err, errSelectionMoved) {
+			return nil, errors.New("选择刚被别处改过,请再点一次")
+		}
+		if err != nil {
+			return nil, err
+		}
+		if changed {
+			if in.On {
+				d.logf("线路自动:打开,改用线路组「%s」", next)
+			} else {
+				d.logf("线路自动:关闭,固定到「%s」", next)
 			}
-			d.refreshExit(d.beginExit(d.currentNode()))
-		}()
+			if err := d.applySelected(next); err != nil {
+				d.rollbackSelection(prev, s)
+				return nil, err
+			}
+		}
 		return d.stateView(), nil
 	})
 	h(ipc.MProbeNodes, func(json.RawMessage) (any, error) {
@@ -2277,6 +2724,7 @@ func (d *Daemon) registerHandlers() {
 		if p == nil || len(p.Tags) == 0 {
 			return nil, errors.New("还没有订阅")
 		}
+		p = withoutHints(p)
 		ctx, cancel := context.WithTimeout(context.Background(), probeBudget(len(p.Tags)))
 		defer cancel()
 		// 测出一个就写进去一个:界面在测速期间会轮询 GetNodes,这样延迟是一个一个冒出来的,
@@ -2289,11 +2737,19 @@ func (d *Daemon) registerHandlers() {
 			d.delays[tag] = ms
 			d.mu.Unlock()
 		}
+		// 关着 IPv6 时不用的 IPv6 节点(见 builder.V6Blocked)不测:测它就是在走 IPv6。直接记不通
+		var skip map[string]bool
+		for _, tag := range d.v6BlockedNow(d.getSettings()) {
+			if skip == nil {
+				skip = map[string]bool{}
+			}
+			skip[tag] = true
+		}
 		var res map[string]int
 		if d.core.Running() {
 			// 已连接:只测内核里有的。列表来自订阅缓存,刚刷新加进来的节点内核里还没有,这些不测、也不给数。选它连上后自然有数。
 			in, _ := d.splitByCore(p)
-			res = d.probeConnected(ctx, in, set)
+			res = d.probeConnected(ctx, in, set, skip)
 		} else {
 			// 未连接:直连量到节点服务器的往返。但「防流量逃逸」的闸还开着的时候不做 —— 那说明用户想连着、
 			// 内核只是暂时没起来(在重启 / 在退避),这时从本机直接发 DNS 查询、ICMP、TCP 握手出去,
@@ -2307,7 +2763,8 @@ func (d *Daemon) registerHandlers() {
 			// 测速途中用户点了连接:装闸前就被取消(holdDirect),剩下的探测一律不再发 —— 它们都从本机直连出去
 			// (系统解析、ICMP、TCP、临时实例)。cancelOnGuard 再兜一层。
 			stop := d.cancelOnGuard(ctx, cancel)
-			res = probeDirect(ctx, p, set, d.logf, d.bootResolver(d.getSettings()), d.getSettings().LocalDNS)
+			s := d.getSettings()
+			res = probeDirect(ctx, p, set, d.logf, d.bootResolver(s), builder.LocalDNS(s), s.IPv6, skip)
 			stop()
 		}
 		// 存一份拷贝,别和返回值共用一个 map:返回值交给控制口在锁外序列化(遍历),而下一次测速每测出一个就往
@@ -2362,21 +2819,23 @@ func (d *Daemon) registerHandlers() {
 		if err != nil {
 			return nil, &ipc.CallError{Code: state.CodeOf(err), Msg: err.Error()}
 		}
-		s := d.getSettings()
 		name := strings.TrimSpace(in.Name)
 		if name == "" {
 			name = np.Title
 		}
-		if name == "" {
-			name = fmt.Sprintf("订阅 %d", len(s.Profiles)+1)
-		}
 		sp := settings.Profile{ID: settings.NewID(), Name: name, URL: url}
-		s.Profiles = append(s.Profiles, sp)
-		first := len(s.Profiles) == 1
-		if first {
-			s.ActiveProfile = sp.ID
-		}
-		if err := d.setSettings(s); err != nil {
+		first := false
+		if _, err := d.editSettings(func(s *settings.Settings) error {
+			if sp.Name == "" {
+				sp.Name = fmt.Sprintf("订阅 %d", len(s.Profiles)+1)
+			}
+			s.Profiles = append(s.Profiles, sp)
+			first = len(s.Profiles) == 1
+			if first {
+				s.ActiveProfile = sp.ID
+			}
+			return nil
+		}); err != nil {
 			return nil, err
 		}
 		d.setProfileCache(sp.ID, np)
@@ -2393,19 +2852,22 @@ func (d *Daemon) registerHandlers() {
 		if err != nil {
 			return nil, err
 		}
-		s := d.getSettings()
-		kept := s.Profiles[:0:0]
-		for _, sp := range s.Profiles {
-			if sp.ID != in.ID {
-				kept = append(kept, sp)
+		var kept []settings.Profile
+		wasActive := false
+		if _, err := d.editSettings(func(s *settings.Settings) error {
+			kept = s.Profiles[:0:0]
+			for _, sp := range s.Profiles {
+				if sp.ID != in.ID {
+					kept = append(kept, sp)
+				}
 			}
-		}
-		if len(kept) == len(s.Profiles) {
-			return nil, errors.New("没有这条订阅")
-		}
-		wasActive := s.ActiveProfile == in.ID
-		s.Profiles = kept
-		if err := d.setSettings(s); err != nil {
+			if len(kept) == len(s.Profiles) {
+				return errNoProfile
+			}
+			wasActive = s.ActiveProfile == in.ID
+			s.Profiles = kept
+			return nil
+		}); err != nil {
 			return nil, err
 		}
 		d.mu.Lock()
@@ -2416,13 +2878,18 @@ func (d *Daemon) registerHandlers() {
 		_ = os.Remove(paths.ProfileCache(in.ID))
 		if wasActive {
 			if len(kept) == 0 {
-				if err := d.savePersisted(persisted{Wanted: false}); err != nil {
-					return nil, err
-				}
-				d.bootWanted.Store(false)
-				d.machine.Disconnect()
-				d.syncGuard()
-				if err := d.syncNICIPv6(); err != nil {
+				// 和 MConnect / MDisconnect 一样拿 connOpMu:不然和同时点的连接交错,落盘的意愿可能和状态机相反
+				if err := func() error {
+					d.connOpMu.Lock()
+					defer d.connOpMu.Unlock()
+					if err := d.savePersisted(persisted{Wanted: false}); err != nil {
+						return err
+					}
+					d.bootWanted.Store(false)
+					d.machine.Disconnect()
+					d.syncGuard()
+					return d.syncNICIPv6()
+				}(); err != nil {
 					return nil, err
 				}
 			} else if err := d.restart(); err != nil {
@@ -2439,30 +2906,32 @@ func (d *Daemon) registerHandlers() {
 		if err != nil {
 			return nil, err
 		}
-		s := d.getSettings()
-		found := false
-		for _, sp := range s.Profiles {
-			if sp.ID == in.ID {
-				found = true
+		prevID, switched := "", false
+		if _, err := d.editSettings(func(s *settings.Settings) error {
+			if !slices.ContainsFunc(s.Profiles, func(sp settings.Profile) bool { return sp.ID == in.ID }) {
+				return errNoProfile
 			}
-		}
-		if !found {
-			return nil, errors.New("没有这条订阅")
-		}
-		if s.ActiveProfile != in.ID {
-			prevID := s.ActiveProfile
+			if s.ActiveProfile == in.ID {
+				return errUnchanged
+			}
+			prevID, switched = s.ActiveProfile, true
 			s.ActiveProfile = in.ID
-			if err := d.setSettings(s); err != nil {
-				return nil, err
-			}
+			return nil
+		}); err != nil {
+			return nil, err
+		}
+		if switched {
 			if err := d.restart(); err != nil {
 				// 新订阅没备出配置,旧内核照跑:设置也退回去,和正在跑的对得上。不退的话界面列的是新订阅的节点,
 				// 之后任何一次重建都按新订阅来,它拉不到就一直退避
-				if cur := d.getSettings(); cur.ActiveProfile == in.ID {
-					cur.ActiveProfile = prevID
-					if rerr := d.setSettings(cur); rerr != nil {
-						d.logf("切换订阅失败后退回原订阅也失败: %v", rerr)
+				if rerr := d.updateSettings(func(cur *settings.Settings) bool {
+					if cur.ActiveProfile != in.ID {
+						return false
 					}
+					cur.ActiveProfile = prevID
+					return true
+				}); rerr != nil {
+					d.logf("切换订阅失败后退回原订阅也失败: %v", rerr)
 				}
 				return nil, &ipc.CallError{Code: state.CodeOf(err), Msg: "切换订阅失败,保持当前连接: " + err.Error()}
 			}
@@ -2510,16 +2979,22 @@ func (d *Daemon) registerHandlers() {
 			if np, err = d.fetchProfile(context.Background(), u); err != nil {
 				return nil, &ipc.CallError{Code: state.CodeOf(err), Msg: err.Error()}
 			}
-			if s = d.getSettings(); find(s) < 0 { // 拉的这段时间里订阅可能被删了
-				return nil, errors.New("没有这条订阅")
+		}
+		name := strings.TrimSpace(in.Name)
+		s, err = d.editSettings(func(cur *settings.Settings) error {
+			i := find(*cur) // 拉的这段时间里订阅可能被删了
+			if i < 0 {
+				return errNoProfile
 			}
-			idx = find(s)
-			s.Profiles[idx].URL = u
-		}
-		if n := strings.TrimSpace(in.Name); n != "" {
-			s.Profiles[idx].Name = n
-		}
-		if err := d.setSettings(s); err != nil {
+			if urlChanged {
+				cur.Profiles[i].URL = u
+			}
+			if name != "" {
+				cur.Profiles[i].Name = name
+			}
+			return nil
+		})
+		if err != nil {
 			return nil, err
 		}
 		if urlChanged {
@@ -2559,7 +3034,7 @@ func (d *Daemon) registerHandlers() {
 		}
 		if in.Async {
 			// 界面用:放到后台刷、立刻返回,这条订阅标成"正在刷新";结果(拉取时间 / 失败原因)随状态推送回去。
-			// 回退链(当前节点 → 自动选择 → 直连)最长两分多钟,控制管道的一次调用 60 秒就断,界面会报超时而后台还在刷
+			// 连着时回退链(当前节点 → 自动选择 → 直连)最长 fetchChainBudget(约 5 分 40 秒),之后可能还要重连;界面不必一直占着一次调用
 			d.mu.Lock()
 			if d.refreshQueued == nil {
 				d.refreshQueued = map[string]bool{}
@@ -2635,20 +3110,22 @@ func (d *Daemon) registerHandlers() {
 		if mac == "" {
 			return nil, errors.New("MAC 地址无效")
 		}
-		s := d.getSettings()
-		found := false
-		for i := range s.Devices {
-			if s.Devices[i].MAC == mac {
-				s.Devices[i].Name, s.Devices[i].Mode, found = in.Name, in.Mode, true
-				if in.IP != "" {
-					s.Devices[i].IP = in.IP
+		s, err := d.editSettings(func(s *settings.Settings) error {
+			found := false
+			for i := range s.Devices {
+				if s.Devices[i].MAC == mac {
+					s.Devices[i].Name, s.Devices[i].Mode, found = in.Name, in.Mode, true
+					if in.IP != "" {
+						s.Devices[i].IP = in.IP
+					}
 				}
 			}
-		}
-		if !found {
-			s.Devices = append(s.Devices, settings.Device{MAC: mac, IP: in.IP, Name: in.Name, Mode: in.Mode})
-		}
-		if err := d.setSettings(s); err != nil {
+			if !found {
+				s.Devices = append(s.Devices, settings.Device{MAC: mac, IP: in.IP, Name: in.Name, Mode: in.Mode})
+			}
+			return nil
+		})
+		if err != nil {
 			return nil, err
 		}
 		if d.core.Running() && s.NetMode == settings.NetGateway {
@@ -2666,18 +3143,20 @@ func (d *Daemon) registerHandlers() {
 			return nil, err
 		}
 		mac := settings.NormalizeMAC(in.MAC)
-		s := d.getSettings()
-		kept := s.Devices[:0]
 		removedPolicy := false
-		for _, dev := range s.Devices {
-			if dev.MAC == mac {
-				removedPolicy = dev.Mode != ""
-				continue
+		s, err := d.editSettings(func(s *settings.Settings) error {
+			kept := s.Devices[:0]
+			for _, dev := range s.Devices {
+				if dev.MAC == mac {
+					removedPolicy = dev.Mode != ""
+					continue
+				}
+				kept = append(kept, dev)
 			}
-			kept = append(kept, dev)
-		}
-		s.Devices = kept
-		if err := d.setSettings(s); err != nil {
+			s.Devices = kept
+			return nil
+		})
+		if err != nil {
 			return nil, err
 		}
 		if removedPolicy && d.core.Running() && s.NetMode == settings.NetGateway {
@@ -2689,19 +3168,65 @@ func (d *Daemon) registerHandlers() {
 	})
 
 	// ---- 设置 ----
-	h(ipc.MGetSettings, func(json.RawMessage) (any, error) { return d.getSettings(), nil })
-	h(ipc.MSetSettings, func(p json.RawMessage) (any, error) {
-		d.settingsOpMu.Lock()
-		defer d.settingsOpMu.Unlock()
-		next, err := ipc.Decode[settings.Settings](p)
+	h(ipc.MGetSettings, func(json.RawMessage) (any, error) { return d.settingsWithRev(), nil })
+	h(ipc.MSetWebPassword, func(p json.RawMessage) (any, error) {
+		in, err := ipc.Decode[struct {
+			Password string `json:"password"`
+		}](p)
 		if err != nil {
 			return nil, err
 		}
-		prev := d.getSettings()
-		next.Schema = settings.Schema
-		next.ProbeMoved = true                                                // 用户这次保存的就是他要的间隔
-		next.Profiles, next.ActiveProfile = prev.Profiles, prev.ActiveProfile // 订阅另有接口管,这里不动
-		if err := d.setSettings(next); err != nil {
+		var pwErr error
+		if err := d.updateSettings(func(s *settings.Settings) bool {
+			pwErr = s.SetWebPassword(in.Password)
+			return pwErr == nil
+		}); err != nil {
+			return nil, err
+		}
+		return nil, pwErr
+	})
+	h(ipc.MSetSettings, func(p json.RawMessage) (any, error) {
+		d.settingsOpMu.Lock()
+		defer d.settingsOpMu.Unlock()
+		in, err := ipc.Decode[settings.Settings](p)
+		if err != nil {
+			return nil, err
+		}
+		// 带着版本号(界面、网页面板、命令行读设置时拿到的):只把相对那一版改了的字段合并到此刻的设置上 ——
+		// 设置页打开以后别处改的(命令行 settings、选节点、另一个界面)不被这份旧快照盖回去。面板密码只归 SetWebPassword 管。
+		// 没带版本号的(旧客户端)照旧整份存。
+		var base *settings.Settings
+		if in.Rev != 0 {
+			b, ok := d.settingsAt(in.Rev)
+			if !ok {
+				return nil, errors.New("设置在这期间被改过很多次(或服务重启过),认不出这份是从哪一版改的:重新打开设置再改")
+			}
+			base = &b
+		}
+		var prev, next settings.Settings
+		var mergeErr error
+		_, err = d.writeSettings(func(cur settings.Settings) (settings.Settings, bool) {
+			prev = cur
+			n := in
+			if base != nil {
+				if n, mergeErr = settings.Merge3(*base, cur, in); mergeErr != nil {
+					return cur, false
+				}
+				n.WebPassword = cur.WebPassword
+			}
+			n.Rev = 0
+			n.Schema = settings.Schema
+			n.ProbeMoved = true                                           // 用户这次保存的就是他要的间隔
+			n.Profiles, n.ActiveProfile = cur.Profiles, cur.ActiveProfile // 订阅另有接口管,这里不动
+			n.LineAuto = cur.LineAuto                                     // 「线路自动」只归 SetLineAuto 管:设置页拿着打开时的旧快照整份保存
+			// 下面拿它和 prev 比改了什么(不是写下的那份:那份补过 SelectedNode)
+			next = n
+			return n, true
+		})
+		if mergeErr != nil {
+			return nil, mergeErr
+		}
+		if err != nil {
 			return nil, err
 		}
 		if prev.CoreLogDisk != next.CoreLogDisk {
@@ -2720,7 +3245,7 @@ func (d *Daemon) registerHandlers() {
 		// 跨过严格全局边界(防逃逸 + 全局)、或动了 IPv6 / TUN,会改变密封 DNS 与闸的安全边界,
 		// 运行中必须整份重建;边界没变的切模式在下面就地切。规则模式下开关防逃逸只动防火墙,配置一字不变,不用重建。
 		if d.core.Running() && needsPrivacyRebuild(prev, next) {
-			if err := d.restartForPrivacySettings(prev); err != nil {
+			if err := d.restartForPrivacySettings(prev, next); err != nil {
 				msg := "隐私设置切换失败,已保持旧配置与隐私保护: " + err.Error()
 				if privacyRelaxes(prev, next) {
 					// 放宽方向不回滚,所以别再说"已保持旧配置" —— 那是假话。
@@ -2728,7 +3253,7 @@ func (d *Daemon) registerHandlers() {
 				}
 				return nil, &ipc.CallError{Code: state.CodeOf(err), Msg: msg}
 			}
-			return d.getSettings(), nil
+			return d.settingsWithRev(), nil
 		}
 		if protectionChanged(prev, next) {
 			d.syncGuard()
@@ -2759,32 +3284,18 @@ func (d *Daemon) registerHandlers() {
 					if err := d.restart(); err != nil {
 						return nil, &ipc.CallError{Code: state.CodeOf(err), Msg: "切换模式失败,保持当前连接: " + err.Error()}
 					}
-					return d.getSettings(), nil
+					return d.settingsWithRev(), nil
 				}
 				if next.Selected != prev.Selected {
-					if d.needRebuildFor(next.Selected) {
-						if err := d.restart(); err != nil {
-							return nil, &ipc.CallError{Code: state.CodeOf(err), Msg: "切换失败,保持当前连接: " + err.Error()}
-						}
-						return d.getSettings(), nil
+					// 和节点列表里切节点同一套:内核里没有 / 参数变了就重建,否则就地换、掐掉老连接、清掉出口与延迟重测
+					if err := d.applySelected(next.Selected); err != nil {
+						d.rollbackSelection(prev, next) // 换不过去:选择退回去,别的设置照存
+						return nil, err
 					}
-					sel := next.Selected
-					if sel == "" {
-						sel = "auto"
-						go d.groupTest(context.Background()) // 切到自动选择:现测一轮换到最快的
-					}
-					_ = d.core.Select("proxy", sel)
-					// 和节点列表里切节点保持一致:选择组只对新连接生效,不掐掉老连接的话
-					// 用户会看到"选了新节点、连接列表里还是老节点";出口和延迟也得清掉重测
-					if err := d.core.CloseAllConnections(); err != nil {
-						d.logf("切节点后掐断旧连接失败(旧连接会继续用老节点): %v", err)
-					}
-					d.clearExit()
-					d.setPing(0)
 				}
 			}
 		}
-		return d.getSettings(), nil
+		return d.settingsWithRev(), nil
 	})
 	h(ipc.MGetLogs, func(p json.RawMessage) (any, error) {
 		in, err := ipc.Decode[struct {

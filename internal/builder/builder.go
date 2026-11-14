@@ -48,6 +48,9 @@ type Input struct {
 	// 域名节点在隧道里靠嗅探到的 SNI 命中直连规则,但不带 TLS 的协议嗅不出域名,这份是兜底。
 	// 拿不到就留空,退回只按域名匹配。
 	NodeIPs map[string][]string
+	// V6Only 用域名写的节点里只解析得到 IPv6 地址的那些(域名 → true),守护进程解析节点域名时顺带找出来的。
+	// 关着 IPv6 时内核按 ipv4_only 解析节点域名,这种节点连不上:不进自动选择,界面标出来(见 V6Blocked)。拿不到就留空。
+	V6Only  map[string]bool
 	Darwin  bool // 按 macOS 生成:隧道网卡名由内核分配(utunN),不能写死;不传时看运行平台
 	Android bool // 按 Android 生成:"进程名"是应用包名(package_name),按应用直连的应用整个绕过 VPN(exclude_package);不传时看运行平台
 	Linux   bool // 按 Linux 生成:内核出站带 RouteMark(route.default_mark);不传时看运行平台
@@ -90,12 +93,60 @@ func ModeName(mode string) string {
 	}
 }
 
-// DefaultSelected proxy 组这一轮该落在哪个节点:设置里选的在订阅里就是它,否则自动选择。
-func DefaultSelected(tags []string, selected string) string {
-	if selected != "" && slices.Contains(tags, selected) {
+// SelectedFor proxy 组这一轮落在哪:设置里选的节点或线路组还在订阅里就是它,否则自动选择。
+func SelectedFor(p *profile.Profile, selected string) string {
+	if p == nil || selected == "" {
+		return "auto"
+	}
+	if slices.Contains(p.Tags, selected) {
+		return selected
+	}
+	if _, ok := p.Group(selected); ok {
 		return selected
 	}
 	return "auto"
+}
+
+// LineSelected 设置里选的是线路组(选的时候是):SelectedNode 记着组里的一台(见 settings.SelectedNode;选节点、自动选择时是空的)。
+func LineSelected(s settings.Settings) bool {
+	return s.Selected != "" && s.SelectedNode != "" && s.SelectedNode != s.Selected
+}
+
+// Present 设置里选的东西这一轮在订阅里还在不在:在就是它自己,不在返回 "auto"。同 SelectedFor,只是选的是线路组时只认同名的线路组 ——
+// 服务器端不再出这个组、订阅里(外部订阅并进来的第三方节点)又冒出个同名的普通节点时,那不是用户选的这条线路,不算还在。
+func Present(p *profile.Profile, s settings.Settings) string {
+	if p != nil && LineSelected(s) {
+		if _, ok := p.Group(s.Selected); ok {
+			return s.Selected
+		}
+		return "auto"
+	}
+	return SelectedFor(p, s.Selected)
+}
+
+// Effective 这一轮 proxy 组实际落在哪:同 SelectedFor,只是选的线路组在订阅里没了(线路改成只部署一台:服务器下线、
+// 入口停用、只分到一台)时,用记着的同线路那一台(settings.SelectedNode),线路、出口不变;那台也不在了才回落自动选择。
+// 选的线路组成员成了全部节点(订阅里只剩这一条线路,见 profile.Profile.Whole)不算没了:自动选择就是这条线路,用它 ——
+// 组里照样自动挑最快的、照样定时测,不把人固定在一台上。
+//
+// 选的线路组没了、订阅里却有个同名的普通节点时,不按名字跟过去(见 Present):照样用记着的那一台,那台也不在就自动选择。
+func Effective(p *profile.Profile, s settings.Settings) string {
+	sel := Present(p, s)
+	if sel != "auto" || s.Selected == "" || p == nil {
+		return sel
+	}
+	if _, whole := p.WholeGroup(s.Selected); whole {
+		return "auto"
+	}
+	if s.SelectedNode != "" && slices.Contains(p.Tags, s.SelectedNode) {
+		return s.SelectedNode
+	}
+	return sel
+}
+
+// DefaultSelected 同 SelectedFor,只认节点(给只有节点列表的地方用)。
+func DefaultSelected(tags []string, selected string) string {
+	return SelectedFor(&profile.Profile{Tags: tags}, selected)
 }
 
 // CachePath 内核缓存文件(选中节点、模式、fake-ip)的位置。
@@ -124,6 +175,10 @@ type Report struct {
 	// Missing 本地找不到的规则集。用到它们的规则已经从配置里摘掉,内核照样起得来,
 	// 只是那几条规则这一轮不生效;守护进程会在连上之后把它们补下来,下次连接就有了。
 	Missing []MissingRuleSet
+	// V6Blocked 这一轮连不上的 IPv6 节点(见 V6Blocked):已经从自动选择和线路组里摘掉,手动选它照样会选上,只是连不通。
+	V6Blocked []string
+	// Hints 订阅里的提示节点(地址只指向本机,见 HintNodes):同样不进自动选择和线路组,手动选它照样会选上,只是连不通。
+	Hints []string
 }
 
 // Build 渲染配置(带缩进的 JSON,便于放进诊断包看)。
@@ -158,15 +213,44 @@ func buildConfig(in Input, rep *Report) ([]byte, error) {
 		return nil, err
 	}
 	tags := in.Profile.Tags
-	selected := DefaultSelected(tags, s.Selected)
+	selected := Effective(in.Profile, s)
 
 	// ---- 出站 ----
-	outbounds := []any{
-		obj("type", "selector", "tag", "proxy", "outbounds", append([]string{"auto"}, tags...), "default", selected, "interrupt_exist_connections", true),
-		autoGroup(tags),
+	// 线路组只在选中的就是某条线路组时才进配置,而且全部放进去(线路之间切换才能就地完成)。选的是自动选择或某个节点时
+	// 一个都不放:生成的配置和没有这个功能时逐字节一样 —— 用不上的东西不进配置,也就没有让连接失败的机会。
+	var groups []profile.Group
+	if _, ok := in.Profile.Group(selected); ok {
+		groups = in.Profile.Groups
 	}
-	for _, raw := range in.Profile.Outbounds {
+	// 关着 IPv6 时要走 IPv6 的节点不进自动选择和线路组(见 V6Blocked);一个能用的都不剩时照旧放着,配置得建得起来,界面另有说明。
+	// 地址直接写成 IPv6 的还要改经 block 出站:手动选它时内核也不去拨,本机一个 IPv6 包都不发
+	rep.V6Blocked = V6Blocked(in.Profile, s, in.V6Only)
+	viaV6Block := v6Detours(in.Profile, rep.V6Blocked)
+	// 提示节点(地址只指向本机,见 HintNodes)同样不进,而且先于 IPv6 节点剔:剔完一个不剩时宁可留着 IPv6 节点
+	// (打开 IPv6、换个网络就能用),提示节点怎么都连不上。订阅里没有提示节点时 reachable 原样返回,配置一个字节都不变
+	rep.Hints = HintNodes(in.Profile)
+	members := func(list []string) []string { return reachable(reachable(list, rep.Hints), rep.V6Blocked) }
+	proxyList := make([]string, 0, 1+len(groups)+len(tags))
+	proxyList = append(proxyList, "auto")
+	for _, g := range groups {
+		proxyList = append(proxyList, g.Tag)
+	}
+	proxyList = append(proxyList, tags...)
+	outbounds := []any{
+		obj("type", "selector", "tag", "proxy", "outbounds", proxyList, "default", selected, "interrupt_exist_connections", true),
+		autoGroup(members(tags)),
+	}
+	for _, g := range groups {
+		outbounds = append(outbounds, urltestGroup(g.Tag, members(g.Members)))
+	}
+	for i, raw := range in.Profile.Outbounds {
+		if i < len(tags) && viaV6Block[tags[i]] {
+			raw = viaBlock(raw)
+		}
 		outbounds = append(outbounds, json.RawMessage(raw))
+	}
+	if len(viaV6Block) > 0 {
+		outbounds = append(outbounds, obj("type", "block", "tag", V6BlockTag))
 	}
 	outbounds = append(outbounds, obj("type", "direct", "tag", "direct"))
 
@@ -208,7 +292,7 @@ func buildConfig(in Input, rep *Report) ([]byte, error) {
 	// 「本地 DNS」在全局模式下只剩一个用处:给节点服务器自己的域名做解析(default_domain_resolver)。
 	// 设成 system 就是明文 53 发到路由器 / 运营商 —— 防流量逃逸开着的时候不能这么干,
 	// 换成加密的公共 DoH(按地址连,不再需要任何别的解析)。规则 / 直连模式不改,那本来就不承诺不直连。
-	localDNS := s.LocalDNS
+	localDNS := LocalDNS(s) // 关着 IPv6 时填的 IPv6 地址不去连
 	if localDNS == "system" && s.NoDirect && s.Mode == settings.ModeGlobal {
 		localDNS = SealedBootstrapDoH
 	}
@@ -707,9 +791,30 @@ func cidrSuffix(ip string) string {
 // 很长的间隔,idle_timeout 必须不小于它);什么时候测一轮由守护进程按设置里的"定时测速(分钟)"来叫
 // (Core.GroupTest),而且只在自动选择时叫 —— 手动指定了节点,后台每隔几分钟把上百个节点全连一遍没有意义,
 // 打开节点列表时会现测。这样配置不随"自动 / 手动"变:两者之间切换就地换选择组,不用重建配置重连(那要断几秒网)。
-func autoGroup(tags []string) map[string]any {
-	return obj("type", "urltest", "tag", "auto", "outbounds", tags, "url", TestURL, "tolerance", 50,
+func autoGroup(tags []string) map[string]any { return urltestGroup("auto", tags) }
+
+// urltestGroup 测速组(自动选择、线路组共用):测速地址用我们自己的 TestURL,订阅里组自带的地址和间隔一概不用;
+// 定时测速同样关掉,由守护进程按"定时测速(分钟)"只叫当前在用的那一组(sing-box 要求 interval 不大于 idle_timeout)。
+func urltestGroup(tag string, members []string) map[string]any {
+	return obj("type", "urltest", "tag", tag, "outbounds", members, "url", TestURL, "tolerance", 50,
 		"interval", "24h", "idle_timeout", "25h")
+}
+
+// reachable list 去掉 blocked 里的;一个不剩时原样返回(空的测速组整份配置都起不来)。blocked 为空时返回 list 本身。
+func reachable(list, blocked []string) []string {
+	if len(blocked) == 0 {
+		return list
+	}
+	out := make([]string, 0, len(list))
+	for _, t := range list {
+		if !slices.Contains(blocked, t) {
+			out = append(out, t)
+		}
+	}
+	if len(out) == 0 {
+		return list
+	}
+	return out
 }
 
 // hostCIDRs 把解析出来的地址转成规则要的写法,顺手挡掉不该进来的:

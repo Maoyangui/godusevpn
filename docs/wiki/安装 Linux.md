@@ -31,11 +31,21 @@ curl -fsSL https://raw.githubusercontent.com/Maoyangui/godusevpn/master/deploy/i
 |---|---|
 | `/etc/godusevpn/` | 设置(`settings.json`)、订阅配置 |
 | `/var/lib/godusevpn/` | 订阅缓存、规则集 `.srs`、`config.json`、日志、诊断包 |
-| Entware(梅林等) | 对应 `/opt/etc/` 与 `/opt/var/lib/` |
+| Entware(梅林等) | 对应 `/opt/etc/` 与 `/opt/var/lib/`;守护进程崩溃时的原因与栈、没起来的原因在 `/opt/var/log/godusevpn.stderr.log`(只有这些,不记连接目标) |
+
+服务没起来时看系统日志:systemd 用 `journalctl -u godusevpn`,OpenWrt 用 `logread -e godusevpn`,梅林看上面那个文件;
+`/var/lib/godusevpn/logs/crash.log` 里也有。系统日志里只有崩溃和没起来的原因,**不记访问记录**(内核给每条连接记的目标
+不往那里写,看内核日志用面板的日志页或 `godusevpn logs`;在终端里前台跑 `godusevpn run` 时照旧打在终端上)。
 
 自启按初始化系统落地:systemd 单元、OpenWrt 的 procd 脚本、Entware 的 init.d 脚本。
-服务崩了 systemd / procd 会自己拉起;梅林没有这种机制,启动时挂一条每分钟的定时任务(`cru`)代替 ——
-`godusevpn stop` 主动停掉的不拉,再 `start` 或重启路由器后恢复。
+开机自启的开关只管开机:关着时重启后服务不会自己起来,`godusevpn start` 照样能起。
+服务崩了 systemd / procd 会自己拉起;梅林没有这种机制,起服务时挂一条每分钟的定时任务(`cru`)代替(开机自启关着也一样)——
+`godusevpn stop` 主动停掉的不拉,再 `start` 或重启路由器(开着开机自启时)后恢复。
+在终端里前台跑 `godusevpn run`(调试用)不会挂这条定时;要前台调试,先 `godusevpn stop` 停掉服务,前台的 Ctrl-C 停掉之后也不会被拉到后台。
+
+> **梅林从 v0.7.16 及更早的版本升级**:升级前在面板里关掉了开机自启的,面板升级时跑的还是旧版本的启动脚本 ——
+> 它停掉旧的守护进程之后,因为开机自启关着而不起新的,服务就停着(开着「防流量逃逸」时会一直断网,看门狗也不会拉)。
+> **升级后若服务没起来,执行 `godusevpn start`**。从这一版往后再升级不会这样(新的启动脚本重启时不看开机自启的开关)。
 
 ## 本机模式(默认)
 

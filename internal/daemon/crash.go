@@ -7,6 +7,8 @@ import (
 	"runtime/debug"
 	"time"
 
+	sblog "github.com/sagernet/sing-box/log"
+
 	"github.com/Maoyangui/godusevpn/internal/buildinfo"
 	"github.com/Maoyangui/godusevpn/internal/paths"
 )
@@ -31,8 +33,9 @@ var crashFile *os.File
 // 收不到的:DLL 自己起的线程里崩掉(那里没有 Go 的 g,Go 不打印,系统直接结束进程),只剩系统日志里的
 // "意外终止"(7031 / 7034)。
 // 其余情形用 SetCrashOutput 另抄一份,fatal 的原因行留在标准错误那边:systemd / procd / launchd 都收标准
-// 错误,前台 run 模式留给控制台。Entware(梅林)的启动脚本把标准错误丢进 /dev/null,那里原因行仍会丢、
-// 只剩栈 —— 已知,要改 Entware 的启停脚本(和它的卸载问题一起)。
+// 错误,前台 run 模式留给控制台。Entware(梅林)没有收标准错误的系统日志,守护进程一启动自己把 fd 2 接到
+// paths.EntwareStderrLog(以前丢进 /dev/null,原因行就丢了)。由初始化系统拉起时守护进程一启动
+// (svc.KeepStderrForCrashes)把内核日志之类改去 /dev/null,标准错误那边只剩崩溃信息和没起来的原因;诊断包两份都带。
 func CaptureCrashes(service bool) {
 	dir := paths.Logs()
 	if err := os.MkdirAll(dir, 0o700); err != nil {
@@ -59,4 +62,32 @@ func rotateCrashLog(p string) {
 	if st, err := os.Stat(p); err == nil && st.Size() > crashLogMax {
 		_ = os.Rename(p, p+".1")
 	}
+}
+
+// QuietLibraryLogs 守护进程把标准错误改了道之后调(svc.KeepStderrForCrashes 返回 true 时,内核起来之前)。
+// sing-box 的日志包在包初始化时就建了一个包级日志,拿的是那一刻的 os.Stderr(原来的 fd 2):改 os.Stderr 管不到它,
+// 内核里用包级日志(log.Info 之类)写的东西照旧进原来的标准错误 —— 由初始化系统拉起时那就是系统日志、launchd 的日志文件、
+// 梅林的崩溃记录文件。换成不输出的。(内核正常运行的日志不走它,走 core 给的 PlatformLogWriter 和建内核那一刻的
+// os.Stderr;gVisor 的包级日志 sing-tun 自己就换成了不输出的。)
+func QuietLibraryLogs() {
+	sblog.SetStdLogger(sblog.NewNOPFactory().Logger())
+}
+
+// RecordFailure 守护进程没起来(建数据目录失败、控制管道被占着……这些不经它自己的日志)或者跑着出错退出时,把原因追加进
+// crash.log:诊断包会带上(见 diag.go);Windows 服务没有能看的标准错误,不记的话这个原因哪儿都不留,只剩系统日志里一个
+// 退出码。err 为 nil 什么都不做。数据目录本身建不成时也就记不下,那时原因照旧写到标准错误(svc.CrashStderr)。
+func RecordFailure(err error) {
+	if err == nil {
+		return
+	}
+	dir := paths.Logs()
+	if os.MkdirAll(dir, 0o700) != nil {
+		return
+	}
+	f, ferr := os.OpenFile(filepath.Join(dir, "crash.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if ferr != nil {
+		return
+	}
+	defer f.Close()
+	fmt.Fprintf(f, "%s 守护进程出错退出: %v\n", time.Now().Format("2006-01-02 15:04:05.000"), err)
 }

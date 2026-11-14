@@ -204,19 +204,26 @@ func switchOff() (bool, error) {
 		if err := paths.Ensure(); err != nil {
 			return false, fmt.Errorf("准备离线设置目录失败: %w", err)
 		}
-		var offline settings.Settings
-		offline, err = settings.Load(paths.Settings())
-		if err != nil {
+		// 读改写在设置文件的锁里一次做完(见 settings.Update):这期间别的进程(刚起来的守护进程、命令行 passwd)写的不被盖掉
+		changed := false
+		errNothing := errors.New("两个开关本来就都关着")
+		_, err = settings.Update(paths.Settings(), func(offline *settings.Settings) error {
+			if !offline.NoDirect && !offline.DisableNICIPv6 {
+				return errNothing
+			}
+			offline.NoDirect = false
+			offline.DisableNICIPv6 = false
+			changed = true
+			return nil
+		})
+		switch {
+		case errors.Is(err, errNothing):
+			return false, nil
+		case err != nil && !changed:
 			// 设置文件坏了就没法安全地"只改两项"(写回去会把别的都抹掉)。但这不该拦住撤闸:
 			// Clear 现在会带着这个错误继续往下走,先把网还给用户。
 			return false, fmt.Errorf("读取离线隐私设置失败: %w", err)
-		}
-		if !offline.NoDirect && !offline.DisableNICIPv6 {
-			return false, nil
-		}
-		offline.NoDirect = false
-		offline.DisableNICIPv6 = false
-		if err := offline.Save(paths.Settings()); err != nil {
+		case err != nil:
 			return false, fmt.Errorf("保存离线隐私设置失败: %w", err)
 		}
 		return true, nil
