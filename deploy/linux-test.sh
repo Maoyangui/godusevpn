@@ -63,9 +63,12 @@ a6=$(getent ahostsv6 www.google.com 2>/dev/null | awk '{print $1}' | grep -v '^:
 # 测出来的延迟也不是节点的真实延迟。真机上出现过(anytls 这类 TCP 节点),这里长期盯着。
 # nodepairs 订阅里所有节点的"地址:端口"。诊断里节点地址打了码,这里直接读订阅缓存(只有 root 读得到,脚本本来就是 root)。
 # 比对要连端口一起比:只按地址比会把远程 DoH(1.1.1.1:443,本来就该经代理走)也算进来。
+# 排掉回环和 0.0.0.0(和客户端认"提示节点"的规则一样,builder/hint.go 的 localServer):订阅里显示用量 / 到期 /
+# 提示的那几条"节点"地址是 127.0.0.1,客户端本来就不连它们;它们排在所有节点 IP 前面,拿它当节点去打,
+# 回环连接根本不进隧道、内核日志里不会有,那条"判给了直连"的检查就永远红。
 nodepairs() {
   d=$("$BIN" diag 2>/dev/null | sed -n 's/.*"dataDir": *"\([^"]*\)".*/\1/p' | head -1)
-  cat "$d"/profiles/*.json 2>/dev/null | tr -d ' ,"' | awk -F: '$1=="server"{s=$2} $1=="server_port"&&s!=""{print s":"$2; s=""}' | grep -E '^[0-9]+\.' | sort -u
+  cat "$d"/profiles/*.json 2>/dev/null | tr -d ' ,"' | awk -F: '$1=="server"{s=$2} $1=="server_port"&&s!=""{print s":"$2; s=""}' | grep -E '^[0-9]+\.' | grep -v -E '^(127\.|0\.0\.0\.0:)' | sort -u
 }
 loopcheck() {
   pairs=$(nodepairs)
