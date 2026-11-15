@@ -233,7 +233,12 @@ func switchOff() (bool, error) {
 	}
 	s.NoDirect = false
 	s.DisableNICIPv6 = false // 不关掉的话守护进程下一轮巡检又把网卡 IPv6 关回去
-	if err := ipc.Call(ctx, ipc.MSetSettings, s, nil); err != nil {
+	// 写设置要排在正在进行的设置事务后面:用户刚选了节点 / 开关了「线路自动」,守护进程持着同一把锁重建内核
+	// (解析节点地址、干跑,通常几秒)。只给 3 秒会超时,开关关不掉,闸撤了以后 15 秒内又被装回来。
+	// 读设置照旧 3 秒(控制口坏了要快点放弃);「恢复网络」是单独提权跑的进程,多等不卡托盘。
+	setCtx, setCancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer setCancel()
+	if err := ipc.Call(setCtx, ipc.MSetSettings, s, nil); err != nil {
 		return false, fmt.Errorf("关闭服务隐私设置失败: %w", err)
 	}
 	return true, nil
