@@ -1,7 +1,7 @@
 <p align="center"><img src="brand/logo.svg" width="120" alt="佛跳墙"></p>
 <h1 align="center">佛跳墙 · godusevpn</h1>
 <p align="center"><a href="https://github.com/Maoyangui/m-ui">m-ui</a> 面板的客户端 · Windows / macOS / Linux / Android 四端一套界面 · 内嵌 <a href="https://github.com/SagerNet/sing-box">sing-box</a> · TUN 全机接管 · 默认关掉 IPv6</p>
-<p align="center"><a href="https://maoyangui.github.io/godusevpn/">介绍站</a> · <a href="https://maoyangui.github.io/godusevpn/docs.html">文档</a> · <a href="https://maoyangui.github.io/godusevpn/demo/">在线演示</a> · <a href="https://github.com/Maoyangui/godusevpn/releases">下载</a> · <a href="#默认策略">默认策略</a></p>
+<p align="center"><b>中文</b> · <a href="README.en.md">English</a> · <a href="https://maoyangui.github.io/godusevpn/">介绍站</a> · <a href="https://maoyangui.github.io/godusevpn/docs.html">文档</a> · <a href="https://maoyangui.github.io/godusevpn/demo/">在线演示</a> · <a href="https://github.com/Maoyangui/godusevpn/releases">下载</a> · <a href="#默认策略">默认策略</a></p>
 <p align="center">
   <a href="https://github.com/Maoyangui/godusevpn/actions/workflows/build.yml"><img src="https://github.com/Maoyangui/godusevpn/actions/workflows/build.yml/badge.svg" alt="build"></a>
   <a href="https://github.com/Maoyangui/godusevpn/releases/latest"><img src="https://img.shields.io/github/v/release/Maoyangui/godusevpn?label=release" alt="latest release"></a>
@@ -87,7 +87,7 @@ CGO_ENABLED=1 CGO_LDFLAGS="-framework UniformTypeIdentifiers" go build -tags des
 
 安装包会注册后台服务(自动启动)、装托盘客户端与命令行,可勾选"登录时自动启动",并注册 `godusevpn://` 协议供落地页一键导入(客户端每次启动也会自己确认一遍这个协议,老版本升上来不用重装)。程序未签名,SmartScreen 提示时点"更多信息 → 仍要运行"。
 
-- **首次打开**先填面板给的订阅链接才能进入;没有订阅的话点「或手动添加节点」。
+- **首次打开**先填面板给的订阅链接才能进入;没有订阅的话点「或手动添加节点」,或者[选购节点](https://godusevpn.org/subscription/)。
 > 地区是从节点名里认出来的:旗帜 emoji、中英文地名、独立的两位国家代码都认,认不出就画一个地球,不影响使用。旗帜是内置的 SVG(见 web/dist/flags/),不靠系统的 emoji 字体——Windows 至今没有旗帜字体。
 
 - **首页**中间是连接 / 断开的大按钮,连上之后按钮下面用大字走连接时长;再往下两张卡片:
@@ -95,7 +95,7 @@ CGO_ENABLED=1 CGO_LDFLAGS="-framework UniformTypeIdentifiers" go build -tags des
   - **速度卡片**:实时上下行、本次连接累计流量,底下是最近一分钟的速度曲线。
   最下面三格:模式(规则 / 全局 / 直连)、订阅(多订阅点击切换)、节点。
 - **节点面板**:每行带地区旗帜与延迟条,名字里写了倍率(`2x` / `x2` / `0.5倍`)会单独标出来;顶上按地区归堆成一排标签,点一下只看该地区,配合搜索框找节点。测速只改数字不重画列表,不会闪。
-- **线路自动**:面板把一条线路部署在好几台服务器上时(需要面板 **m-ui 0.7.17 及以上**,它才在订阅里给这种线路出线路组),节点面板顶上多一个「线路自动」开关。打开后同一线路的几台合成一项,选它就只在这条线路自己的服务器里自动用最快的那台(线路、出口不变;「自动选择」是在全部节点里挑,可能换线路);关掉时固定到组里此刻在用的那台。只测这一组的服务器;在用的那台挂了(连接失败、健康检查不通)当场只测这一组、换到组里通的那台,一般十几秒内恢复,不出这条线路(hysteria2 / TUIC 被封时要先等会话看护判废,一般一两分钟);线路减到一台时先用剩下那台、首页写明,面板恢复多台后自动回到线路自动。旧面板、订阅里没有能合并的线路时不显示这个开关。详见 wiki [日常使用](docs/wiki/日常使用.md)。
+- **线路自动**:面板把一条线路部署在好几台服务器上时(需要面板 **m-ui 0.7.17 及以上**,它才在订阅里给这种线路出线路组),节点面板顶上多一个「线路自动」开关。打开后同一线路的几台合成一项,选它就只在这条线路自己的服务器里自动用最快的那台(线路、出口不变;「自动选择」是在全部节点里挑,可能换线路);关掉时固定到组里此刻在用的那台。只测这一组的服务器;在用的那台挂了(连接失败、健康检查不通)当场只测这一组、换到组里通的那台,一般 20 秒左右恢复,不出这条线路(hysteria2 / TUIC 要先等会话看护判废,一般一分半到两分钟;11-15 真机实测 Reality 约 20 秒、Hysteria2 约 100 秒);线路减到一台时先用剩下那台、首页写明,面板恢复多台后自动回到线路自动。旧面板、订阅里没有能合并的线路时不显示这个开关。详见 wiki [日常使用](docs/wiki/日常使用.md)。
 - **只能走 IPv6 的节点**:「允许 IPv6」关着(出厂就是关)时不分平台都不用它们 —— 地址直接写成 IPv6 的节点,以及域名只有 IPv6 地址(只有 AAAA 记录)的节点(连接时解析节点域名顺带认出来;全局 +「防流量逃逸」下本地 DNS 是 system 或域名形式的 DoH 时不做这次解析,认不出来,只是不会提前标出来)。节点列表里标「IPv6 节点」(命令行 `nodes` 也标),不进自动选择和线路组,测速不测;手动选它照样选得上但连不通,首页点名是哪个节点、写明到 设置 → 隐私 打开「允许 IPv6」,状态码是 `E_NODE_V6`(当前节点只能走 IPv6,而「允许 IPv6」关着)。服务和界面自己直连发出的请求(没连接时拉订阅、检查更新、下载安装包、补规则集、DoH)关着 IPv6 时同样只走 IPv4。详见 [关于 IPv6](docs/wiki/关于%20IPv6.md)。
 - **提示节点**:面板放在订阅里显示用量、到期、续费的「节点」(m-ui 的「00-勿选-流量…」、管理员自建的「续费提示」:地址是本机、端口小于 1024,或者写成 `0.0.0.0`)标「提示」,不进自动选择和线路组,测速不测 —— 以前它们常排第一,测速结果出来之前自动选择先落在它上面,全局模式下那几秒整机没网。手动选它照样选得上,首页说一句它不能上网。写着本机地址的 socks / http 节点(接本机另一个代理)和本机高端口上的转发照常当节点用。
 - **首次打开**是一张引导页:只要一个订阅链接,旁边带粘贴键;下面写清楚也可以在落地页点「一键导入」,以及订阅地址只存在本机。
@@ -114,7 +114,7 @@ CGO_ENABLED=1 CGO_LDFLAGS="-framework UniformTypeIdentifiers" go build -tags des
 - **面板**(Linux):默认只给本机和局域网打开,从公网打开要自己开 `webAllowPublic`。面板是明文 HTTP,云主机上推荐 SSH 隧道。
 - **定时测速**:设置里的"定时测速(分钟)",默认 10 分钟,自动选择时每隔该周期经节点真连一轮全部可用节点(跳过 IPv6 节点和提示节点)并切到最快的,选了某条线路(线路自动)时只测这条线路自己的服务器;手动指定节点、直连模式、没有流量时不测,手动指定节点时连接也不碰别的节点。节点列表上的延迟是直接量网卡到节点的握手(UDP 协议的节点要真连一次),打开列表五分钟内只自动测一次。这个间隔不写进内核配置(由守护进程定时叫测),所以自动 / 手动之间切换、改这个间隔都是就地生效,不重连。
 - **按进程直连**:设置 → 分流,每行一个 exe 名(如 `steam.exe`),这些程序的流量不走代理。全局模式下「防流量逃逸」开着时不生效,这些程序也走隧道;规则模式下照常直连,但隧道异常时要等隧道恢复(防火墙认不出进程)。
-- **升级**:连着时客户端每小时经节点查一次新版本(没连接时不自动查,不让 GitHub 看到你的真实 IP;「关于」里可以手动检查),有新版本时首页顶栏「佛跳墙」旁亮一个红色 **NEW**(侧栏「关于」也带 NEW),点它直达升级;也可以 关于 → 检查更新 → 升级并重启。只替换程序,设置与订阅都保留。
+- **升级**:连着时客户端每小时经节点查一次新版本(没连接时不自动查,不让 GitHub 看到你的真实 IP;「关于」里可以手动检查),有新版本时首页顶栏「佛跳墙」旁亮一个红色 **NEW**(侧栏「关于」也带 NEW),点它直达升级;也可以 关于 → 检查更新 → 升级并重启。只替换程序,设置与订阅都保留。下载目录里的旧安装包会清掉:下新版前删别的版本,新版跑起来后删装过的和更旧的。
 - **日志保留**:默认 7 天,超过的滚动日志与诊断包自动删除;设置 → 日志里可改,0 = 一直保留。
 - **访问记录不落盘**:内核日志里每条连接的目标默认只留在内存里,服务重启就没了;磁盘上只有打了码的警告和错误。系统日志里也不记:macOS 的 launchd 日志、Linux 的 journald / logread、梅林的崩溃记录文件只收崩溃和没起来的原因,不再有连接目标(以前内核把每条连接的目标写到标准错误,由系统日志收走落盘)。排障要长期保留时到设置 → 日志打开「内核日志写入磁盘」。fake-ip 对照表(`cache.db`)断开十几分钟后自动删。
 - **出口查询可关**:首页的出口地址是连上后经节点问第三方网站查到的,不想要就到设置 → 隐私关掉。

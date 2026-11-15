@@ -6,6 +6,8 @@
 这里是**参考手册**:文件放在哪、每个设置项是什么意思、命令行怎么用、出了问题从哪查。
 只想快点用起来的话,[介绍站的文档页](https://maoyangui.github.io/godusevpn/docs.html)更短。
 
+**还没有订阅、不想自己搭建?** 直接[选购节点](https://godusevpn.org/subscription/),导入就能用。
+
 <p align="center">
   <img src="https://raw.githubusercontent.com/Maoyangui/godusevpn/master/docs/screenshots/home.png" width="230" alt="首页">
   <img src="https://raw.githubusercontent.com/Maoyangui/godusevpn/master/docs/screenshots/nodes.png" width="230" alt="节点列表">
