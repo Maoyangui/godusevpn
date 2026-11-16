@@ -298,14 +298,46 @@ function sheetIs(kind, seq) { return sheetKind === kind && sheetSeq === seq && $
 // (电视上几秒没反应、按返回再进是常事),新开的这块也要拿到实时数字和结果;换成模式、订阅面板时照样不往里画。
 // 往里画的 drawNodes 自己还按 seq 防着:取节点列表那一下面板又换了,就不画。
 function nodesOpen() { return sheetKind === 'nodes' && $('#sheet').classList.contains('show'); }
+// opts.search = { placeholder, onInput(值) }:面板带搜索。标题行右边一个放大镜(在操作按钮左边),点了搜索框就在标题行里展开、
+// 标题让位;× 或 Esc 收起并清空。搜索框不放在正文里:正文一重画(测速结束、翻开关)框和光标就丢,而且平白占一整行。
+// 用不用得上由面板自己定(sheetSearchAvail):条目少的时候放大镜不出现。
 function openSheet(title, html, opts = {}) {
   sheetSeq++; sheetKind = opts.kind || '';
-  $('#sheet-head').innerHTML = `<span class="grow">${esc(title)}</span>${opts.action ? `<button class="btn sm ghost" id="sheet-action">${esc(opts.action)}</button>` : ''}`;
+  $('#sheet').setAttribute('data-kind', sheetKind); // 样式按面板种类微调(节点面板的间距)
+  const glass = '<svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5"/><path d="m20 20-4.2-4.2"/></svg>';
+  const search = opts.search ? `<span class="sheet-search" id="sheet-search" hidden>${glass}<input type="text" id="sheet-search-input" placeholder="${esc(opts.search.placeholder || '')}" aria-label="${esc(opts.search.placeholder || '')}" autocomplete="off" spellcheck="false"><button class="icon-btn xs" id="sheet-search-x" title="${esc(t('sheet.searchClose'))}" aria-label="${esc(t('sheet.searchClose'))}"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></svg></button></span><button class="icon-btn sheet-search-btn" id="sheet-search-btn" hidden title="${esc(opts.search.placeholder || '')}" aria-label="${esc(opts.search.placeholder || '')}">${glass}</button>` : '';
+  $('#sheet-head').innerHTML = `<span class="grow" id="sheet-title">${esc(title)}</span>${search}${opts.action ? `<button class="btn sm ghost" id="sheet-action">${esc(opts.action)}</button>` : ''}`;
   $('#sheet-body').innerHTML = html;
   $('#sheet').classList.add('show'); $('#sheet-backdrop').classList.add('show');
   sheetOnClose = opts.onClose || null;
   if (opts.action && opts.onAction) $('#sheet-action').addEventListener('click', opts.onAction);
+  if (opts.search) {
+    const input = $('#sheet-search-input');
+    input.addEventListener('input', () => opts.search.onInput(input.value));
+    input.addEventListener('keydown', e => { if (e.key === 'Escape') { e.stopPropagation(); sheetSearchOpen(false); $('#sheet-search-btn').focus(); } });
+    $('#sheet-search-btn').addEventListener('click', () => sheetSearchOpen(true));
+    $('#sheet-search-x').addEventListener('click', () => { sheetSearchOpen(false); $('#sheet-search-btn').focus(); });
+  }
   tvFocus();
+}
+// sheetSearchOpen 展开 / 收起标题行里的搜索框。收起时把搜索词清掉(看不见的过滤不留着)。
+function sheetSearchOpen(on) {
+  const box = $('#sheet-search'), btn = $('#sheet-search-btn'), input = $('#sheet-search-input');
+  if (!box || !btn || !input) return;
+  on = !!on && btn.dataset.off !== '1';
+  box.hidden = !on;
+  $('#sheet-title').hidden = on;
+  btn.hidden = on || btn.dataset.off === '1';
+  if (on) input.focus();
+  else if (input.value) { input.value = ''; input.dispatchEvent(new Event('input')); }
+}
+// sheetSearchAvail 这块面板现在用不用得上搜索(条目多才用得上):用不上就不显示放大镜,开着的搜索也收起。
+function sheetSearchAvail(yes) {
+  const btn = $('#sheet-search-btn');
+  if (!btn) return;
+  btn.dataset.off = yes ? '' : '1';
+  if (!yes) sheetSearchOpen(false);
+  else if ($('#sheet-search').hidden) btn.hidden = false;
 }
 function closeSheet() {
   sheetSeq++; sheetKind = '';
@@ -866,7 +898,8 @@ function msCell(n, testing) {
 let nodeTesting = false, nodeFilter = '', nodeRegion = '', nodeFetchTried = false, nodeSig = '', nodePicking = false;
 async function sheetNodes() {
   nodeFilter = ''; nodeRegion = '';
-  openSheet(t('sheet.nodes'), `<div class="empty"><span class="spinner"></span></div>`, { kind: 'nodes', action: t('sheet.retest'), onAction: () => testNodes(true) });
+  openSheet(t('sheet.nodes'), `<div class="empty"><span class="spinner"></span></div>`, { kind: 'nodes', action: t('sheet.retest'), onAction: () => testNodes(true),
+    search: { placeholder: t('node.filter'), onInput: v => { nodeFilter = v.trim(); applyNodeFilter(); } } });
   testBtn(); // 上一轮测速还在跑(关掉面板又打开):按钮照样是「测速中」、点不了,还没轮到的照样转圈
   await drawNodes(nodeTesting);
   testNodes(false);
@@ -877,13 +910,20 @@ function applyNodeFilter() {
   const body = $('#sheet-body');
   if (!body) return;
   const q = nodeFilter.toLowerCase();
+  let shown = 0;
   body.querySelectorAll('.item[data-name]').forEach(it => {
     const name = it.dataset.name || '';
     if (name === 'auto') { it.hidden = false; return; } // 自动选择永远留在最上面
-    const hay = (name + ' ' + (it.dataset.search || '')).toLowerCase();
+    // 除了节点名(线路组还有成员名),地区也能搜:国家代码(jp、tw)和地区名(日本、Japan)
+    const geo = it.dataset.geo || '';
+    const hay = (name + ' ' + (it.dataset.search || '') + ' ' + geo + ' ' + (geo ? regionName(geo) : '')).toLowerCase();
     it.hidden = !!((q && hay.indexOf(q) < 0) || (nodeRegion && it.dataset.geo !== nodeRegion));
+    if (!it.hidden) shown++;
   });
   body.querySelectorAll('.chip').forEach(c => c.classList.toggle('on', (c.dataset.geo || '') === nodeRegion));
+  // 一个都没筛出来:说一声(只剩「自动选择」孤零零一行,看着像列表坏了)
+  const none = $('#node-nomatch');
+  if (none) { none.hidden = shown > 0 || !(q || nodeRegion); none.textContent = q ? t('node.noMatch', { q: nodeFilter }) : t('node.noMatchRegion'); }
 }
 // regionList 按地区归堆,节点多的排前面(最多 8 个,换行排布,太多会把列表挤下去);只有一个地区就不用筛了
 function regionList(nodes) {
@@ -1079,14 +1119,15 @@ async function drawNodes(testing) {
   // 留着它们就是一个看不见、也清不掉的过滤,列表只剩「自动选择」
   const regions = regionList(rows);
   if (nodeRegion && !regions.some(r => r[0] === nodeRegion)) nodeRegion = '';
+  // 搜索在标题行(放大镜,见 openSheet):节点不多时不出现,搜索词也清掉
   if (rows.length <= 8) nodeFilter = '';
+  sheetSearchAvail(rows.length > 8);
   // 「线路自动」开关:订阅里有线路组才出现,排在最上面。data-name 让重画之后焦点落回它(电视遥控器)
   const sw = hasGroups ? `<div class="srow"><div class="lbl">${t('node.lineAuto')}<div>${t('node.lineAutoHelp')}</div></div><label class="switch"><input type="checkbox" id="node-lineauto" data-name="__lineauto" data-tvskip ${lineOn ? 'checked' : ''}></label></div>` : '';
   const keep = focusKey($('#sheet-body'), 'data-name');
   $('#sheet-body').innerHTML = sw + hint
-    + (rows.length > 8 ? `<div class="sheet-filter"><input type="text" id="node-filter" placeholder="${t('node.filter')}" value="${esc(nodeFilter)}"></div>` : '')
     + regionChips(regions)
-    + `<div class="list">${rows.map((n, i) => nodeRow(n, i, max, testing)).join('')}</div>`;
+    + `<div class="list">${rows.map((n, i) => nodeRow(n, i, max, testing)).join('')}</div><div class="nomatch" id="node-nomatch" hidden></div>`;
   $('#sheet-body').querySelectorAll('.item').forEach(it => it.addEventListener('click', async () => {
     if (it.dataset.unsupported) { toast(t('node.unsupportedWhy', { why: it.dataset.unsupported }), 'err'); return; }
     // 上一下还没回来(头一回选线路组要重连,好几秒;电视上连按 OK)就不再选:不然排着队再选一次,刚重连好的连接又被掐一次。
@@ -1118,8 +1159,6 @@ async function drawNodes(testing) {
   }
   $('#sheet-body').querySelectorAll('.chip').forEach(c => c.addEventListener('click', () => { nodeRegion = c.dataset.geo || ''; applyNodeFilter(); }));
   refocus($('#sheet-body'), 'data-name', keep);
-  const f = $('#node-filter');
-  if (f) f.addEventListener('input', () => { nodeFilter = f.value.trim(); applyNodeFilter(); });
   applyNodeFilter();
 }
 // barWidth 延迟条的宽度:没测出来就是 0。条子一直留着,测完只改宽度,CSS 自带的过渡会把它抹开。

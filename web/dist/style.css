@@ -257,7 +257,24 @@ pre.log .warn { color: #fbbf24; } pre.log .err { color: #f87171; } pre.log .dim 
 .nogap .cond > *:not([hidden]) + *:not([hidden]) { margin-left: 8px; }
 .cond .val { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: Consolas, "Cascadia Mono", monospace; }
 .icon-btn.xs { width: 24px; height: 24px; border-radius: 8px; } .icon-btn.xs svg { width: 14px; height: 14px; }
-.sheet-filter { padding: 0 0 8px; } .sheet-filter input { padding: 8px 12px; }
+/* 节点面板里几块之间的间距:开关行下面不要分隔线(紧跟着就是地区标签),文字和标题左对齐、标签和列表的框左对齐 */
+.sheet[data-kind="nodes"] .sheet-body > .srow { padding: 2px 4px 12px; border-bottom: 0; }
+.sheet[data-kind="nodes"] .sheet-body > .chips { padding: 0 0 10px; }
+.nomatch { padding: 14px 4px 2px; font-size: 12px; color: var(--muted2); text-align: center; }
+/* 面板标题行里的搜索:平时只是右边一个放大镜;点了搜索框在标题行里展开(标题让位),× 收起 */
+.sheet-head { min-height: 44px; }
+.sheet-search-btn { width: 32px; height: 32px; color: var(--muted); }
+.sheet-search-btn:hover { color: var(--text); }
+.sheet-search-btn svg { width: 18px; height: 18px; }
+.sheet-search { flex: 1; min-width: 0; display: flex; align-items: center; gap: 6px; height: 34px; padding: 0 4px 0 10px; border: 1px solid var(--line); border-radius: 10px; background: var(--bg2); font-weight: 400; transition: border-color .15s, box-shadow .15s; animation: sheet-search-in .16s ease-out; }
+.sheet-search:focus-within { border-color: #2f8bff; box-shadow: 0 0 0 3px rgba(47, 139, 255, .18); }
+.sheet-search > svg { flex: none; width: 16px; height: 16px; fill: none; stroke: var(--muted2); stroke-width: 1.9; stroke-linecap: round; stroke-linejoin: round; }
+.sheet-search input[type=text] { flex: 1; min-width: 0; width: auto; height: 100%; padding: 0; border: 0; border-radius: 0; background: none; box-shadow: none; font-size: 13px; }
+.sheet-search input[type=text]:focus { border: 0; box-shadow: none; }
+.nogap .sheet-search > * + * { margin-left: 6px; }
+@keyframes sheet-search-in { from { opacity: 0; transform: translateX(8px); } }
+@media (prefers-reduced-motion: reduce) { .sheet-search { animation: none; } }
+body.tv .sheet-search { height: 42px; } body.tv .sheet-search-btn { width: 40px; height: 40px; }
 .with-btn { position: relative; } .with-btn input { padding-right: 64px; } .with-btn > button { position: absolute; right: 6px; bottom: 5px; }
 .upd-hint { font-size: 11px; color: var(--brand2); margin-top: 3px; cursor: pointer; }
 .upd-hint::before { content: ""; display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: var(--danger); margin-right: 5px; vertical-align: 1px; }
