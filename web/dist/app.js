@@ -146,7 +146,8 @@ function toast(msg, kind = '') {
   el.textContent = msg;
   el.className = 'toast ' + kind + ' show';
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => { el.classList.remove('show'); }, 2400);
+  // 短的一句 2.4 秒;长的(带着怎么办的那种)按字数多留一会儿,最多 6 秒,不然来不及读完
+  toastTimer = setTimeout(() => { el.classList.remove('show'); }, Math.min(6000, 2400 + Math.max(0, String(msg).length - 16) * 70));
 }
 function tween(el, from, to, fmt, ms = 500) {
   const key = el.id || el;
@@ -377,6 +378,197 @@ function nav(name, arg) {
 }
 function navHome() { nav(state && state.view.profiles && state.view.profiles.length ? 'home' : 'onboard'); }
 
+// ---- 订阅二维码(qr.js)----
+// 新增订阅不用手敲地址:桌面端把二维码图片拖进窗口、粘贴截图、或点按钮选图片;Android 手机用相机扫,或从相册选。
+// 识别在本机做(qr.js + vendor/jsqr.js)。认出订阅地址就填进表单,由用户自己点添加;认出的是节点分享链接就带去「手动添加节点」。
+// 电视上不显示(没有相机,遥控器也没法选图,电视加订阅走落地页的一键导入)。
+const QR = () => window.GVQR;
+const qrPhone = () => !!window.GodusevpnBridge && !isTVMode(); // Android 手机
+const QR_IC = {
+  code: '<svg viewBox="0 0 24 24"><path d="M4 4h6v6H4zM14 4h6v6h-6zM4 14h6v6H4z"/><path d="M14 14h2.5v2.5H14zM18.5 14H20M14 18.5v1.5M17.5 17.5H20V20"/></svg>',
+  cam: '<svg viewBox="0 0 24 24"><path d="M4 8V5.5A1.5 1.5 0 0 1 5.5 4H8M16 4h2.5A1.5 1.5 0 0 1 20 5.5V8M20 16v2.5a1.5 1.5 0 0 1-1.5 1.5H16M8 20H5.5A1.5 1.5 0 0 1 4 18.5V16M4 12h16"/></svg>',
+  pic: '<svg viewBox="0 0 24 24"><rect x="3.5" y="4.5" width="17" height="15" rx="2.5"/><circle cx="9" cy="10" r="1.6"/><path d="M4 17l4.5-4 3.5 3 3-2.5 5 4"/></svg>',
+};
+// qrInBtn 订阅管理的表单:地址框里「粘贴」左边的一颗小图标按钮。桌面点了选图片,手机点了开相机(取景画面里可以转去相册)
+function qrInBtn(where) {
+  if (!QR() || isTVMode()) return '';
+  const tip = t(qrPhone() ? 'qr.scan' : 'qr.pick');
+  return `<button type="button" class="btn sm ghost qrbtn" data-qr-go="${where}" title="${esc(tip)}" aria-label="${esc(tip)}">${qrPhone() ? QR_IC.cam : QR_IC.code}</button>`;
+}
+// qrCardHTML 引导页「或者」下面的一张卡,和「在落地页点一键导入」同一个样子:整张卡可点
+function qrCardHTML() {
+  if (!QR() || isTVMode()) return '';
+  if (qrPhone()) return `<div class="tipcard qrcard" data-qr-go="ob" role="button" tabindex="0"><span class="tipic">${QR_IC.cam}</span><span class="tiptxt"><b>${t('qr.cardScan')}</b><span>${t('qr.cardScanDesc')}</span></span><button type="button" class="btn sm" data-qr-album="ob">${t('qr.album')}</button></div>`;
+  return `<div class="tipcard qrcard" data-qr-go="ob" role="button" tabindex="0"><span class="tipic">${QR_IC.code}</span><span class="tiptxt"><b>${t('qr.card')}</b><span>${t('qr.cardDesc')}</span></span><svg class="chev" viewBox="0 0 24 24"><path d="M9 6l6 6-6 6"/></svg></div>`;
+}
+function qrBind(root) {
+  if (!root) return;
+  root.querySelectorAll('[data-qr-album]').forEach(b => b.addEventListener('click', e => { e.stopPropagation(); qrPick(b.dataset.qrAlbum); }));
+  root.querySelectorAll('[data-qr-go]').forEach(b => {
+    const go = () => (qrPhone() ? qrScan(b.dataset.qrGo) : qrPick(b.dataset.qrGo));
+    b.addEventListener('click', go);
+    if (b.tagName !== 'BUTTON') b.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); go(); } });
+  });
+}
+// 选一张图片。input 要挂在页面上再点:老 WebView 里没挂上的 input 点了不出选择框
+function qrPick(where) {
+  const input = document.createElement('input');
+  input.type = 'file'; input.accept = 'image/*'; input.style.display = 'none';
+  input.addEventListener('change', () => { const f = input.files && input.files[0]; input.remove(); if (f) qrFromFile(f, where); });
+  document.body.appendChild(input);
+  input.click();
+  setTimeout(() => { if (!input.files || !input.files.length) input.remove(); }, 120000); // 取消选择没有事件:过两分钟自己清掉
+}
+async function qrFromFile(file, where) {
+  toast(t('qr.reading'));
+  let text;
+  try { text = await QR().fromFile(file); } catch (e) { toast(t('qr.err.' + ((e && e.code) || 'badImage')), 'err'); return; }
+  qrApply(text, where);
+}
+// qrApply 认出来的文字怎么用:订阅地址 → 填进表单;节点分享链接 → 去「手动添加节点」;都不是 → 说清楚。返回用上了没有
+function qrApply(text, where) {
+  const r = QR().parse(text);
+  if (r.kind === 'sub') { qrFill(r, where); return true; }
+  if (r.kind === 'node') {
+    toast(t('qr.isNode'));
+    openNodeEdit(where === 'ob' ? 'onboard' : 'profiles');
+    const links = r.links.join('\n');
+    let tries = 0;
+    const put = () => { // 那一页是异步画出来的:等输入框出现再填
+      const box = $('#nf-links');
+      if (box) { box.value = links; box.dispatchEvent(new Event('input')); } else if (++tries < 30 && view === 'nodeEdit') setTimeout(put, 80);
+    };
+    put();
+    return true;
+  }
+  const s = r.text.length > 40 ? r.text.slice(0, 40) + '…' : r.text;
+  toast(s ? t('qr.notSub', { s }) : t('qr.err.noCode'), 'err');
+  return false;
+}
+function qrFill(r, where) {
+  const set = (el, v) => { el.value = v; el.dispatchEvent(new Event('input')); };
+  // 填完不把光标留在地址框里:地址从头显示(一眼先看到域名),手机上也不会把键盘弹出来;焦点给「添加」那颗按钮,回车就能加
+  const settle = (u, btn) => { u.blur(); u.scrollLeft = 0; if (btn) btn.focus(); };
+  if (where === 'pf') {
+    if (view !== 'profiles') nav('profiles'); // 在首页拖进来 / 粘贴的:带到订阅管理
+    if (!$('#pf-url')) { const add = $('#prof-add'); if (add) add.click(); } // 表单没开就开一张新的
+    const u = $('#pf-url');
+    if (!u) return;
+    set(u, r.url);
+    const n = $('#pf-name');
+    if (n && r.name && !n.value.trim()) n.value = r.name;
+    settle(u, $('#pf-save'));
+  } else {
+    const u = $('#ob-url');
+    if (!u) return;
+    set(u, r.url);
+    if (r.name && $('#ob-name')) $('#ob-name').value = r.name;
+    settle(u, $('#ob-go'));
+  }
+  toast(t('qr.filled'), 'ok');
+}
+// 现在收不收拖进来 / 粘贴的订阅二维码、填到哪:引导页填引导页的框;订阅管理页和首页填订阅管理的表单(首页会先带过去)。
+// 开着对话框、面板、登录框、取景画面时不收 —— 那时用户在做别的事。
+const qrBusy = () => !!($('#dialog') || $('#qr-scan') || ($('#login') && !$('#login').hidden) || ($('#sheet') && $('#sheet').classList.contains('show')) || ($('#drawer') && $('#drawer').classList.contains('show')));
+const qrWhere = () => (qrBusy() ? '' : view === 'onboard' ? 'ob' : view === 'profiles' || view === 'home' ? 'pf' : '');
+function qrDropHint(show) {
+  let el = $('#qr-drop');
+  if (!show) { if (el) el.remove(); return; }
+  if (el) return;
+  el = document.createElement('div');
+  el.id = 'qr-drop'; el.className = 'qrdrop';
+  el.innerHTML = `<div class="qrdrop-in">${QR_IC.code}<b>${t('qr.drop')}</b><span>${t('qr.dropNote')}</span></div>`;
+  $('.app').appendChild(el);
+}
+// 拖文件进窗口:不拦的话 WebView 会直接打开那个文件、把整个界面换掉。所以文件一律拦下;图片在能填订阅的页面上就拿去认。
+function qrInitDrop() {
+  const files = dt => { const ts = (dt && dt.types) || []; for (let i = 0; i < ts.length; i++) if (ts[i] === 'Files') return true; return false; };
+  document.addEventListener('dragover', e => {
+    if (!files(e.dataTransfer)) return;
+    e.preventDefault();
+    const ok = !!(QR() && qrWhere());
+    e.dataTransfer.dropEffect = ok ? 'copy' : 'none';
+    qrDropHint(ok);
+  });
+  document.addEventListener('dragleave', e => { if (!e.relatedTarget) qrDropHint(false); });
+  document.addEventListener('drop', e => {
+    if (!files(e.dataTransfer)) return;
+    e.preventDefault();
+    qrDropHint(false);
+    const w = qrWhere();
+    if (!QR() || !w) return;
+    const f = QR().imageFrom(e.dataTransfer);
+    if (!f) { toast(t('qr.err.notImage'), 'err'); return; }
+    qrFromFile(f, w);
+  });
+  // 粘贴的是图片(截图)时拿去认;粘贴文字的照常。
+  // 剪贴板里文字和图片都有的(从 Word、Excel 里复制一段字,它们会顺带放一张这段字的图)按文字算,不然贴个地址会被当成图片拦下
+  document.addEventListener('paste', e => {
+    const w = qrWhere();
+    if (!QR() || !w) return;
+    let txt = '';
+    try { txt = (e.clipboardData && e.clipboardData.getData('text/plain')) || ''; } catch (err) { /* 取不到就当没有文字 */ }
+    if (txt.trim()) return;
+    const f = QR().imageFrom(e.clipboardData);
+    if (!f) return;
+    e.preventDefault();
+    qrFromFile(f, w);
+  });
+}
+// 扫一扫:一层盖住整个界面的取景画面。认出订阅(或节点分享链接)就收起并用上;别的码提示一句、接着扫。
+let qrStop = null, qrTipTimer = 0;
+function qrScanClose() {
+  clearTimeout(qrTipTimer);
+  if (qrStop) { try { qrStop(); } catch (e) { /* 已经停了 */ } qrStop = null; }
+  const el = $('#qr-scan');
+  if (el) el.remove();
+}
+// 取景框下面那句话。提醒(扫到的不是订阅)过几秒自己换回平常那句,码还在框里的话会再提醒一次
+function qrScanTip(text, warn) {
+  const tip = $('#qr-tip');
+  if (!tip) return;
+  tip.textContent = text;
+  tip.classList.toggle('warn', !!warn);
+  clearTimeout(qrTipTimer);
+  if (warn) qrTipTimer = setTimeout(() => qrScanTip(t('qr.scanTip'), false), 3600);
+}
+async function qrScan(where) {
+  if (!QR() || $('#qr-scan')) return;
+  if (!QR().canScan()) { toast(t('qr.cam.unsupported'), 'err'); return; }
+  const el = document.createElement('div');
+  el.id = 'qr-scan'; el.className = 'qrscan';
+  // 相机还没出画面的那一会儿(等用户点系统的权限框、等相机起来):画面留黑、写「正在打开相机」。
+  // video 在出画面之前不显示 —— Android 的 WebView 会拿一张自带的「播放键」大图垫在没画面的 video 上,铺满屏幕很难看。
+  el.innerHTML = `<video id="qr-video" playsinline muted></video>
+    <div class="qrscan-frame"><i></i><i></i><i></i><i></i><b class="qrscan-line"></b><div class="qrscan-tip"><span id="qr-tip">${t('qr.scanStarting')}</span></div></div>
+    <button type="button" class="qrscan-x" id="qr-x" aria-label="${esc(t('qr.close'))}"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+    <div class="qrscan-foot"><button type="button" class="btn qrscan-album" id="qr-album">${QR_IC.pic}<span>${t('qr.album')}</span></button></div>`;
+  $('.app').appendChild(el);
+  $('#qr-x').addEventListener('click', qrScanClose);
+  $('#qr-album').addEventListener('click', () => { qrScanClose(); qrPick(where); });
+  let stop;
+  try {
+    stop = await QR().scan($('#qr-video'), text => {
+      const r = QR().parse(text);
+      if (r.kind === 'none') { qrScanTip(t('qr.scanNotSub'), true); return false; }
+      setTimeout(() => { qrScanClose(); qrApply(text, where); }, 0);
+      return true;
+    });
+  } catch (e) {
+    if ($('#qr-scan') && $('#qr-scan') !== el) return; // 这一次等相机的时候已经关掉、又开了新的一次:别把新的那次关了
+    qrScanClose();
+    toast(t('qr.cam.' + ((e && e.code) === 'denied' ? 'denied' : (e && e.code) === 'noCamera' ? 'noCamera' : (e && e.code) === 'decoder' ? 'decoder' : 'unsupported')), 'err');
+    return;
+  }
+  if ($('#qr-scan') !== el) { stop(); return; } // 等相机的时候已经关掉了(或者又开了新的一次):这一路相机放开
+  qrStop = stop;
+  el.classList.add('on'); // 画面出来了:显示 video、扫描线开始走
+  const tip = $('#qr-tip');
+  if (tip && !tip.classList.contains('warn')) qrScanTip(t('qr.scanTip'), false);
+}
+// 切到后台 / 锁屏:把相机放开,回来要用再点一次
+document.addEventListener('visibilitychange', () => { if (document.hidden) qrScanClose(); });
+
 // ---- 引导 ----
 function renderOnboard(el) {
   el.innerHTML = `<div class="onboard">
@@ -394,6 +586,7 @@ function renderOnboard(el) {
       <span class="tipic"><svg viewBox="0 0 24 24"><path d="M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7-7l-1.7 1.7"/><path d="M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7 7l1.7-1.7"/></svg></span>
       <span class="tiptxt"><b>${t('onboard.import')}</b><span>${t('onboard.importDesc')}</span></span>
     </div>
+    ${qrCardHTML()}
     <div class="grow1"></div>
     <div class="notecard">
       <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8v.5"/></svg>
@@ -422,6 +615,7 @@ function renderOnboard(el) {
   $('#ob-paste').addEventListener('click', async () => { await pasteInto('#ob-url'); $('#ob-http').hidden = !isPlainHTTP($('#ob-url').value); });
   $('#ob-url').addEventListener('keydown', e => { if (e.key === 'Enter') submit(); });
   $('#ob-url').addEventListener('input', () => { $('#ob-http').hidden = !isPlainHTTP($('#ob-url').value); });
+  qrBind(el);
   setTimeout(() => $('#ob-url').focus(), 120);
 }
 // svcBanner 服务连不上时的横幅。"账户没权限"和"服务没在跑"是两回事:前者服务好好的,只是这个账户
@@ -1255,17 +1449,18 @@ function renderProfiles(el, editId) {
   el.innerHTML = `<div id="prof-form"></div><div id="prof-list"></div>
     <button class="addcard" id="prof-add">
       <span class="addic"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></span>
-      <span class="addtxt"><b>${t('prof.add')}</b><span>${t('prof.addHint')}</span></span>
+      <span class="addtxt"><b>${t('prof.add')}</b><span>${t(!QR() || isTVMode() ? 'prof.addHint' : qrPhone() ? 'prof.addHintScan' : 'prof.addHintQr')}</span></span>
     </button>
     <button class="altlink" id="prof-manual">${t('mn.entry')}<svg viewBox="0 0 24 24"><path d="M9 6l6 6-6 6"/></svg></button>`;
   const showForm = (p) => {
     $('#prof-form').innerHTML = `<div class="card"><div class="field"><label>${t('prof.name')}</label><input type="text" id="pf-name" value="${esc(p ? p.name : '')}"></div>
-      ${p && p.manual ? '' : `<div class="field with-btn"><label>${t('prof.url')}</label><input type="url" id="pf-url" spellcheck="false" value="${esc(p ? p.url : '')}"><button class="btn sm ghost" id="pf-paste">${t('common.paste')}</button></div><div class="help warn http-warn" id="pf-http" ${p && isPlainHTTP(p.url) ? '' : 'hidden'}>${t('prof.httpWarn')}</div>`}
+      ${p && p.manual ? '' : `<div class="field with-btn${QR() && !isTVMode() ? ' has2' : ''}"><label>${t('prof.url')}</label><input type="url" id="pf-url" spellcheck="false" value="${esc(p ? p.url : '')}"><span class="inbtns">${qrInBtn('pf')}<button class="btn sm ghost" id="pf-paste">${t('common.paste')}</button></span></div><div class="help warn http-warn" id="pf-http" ${p && isPlainHTTP(p.url) ? '' : 'hidden'}>${t('prof.httpWarn')}</div>`}
       <div class="row"><button class="btn primary" id="pf-save">${t('prof.save')}</button><button class="btn" id="pf-cancel">${t('prof.cancel')}</button><span id="pf-busy"></span></div></div>`;
     $('#pf-cancel').addEventListener('click', () => { $('#prof-form').innerHTML = ''; });
     const httpHint = () => { if ($('#pf-http')) $('#pf-http').hidden = !isPlainHTTP($('#pf-url').value); };
     if ($('#pf-paste')) $('#pf-paste').addEventListener('click', async () => { await pasteInto('#pf-url'); httpHint(); });
     if ($('#pf-url')) $('#pf-url').addEventListener('input', httpHint);
+    qrBind($('#prof-form'));
     $('#pf-save').addEventListener('click', async () => {
       const b = $('#pf-save'); b.disabled = true; $('#pf-busy').innerHTML = '<span class="spinner"></span>';
       try {
@@ -1274,7 +1469,8 @@ function renderProfiles(el, editId) {
       } catch (e) { toast(errText(e), 'err'); }
       b.disabled = false; if ($('#pf-busy')) $('#pf-busy').innerHTML = '';
     });
-    setTimeout(() => { const box = $(p && p.id ? '#pf-name' : '#pf-url'); if (box) box.focus(); }, 80);
+    // 新开的表单把光标放进地址框;已经被二维码填好了的不抢(地址要从头显示,手机上也别弹键盘)
+    setTimeout(() => { const box = $(p && p.id ? '#pf-name' : '#pf-url'); if (box && ((p && p.id) || !box.value)) box.focus(); }, 80);
   };
   $('#prof-add').addEventListener('click', () => showForm(null));
   $('#prof-manual').addEventListener('click', () => openNodeEdit('profiles'));
@@ -1636,6 +1832,7 @@ async function renderNodeEdit(el, tag) {
     let seq = 0, timer = null;
     const showForm = on => { $('#nf-form').style.display = on ? '' : 'none'; $('#nf-or').style.display = on ? '' : 'none'; };
     const parse = async () => {
+      if (!$('#nf-links') || !$('#nf-parsed')) return; // 输入完马上离开了这一页:输入框已经不在,这一次不解析(以前这里会报错)
       const text = $('#nf-links').value, me = ++seq, box = $('#nf-parsed');
       if (!text.trim()) { multi = null; box.innerHTML = ''; $('#nf-help').hidden = false; showForm(true); saveLabel(); return; }
       let r;
@@ -2501,6 +2698,7 @@ document.addEventListener('focusin', e => { // 电视上焦点落点写进 logca
   if (document.body.classList.contains('tv')) console.log('focus ' + e.target.tagName + '#' + (e.target.id || '') + '.' + (e.target.className || '') + ' ' + (e.target.textContent || '').trim().slice(0, 12));
 });
 window.__godBack = () => { // 系统返回键:先关对话框与面板抽屉,再退回上一页;首页返回 false 让壳把应用放后台
+  if ($('#qr-scan')) { qrScanClose(); return true; } // 扫一扫开着:先关它(把相机放开)
   if ($('#dialog')) { closeDialog(false); return true; }
   if ($('#sheet').classList.contains('show')) { closeSheet(); return true; }
   if ($('#drawer').classList.contains('show')) { closeDrawer(); return true; }
@@ -2509,3 +2707,4 @@ window.__godBack = () => { // 系统返回键:先关对话框与面板抽屉,再
 };
 
 document.addEventListener('DOMContentLoaded', init);
+document.addEventListener('DOMContentLoaded', qrInitDrop);

@@ -54,6 +54,18 @@ flag-icons —— web/dist/flags/ 下的各地区旗帜(取其 flags/1x1 方形�
 
 ---
 
+jsQR —— web/dist/vendor/jsqr.js,认订阅二维码用(从图片里认、手机相机扫),在界面里本机运行,图片和相机画面不出本机
+  https://github.com/cozmo/jsQR
+  Apache License 2.0,许可全文在 web/dist/vendor/jsqr.LICENSE.txt
+
+  版本 1.4.0,取自 npm 包 jsqr 的 dist/jsQR.js,原样收录、未作改动(.gitattributes 里标了不做换行转换):
+    npm 包(jsqr-1.4.0.tgz)的 integrity  sha512-dxLob7q65Xg2DvstYkRpkYtmKm2sPJ9oFhrhmudT1dZvNFFTlroai3AWSpLey/w5vMcLBXRgOJsbXpdN9HzU/A==
+    收录的这一个文件的 sha256           bc40c8a15196236b2314db0856f72ca0b49980cd5413b8c852a7349f5fee0859
+    (web/compat_test.go 里钉着这个 sha256,文件被改动一个字节测试就不过)
+  Apache-2.0 的代码可以并进 GPL-3.0 的程序一起分发;收录时间 2026-11-17。
+
+---
+
 wireguard-windows —— internal/netmode/wfp/ 下的 Windows 过滤平台(WFP)代码改自它的 tunnel/firewall,用来做「防流量逃逸」的闸
   https://git.zx2c4.com/wireguard-windows
   MIT License

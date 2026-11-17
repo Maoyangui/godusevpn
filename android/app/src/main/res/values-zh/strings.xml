@@ -14,6 +14,7 @@
     <string name="no_vpn_dialog">这台设备的系统里没有 VPN 授权界面,无法连接。可到「设置 → 网络 → VPN」里手动允许本应用。</string>
     <string name="vpn_denied">没有允许 VPN 请求,无法连接。再点一次连接会重新询问。</string>
     <string name="vpn_settings_failed">打不开系统 VPN 设置</string>
+    <string name="no_picker">这台设备上没有能选图片的界面</string>
     <string name="install_need_permission">需要先允许本应用安装未知应用。系统授权页可能已弹出;没有的话到「系统设置 → 应用 → 特殊权限 → 安装未知应用」里允许本应用,然后再点一次更新</string>
     <string name="install_blocked">这台设备不让应用自行安装更新,请到官网手动下载安装包</string>
     <string name="install_no_installer">拉不起系统安装器。请打开应用后再点一次更新,或到官网手动下载安装包</string>

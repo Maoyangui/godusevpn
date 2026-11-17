@@ -6,6 +6,7 @@ import android.content.ClipboardManager
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.res.Configuration
+import android.graphics.Bitmap
 import android.net.Uri
 import android.net.VpnService
 import android.os.Build
@@ -13,7 +14,9 @@ import android.os.Bundle
 import android.util.Log
 import android.webkit.ConsoleMessage
 import android.webkit.JavascriptInterface
+import android.webkit.PermissionRequest
 import android.webkit.RenderProcessGoneDetail
+import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
@@ -66,6 +69,22 @@ class MainActivity : AppCompatActivity() {
         }
     }
     private val notifyPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
+
+    // 页面里的 <input type="file">(从相册选一张订阅二维码):WebView 自己不弹选择界面,要接 onShowFileChooser。
+    // 每个回调都必须答复一次(选了、没选都算),漏答的话页面之后再也点不出选择界面。
+    private var filePick: ValueCallback<Array<Uri>>? = null
+    private val fileChooser = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { r ->
+        filePick?.onReceiveValue(WebChromeClient.FileChooserParams.parseResult(r.resultCode, r.data))
+        filePick = null
+    }
+    private val blankPoster: Bitmap by lazy { Bitmap.createBitmap(1, 1, Bitmap.Config.ARGB_8888) }
+    // 页面要开相机(扫订阅二维码):系统的相机权限没给过就先问,用户点了允许才放给页面
+    private var cameraAsk: PermissionRequest? = null
+    private val cameraPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) { ok ->
+        val req = cameraAsk
+        cameraAsk = null
+        if (req != null) runCatching { if (ok) req.grant(arrayOf(PermissionRequest.RESOURCE_VIDEO_CAPTURE)) else req.deny() }
+    }
 
     /** 服务先起(通知栏显示"连接中",进程转前台),再让引擎连。 */
     private fun startConnect(): String {
@@ -132,6 +151,44 @@ class MainActivity : AppCompatActivity() {
                 if (m.messageLevel() == ConsoleMessage.MessageLevel.ERROR) Log.w(App.TAG, line) else Log.i(App.TAG, line)
                 return true
             }
+
+            // 选图片(页面按 accept 要的类型,现在只有图片)。电视 / 盒子上可能根本没有能选文件的界面,launch 要兜住。
+            override fun onShowFileChooser(view: WebView, cb: ValueCallback<Array<Uri>>, params: FileChooserParams): Boolean {
+                filePick?.onReceiveValue(null) // 上一次的还没答复(选择界面被系统收走了):先答掉
+                filePick = cb
+                runCatching { fileChooser.launch(params.createIntent()) }.onFailure {
+                    Log.w(App.TAG, "打不开选图片的界面", it)
+                    filePick = null
+                    cb.onReceiveValue(null)
+                    runCatching { Toast.makeText(this@MainActivity, getString(R.string.no_picker), Toast.LENGTH_LONG).show() }
+                }
+                return true
+            }
+
+            // 页面要用相机(getUserMedia)。只应自家页面、只给相机,别的(麦克风之类)一概不给。
+            override fun onPermissionRequest(request: PermissionRequest) {
+                val own = request.origin?.host == "appassets.androidplatform.net"
+                if (!own || request.resources.none { it == PermissionRequest.RESOURCE_VIDEO_CAPTURE }) { request.deny(); return }
+                if (checkSelfPermission(android.Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
+                    request.grant(arrayOf(PermissionRequest.RESOURCE_VIDEO_CAPTURE))
+                    return
+                }
+                cameraAsk?.let { old -> runCatching { old.deny() } }
+                cameraAsk = request
+                runCatching { cameraPermission.launch(android.Manifest.permission.CAMERA) }.onFailure {
+                    Log.w(App.TAG, "申请相机权限失败", it)
+                    cameraAsk = null
+                    runCatching { request.deny() }
+                }
+            }
+
+            override fun onPermissionRequestCanceled(request: PermissionRequest) {
+                if (cameraAsk === request) cameraAsk = null
+            }
+
+            // 没出画面的 <video>(扫码的取景画面在等相机时),WebView 会垫一张自带的「播放键」大图,铺满屏幕很难看:换成透明的。
+            // 页面那边也做了(出画面前不显示 video),这里是第二道。
+            override fun getDefaultVideoPoster(): Bitmap = blankPoster
         }
         // WebView 的版本决定页面能用哪些写法。电视 / 盒子常年停在很旧的版本,出问题时这一行是第一手线索。
         Log.i(App.TAG, "WebView: " + (runCatching { WebViewCompat.getCurrentWebViewPackage(this)?.let { it.packageName + " " + it.versionName } }.getOrNull() ?: "取不到"))

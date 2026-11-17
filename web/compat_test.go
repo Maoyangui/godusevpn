@@ -1,6 +1,8 @@
 package web
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"io/fs"
 	"strings"
 	"testing"
@@ -54,6 +56,13 @@ func TestDistJSRunsOnOldWebView(t *testing.T) {
 	if err != nil || len(files) == 0 {
 		t.Fatalf("没找到 dist 下的 js: %v", err)
 	}
+	// 原样收录的第三方脚本(dist/vendor,认二维码的 jsQR)也是页面要加载的,同样得过这一关:
+	// 它是用到时才加载的,写法不被认只坏掉二维码那一个功能,但那也是坏。
+	vendor, err := fs.Glob(dist, "dist/vendor/*.js")
+	if err != nil || len(vendor) == 0 {
+		t.Fatalf("没找到 dist/vendor 下的 js: %v", err)
+	}
+	files = append(files, vendor...)
 	for _, f := range files {
 		b, err := fs.ReadFile(dist, f)
 		if err != nil {
@@ -82,6 +91,36 @@ func TestDistJSRunsOnOldWebView(t *testing.T) {
 					f, ln, r.name, r.chrome, minChrome)
 			}
 		}
+	}
+}
+
+// TestVendoredQRDecoderIsUnmodified 认二维码的 jsQR 是原样收录的(NOTICE 里写着版本、出处和校验值)。
+// 这里把校验值钉住:文件被改过一个字节(手滑、格式化工具、换行转换)就不过 —— 要升级就连 NOTICE 和这里一起改。
+// 另外核对许可全文在、页面确实是从这个路径按需加载它的。
+func TestVendoredQRDecoderIsUnmodified(t *testing.T) {
+	const want = "bc40c8a15196236b2314db0856f72ca0b49980cd5413b8c852a7349f5fee0859" // jsqr 1.4.0 的 dist/jsQR.js
+	b, err := fs.ReadFile(dist, "dist/vendor/jsqr.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(b)
+	if got := hex.EncodeToString(sum[:]); got != want {
+		t.Errorf("dist/vendor/jsqr.js 的 sha256 是 %s,NOTICE 里记的是 %s —— 这份文件应当和上游一个字节不差", got, want)
+	}
+	lic := readDist(t, "dist/vendor/jsqr.LICENSE.txt")
+	if !strings.Contains(lic, "Apache License") || !strings.Contains(lic, "Version 2.0") {
+		t.Error("dist/vendor/jsqr.LICENSE.txt 不是 Apache-2.0 的许可全文")
+	}
+	if qr := readDist(t, "dist/qr.js"); !strings.Contains(qr, "'vendor/jsqr.js'") {
+		t.Error("dist/qr.js 里找不到按需加载 vendor/jsqr.js 的那一行 —— 路径改了的话这条测试和 NOTICE 要跟着改")
+	}
+	html := readDist(t, "dist/index.html")
+	i, j := strings.Index(html, `src="qr.js"`), strings.Index(html, `src="app.js"`)
+	if i < 0 || j < 0 || i > j {
+		t.Error("index.html 里 qr.js 要排在 app.js 前面(app.js 起来时就要用它)")
+	}
+	if strings.Contains(html, "vendor/jsqr.js") {
+		t.Error("index.html 不该直接加载 vendor/jsqr.js:257 KB 的解码库是用到时才装的")
 	}
 }
 

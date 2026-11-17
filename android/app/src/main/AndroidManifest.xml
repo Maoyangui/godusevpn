@@ -11,10 +11,14 @@
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
     <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" tools:ignore="QueryAllPackagesPermission" />
+    <uses-permission android:name="android.permission.CAMERA" /> <!-- 手机上扫订阅二维码;点了「扫」才向系统要,画面只在本机识别 -->
 
     <!-- 电视:没有触摸屏也能装;有 leanback 启动器入口 -->
     <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
     <uses-feature android:name="android.software.leanback" android:required="false" />
+    <!-- 声明了相机权限,系统会默认当成「必须有相机」;电视 / 盒子没有相机,写明不是必需的 -->
+    <uses-feature android:name="android.hardware.camera" android:required="false" />
+    <uses-feature android:name="android.hardware.camera.autofocus" android:required="false" />
 
     <application
         android:name=".App"

@@ -14,6 +14,9 @@
 *.mp4 binary
 *.woff2 binary
 
+# 原样收录的第三方脚本(认二维码的 jsQR):一个字节都不动,NOTICE 里记的校验值在哪个平台检出都对得上
+web/dist/vendor/** -text
+
 # 在 macOS / Linux 上执行的脚本只能是 LF:带 CR 的话 #!/bin/sh 后面多一个回车符,双击 .command 直接报找不到解释器
 *.sh text eol=lf
 *.command text eol=lf

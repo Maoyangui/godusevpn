@@ -15,6 +15,7 @@
     <string name="no_vpn_dialog">This device has no VPN permission screen, so it cannot connect. Allow this app manually under Settings → Network → VPN.</string>
     <string name="vpn_denied">The VPN request was not allowed, so it cannot connect. Tap connect again to be asked again.</string>
     <string name="vpn_settings_failed">Cannot open the system VPN settings</string>
+    <string name="no_picker">This device has no screen for choosing an image</string>
     <string name="install_need_permission">Allow this app to install unknown apps first. The system permission page may have opened; if not, allow it under Settings → Apps → Special access → Install unknown apps, then tap update again</string>
     <string name="install_blocked">This device does not let apps install their own updates. Download the installer from the website instead</string>
     <string name="install_no_installer">Could not open the system installer. Open the app and tap update again, or download the installer from the website</string>

@@ -713,3 +713,59 @@ body.tv .drawer-brand b { font-size: 22px; }
 .nrow .icon-btn { flex: none; }
 .http-warn { font-size: 11px; color: var(--warn); line-height: 1.4; margin: -4px 2px 8px; }
 .pc-top .tag, .pm-top .tag { margin-left: 6px; flex: none; }
+
+/* ---- 订阅二维码(qr.js):地址框里的小按钮、引导页的卡片、拖放时的提示、扫一扫的取景画面 ---- */
+.with-btn > .inbtns { position: absolute; right: 6px; bottom: 5px; display: flex; align-items: center; }
+.with-btn.has2 input { padding-right: 94px; }
+.btn.qrbtn { position: relative; display: inline-flex; align-items: center; justify-content: center; padding: 6px 5px 6px 7px; color: var(--brand2); }
+@media (hover: hover) { .btn.qrbtn:hover { background: rgba(47, 139, 255, .1); } } /* 只在有鼠标的设备上:触摸屏点过之后悬停态会一直留着 */
+.btn.qrbtn:active { background: rgba(47, 139, 255, .16); }
+.qrbtn + .btn { margin-left: -2px; }
+.qrbtn::after { content: ''; position: absolute; top: -7px; right: -2px; bottom: -7px; left: -8px; } /* 图标小,能点中的范围比它大一圈(手指) */
+.qrbtn svg, .qrscan-album svg { width: 17px; height: 17px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; flex: none; }
+.qrcard { width: 100%; margin-top: 10px; cursor: pointer; text-align: left; transition: border-color .15s, background .15s; }
+@media (hover: hover) { .qrcard:hover { border-color: #2f8bff; } }
+.qrcard:active { transform: scale(.995); border-color: #2f8bff; }
+.qrcard .chev { width: 16px; height: 16px; flex: none; fill: none; stroke: var(--muted2); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.qrcard .btn { flex: none; }
+/* 引导页多了一张卡,矮的屏幕(小手机、键盘弹出来时)一屏放不下:标志原来会被一点点挤扁,挤到只剩一个点。
+   改成不让它被挤,放不下的高度上干脆不显示,把地方让给输入框和下面的入口。电视那套不动。 */
+body:not(.tv) .onboard .logo { flex: none; }
+@media (max-height: 740px) { body:not(.tv) .onboard .logo { display: none; } }
+/* 拖着图片进窗口时:顶栏下面整块盖一层半透明的底(后面的内容退下去),中间一个虚线框说松手会怎样 */
+.qrdrop { position: absolute; top: 52px; right: 0; bottom: 0; left: 0; z-index: 40; display: flex; padding: 8px 12px 12px; background: var(--topbar); pointer-events: none; animation: fadeIn .16s var(--ease); }
+body.android .qrdrop { top: 58px; }
+.qrdrop-in { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; padding: 0 24px; border: 2px dashed var(--brand2); border-radius: 20px; background: rgba(47, 139, 255, .08); text-align: center; }
+.nogap .qrdrop-in > *:not([hidden]) + *:not([hidden]) { margin-top: 8px; }
+.qrdrop-in svg { width: 44px; height: 44px; margin-bottom: 4px; fill: none; stroke: var(--brand2); stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+.qrdrop-in b { font-size: 14.5px; font-weight: 600; color: var(--text); }
+.qrdrop-in span { font-size: 11.5px; color: var(--muted); line-height: 1.5; }
+.qrscan { position: absolute; top: 0; right: 0; bottom: 0; left: 0; z-index: 45; background: #000; display: flex; align-items: center; justify-content: center; overflow: hidden; }
+.qrscan video { position: absolute; top: 0; left: 0; width: 100%; height: 100%; object-fit: cover; opacity: 0; }
+.qrscan.on video { opacity: 1; }
+.qrscan-frame { position: relative; width: 68vmin; height: 68vmin; max-width: 320px; max-height: 320px; border-radius: 22px; box-shadow: 0 0 0 100vmax rgba(0, 0, 0, .5); }
+.qrscan-frame i { position: absolute; width: 26px; height: 26px; border: 3px solid #fff; filter: drop-shadow(0 0 2px rgba(0, 0, 0, .55)); } /* 带一圈暗边:画面是白的也看得见四个角 */
+.qrscan-frame i:nth-child(1) { top: -2px; left: -2px; border-right: 0; border-bottom: 0; border-top-left-radius: 22px; }
+.qrscan-frame i:nth-child(2) { top: -2px; right: -2px; border-left: 0; border-bottom: 0; border-top-right-radius: 22px; }
+.qrscan-frame i:nth-child(3) { bottom: -2px; left: -2px; border-right: 0; border-top: 0; border-bottom-left-radius: 22px; }
+.qrscan-frame i:nth-child(4) { bottom: -2px; right: -2px; border-left: 0; border-top: 0; border-bottom-right-radius: 22px; }
+/* 一条来回扫的亮线:看得出「正在认」 */
+.qrscan-line { display: none; position: absolute; top: 8%; right: 9%; left: 9%; height: 2px; border-radius: 2px; background: linear-gradient(90deg, rgba(124, 200, 255, 0), #7cc8ff, rgba(124, 200, 255, 0)); box-shadow: 0 0 12px rgba(47, 139, 255, .9); animation: qrLine 2.4s ease-in-out infinite alternate; }
+.qrscan.on .qrscan-line { display: block; }
+@keyframes qrLine { to { top: 92%; } }
+@media (prefers-reduced-motion: reduce) { .qrscan-line { animation: none; top: 50%; opacity: .55; } }
+.qrscan-tip { position: absolute; top: 100%; right: -40px; left: -40px; margin-top: 16px; text-align: center; }
+.qrscan-tip span { display: inline-block; padding: 6px 14px; border-radius: 16px; background: rgba(0, 0, 0, .55); color: #fff; font-size: 13px; line-height: 1.45; } /* 垫一块深色底:画面里是什么都读得清 */
+.qrscan-tip span.warn { color: #ffd27a; }
+.qrscan-x { position: absolute; top: 14px; right: 12px; width: 40px; height: 40px; border: 0; border-radius: 50%; background: rgba(0, 0, 0, .45); color: #fff; display: flex; align-items: center; justify-content: center; }
+.qrscan-x svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; }
+.qrscan-foot { position: absolute; right: 0; bottom: 28px; left: 0; display: flex; justify-content: center; }
+.qrscan-album { display: inline-flex; align-items: center; gap: 6px; background: rgba(255, 255, 255, .16); border-color: rgba(255, 255, 255, .28); color: #fff; }
+.nogap .qrscan-album > *:not([hidden]) + *:not([hidden]) { margin-left: 6px; }
+.qrscan-album:hover { background: rgba(255, 255, 255, .24); }
+/* 横过来的手机(屏幕很矮):取景框收小,「相册」挪到右下角,免得压到框下面那句话 */
+@media (max-height: 460px) {
+  .qrscan-frame { width: 54vmin; height: 54vmin; }
+  .qrscan-tip { margin-top: 10px; }
+  .qrscan-foot { bottom: 16px; justify-content: flex-end; padding-right: 16px; }
+}
