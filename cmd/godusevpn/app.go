@@ -522,6 +522,8 @@ type NodeInfo struct {
 	Unsupported string `json:"unsupported,omitempty"`
 	// Pending 订阅刷新新加进来、内核里还没有的节点:没有延迟,选它会重建配置重连用上
 	Pending bool `json:"pending,omitempty"`
+	// Changed 参数随订阅刷新变了、内核里还是旧的那份:协议标签按新的显示,选它会按新参数重连
+	Changed bool `json:"changed,omitempty"`
 }
 
 // GetNodes 节点列表(带最近一次延迟);内核没跑时只给订阅里的名字。
@@ -531,7 +533,7 @@ func (a *App) GetNodes() ([]NodeInfo, error) {
 	if err != nil {
 		out := []NodeInfo{}
 		for _, n := range st.View.Nodes {
-			out = append(out, NodeInfo{Name: n, Delay: st.View.Delays[n], Current: n == st.View.Node, Unsupported: st.View.Unsupported[n]})
+			out = append(out, NodeInfo{Name: n, Type: st.View.Types[n], Delay: st.View.Delays[n], Current: n == st.View.Node, Unsupported: st.View.Unsupported[n]})
 		}
 		return out, nil
 	}
@@ -550,11 +552,15 @@ func (a *App) GetNodes() ([]NodeInfo, error) {
 	for _, name := range names {
 		if !inKernel[name] { // 内核建不起来的标原因;其余是刷新新加进来的
 			why := st.View.Unsupported[name]
-			out = append(out, NodeInfo{Name: name, Unsupported: why, Pending: why == ""})
+			out = append(out, NodeInfo{Name: name, Type: st.View.Types[name], Unsupported: why, Pending: why == ""})
 			continue
 		}
 		p := proxies[name]
-		ni := NodeInfo{Name: name, Type: p.Type, Delay: p.LastDelay(), Current: name == group.Now}
+		// 协议以订阅缓存里的为准:内核里那份是启动时的,面板把线路换了协议,刷新之后内核报的还是旧协议
+		ni := NodeInfo{Name: name, Type: st.View.NodeType(name, p.Type), Delay: p.LastDelay(), Current: name == group.Now}
+		if st.View.NodeChanged(name) { // 参数变了、内核里还是旧的:内核记的延迟量的是旧的那份,不用
+			ni.Changed, ni.Delay = true, 0
+		}
 		if v, ok := st.View.Delays[name]; ok { // 列表测速的结果优先:和后台自动选择那一轮量的不是一回事,一列数字要是同一种
 			ni.Delay = v
 		}

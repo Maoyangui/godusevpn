@@ -63,3 +63,29 @@ func TestChangeText(t *testing.T) {
 		t.Fatalf("得 %q", s)
 	}
 }
+
+// 面板把线路从 hysteria2 换成 vless(名字没变),客户端刷新时当前节点没受影响 → 不重建内核。
+// 这时节点列表的协议要按刷新到的订阅写,并且知道哪几个节点在内核里还是旧的那份(用户真机:刷新几次列表还全是 HYSTERIA2)。
+func TestNodeTypesAndChangedFollowFreshProfile(t *testing.T) {
+	running := prof(t,
+		`{"tag":"香港1","type":"hysteria2","server":"1.1.1.1","server_port":56855}`,
+		`{"tag":"台湾1","type":"hysteria2","server":"1.1.1.1","server_port":28752}`,
+		`{"tag":"香港3","type":"anytls","server":"1.1.1.1","server_port":49140}`,
+		`{"tag":"已删","type":"hysteria2","server":"1.1.1.1","server_port":1}`)
+	fresh := prof(t,
+		`{"tag":"香港1","type":"vless","server":"1.1.1.1","server_port":5683}`,
+		`{ "server_port":2875, "tag":"台湾1", "type":"vless", "server":"1.1.1.1" }`,
+		`{"server":"1.1.1.1","tag":"香港3","server_port":49140,"type":"anytls"}`,
+		`{"tag":"新加的","type":"vless","server":"2.2.2.2","server_port":443}`)
+	types := nodeTypes(fresh)
+	if types["香港1"] != "vless" || types["台湾1"] != "vless" || types["香港3"] != "anytls" || types["新加的"] != "vless" || len(types) != 4 {
+		t.Fatalf("协议要按刷新到的订阅: %v", types)
+	}
+	got := changedNodes(running, fresh)
+	if strings.Join(got, ",") != "香港1,台湾1" {
+		t.Fatalf("参数变了、内核里还是旧的:只有 香港1、台湾1(香港3 只是字段顺序不同;新加的内核里没有,不算): %v", got)
+	}
+	if changedNodes(nil, fresh) != nil || changedNodes(running, nil) != nil || len(changedNodes(fresh, fresh)) != 0 {
+		t.Fatal("内核没在跑、或者两份一样:没有「变了的」")
+	}
+}

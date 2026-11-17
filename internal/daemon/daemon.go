@@ -2471,6 +2471,10 @@ func (d *Daemon) stateView() ipc.StateView {
 	if a := d.settings.Active(); a != nil {
 		if p := d.profiles[a.ID]; p != nil {
 			v.Groups = p.Groups // 缓存里的订阅解析出来之后不再改,只读着用
+			v.Types = nodeTypes(p)
+			if running {
+				v.Changed = changedNodes(d.running, p)
+			}
 			v.V6Blocked = builder.V6Blocked(p, s, d.v6Only)
 			v.SelectedV6 = selectionBlocked(p, builder.Effective(p, s), v.V6Blocked)
 			v.SelNote = selNote(p, s)
@@ -2749,7 +2753,7 @@ func (d *Daemon) registerHandlers() {
 		if d.core.Running() {
 			// 已连接:只测内核里有的。列表来自订阅缓存,刚刷新加进来的节点内核里还没有,这些不测、也不给数。选它连上后自然有数。
 			in, _ := d.splitByCore(p)
-			res = d.probeConnected(ctx, in, set, skip)
+			res = d.probeConnected(ctx, in, set, skip, d.changedSet(p))
 		} else {
 			// 未连接:直连量到节点服务器的往返。但「防流量逃逸」的闸还开着的时候不做 —— 那说明用户想连着、
 			// 内核只是暂时没起来(在重启 / 在退避),这时从本机直接发 DNS 查询、ICMP、TCP 握手出去,
@@ -2788,6 +2792,12 @@ func (d *Daemon) registerHandlers() {
 		if in.Tag != "proxy" && d.core.Running() && !d.inCore(in.Tag) {
 			// 刚刷新加进来、内核里还没有的节点:全局模式下守护进程自己的探测包会进 TUN,量不准,不如说清楚
 			return nil, errors.New("这个节点是刚刷新加进来的,内核里还没有;选它连上后再测")
+		}
+		if in.Tag != "proxy" && d.core.Running() {
+			if _, cur := d.activeProfile(); cur != nil && d.changedSet(cur)[in.Tag] {
+				// 参数随订阅变了、内核里还是旧的那份:经内核测出来的是旧线路,不是现在这条
+				return nil, errors.New("这个节点的参数刚随订阅更新,内核里还是旧的;选它连上后再测")
+			}
 		}
 		ms, err := d.core.URLTest(context.Background(), in.Tag, builder.TestURL)
 		if err == nil && in.Tag == "proxy" {

@@ -90,3 +90,69 @@ func TestNodesMarkUnsupported(t *testing.T) {
 		t.Fatalf("只有内核建不起来的那个带原因: %+v", nodes)
 	}
 }
+
+// changedBackend 面板把「香港1」从 hysteria2 换成了 vless,客户端刷新过了、当前节点没受影响所以内核没重建:
+// 状态里的协议(订阅缓存)是 vless,内核报的还是 Hysteria2。
+type changedBackend struct{ port int }
+
+func (b changedBackend) Dispatch(method string, _ json.RawMessage) (any, error) {
+	switch method {
+	case ipc.MGetClashInfo:
+		if b.port == 0 {
+			return nil, nil
+		}
+		return ipc.ClashInfo{Port: b.port, Secret: "s", Running: true}, nil
+	case ipc.MGetState:
+		return ipc.StateView{
+			Nodes:   []string{"auto", "香港1", "香港3", "新加的"},
+			Types:   map[string]string{"香港1": "vless", "香港3": "anytls", "新加的": "vless"},
+			Changed: []string{"香港1"},
+			Delays:  map[string]int{"香港3": 66},
+		}, nil
+	}
+	return nil, nil
+}
+func (changedBackend) Logf(string, ...any) {}
+
+// 节点列表上的协议以刷新到的订阅为准,不以内核为准;参数变了、内核里还是旧的那份的节点标出来,内核给它记的延迟不用。
+// 用户真机:几十条线路从 hysteria2 换成 vless,刷新多次,列表上还全是 HYSTERIA2。
+func TestNodesTypeFollowsSubscriptionNotKernel(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"proxies":{
+			"proxy":{"name":"proxy","type":"Selector","now":"香港3","all":["auto","香港1","香港3"]},
+			"auto":{"name":"auto","type":"URLTest","now":"香港3"},
+			"香港1":{"name":"香港1","type":"Hysteria2","history":[{"delay":198}]},
+			"香港3":{"name":"香港3","type":"AnyTLS","history":[{"delay":80}]}}}`))
+	}))
+	defer srv.Close()
+	nodes, err := New(changedBackend{port: srv.Listener.Addr().(*net.TCPAddr).Port}, Options{}).nodes(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	by := map[string]NodeInfo{}
+	for _, n := range nodes {
+		by[n.Name] = n
+	}
+	if h := by["香港1"]; h.Type != "vless" || !h.Changed || h.Delay != 0 || h.Pending {
+		t.Fatalf("换了协议的:标签按订阅写 vless、标成已更新、不用内核记的旧延迟: %+v", h)
+	}
+	if h := by["香港3"]; h.Type != "anytls" || h.Changed || h.Delay != 66 || !h.Current {
+		t.Fatalf("没变的照常: %+v", h)
+	}
+	if n := by["新加的"]; n.Type != "vless" || !n.Pending || n.Changed {
+		t.Fatalf("刷新新加的也带协议: %+v", n)
+	}
+	if a := by["auto"]; a.Type != "URLTest" || a.AutoNow != "香港3" {
+		t.Fatalf("内核自己的组,订阅里没有它的协议:用内核报的: %+v", a)
+	}
+	// 没连着时也有协议标签(以前内核不在跑就一个标签都没有)
+	off, err := New(changedBackend{}, Options{}).nodes(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range off {
+		if n.Name == "香港1" && n.Type != "vless" {
+			t.Fatalf("没连着时协议也按订阅写: %+v", n)
+		}
+	}
+}

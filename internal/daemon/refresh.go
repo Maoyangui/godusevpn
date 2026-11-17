@@ -163,6 +163,52 @@ func (d *Daemon) needRebuildFor(tag string) bool {
 	return hadOld && hasNew && old != nw
 }
 
+// nodeTypes 订阅缓存里各节点的协议。界面的协议标签用它(见 ipc.StateView.Types)。
+func nodeTypes(p *profile.Profile) map[string]string {
+	out := make(map[string]string, len(p.Outbounds))
+	for _, e := range endpoints(p) {
+		if e.Type != "" {
+			out[e.Tag] = e.Type
+		}
+	}
+	return out
+}
+
+// changedNodes 参数变了、内核里还是旧的那份的节点:running 是内核启动时用的那份订阅,fresh 是最新的缓存,
+// 两边都有、内容不同的就是。面板把线路换了端口或协议,客户端刷新时只要当前节点没受影响就不重建内核(见 decideRefresh),
+// 这些节点在内核里就一直是旧的,直到选中它或重连。
+func changedNodes(running, fresh *profile.Profile) []string {
+	if running == nil || fresh == nil {
+		return nil
+	}
+	var out []string
+	for _, tag := range fresh.Tags {
+		old, had := running.Node(tag)
+		if nw, has := fresh.Node(tag); had && has && old != nw {
+			out = append(out, tag)
+		}
+	}
+	return out
+}
+
+// changedSet 同上,给测速用:内核没在跑时是空的。
+func (d *Daemon) changedSet(fresh *profile.Profile) map[string]bool {
+	if !d.core.Running() {
+		return nil
+	}
+	d.mu.Lock()
+	running := d.running
+	d.mu.Unlock()
+	var out map[string]bool
+	for _, tag := range changedNodes(running, fresh) {
+		if out == nil {
+			out = map[string]bool{}
+		}
+		out[tag] = true
+	}
+	return out
+}
+
 // sameMembers 两组成员是不是同一批节点(顺序不算)。
 func sameMembers(a, b []string) bool {
 	if len(a) != len(b) {

@@ -1074,7 +1074,7 @@ function nodeRow(n, i, max, testing) {
   return `<div class="item ${n.current ? 'current' : ''}${n.unsupported ? ' unsupported' : ''}" data-name="${esc(n.name)}"${bad} data-geo="${code}" style="animation-delay:${Math.min(i, 12) * 25}ms"><span class="check"></span>
     ${flagHTML(code, 'sm')}
     <div class="name">
-      <div class="ntop"><b>${esc(cleanName(n.name))}</b>${n.hint ? `<em class="tag">${t('node.hint')}</em>` : ''}${mult ? `<em class="tag warn">${t('node.mult', { n: mult })}</em>` : ''}${n.v6 ? `<em class="tag warn">${t('node.v6')}</em>` : ''}${n.unsupported ? `<em class="tag">${t('node.unsupported')}</em>` : ''}${n.pending ? `<em class="tag">${t('node.pending')}</em>` : ''}${n.type ? `<em class="ntype">${esc(n.type)}</em>` : ''}</div>
+      <div class="ntop"><b>${esc(cleanName(n.name))}</b>${n.hint ? `<em class="tag">${t('node.hint')}</em>` : ''}${mult ? `<em class="tag warn">${t('node.mult', { n: mult })}</em>` : ''}${n.v6 ? `<em class="tag warn">${t('node.v6')}</em>` : ''}${n.unsupported ? `<em class="tag">${t('node.unsupported')}</em>` : ''}${n.pending ? `<em class="tag">${t('node.pending')}</em>` : ''}${n.changed ? `<em class="tag">${t('node.changed')}</em>` : ''}${n.type ? `<em class="ntype">${esc(n.type)}</em>` : ''}</div>
       <div class="bar"><i style="width:${barWidth(n.delay, max)}"></i></div>
     </div>
     <span class="ms ${msClass(n.delay)}">${msCell(n, testing)}</span></div>`;
@@ -1108,7 +1108,7 @@ async function drawNodes(testing) {
   // 节点集合没变就只改数字,别整块重画:一百来个节点重画一次会先空一下,入场动画还要错峰放完,
   // 滚动位置和筛选框里的字也跟着丢 —— 测速结束那一下看着就是"闪一下白再出来"。
   const sig = (hasGroups ? (lineOn ? 'L|' : 'N|') : '') // 开关翻了 / 线路组出现或消失:整块重画
-    + rows.map(n => n.name + (n.group ? '#' : '') + (n.pending ? '+' : '') + (n.unsupported ? '!' : '') + (n.v6 ? '6' : '') + (n.hint ? '?' : '')).join(' '); // 新节点重连后用上了,标签要跟着变
+    + rows.map(n => n.name + (n.group ? '#' : '') + (n.pending ? '+' : '') + (n.changed ? '~' : '') + (n.unsupported ? '!' : '') + (n.v6 ? '6' : '') + (n.hint ? '?' : '') + '/' + (n.type || '')).join(' '); // 新节点重连后用上了,标签要跟着变
   if (sig === nodeSig && patchNodes(rows, max, testing)) return;
   nodeSig = sig;
   const st = v.state && v.state.status, online = st === 'connected' || st === 'degraded';

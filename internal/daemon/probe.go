@@ -227,7 +227,10 @@ func lookupNode(ctx context.Context, host string, resolve func(context.Context, 
 // 也经它自己的出站真连一次:从本机直接握手落地,量的不是这条链,落地还会直接看到本机的地址(写成 IPv6 的就是从本机走 IPv6)。
 //
 // 关着 IPv6 时同样不走 IPv6:skip(这一轮不用的 IPv6 节点)不测、直接记不通,解析出来的地址只用 IPv4 的,写成 IPv6 地址的不拨(见 lookupNode)。
-func (d *Daemon) probeConnected(ctx context.Context, p *profile.Profile, onEach func(tag string, ms int), skip map[string]bool) map[string]int {
+//
+// stale 是参数随刷新变了、内核里还是旧的那份的节点(见 changedSet):要经出站真连的那两类不测、不给数 —— 内核里那条出站
+// 是刷新前的参数,经它量出来的不是现在这条线路。握手直接量的那一类照测:地址和端口取的是刷新后的。
+func (d *Daemon) probeConnected(ctx context.Context, p *profile.Profile, onEach func(tag string, ms int), skip, stale map[string]bool) map[string]int {
 	s := d.getSettings()
 	resolve := d.bootResolver(s)
 	res := map[string]int{}
@@ -246,7 +249,9 @@ func (d *Daemon) probeConnected(ctx context.Context, p *profile.Profile, onEach 
 			continue
 		}
 		if udpProtocols[e.Type] || e.chained() {
-			viaOut = append(viaOut, e.Tag)
+			if !stale[e.Tag] {
+				viaOut = append(viaOut, e.Tag)
+			}
 			continue
 		}
 		if e.Server == "" || e.Port <= 0 {

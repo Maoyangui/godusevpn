@@ -108,6 +108,12 @@ type StateView struct {
 	Hints []string `json:"hints,omitempty"`
 	// SelectedHint 选中的就是提示节点(或成员全是提示节点的线路组):手动选它照样选得上,界面说一句它不能上网
 	SelectedHint bool `json:"selectedHint,omitempty"`
+	// Types 各节点的协议(vless、hysteria2 …),取自最新的订阅缓存 —— 和 Nodes 同一个来源。界面的协议标签用它:
+	// 内核里那份是启动时的,面板把一条线路换了协议,刷新之后内核报的还是旧协议。
+	Types map[string]string `json:"types,omitempty"`
+	// Changed 这些节点的参数随最近的刷新变了,而内核里还是启动时那份:选它会按新参数重建配置(见 needRebuildFor);
+	// 这期间内核给它记的延迟量的是旧的那份,不作数。
+	Changed []string `json:"changed,omitempty"`
 }
 
 // ForPage 给界面看的那份状态:设置里去掉凭据(见 settings.Settings.ForPage),订阅去掉带令牌的地址和续费地址
