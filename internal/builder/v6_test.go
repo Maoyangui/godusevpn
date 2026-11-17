@@ -146,4 +146,14 @@ func TestV6BlockedChains(t *testing.T) {
 	if got := V6Blocked(p, s, map[string]bool{"v6only.example": true}); len(got) != 0 {
 		t.Fatalf("开着 IPv6 时一个不算: %v", got)
 	}
+	// V6Needed 不看设置:哪些节点要从本机走 IPv6 是订阅本身的事(开着 IPv6、可网络没有 IPv6 时,界面拿它解释为什么连不上)
+	if got := V6Needed(p, map[string]bool{"v6only.example": true}); !reflect.DeepEqual(got, []string{"v6", "v6括号", "只有AAAA", "经v6中转", "naive链", "两跳"}) {
+		t.Fatalf("V6Needed: %v", got)
+	}
+	if got := V6Needed(p, nil); !reflect.DeepEqual(got, []string{"v6", "v6括号", "经v6中转", "两跳"}) {
+		t.Fatalf("没解析过域名时只认写成 IPv6 地址的: %v", got)
+	}
+	if V6Needed(nil, nil) != nil {
+		t.Fatal("没有订阅")
+	}
 }

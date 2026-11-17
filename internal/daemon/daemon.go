@@ -91,6 +91,9 @@ type Daemon struct {
 	refreshQueued              map[string]bool             // 界面点的后台刷新:goroutine 还没登记进 refreshing 时也要显示"正在刷新"
 	unsupported                map[string]skippedNode      // 最近一次备配置时内核建不起来、被剔掉的节点(tag → 原因与当时的出站)
 	v6Only                     map[string]bool             // 最近一次备配置时解析出来、只有 IPv6 地址的节点域名(见 builder.V6Blocked)
+	hostV6Mu                   sync.Mutex                  // 管下面两项(见 hostNoV6)
+	hostV6No                   bool                        // 本机网络看起来没有 IPv6(网卡上没有公网 IPv6 地址)
+	hostV6At                   time.Time                   // 上面那个是什么时候问的
 	running                    *profile.Profile            // 正在跑的内核是按哪份订阅生成的;刷新后拿它和缓存比,决定动不动隧道
 	prepared                   *profile.Profile            // prepare 刚按它生成了配置、内核还没起:start 成功后转成 running
 	guardOn                    bool                        // 「防流量逃逸」的闸此刻开着
@@ -1072,7 +1075,9 @@ func (d *Daemon) prepare(ctx context.Context) ([]byte, error) {
 	clashPort := d.pickClashPort(s.ClashPort)
 	nodeIPs, noA := resolveNodeHosts(ctx, p, d.bootResolver(s))
 	var v6Only map[string]bool
-	if !s.IPv6 { // 开着 IPv6 时内核解析节点域名按 prefer_ipv4,只有 IPv6 地址的域名照样连得上,不用找
+	// 开着 IPv6 时内核解析节点域名按 prefer_ipv4,只有 IPv6 地址的域名照样连得上,不用找 —— 除非本机网络没有 IPv6:
+	// 那时这种节点连不上,要找出来让界面说清楚原因(见 v6NoNet)
+	if !s.IPv6 || d.hostNoV6() {
 		v6Only = v6OnlyHosts(ctx, p, nodeIPs, noA, d.bootLookup4(s), d.bootLookup6(s))
 	}
 	cfg, rep, skipped, err := buildValid(d.core, builder.Input{Profile: p, Settings: s, DataDir: paths.DataDir(), ClashSecret: d.secret, RuleSetDir: paths.RuleSets(), LANDNS: netmode.LANResolvers(),
@@ -1378,8 +1383,12 @@ func (d *Daemon) health(ctx context.Context) error {
 // nodeDown 当前节点测不通时报给状态机的错误。正在用的是这一轮连不上的 IPv6 节点(关着 IPv6,见 builder.V6Blocked)时
 // 换成单独的错误码:界面据此说清楚原因和该去哪儿改,而不是笼统一句"当前节点不可用"。
 func (d *Daemon) nodeDown(err error) error {
-	if now := d.currentNode(); now != "" && slices.Contains(d.v6BlockedNow(d.getSettings()), now) {
+	s := d.getSettings()
+	if now := d.currentNode(); now != "" && slices.Contains(d.v6BlockedNow(s), now) {
 		return state.Errf(state.CodeNodeV6, "%v", err)
+	} else if now != "" && slices.Contains(d.v6NoNetNow(s), now) {
+		// 开着 IPv6、节点只能走 IPv6、可这个网络没有 IPv6:不是节点坏了,也不是断网
+		return state.Errf(state.CodeNodeV6Net, "当前网络没有 IPv6,这个节点只能走 IPv6: %v", err)
 	}
 	return state.Errf(state.CodeNodeDown, "当前节点不可用: %v", err)
 }
@@ -2449,6 +2458,7 @@ func (d *Daemon) stateView() ipc.StateView {
 		v.Nodes = []string{}
 	}
 	running, want := d.core.Running(), d.wantConnected() // 别在 d.mu 里问内核 / 状态机(各有各的锁)
+	noV6 := s.IPv6 && d.hostNoV6()                       // 同上:读网卡不在 d.mu 里做
 	d.mu.Lock()
 	if len(d.delays) > 0 {
 		v.Delays = make(map[string]int, len(d.delays))
@@ -2477,6 +2487,8 @@ func (d *Daemon) stateView() ipc.StateView {
 			}
 			v.V6Blocked = builder.V6Blocked(p, s, d.v6Only)
 			v.SelectedV6 = selectionBlocked(p, builder.Effective(p, s), v.V6Blocked)
+			v.V6NoNet = v6NoNet(p, s, d.v6Only, noV6)
+			v.SelectedV6NoNet = selectionBlocked(p, builder.Effective(p, s), v.V6NoNet)
 			v.SelNote = selNote(p, s)
 			v.Hints = builder.HintNodes(p)
 			v.SelectedHint = selectionBlocked(p, builder.Effective(p, s), v.Hints)

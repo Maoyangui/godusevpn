@@ -101,6 +101,11 @@ type StateView struct {
 	// SelectedV6 这一轮实际落到的选择(选的节点、成员全是这种节点的线路组,或者自动选择而节点全是这种)就是上面那种:
 	// 首页要明说为什么连不上、怎么办
 	SelectedV6 bool `json:"selectedV6,omitempty"`
+	// V6NoNet 「允许 IPv6」开着、可本机网络没有 IPv6(网卡上没有公网 IPv6 地址)时,订阅里只能走 IPv6 的节点:这个网络连不上它们。
+	// 节点列表同样标成「IPv6 节点」;配置不为它改(换个网络就通了)。读不出网卡时为空,不下结论
+	V6NoNet []string `json:"v6NoNet,omitempty"`
+	// SelectedV6NoNet 这一轮实际落到的选择就是上面那种:首页说清楚连不上是因为当前网络没有 IPv6,不是断网
+	SelectedV6NoNet bool `json:"selectedV6NoNet,omitempty"`
 	// SelNote 设置里选的节点 / 线路组在当前订阅里已经没有了:这一轮实际用的是什么(见 builder.Effective)。界面写明,不让人以为还在用它
 	SelNote *SelNote `json:"selNote,omitempty"`
 	// Hints 订阅里的提示节点(地址只指向本机,见 builder.HintNodes):面板放来显示续费 / 用量信息的,不能上网。

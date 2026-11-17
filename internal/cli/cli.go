@@ -335,6 +335,8 @@ func printProbe(v ipc.StateView, res map[string]int) {
 		switch ms := res[n]; {
 		case slices.Contains(v.V6Blocked, n):
 			fmt.Printf("%s: %s\n", n, v6Untested)
+		case ms < 0 && slices.Contains(v.V6NoNet, n):
+			fmt.Printf("%s: 不通(%s)\n", n, v6NoNetWhy)
 		case ms < 0:
 			fmt.Printf("%s: 不通\n", n)
 		default:
@@ -384,6 +386,8 @@ func printStatus(v ipc.StateView) {
 const (
 	v6Tag      = "IPv6 节点(「允许 IPv6」关着,这一轮不用)"
 	v6Untested = "IPv6 节点(「允许 IPv6」关着,没测)"
+	// v6NoNetWhy 「允许 IPv6」开着、节点只能走 IPv6、可本机网络没有 IPv6(见 ipc.StateView.V6NoNet):连不上的原因
+	v6NoNetWhy = "只能走 IPv6,当前网络没有 IPv6"
 )
 
 // nodeTotal 订阅里真正的节点数:列表首项 auto(自动选择)不是节点,内核 proxy 组里的线路组名(订阅缓存还没有时
@@ -403,6 +407,9 @@ func nodeCountNote(v ipc.StateView) string {
 	if len(v.V6Blocked) > 0 {
 		return fmt.Sprintf("(共 %d 个节点,其中 %d 个是 IPv6 节点、「允许 IPv6」关着,这一轮不用)", nodeTotal(v), len(v.V6Blocked))
 	}
+	if len(v.V6NoNet) > 0 {
+		return fmt.Sprintf("(共 %d 个节点,其中 %d 个只能走 IPv6、当前网络没有 IPv6,连不上)", nodeTotal(v), len(v.V6NoNet))
+	}
 	return fmt.Sprintf("(共 %d 个节点)", nodeTotal(v))
 }
 
@@ -420,7 +427,9 @@ func nodeLine(v ipc.StateView, n string) string {
 	} else if slices.Contains(v.V6Blocked, n) {
 		ms = "  " + v6Tag // 测速时它不测、直接记不通:那个"不通"不显示,显示原因
 	} else if d, ok := v.Delays[n]; ok {
-		if d < 0 {
+		if d < 0 && slices.Contains(v.V6NoNet, n) {
+			ms = "  不通(" + v6NoNetWhy + ")"
+		} else if d < 0 {
 			ms = "  不通"
 		} else {
 			ms = fmt.Sprintf("  %d ms", d)
@@ -439,6 +448,9 @@ func selectionNotes(v ipc.StateView) []string {
 	}
 	if v.SelectedV6 {
 		out = append(out, v6Hint(v))
+	}
+	if v.SelectedV6NoNet {
+		out = append(out, v6NoNetHint(v))
 	}
 	return out
 }
@@ -594,6 +606,20 @@ func v6Hint(v ipc.StateView) string {
 		what = "线路「" + sel + "」的服务器全都只能走 IPv6"
 	}
 	return what + ",而「允许 IPv6」关着,连不上:要用就打开 IPv6(settings ipv6=on,界面里是 设置 → 隐私),或者换别的节点"
+}
+
+// v6NoNetHint 选的这一轮连不上、原因是它只能走 IPv6 而本机网络没有 IPv6(「允许 IPv6」是开着的)时的提示:
+// 点名是哪个节点 / 哪条线路。不是断网,也不是节点坏了 —— 换到有 IPv6 的网络就通。
+func v6NoNetHint(v ipc.StateView) string {
+	sel := v.Settings.Selected
+	what := "「" + sel + "」只能走 IPv6"
+	if sel == "" || !slices.Contains(v.Nodes, sel) && !isGroup(v, sel) {
+		what = "订阅里的节点全都只能走 IPv6"
+	}
+	if isGroup(v, sel) {
+		what = "线路「" + sel + "」的服务器全都只能走 IPv6"
+	}
+	return what + ",而当前网络没有 IPv6(网卡上没有公网 IPv6 地址),连不上:换到有 IPv6 的网络,或者换别的节点"
 }
 
 func isGroup(v ipc.StateView, tag string) bool {

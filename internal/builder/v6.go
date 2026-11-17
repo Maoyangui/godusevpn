@@ -53,6 +53,18 @@ func V6Blocked(p *profile.Profile, s settings.Settings, v6Only map[string]bool) 
 	if p == nil || s.IPv6 {
 		return nil
 	}
+	return V6Needed(p, v6Only)
+}
+
+// V6Needed 订阅里本机要走 IPv6 才连得上的节点(按订阅里的顺序),判法见 V6Blocked:按第一跳判,地址写成 IPv6、
+// 或者域名只解析得到 IPv6 地址(v6Only)。不看设置。
+//
+// 除了 V6Blocked,还有一处用它:「允许 IPv6」开着、可本机网络没有 IPv6 时,这些节点同样连不上 —— 界面拿它说清楚原因
+// (见 daemon 的 v6NoNet),不然看着就像断网了。那种情况不改配置:网络随时会变,自动选择自己会绕开连不上的节点。
+func V6Needed(p *profile.Profile, v6Only map[string]bool) []string {
+	if p == nil {
+		return nil
+	}
 	nodes := make(map[string]v6Node, len(p.Tags))
 	for i, raw := range p.Outbounds {
 		if i >= len(p.Tags) {

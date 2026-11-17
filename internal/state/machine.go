@@ -47,6 +47,9 @@ const (
 	// CodeNodeV6 正在用的节点是 IPv6 地址、而这一轮关着 IPv6(见 builder.V6Blocked):连不上不是节点坏了,是设置挡着。
 	// 状态机按节点不通处理(降级、自救),界面据此说清楚原因和去哪儿改
 	CodeNodeV6 = "E_NODE_V6"
+	// CodeNodeV6Net 正在用的节点只能走 IPv6、「允许 IPv6」也开着,可本机网络没有 IPv6(网卡上没有公网 IPv6 地址):
+	// 连不上不是节点坏了、也不是断网,是这个网络到不了它。和 CodeNodeV6 一样按节点不通处理,界面说清楚原因
+	CodeNodeV6Net = "E_NODE_V6_NET"
 	// 隐私保护前置条件未满足时必须退避重试，不能继续启动数据面。
 	CodePrivacyGuard = "E_PRIVACY_GUARD"
 	CodePrivacyNIC   = "E_PRIVACY_NIC"

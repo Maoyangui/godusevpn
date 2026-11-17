@@ -689,9 +689,9 @@ function updateHome() {
   const quiet = on && !err;
   $('#status').hidden = quiet;
   $('#status').textContent = state.service ? t('st.' + st) : svcText(state);
-  // 下面那条 IPv6 提示挂着时,同一个原因(E_NODE_V6)不在状态行再说一遍:提示条里已经点了名、说了去哪儿改
+  // 下面那条 IPv6 提示挂着时,同一个原因(E_NODE_V6、E_NODE_V6_NET)不在状态行再说一遍:提示条里已经点了名、说了怎么办
   const v6Text = v6HintText(v);
-  const errSub = v6Text && v.state.code === 'E_NODE_V6' ? '' : err;
+  const errSub = v6Text && (v.state.code === 'E_NODE_V6' || v.state.code === 'E_NODE_V6_NET') ? '' : err;
   $('#status-sub').hidden = !errSub;
   $('#status-sub').textContent = errSub;
   // 防流量逃逸的闸:开着就亮一颗小盾;该开却没开成(防火墙不可用之类)标成警告
@@ -791,12 +791,19 @@ function wrapPill(el, text) {
 // v6HintText 选的(节点、线路,或自动选择而节点全是这种)只能走 IPv6、而「允许 IPv6」关着时的提示:点名是哪个,说清楚去哪儿改。
 // 直连模式下流量不经节点,不挂;自救临时借了别的线路时(连着、实际在用的不是选的那个)补一句现在用的是哪台,
 // 不然挂在一个正常的节点上方,读起来像在说它。
+//
+// 另一种情况:「允许 IPv6」开着,可当前网络没有 IPv6(selectedV6NoNet,服务看的是网卡上有没有公网 IPv6 地址)。同样连不上,
+// 但不是设置挡着,也不是断网:说清楚是这个网络到不了它。这一条是推断的(NAT66 的网络会看走眼),所以真连上了、
+// 正在用的就是选的那个时不挂。
 function v6HintText(v) {
-  if (!v || !v.selectedV6 || v.mode === 'direct') return '';
+  if (!v || !(v.selectedV6 || v.selectedV6NoNet) || v.mode === 'direct') return '';
+  const net = !v.selectedV6;
   const s = v.settings || {}, note = v.selNote;
   const sel = note ? (note.now || '') : (s.selected || ''); // 选的没了时这一轮落在同线路那台,或者自动选择
-  let text = !sel ? t('node.v6HintAuto') : groupByTag(v, sel) ? t('node.v6HintLine', { n: cleanName(sel) }) : t('node.v6Hint', { n: cleanName(sel) });
   const st = v.state && v.state.status, on = st === 'connected' || st === 'degraded';
+  if (net && st === 'connected' && (!v.node || v.node === (sel || 'auto'))) return '';
+  const k = net ? 'node.v6Net' : 'node.v6Hint';
+  let text = !sel ? t(k + 'Auto') : groupByTag(v, sel) ? t(k + 'Line', { n: cleanName(sel) }) : t(k, { n: cleanName(sel) });
   if (on && v.node && v.node !== (sel || 'auto')) text += t('node.v6Borrowed', { n: cleanName(v.node) });
   return text;
 }
@@ -1098,7 +1105,8 @@ async function drawNodes(testing) {
     $('#sheet-body').innerHTML = `<div class="empty">${p ? t('node.notFetched') : t('prof.empty')}</div>`; return;
   }
   const v = (state && state.view) || {};
-  const v6 = new Set(v.v6Blocked || []); // 关着 IPv6 时连不上的 IPv6 节点:标出来
+  // 连不上的 IPv6 节点:关着 IPv6 时不用的(v6Blocked),和开着 IPv6、可当前网络没有 IPv6 的(v6NoNet)。都标成「IPv6 节点」
+  const v6 = new Set((v.v6Blocked || []).concat(v.v6NoNet || []));
   // 订阅里的提示节点(地址只指向本机,面板放来显示续费 / 用量的):标「提示」,不测速,以前测出的数也不显示
   const hints = new Set(v.hints || []);
   nodes.forEach(n => { n.v6 = v6.has(n.name); n.hint = hints.has(n.name); if (n.hint) n.delay = 0; });
@@ -1142,7 +1150,7 @@ async function drawNodes(testing) {
       if (sheetIs('nodes', pickSeq)) closeSheet(); // 等的时候用户已经关掉、开了别的面板:别把那块关了
       else if (nodesOpen()) { nodeSig = ''; await drawNodes(false); } // 关掉又重新打开了节点面板:按新的选择重画,不替人关
       const nst = nv && nv.state && nv.state.status;
-      if (nv && nv.selectedV6) toast(v6HintText(nv) || t('node.v6Hint', { n: cleanName(it.dataset.name) }), 'err'); // 选的节点只能走 IPv6,而现在关着 IPv6
+      if (nv && (nv.selectedV6 || nv.selectedV6NoNet)) { const why = v6HintText(nv) || (nv.selectedV6 ? t('node.v6Hint', { n: cleanName(it.dataset.name) }) : ''); if (why) toast(why, 'err'); } // 选的节点只能走 IPv6,而现在关着 IPv6 / 当前网络没有 IPv6
       else if (nv && nv.selectedHint) toast(t('node.hintWhy'), 'err'); // 选的是订阅里的提示节点:照样选上,说一句它不能上网
       else if (it.dataset.group && online && nst && nst !== 'connected' && nst !== 'degraded') toast(t('node.lineAutoReconnect'));
     } catch (e) {

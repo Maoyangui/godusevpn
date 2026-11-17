@@ -7,6 +7,7 @@ import (
 
 	"github.com/Maoyangui/godusevpn/internal/builder"
 	"github.com/Maoyangui/godusevpn/internal/ipc"
+	"github.com/Maoyangui/godusevpn/internal/netmode"
 	"github.com/Maoyangui/godusevpn/internal/profile"
 	"github.com/Maoyangui/godusevpn/internal/settings"
 	"github.com/Maoyangui/godusevpn/internal/state"
@@ -192,6 +193,46 @@ func (d *Daemon) v6BlockedNow(s settings.Settings) []string {
 	v6 := d.v6Only
 	d.mu.Unlock()
 	return builder.V6Blocked(p, s, v6)
+}
+
+// ---- 开着 IPv6、可网络没有 IPv6 时连不上的 IPv6 节点 ----
+
+// hostIPv6 本机现在有没有能出网的 IPv6(见 netmode.HostIPv6);测试里替换。
+var hostIPv6 = func() (has, known bool) { return netmode.HostIPv6(builder.TunName) }
+
+// hostNoV6 本机网络现在看起来没有 IPv6:网卡读得出来,而且一张带公网 IPv6 地址的都没有。读不出来不下结论(false)。
+// 状态查询每秒都来问,结果留 5 秒;有自己的锁,d.mu 里外都能问。
+func (d *Daemon) hostNoV6() bool {
+	d.hostV6Mu.Lock()
+	defer d.hostV6Mu.Unlock()
+	if !d.hostV6At.IsZero() && time.Since(d.hostV6At) < 5*time.Second {
+		return d.hostV6No
+	}
+	has, known := hostIPv6()
+	d.hostV6No, d.hostV6At = known && !has, time.Now()
+	return d.hostV6No
+}
+
+// v6NoNet 「允许 IPv6」开着、可本机网络没有 IPv6 时,订阅 p 里只能走 IPv6 的节点(见 builder.V6Needed):这个网络连不上它们。
+// 关着 IPv6 时归 V6Blocked 管(那是设置挡着),这里不重复。noV6 由调用方先问好(hostNoV6),这样在 d.mu 里也能用。
+func v6NoNet(p *profile.Profile, s settings.Settings, v6Only map[string]bool, noV6 bool) []string {
+	if p == nil || !s.IPv6 || !noV6 {
+		return nil
+	}
+	return builder.V6Needed(p, v6Only)
+}
+
+// v6NoNetNow 当前订阅里、这个网络连不上的 IPv6 节点(见 v6NoNet)。
+func (d *Daemon) v6NoNetNow(s settings.Settings) []string {
+	if !s.IPv6 {
+		return nil
+	}
+	noV6 := d.hostNoV6()
+	_, p := d.activeProfile()
+	d.mu.Lock()
+	v6 := d.v6Only
+	d.mu.Unlock()
+	return v6NoNet(p, s, v6, noV6)
 }
 
 // autoSkippedNow 当前订阅里自动选择不用的节点,分开给:提示节点(地址只指向本机,见 builder.HintNodes)、

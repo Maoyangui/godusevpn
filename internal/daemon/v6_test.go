@@ -348,10 +348,11 @@ func TestV6OnlyHosts(t *testing.T) {
 	if d.bootLookup4(s) != nil {
 		t.Fatal("严格全局下不解析,也不补问")
 	}
-	// prepare 只在关着 IPv6 时去找
+	// prepare 只在两种情况下去找:关着 IPv6(这种节点解析不出地址);开着 IPv6 而本机网络没有 IPv6(这种节点连不上,界面要说清原因)。
+	// 开着 IPv6、网络也有 IPv6 的平常情况不多问这一轮 DNS
 	prep := funcBody(t, readDaemonSource(t), "func (d *Daemon) prepare(ctx context.Context) ([]byte, error) {")
-	if !strings.Contains(prep, "if !s.IPv6 {") || !strings.Contains(prep, "V6Only: v6Only") {
-		t.Fatal("prepare 关着 IPv6 时要找出只有 IPv6 地址的节点域名并交给配置生成")
+	if !strings.Contains(prep, "if !s.IPv6 || d.hostNoV6() {") || !strings.Contains(prep, "V6Only: v6Only") {
+		t.Fatal("prepare 关着 IPv6、或开着 IPv6 而网络没有 IPv6 时,要找出只有 IPv6 地址的节点域名并交给配置生成")
 	}
 }
 
