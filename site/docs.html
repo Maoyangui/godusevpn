@@ -89,7 +89,9 @@
       <tr><td>只给本机看</td><td><code>godusevpn settings webListen=127.0.0.1:9800</code></td></tr>
       <tr><td>允许从公网打开</td><td><code>godusevpn settings webAllowPublic=on</code></td></tr>
       <tr><td>服务开关</td><td><code>godusevpn install | start | stop | status | uninstall</code></td></tr>
+      <tr><td>打开面板(桌面)</td><td><code>godusevpn open</code>,或点应用菜单里的「佛跳墙」图标</td></tr>
     </table>
+    <p>桌面发行版(有应用菜单的)装完后,系统也认得 <code>godusevpn://</code> 链接:在面板的订阅页上点「一键导入」,浏览器会打开本机面板、弹出已经填好地址和名字的添加订阅框,看一眼再点添加。订阅地址放在面板地址的 <code>#</code> 后面交给页面,不发给服务器、不进日志。软路由和没有桌面的服务器照旧在面板里粘贴地址。</p>
     <p>访问记录不落盘:内核日志里每条连接的目标默认只留在内存里。系统日志里也不记 —— journald / logread、macOS 的 launchd 日志、梅林的崩溃记录文件(<code>/opt/var/log/godusevpn.stderr.log</code>)只收崩溃和服务没起来的原因,不再有连接目标。</p>
     <h3>网关模式(软路由)</h3>
     <p>设置 → 网络 → 网络模式选"网关",局域网设备把网关和 DNS 指向这台机器就被代理,设备的 DNS 查询由内核接管(fake-ip、防泄漏)。菜单里会多出"设备"页:自动发现在线设备,每台可设跟随规则 / 强制代理 / 直连 / 拒绝上网(「防流量逃逸」生效时「直连」不生效,照样走隧道),按 MAC 记住也按 MAC 生效:换 IP 马上跟着、不断别的设备,旧 IP 分给别人不会错套,IPv6 地址也算。</p>

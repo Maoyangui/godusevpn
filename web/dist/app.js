@@ -616,7 +616,8 @@ function renderOnboard(el) {
   $('#ob-url').addEventListener('keydown', e => { if (e.key === 'Enter') submit(); });
   $('#ob-url').addEventListener('input', () => { $('#ob-http').hidden = !isPlainHTTP($('#ob-url').value); });
   qrBind(el);
-  setTimeout(() => $('#ob-url').focus(), 120);
+  // 这 120 毫秒里页面可能已经被换走(冷启动时落地页的一键导入一进来就跳到订阅页):输入框不在了就不管
+  setTimeout(() => { const u = $('#ob-url'); if (u) u.focus(); }, 120);
 }
 // svcBanner 服务连不上时的横幅。"账户没权限"和"服务没在跑"是两回事:前者服务好好的,只是这个账户
 // 不在名单里(Windows)或不是管理员(macOS)。这时绝不能给「修复」—— 修复走 uninstall + install,
@@ -2599,6 +2600,25 @@ async function init() {
       if (pending) window.__godEvent('import', pending);
     }
   } catch (e) { /* 老外壳没有这个方法 */ }
+  // 浏览器面板(Linux):点落地页的一键导入,系统把 godusevpn:// 链接交给 godusevpn open-link,它用浏览器打开面板、
+  // 把要导入的订阅放在地址的 # 后面。还没登录时 init 在前面就返回了、走不到这里:地址留在 # 里,登录完页面重新加载再读。
+  if (window.__web && typeof window.__webEmit === 'function') {
+    const imp = takeHashImport();
+    if (imp) window.__webEmit('import', imp);
+  }
+}
+// takeHashImport 读地址栏 # 后面的一键导入(#import?url=…&name=…,和 internal/deeplink 的 Fragment 是一对),
+// 读到就把它从地址栏和这条历史记录里拿掉:订阅地址带着令牌,不该留在地址栏里、也不该在刷新时再弹一次。
+// 只认 http / https 的订阅地址。
+function takeHashImport() {
+  const h = location.hash || '';
+  if (h.indexOf('#import?') !== 0) return null;
+  let p;
+  try { p = new URLSearchParams(h.slice(8)); } catch (e) { return null; }
+  try { history.replaceState(null, '', location.pathname + location.search); } catch (e) { try { location.hash = ''; } catch (x) { /* 不让改就算了 */ } }
+  const url = (p.get('url') || '').trim();
+  if (!/^https?:\/\/[^\s/]+/i.test(url)) return null;
+  return { url, name: (p.get('name') || '').trim().slice(0, 80) };
 }
 // ---- 遥控器 / 方向键(Android):WebView 不自带空间导航,按元素位置找下一个焦点;Enter 等于点击;返回键交给 __godBack ----
 // .logbox 也要算可聚焦:它里面没有任何可点的元素,遥控器只有先落到框上才谈得上用上下键滚(见 scrollBox)。

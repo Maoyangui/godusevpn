@@ -157,6 +157,7 @@ curl -fsSL https://raw.githubusercontent.com/Maoyangui/godusevpn/master/deploy/i
 
 装完终端会打印面板地址(局域网 / 内网地址、云主机的公网地址、本机地址)和随机生成的初始密码。Linux 上面板默认监听 `0.0.0.0:9800`,局域网其它设备直接打开即可;云主机要在安全组 / 防火墙放行 TCP 9800。改密码 `godusevpn passwd`,只给本机看就 `godusevpn settings webListen=127.0.0.1:9800`。面板与 Windows 客户端是同一套页面,功能一致(订阅、三态、规则组、节点测速、日志、升级)。
 
+- **桌面发行版**(有应用菜单的):安装时在应用菜单里加一个「佛跳墙」图标,点开就是面板(`godusevpn open`);并向系统登记 `godusevpn://` 协议 —— 在面板订阅页上点「一键导入」,浏览器会打开本机面板、弹出已经填好地址和名字的添加订阅框,看一眼点添加即可(不会自动加进去)。订阅地址放在面板地址的 `#` 后面交给页面,不发给服务器、不进日志,页面读完就从地址栏拿掉。老版本经面板自更新升上来的,服务重启时自己补上图标和登记。软路由、没有桌面的服务器上不做这些,照旧在面板里粘贴地址。
 - 数据布局与 Windows 一致:设置在 `/etc/godusevpn/`,缓存、规则集、日志在 `/var/lib/godusevpn/`(梅林等 Entware 环境在 `/opt/etc` 与 `/opt/var/lib` 下)。
 - 自启按初始化系统落地:systemd 单元、OpenWrt 的 procd 脚本、Entware 的 init.d 脚本;`godusevpn install | uninstall | start | stop | status`。
 - 本机模式(默认):TUN 只代理本机流量,与 Windows 相同;外部连进来的连接(SSH、面板)由连接跟踪认出来,回包走原来的路由,远程 SSH 不会被切断;只绑物理网卡地址往外连的(WebRTC)照样走隧道。

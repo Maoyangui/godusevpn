@@ -4,6 +4,8 @@
 //	godusevpn install | uninstall       注册 / 删除开机自启(Linux 的 systemd / procd / Entware,macOS 的 launchd),install 后随即启动
 //	godusevpn start | stop | status
 //	godusevpn passwd [新密码]            设置面板密码(不给参数就随机生成并打印)
+//	godusevpn open                      (Linux 桌面)用默认浏览器打开面板
+//	godusevpn open-link <godusevpn://…>  (Linux 桌面)落地页的一键导入:系统把链接交到这里,打开面板并填好添加订阅框
 //	godusevpn version
 //	其它子命令(status / connect / mode / nodes / select / test / profile / rules / settings / logs / diag)见 internal/cli
 package main
@@ -19,11 +21,14 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Maoyangui/godusevpn/brand"
 	"github.com/Maoyangui/godusevpn/internal/autostart"
 	"github.com/Maoyangui/godusevpn/internal/builder"
 	"github.com/Maoyangui/godusevpn/internal/buildinfo"
 	"github.com/Maoyangui/godusevpn/internal/cli"
 	"github.com/Maoyangui/godusevpn/internal/daemon"
+	"github.com/Maoyangui/godusevpn/internal/deeplink"
+	"github.com/Maoyangui/godusevpn/internal/desktop"
 	"github.com/Maoyangui/godusevpn/internal/ipc"
 	"github.com/Maoyangui/godusevpn/internal/netmode"
 	"github.com/Maoyangui/godusevpn/internal/paths"
@@ -87,12 +92,21 @@ func main() {
 		if err := svc.Install(exe); err != nil {
 			fail(err)
 		}
+		// 有桌面的 Linux:应用菜单里加一个图标(点开就是面板),并登记 godusevpn:// —— 落地页的「一键导入」点了能直接填好订阅。
+		// 没有桌面的机器(软路由、服务器)里面什么都不做。
+		_, deskErr := desktop.Install(exe, brand.LogoSVG)
 		if err := svc.Start(); err != nil {
 			fail(fmt.Errorf("已注册自启但启动失败: %w", err))
 		}
 		waitService()
 		fmt.Printf("%s 已安装并启动(%s)\n", svc.DisplayName, svc.Kind())
 		printPanel(s, pw)
+		switch {
+		case deskErr != nil:
+			fmt.Println("注意:没能加入应用菜单(不影响使用):", deskErr)
+		case desktop.Available():
+			fmt.Println("已加入应用菜单(" + buildinfo.DisplayName + ",点开就是面板);订阅落地页的「一键导入」可以直接用")
+		}
 	case "uninstall":
 		// 先停服务，再确认持久闸和网卡 IPv6 都已成功清理；任何失败都保留
 		// 保护状态并中止卸载，避免用户得到“已卸载但机器仍被锁住/状态不明”的结果。
@@ -137,11 +151,20 @@ func main() {
 		if err := svc.Uninstall(); err != nil {
 			fail(err)
 		}
+		desktop.Uninstall() // 应用菜单里的图标、godusevpn:// 的登记
 		fmt.Println("已停止并删除自启;设置与数据保留在", paths.ConfDir(), "与", paths.DataDir())
+	case "open", "open-link":
+		// 桌面用户点了应用菜单里的图标(不带参数),或在浏览器里点了 godusevpn:// 链接(系统把链接作为参数交过来)。不用 root。
+		link := ""
+		if len(os.Args) > 2 {
+			link = os.Args[2]
+		}
+		os.Exit(openLink(link))
 	case "post-stop":
 		// 服务单元的 ExecStopPost:进程不管怎么没的,内核留下的转发重定向都要清,设备 DNS 改问公共 DNS(只在 Linux 网关模式下有事做)
 		s, _ := settings.Load(paths.Settings())
 		netmode.PostStop(builder.TunName, s.LocalDNS)
+		desktop.WriteHint("") // 进程不管怎么没的,「面板开在哪」的提示都不该留着
 	case "boot-guard":
 		// 开机闸单元调:早于联网把落盘的闸装上、按备份先停网卡 IPv6;没有落盘的就什么都不做
 		if err := netmode.ApplyBootGuard(); err != nil {
@@ -205,6 +228,23 @@ func runDaemon(ctx context.Context) error {
 	}
 	ui := uiapi.New(d, uiapi.Options{Platform: runtime.GOOS, PrefsPath: paths.UIPrefs(), Autostart: autostart.Enabled, SetAutostart: autostart.Set})
 	ws := web.New(ui, d.Logf)
+	if runtime.GOOS == "linux" {
+		ws.Announce = desktop.WriteHint
+		// 面板自更新只换程序文件、不重跑 install:旧版本装的没有应用菜单图标和 godusevpn:// 登记,这里补上(内容没变不动)。
+		// 只动装成了服务的;手动前台跑的不碰。没有桌面的机器(软路由、服务器)里面什么都不做。
+		if svc.QueryStatus() != "not-installed" {
+			if exe, err := os.Executable(); err == nil {
+				if p, err := filepath.EvalSymlinks(exe); err == nil {
+					exe = p
+				}
+				if changed, err := desktop.Install(exe, brand.LogoSVG); err != nil {
+					d.Logf("加入应用菜单失败: %v", err)
+				} else if changed {
+					d.Logf("已加入应用菜单,并登记 godusevpn:// 链接(落地页一键导入)")
+				}
+			}
+		}
+	}
 	go func() {
 		// 等控制口起来再读设置里的监听地址
 		time.Sleep(300 * time.Millisecond)
@@ -223,7 +263,47 @@ func runDaemon(ctx context.Context) error {
 			d.Logf("面板退出: %v", err)
 		}
 	}()
-	return d.Run(ctx)
+	err = d.Run(ctx)
+	// 面板那个协程未必来得及跑完它自己的收尾(进程这就退了):这里再删一次
+	desktop.WriteHint("")
+	return err
+}
+
+// openLink 用默认浏览器打开面板;link 是一条 godusevpn://import 链接时,把要导入的订阅放在地址的 # 后面交给页面
+// (片段不发给服务器),页面弹出填好的添加订阅框,由用户点确认。link 为空就只打开面板。返回退出码。
+// 这里是普通用户身份:读不了设置、连不了控制口,面板开在哪靠守护进程留下的提示文件(见 internal/desktop)。
+// 点链接时没有终端,出了什么问题除了标准错误,再弹一条桌面通知。
+func openLink(link string) int {
+	say := func(msg string) {
+		fmt.Fprintln(os.Stderr, msg)
+		desktop.Notify(buildinfo.DisplayName, msg)
+	}
+	if runtime.GOOS != "linux" {
+		fmt.Fprintln(os.Stderr, "只有 Linux 用得着这条命令(macOS 上的一键导入由图形界面接)")
+		return 2
+	}
+	frag := ""
+	if strings.TrimSpace(link) != "" {
+		imp, err := deeplink.ParseImport(link)
+		if err != nil {
+			say("这条链接导入不了:" + err.Error())
+			return 2
+		}
+		frag = imp.Fragment()
+	}
+	base := desktop.PanelURL()
+	if base != "" && !desktop.Alive(base) {
+		base = "" // 提示文件是上次留下的(进程被强杀之类),面板其实没在
+	}
+	if base == "" {
+		say("服务没有在运行,或者面板没开。先在终端里执行:sudo godusevpn start(面板没开:sudo godusevpn settings webListen=127.0.0.1:9800)")
+		return 1
+	}
+	if err := desktop.Open(base + frag); err != nil {
+		say(err.Error())
+		return 1
+	}
+	return 0
 }
 
 // setPassword 服务在跑就经控制口改(立即生效;只改密码这一项,和界面、命令行别的保存互不覆盖),
@@ -330,6 +410,6 @@ func fail(err error) {
 
 func usage() {
 	fmt.Println(buildinfo.DisplayName, buildinfo.Version)
-	fmt.Println("用法: godusevpn run | install | uninstall | start | stop | status | passwd [密码] | version")
+	fmt.Println("用法: godusevpn run | install | uninstall | start | stop | status | passwd [密码] | open | version")
 	cli.Usage()
 }

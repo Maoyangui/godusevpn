@@ -32,6 +32,10 @@ type Server struct {
 
 	sessions map[string]webSession  // 会话 → 到期与创建时的密码版本
 	fails    map[string][]time.Time // 登录失败时间(按来源 IP)
+
+	// Announce 面板开始 / 停止在某个地址上监听时调(停止时 listen 为空)。Linux 的守护进程用它记下「面板开在哪」,
+	// 给桌面上点 godusevpn:// 链接的普通用户看(见 internal/desktop);不设就什么都不做。
+	Announce func(listen string)
 }
 
 type webSession struct {
@@ -120,6 +124,10 @@ func (s *Server) serveOnce(ctx context.Context, listen string) error {
 		}
 	}()
 	s.logf("面板监听 http://%s/", listen)
+	if s.Announce != nil {
+		s.Announce(listen)
+		defer s.Announce("")
+	}
 	err = srv.Serve(ln)
 	close(stop)
 	if err != nil && !errors.Is(err, http.ErrServerClosed) {

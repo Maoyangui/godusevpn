@@ -1,11 +1,14 @@
 package web
 
 import (
+	"context"
 	"encoding/json"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Maoyangui/godusevpn/internal/ipc"
 	"github.com/Maoyangui/godusevpn/internal/settings"
@@ -91,5 +94,48 @@ func TestLocalClient(t *testing.T) {
 		if got := localClient(host); got != want {
 			t.Fatalf("%s: 得 %v", host, got)
 		}
+	}
+}
+
+// 面板开始监听时报一次监听地址、停下来时报一次空:Linux 的守护进程靠它记下「面板开在哪」(桌面上点 godusevpn:// 链接用)。
+func TestAnnounceListenAndStop(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := ln.Addr().String()
+	ln.Close()
+	f := &fakeDaemon{s: settings.Default()}
+	f.s.WebListen, f.s.WebPassword = addr, "x"
+	s := New(uiapi.New(f, uiapi.Options{}), nil)
+	got := make(chan string, 4)
+	s.Announce = func(listen string) { got <- listen }
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- s.serveOnce(ctx, addr) }()
+	select {
+	case v := <-got:
+		if v != addr {
+			t.Fatalf("开始监听时应当报监听地址 %q,得到 %q", addr, v)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("没等到开始监听的通知")
+	}
+	if c, err := net.DialTimeout("tcp", addr, 2*time.Second); err != nil {
+		t.Fatalf("报了地址就应当已经在监听: %v", err)
+	} else {
+		c.Close()
+	}
+	cancel()
+	select {
+	case v := <-got:
+		if v != "" {
+			t.Fatalf("停下来时应当报空,得到 %q", v)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("没等到停止监听的通知")
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("正常停下不该报错: %v", err)
 	}
 }

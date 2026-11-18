@@ -57,5 +57,7 @@
     es.onerror = () => { es.close(); es = null; setTimeout(() => { if (!es) connect(); }, 2000); };
   };
   window.runtime = { EventsOn: (n, f) => { (listeners[n] = listeners[n] || []).push(f); if (!es) connect(); } };
+  // 页面自己发一条事件给监听者(一键导入:地址是从 # 后面读来的,不经服务器)
+  window.__webEmit = (n, d) => { (listeners[n] || []).forEach(f => f(d)); };
   window.__webReconnect = () => { if (es) { es.close(); es = null; } connect(); };
 })();
