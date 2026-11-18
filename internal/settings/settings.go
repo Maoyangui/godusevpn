@@ -66,6 +66,7 @@ type Settings struct {
 	NoExitLookup   bool     `json:"noExitLookup"`   // 不查出口地址(默认查:连上后经节点问第三方网站一次,首页显示出口)
 	WebAllowPublic bool     `json:"webAllowPublic"` // 允许从公网打开面板(默认只给本机和局域网:面板是明文 HTTP)
 	WebListen      string   `json:"webListen"`      // Web 面板监听地址(Linux),如 127.0.0.1:9800 / 0.0.0.0:9800;空 = 不开面板
+	WebHosts       string   `json:"webHosts"`       // 面板还认哪些域名(逗号隔开,可写 *.example.com;* = 不查)。IP、localhost、局域网主机名不用写,见 internal/web 的 allowedHost
 	WebPassword    string   `json:"webPassword"`    // 面板密码的加盐哈希(salt$sha256);空 = 无密码,此时面板不给用
 	NetMode        string   `json:"netMode"`        // local | gateway(Linux 软路由:代理经本机转发的局域网流量),见 gateway.go
 	LANSubnets     []string `json:"lanSubnets"`     // 保留字段,没有接线(见 gateway.go)

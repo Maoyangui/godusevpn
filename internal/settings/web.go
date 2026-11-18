@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"regexp"
 	"runtime"
 	"strings"
 )
@@ -24,6 +25,11 @@ func defaultWebListen() string {
 }
 
 func (s *Settings) validateWeb() error {
+	hosts, err := normWebHosts(s.WebHosts)
+	if err != nil {
+		return err
+	}
+	s.WebHosts = hosts
 	s.WebListen = strings.TrimSpace(s.WebListen)
 	if s.WebListen == "" {
 		return nil
@@ -39,6 +45,24 @@ func (s *Settings) validateWeb() error {
 	// 面板自己会拒绝访问并提示去设密码,见 internal/web。
 	return nil
 }
+
+// normWebHosts 规范设置 webHosts:去空格、转小写、去掉末尾的点;每一项要是域名(可带 *. 前缀)或者单独一个 *。
+func normWebHosts(v string) (string, error) {
+	var out []string
+	for _, h := range strings.Split(v, ",") {
+		h = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(h)), ".")
+		if h == "" {
+			continue
+		}
+		if h != "*" && !hostnameRe.MatchString(strings.TrimPrefix(h, "*.")) {
+			return "", fmt.Errorf("面板域名 %q 不对:只写域名,多个用逗号隔开(不带 http:// 和端口),如 panel.example.com", h)
+		}
+		out = append(out, h)
+	}
+	return strings.Join(out, ","), nil
+}
+
+var hostnameRe = regexp.MustCompile(`^[a-z0-9_]([a-z0-9_-]{0,61}[a-z0-9_])?(\.[a-z0-9_]([a-z0-9_-]{0,61}[a-z0-9_])?)*$`)
 
 func loopback(host string) bool {
 	if host == "" || strings.EqualFold(host, "localhost") {

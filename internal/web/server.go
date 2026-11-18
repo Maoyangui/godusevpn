@@ -295,15 +295,67 @@ var cgnat = &net.IPNet{IP: net.IPv4(100, 64, 0, 0), Mask: net.CIDRMask(10, 32)}
 // Handler 面板默认只给本机和局域网:它是明文 HTTP,从公网打开时密码、订阅地址、节点密码、访问记录都能被路上看到,
 // 云主机上还会被扫到。要从公网用,推荐 SSH 隧道或自己套 HTTPS 反代(反代从本机连过来,不受这条限制),
 // 实在要直连就开 webAllowPublic。这里的回应不写产品名:扫描器不该从这个回应认出是什么。
+//
+// 另外只认本机的名字(见 allowedHost):挡 DNS 重绑定。开了 webAllowPublic 的不查 —— 那时谁都能从公网直接连到面板,
+// 借重绑定也拿不到更多。
 func (s *Server) Handler() http.Handler {
 	mux := s.routes()
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !localClient(clientIP(r)) && !s.ui.Settings().WebAllowPublic {
+		st := s.ui.Settings()
+		if !localClient(clientIP(r)) && !st.WebAllowPublic {
 			http.Error(w, "403 Forbidden\nOnly the local network can open this page. To allow it from elsewhere, run on this machine:\n  settings webAllowPublic=on\n只允许本机和局域网打开。要从别处打开,在这台机器上执行上面这条设置。", http.StatusForbidden)
+			return
+		}
+		if !st.WebAllowPublic && !allowedHost(r.Host, st.WebHosts) {
+			h := hostName(r.Host)
+			http.Error(w, "403 Forbidden\nOpen this page by IP address, localhost or a local host name. To open it as "+h+", run on this machine:\n  settings webHosts="+h+"\n只能用 IP、localhost 或局域网里的主机名打开。要用这个域名打开,在这台机器上执行上面这条设置(几个域名用逗号隔开)。", http.StatusForbidden)
 			return
 		}
 		mux.ServeHTTP(w, r)
 	})
+}
+
+// allowedHost 请求里的 Host 是不是本机认的名字,挡 DNS 重绑定(审计 S2):恶意网页把自己的域名解析到 127.0.0.1 或局域网地址,
+// 浏览器就把本机面板当成那个网页的同源,网页能读 ping、反复试登录(失败次数还记在用户自己的 IP 上,把用户也锁在外面)。
+// 攻击者只能用自己在公网 DNS 里管得到的域名,所以这些直接放行:IP、localhost、不带点的主机名、只在局域网 / 私有网络里
+// 解析的后缀(.local、.lan、.home、.internal、.home.arpa、.localdomain、Tailscale 的 .ts.net)。
+// 别的域名(比如自己套 HTTPS 反代、反代又原样转发 Host 的)写进设置 webHosts;webHosts 里写 * 就不查。
+func allowedHost(host, extra string) bool {
+	h := hostName(host)
+	if h == "" || h == "localhost" || net.ParseIP(h) != nil || !strings.Contains(h, ".") {
+		return true
+	}
+	for _, suf := range localSuffixes {
+		if strings.HasSuffix(h, suf) {
+			return true
+		}
+	}
+	for _, e := range strings.Split(extra, ",") {
+		e = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(e)), ".")
+		switch {
+		case e == "":
+		case e == "*", e == h:
+			return true
+		case strings.HasPrefix(e, "*.") && strings.HasSuffix(h, e[1:]):
+			return true
+		}
+	}
+	return false
+}
+
+var localSuffixes = []string{".localhost", ".local", ".lan", ".home", ".internal", ".home.arpa", ".localdomain", ".ts.net"}
+
+// hostName Host 去掉端口、方括号和 IPv6 的区域标识,转小写、去掉末尾的点。
+func hostName(host string) string {
+	h := strings.TrimSpace(host)
+	if hh, _, err := net.SplitHostPort(h); err == nil {
+		h = hh
+	}
+	h = strings.Trim(h, "[]")
+	if i := strings.IndexByte(h, '%'); i >= 0 {
+		h = h[:i]
+	}
+	return strings.TrimSuffix(strings.ToLower(h), ".")
 }
 
 func (s *Server) routes() http.Handler {

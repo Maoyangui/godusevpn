@@ -3296,7 +3296,7 @@ func (d *Daemon) registerHandlers() {
 			// 这几项都不进 sing-box 的配置:面板监听地址与密码归内置 HTTP 面板管,日志保留天数归滚动器管,
 			// 内核日志落不落盘归 corePrintf 管,查不查出口归 refreshExit 管,订阅刷新间隔归 Run 的循环管 —— 改它们不该让隧道断一下
 			live.WebListen, live.WebPassword, live.LogDays, live.UpdateHours = next.WebListen, next.WebPassword, next.LogDays, next.UpdateHours
-			live.CoreLogDisk, live.NoExitLookup, live.WebAllowPublic = next.CoreLogDisk, next.NoExitLookup, next.WebAllowPublic
+			live.CoreLogDisk, live.NoExitLookup, live.WebAllowPublic, live.WebHosts = next.CoreLogDisk, next.NoExitLookup, next.WebAllowPublic, next.WebHosts
 			if !reflect.DeepEqual(live, next) {
 				if err := d.restart(); err != nil {
 					return nil, &ipc.CallError{Code: state.CodeOf(err), Msg: "新设置的配置生成失败,保持当前连接: " + err.Error()}

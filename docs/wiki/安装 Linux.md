@@ -28,6 +28,7 @@ curl -fsSL https://raw.githubusercontent.com/Maoyangui/godusevpn/master/deploy/i
 | 改面板密码 | `godusevpn passwd` |
 | 只给本机看 | `godusevpn settings webListen=127.0.0.1:9800` |
 | 允许从公网打开 | `godusevpn settings webAllowPublic=on` |
+| 用自己的域名打开(比如反代) | `godusevpn settings webHosts=panel.example.com` |
 | 服务开关 | `godusevpn install \| start \| stop \| status \| uninstall` |
 
 > 面板**必须**有密码才能用;没设密码的话面板一律不给用,本机来的也一样(命令行走控制口,照常)。

@@ -33,6 +33,7 @@ func post(t *testing.T, h http.Handler, path, body, remote, cookie string) *http
 	t.Helper()
 	req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
 	req.RemoteAddr = remote
+	req.Host = "192.168.1.2:9800" // httptest 默认的 Host 是 example.com,会被 Host 检查挡下(见 allowedHost)
 	req.Header.Set("Content-Type", "application/json")
 	if cookie != "" {
 		req.Header.Set("Cookie", cookie)
@@ -84,6 +85,70 @@ func TestPasswordLoginStillWorks(t *testing.T) {
 	}
 	if rec := post(t, h, "/api/GetSettings", "[]", "192.168.1.9:1", "gvsid="+c[0].Value); rec.Code != 200 || strings.Contains(rec.Body.String(), `"error"`) {
 		t.Fatalf("登录后应当能用:%d %s", rec.Code, rec.Body.String())
+	}
+}
+
+// 审计 S2:只认本机的名字,挡 DNS 重绑定。IP、localhost、不带点的主机名、局域网后缀直接放行;别的域名要写进 webHosts。
+func TestAllowedHost(t *testing.T) {
+	for _, c := range []struct {
+		host, extra string
+		want        bool
+	}{
+		{"127.0.0.1:9800", "", true}, {"192.168.1.2:9800", "", true}, {"[::1]:9800", "", true}, {"[fe80::1%25eth0]:9800", "", true},
+		{"100.64.1.1", "", true}, {"localhost:9800", "", true}, {"LOCALHOST", "", true}, {"app.localhost:9800", "", true},
+		{"nanopi:9800", "", true}, {"router.lan:9800", "", true}, {"pi.local", "", true}, {"box.home.arpa", "", true},
+		{"nas.internal", "", true}, {"x.localdomain", "", true}, {"box.tail1234.ts.net", "", true}, {"", "", true},
+		{"evil.example.com:9800", "", false}, {"127.0.0.1.nip.io:9800", "", false}, {"localhost.evil.com", "", false},
+		{"lan.evil.com", "", false}, {"evil.com.", "", false},
+		{"panel.example.com", "panel.example.com", true}, {"Panel.Example.com.:443", " panel.example.com ", true},
+		{"a.panel.example.com", "*.panel.example.com", true}, {"panel.example.com", "*.panel.example.com", false},
+		{"evilpanel.example.com", "*.panel.example.com", false}, {"other.example.com", "a.com,other.example.com", true},
+		{"evil.example.com", "*", true}, {"evil.example.com", "panel.example.com", false},
+	} {
+		if got := allowedHost(c.host, c.extra); got != c.want {
+			t.Fatalf("Host %q(webHosts=%q):得 %v,应为 %v", c.host, c.extra, got, c.want)
+		}
+	}
+}
+
+// 借重绑定打进来的请求(Host 是攻击者的域名)连 ping 和登录都碰不到,也不记登录失败(用户自己不会被锁在外面);
+// 加进 webHosts 或开了 webAllowPublic 就照常。
+func TestHostCheckBlocksRebinding(t *testing.T) {
+	req := func(h http.Handler, path, host string) *httptest.ResponseRecorder {
+		r := httptest.NewRequest(http.MethodPost, path, strings.NewReader(`{"password":"wrong"}`))
+		r.RemoteAddr, r.Host = "127.0.0.1:50000", host
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, r)
+		return rec
+	}
+	f := &fakeDaemon{s: settings.Default()}
+	if err := f.s.SetWebPassword("secret123"); err != nil {
+		t.Fatal(err)
+	}
+	s := New(uiapi.New(f, uiapi.Options{}), nil)
+	h := s.Handler()
+	for _, path := range []string{"/api/ping", "/api/login", "/", "/api/GetSettings"} {
+		rec := req(h, path, "evil.example.com:9800")
+		if rec.Code != http.StatusForbidden || !strings.Contains(rec.Body.String(), "settings webHosts=evil.example.com\n") {
+			t.Fatalf("%s:陌生域名应 403 并写明怎么放行,得 %d %s", path, rec.Code, rec.Body.String())
+		}
+	}
+	if len(s.fails) != 0 || len(f.called) != 0 {
+		t.Fatalf("被挡下的请求不该记登录失败、不该调到守护进程: %v %v", s.fails, f.called)
+	}
+	if rec := req(h, "/api/ping", "127.0.0.1:9800"); rec.Code != 200 {
+		t.Fatalf("IP 直连应照常: %d", rec.Code)
+	}
+
+	f2 := &fakeDaemon{s: f.s}
+	f2.s.WebHosts = "evil.example.com"
+	if rec := req(New(uiapi.New(f2, uiapi.Options{}), nil).Handler(), "/api/ping", "evil.example.com:9800"); rec.Code != 200 {
+		t.Fatalf("写进 webHosts 的域名应放行: %d %s", rec.Code, rec.Body.String())
+	}
+	f3 := &fakeDaemon{s: f.s}
+	f3.s.WebAllowPublic = true
+	if rec := req(New(uiapi.New(f3, uiapi.Options{}), nil).Handler(), "/api/ping", "evil.example.com:9800"); rec.Code != 200 {
+		t.Fatalf("开了 webAllowPublic 的不查 Host: %d %s", rec.Code, rec.Body.String())
 	}
 }
 
