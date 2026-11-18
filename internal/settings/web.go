@@ -50,14 +50,19 @@ func (s *Settings) validateWeb() error {
 func normWebHosts(v string) (string, error) {
 	var out []string
 	for _, h := range strings.Split(v, ",") {
-		h = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(h)), ".")
+		h = strings.ToLower(strings.TrimSpace(h))
 		if h == "" {
 			continue
 		}
-		if h != "*" && !hostnameRe.MatchString(strings.TrimPrefix(h, "*.")) {
+		if h == "*" { // 不查 Host:只认原样的一个 *(「*.」这类手误去掉点后不能变成它,把防护整个关掉)
+			out = append(out, h)
+			continue
+		}
+		name := strings.TrimSuffix(h, ".")
+		if !hostnameRe.MatchString(strings.TrimPrefix(name, "*.")) {
 			return "", fmt.Errorf("面板域名 %q 不对:只写域名,多个用逗号隔开(不带 http:// 和端口),如 panel.example.com", h)
 		}
-		out = append(out, h)
+		out = append(out, name)
 	}
 	return strings.Join(out, ","), nil
 }
