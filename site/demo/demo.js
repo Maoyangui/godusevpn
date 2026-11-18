@@ -220,6 +220,7 @@
         .concat(NODES.map(n => ({ name: n.name, type: n.type, delay: n.delay, current: n.name === cur })));
     },
     GetProfiles: async () => demoProfiles(),
+    GetProfilesWithLinks: async () => demoProfiles(), // 订阅管理页取的是带地址的这一份(0.7.17 起);少了它这一页会显示「还没有订阅」
     SelectProfile: async id => { PROFILE.active = id === PROFILE.id; if (MANUAL) MANUAL.active = id === MANUAL.id; push(); },
     GetManualNodes: async () => ({ id: MANUAL ? MANUAL.id : '', nodes: MANUAL ? MANUAL.nodes : [] }),
     ParseNodeLinks: async text => demoParseLinks(text),
