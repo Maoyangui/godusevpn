@@ -308,7 +308,8 @@ func (s *Server) Handler() http.Handler {
 		}
 		if !st.WebAllowPublic && !allowedHost(r.Host, st.WebHosts) {
 			h := hostName(r.Host)
-			http.Error(w, "403 Forbidden\nOpen this page by IP address, localhost or a local host name. To open it as "+h+", run on this machine:\n  settings webHosts="+h+"\n只能用 IP、localhost 或局域网里的主机名打开。要用这个域名打开,在这台机器上执行上面这条设置(几个域名用逗号隔开)。", http.StatusForbidden)
+			// 提示里写明「是你自己配的域名才放行」:被恶意网页引到这一页的人照着提示执行,等于亲手把攻击者的域名放行(Fable 审查 F-J1)
+			http.Error(w, "403 Forbidden\nOpen this page by IP address, localhost or a local host name. If "+h+" is a name you set up yourself (your own reverse proxy, for example), allow it by running on this machine:\n  settings webHosts="+h+"\nIf you did not set it up, do not run this: a web page may be trying to reach this panel through that name.\n只能用 IP、localhost 或局域网里的主机名打开。这个域名是你自己配的(比如自己套的反代)才放行:在这台机器上执行上面这条设置(几个域名用逗号隔开)。不是你配的就不要执行 —— 可能是某个网页想借这个域名碰本机的面板。", http.StatusForbidden)
 			return
 		}
 		mux.ServeHTTP(w, r)
@@ -318,7 +319,7 @@ func (s *Server) Handler() http.Handler {
 // allowedHost 请求里的 Host 是不是本机认的名字,挡 DNS 重绑定(审计 S2):恶意网页把自己的域名解析到 127.0.0.1 或局域网地址,
 // 浏览器就把本机面板当成那个网页的同源,网页能读 ping、反复试登录(失败次数还记在用户自己的 IP 上,把用户也锁在外面)。
 // 攻击者只能用自己在公网 DNS 里管得到的域名,所以这些直接放行:IP、localhost、不带点的主机名、只在局域网 / 私有网络里
-// 解析的后缀(.local、.lan、.home、.internal、.home.arpa、.localdomain、Tailscale 的 .ts.net)。
+// 解析的后缀(.localhost、.local、.lan、.home、.internal、.home.arpa、.localdomain、Tailscale 的 .ts.net)。
 // 别的域名(比如自己套 HTTPS 反代、反代又原样转发 Host 的)写进设置 webHosts;webHosts 里写 * 就不查。
 func allowedHost(host, extra string) bool {
 	h := hostName(host)
