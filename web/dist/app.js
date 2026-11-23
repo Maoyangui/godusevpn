@@ -787,10 +787,12 @@ function regionName(code) {
 function cleanName(name) {
   return String(name || '').replace(/^[\s\-|·]*[\u{1F1E6}-\u{1F1FF}]{2}[\s\-|·]*/u, '').trim() || String(name || '');
 }
-// nodeMult 节点名里的倍率(2x / x2 / 0.5倍);一倍和认不出来都返回 0,不显示牌子
+// nodeMult 节点名里的倍率(2x / x2 / 0.5倍);一倍和认不出来都返回 0,不显示牌子。
+// 「x2」这种写法,x 前面不能紧挨着小写字母或数字:那是单词里的(Xbox2、Netflix2、Linux3),不是倍率。
+// 大写字母后面照认(HKx2、IPLCx3 是机场常见的紧凑写法);面板自己拼的是「 x2」(前面有空格)
 function nodeMult(name) {
   const s = String(name || '');
-  const m = s.match(/(?:^|[^\d.])(\d+(?:\.\d+)?)\s*[xX×倍]/) || s.match(/[xX×]\s*(\d+(?:\.\d+)?)/);
+  const m = s.match(/(?:^|[^\d.])(\d+(?:\.\d+)?)\s*[xX×倍]/) || s.match(/(?:^|[^a-z\d])[xX×]\s*(\d+(?:\.\d+)?)/);
   if (!m) return 0;
   const v = parseFloat(m[1]);
   return v > 0 && v !== 1 ? v : 0;

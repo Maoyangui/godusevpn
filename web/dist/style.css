@@ -681,6 +681,12 @@ body.tv .drawer-brand b { font-size: 22px; }
 .guard-pill svg.chev { width: 12px; height: 12px; margin-left: -2px; opacity: .7; }
 button.guard-pill:hover { border-color: rgba(47, 139, 255, .5); } button.guard-pill.warn:hover { border-color: rgba(217, 119, 6, .6); }
 button.guard-pill:active { transform: scale(.98); }
+/* 触屏上这两颗胶囊只有 26~29 像素高:样子不变,外框上下各多 5 像素可点(胶囊之间隔 10 像素,两颗挨着也不重叠);电视用遥控器,不用。
+   ::after 是从边框里面量的,所以写 6(1 像素边框 + 5) */
+@media (pointer: coarse) {
+  body:not(.tv) button.guard-pill { position: relative; }
+  body:not(.tv) button.guard-pill::after { content: ''; position: absolute; left: 0; right: 0; top: -6px; bottom: -6px; }
+}
 /* 点开后的说明面板:状态一行(图标 + 粗体)、服务给的完整说明、它防的是什么、按钮靠右 */
 .ntc { padding: 2px 4px 6px; }
 .ntc-h { display: flex; align-items: center; gap: 8px; margin: 4px 0 8px; font-size: 14px; }
