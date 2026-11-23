@@ -722,6 +722,8 @@ const GEO_COLOR = {
   TH: ['#dc2626', '#1d4ed8'], AE: ['#16a34a', '#374151'], CN: ['#dc2626', '#f59e0b'], IE: ['#16a34a', '#f97316'],
 };
 const ICON_GLOBE = '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a15 15 0 0 1 0 18a15 15 0 0 1 0-18"/></svg>';
+const ICON_INFO = '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v5.5"/><path d="M12 7.5v.3"/></svg>'; // 订阅里的提示行(不是服务器,不挂国旗)
+const ICON_LINES = '<svg viewBox="0 0 24 24"><path d="M3 6h5l4 6"/><path d="M3 18h5l4-6"/><path d="M3 12h18"/><path d="M18 9l3 3-3 3"/></svg>'; // 线路自动:几台并成一条
 // flagCode 旗帜 emoji 是两个区域指示符,减掉基址就是 ISO 国家代码,不用查表
 function flagCode(s) {
   const m = String(s || '').match(/[\u{1F1E6}-\u{1F1FF}]{2}/u);
@@ -733,8 +735,13 @@ function geoCode(name) {
   if (f) return f;
   const low = s.toLowerCase();
   for (const [code, alias] of GEO_NAMES) for (const a of alias.split(',')) if (low.includes(a)) return code;
-  const m = low.match(/(?:^|[^a-z0-9])([a-z]{2})(?=$|[^a-z0-9])/);
-  if (m) { const c = m[1].toUpperCase(); if (GEO_SET.has(c)) return c; }
+  // 两侧不挨字母数字的两位代码。紧跟在数字后面的 GB 是流量单位不是英国(「剩余流量:128.5 GB」「100GB 套餐」),跳过它接着往后找
+  const re = /(^|[^a-z0-9])([a-z]{2})(?=$|[^a-z0-9])/g;
+  for (let m = re.exec(low); m; m = re.exec(low)) {
+    const c = m[2].toUpperCase();
+    if (c === 'GB' && /\d[\d.,]*\s*$/.test(low.slice(0, m.index + m[1].length))) continue;
+    return GEO_SET.has(c) ? c : ''; // 和以前一样只看第一个(跳过的流量单位不算)
+  }
   return '';
 }
 function geoStyle(code) {
@@ -788,6 +795,30 @@ function nodeMult(name) {
   const v = parseFloat(m[1]);
   return v > 0 && v !== 1 ? v : 0;
 }
+// dispName 列表和首页卡片上显示的名字:倍率已经单独做成小标签(multTag),名字里的「2x / x2 / 2倍 / 0.5倍率 / 【2倍】」就拿掉,
+// 省下的地方留给名字本身 —— 长名字的区别常在末尾(「新加坡 01」「新加坡 02」)。只拿掉单独成词的那一段(前后是空白、标点、括号、
+// 中文或头尾),「Xbox2」这种连在单词里的不动;拿掉后什么都不剩就照原样。后端、搜索、悬停用的仍是原名。
+const MULT_TOKEN = /[[(【(]?(?:\d+(?:\.\d+)?\s*(?:倍率|倍|[xX×])|[xX×]\s*\d+(?:\.\d+)?)[\])】)]?/g;
+function dispName(name) {
+  const base = cleanName(name), mult = nodeMult(name);
+  if (!mult) return base;
+  const edge = ch => !ch || /[\s\-|·_,,/\\[\]()【】()]/.test(ch) || ch.charCodeAt(0) > 0x7f;
+  let out = base, done = false;
+  out = out.replace(MULT_TOKEN, (tok, at, s) => {
+    if (done || !edge(s[at - 1]) || !edge(s[at + tok.length]) || parseFloat(tok.replace(/[^\d.]/g, '')) !== mult) return tok;
+    done = true;
+    return ' ';
+  });
+  out = out.replace(/[[(【(]\s*[\])】)]/g, ' ').replace(/\s{2,}/g, ' ').replace(/^[\s\-|·_,,/]+|[\s\-|·_,,/]+$/g, '').trim();
+  return out || base;
+}
+// multTag 倍率小标签:大于 1 是多扣流量(琥珀色),小于 1 是省流量(绿色);悬停看全称「2× 计费」
+function multTag(mult) {
+  return mult ? `<em class="mt ${mult < 1 ? 'save' : 'warn'}" title="${esc(t('node.mult', { n: mult }))}">${esc(t('node.multShort', { n: mult }))}</em>` : '';
+}
+// 节点列表里协议的显示名。手动添加节点的下拉(NODE_TYPES)只列能手填的几种,订阅里还会有这些
+const PROTO_NAMES = { shadowsocks: 'Shadowsocks', shadowsocksr: 'SSR', vmess: 'VMess', vless: 'VLESS', trojan: 'Trojan', hysteria: 'Hysteria', hysteria2: 'Hysteria2', tuic: 'TUIC', anytls: 'AnyTLS', wireguard: 'WireGuard', shadowtls: 'ShadowTLS', socks: 'SOCKS5', http: 'HTTP', ssh: 'SSH', naive: 'Naive', tor: 'Tor' };
+function protoName(ty) { return PROTO_NAMES[ty] || ty; }
 
 // ---- 首页 ----
 let hist = [];        // 最近一分钟的速度采样:首页那条曲线就是它画出来的
@@ -831,8 +862,8 @@ function renderHome(el) {
     <button class="idcard" id="id-card">
       <span class="flag none" id="id-flag">${ICON_GLOBE}</span>
       <span class="idmid">
-        <span class="idtop"><b id="id-name">–</b><em class="tag" id="id-auto" hidden>${t('pick.auto')}</em><em class="tag warn" id="id-mult" hidden></em></span>
-        <span class="idsub" id="id-sub"></span>
+        <b class="idname" id="id-name">–</b>
+        <span class="idsub"><em class="mt" id="id-auto" hidden>${t('pick.auto')}</em><em class="mt warn" id="id-mult" hidden></em><span class="idsub-t" id="id-sub"></span></span>
       </span>
       <span class="idms" id="id-ms"><b id="s-ping">–</b><span id="id-unit"></span></span>
     </button>
@@ -930,12 +961,18 @@ function updateHome() {
   const name = auto ? (v.autoNow || t('node.auto')) : grp ? (v.autoNow || v.node) : v.node;
   // 线路组:旗帜按线路(和节点列表那一行一样;入口服务器的地名不该盖过线路),大字照旧是实际那台
   setFlag($('#id-flag'), grp ? groupGeo(grp.tag, grp.members) : on || !auto ? geoCode(name) : geoCode(v.node));
-  $('#id-name').textContent = cleanName(name);
+  // 名字单独占一行、占满整宽(以前和「自动」「2× 计费」挤在一行,长名字只剩一半);倍率在名字里的那段拿掉,做成第二行开头的小标签
+  $('#id-name').textContent = dispName(name);
+  $('#id-name').title = cleanName(name);
   $('#id-auto').hidden = !auto && !grp;
   $('#id-auto').textContent = t(grp ? 'pick.lineAuto' : 'pick.auto');
   const mult = nodeMult(name);
   $('#id-mult').hidden = !mult;
-  if (mult) $('#id-mult').textContent = t('node.mult', { n: mult });
+  if (mult) {
+    $('#id-mult').className = 'mt ' + (mult < 1 ? 'save' : 'warn');
+    $('#id-mult').textContent = t('node.multShort', { n: mult });
+    $('#id-mult').title = t('node.mult', { n: mult });
+  }
   let sub;
   if (!on) sub = t('home.pickNode');
   else if (v.mode === 'direct') sub = t('home.directAll'); // 直连模式的流量根本不经节点,别挂着节点的出口
@@ -959,7 +996,8 @@ function updateHome() {
 
   $('#pk-mode-v').textContent = t('mode.' + v.mode);
   $('#pk-prof-v').textContent = v.profile ? v.profile.name : t('prof.empty');
-  $('#pk-node-v').textContent = auto ? t('pick.auto') : grp ? cleanName(v.node) + ' · ' + t('pick.lineAuto') : cleanName(v.node);
+  $('#pk-node-v').textContent = auto ? t('pick.auto') : grp ? cleanName(v.node) + ' · ' + t('pick.lineAuto') : dispName(v.node);
+  $('#pk-node-v').title = auto ? '' : cleanName(v.node); // 格子窄、字多时省略了,悬停看全名
   $('#pk-node-ms').textContent = '';
   const b = $('#home-banner');
   const want = state.service ? '' : (state.svcState === 'no-permission' ? 'noperm' : 'down');
@@ -1092,9 +1130,10 @@ function msText(d, testing) {
   if (d < 0) return t('node.fail');
   return d ? d + ' ms' : '–';
 }
-// msCell 节点 / 线路组那一行的延迟格:提示节点不测速(不转圈、不写"不通"),写「提示」;跳过的、还没进内核的节点空着
+// msCell 节点 / 线路组那一行的延迟格:提示节点不测速(不转圈、不写"不通"),空着 —— 它是什么第二行已经写了,不再重复一个「提示」;
+// 跳过的、还没进内核的节点也空着
 function msCell(n, testing) {
-  if (n.hint) return t('node.hint');
+  if (n.hint) return '';
   return n.unsupported || n.pending ? '' : msText(n.delay, testing);
 }
 let nodeTesting = false, nodeFilter = '', nodeRegion = '', nodeFetchTried = false, nodeSig = '', nodePicking = false;
@@ -1103,8 +1142,32 @@ async function sheetNodes() {
   openSheet(t('sheet.nodes'), `<div class="empty"><span class="spinner"></span></div>`, { kind: 'nodes', action: t('sheet.retest'), onAction: () => testNodes(true),
     search: { placeholder: t('node.filter'), onInput: v => { nodeFilter = v.trim(); applyNodeFilter(); } } });
   testBtn(); // 上一轮测速还在跑(关掉面板又打开):按钮照样是「测速中」、点不了,还没轮到的照样转圈
+  // 先照上一次取到的列表画出来(同一个订阅才用),不转圈;再取新的,结构没变就只改数字
+  const pid = state && state.view && state.view.profile && state.view.profile.id;
+  if (nodeCache && nodeCache.pid === pid) { nodeSig = ''; await drawNodes(nodeTesting, nodeCache.nodes); }
+  nodeViewSig = nodeViewKey(state && state.view);
   await drawNodes(nodeTesting);
   testNodes(false);
+}
+// 节点面板开着的时候,服务推来的状态里跟这份列表有关的变了(订阅刷新加减了节点、线路组变了、「线路自动」在别处翻了、选的节点换了、
+// 自动选择换了一台、连上 / 断开了),就按新状态重取一次(结构没变只改数字,变了才整块重画)。以前只有自己在面板里点了什么才重取,
+// 别的变化要关掉面板再打开才看得到(用户 11-23)。状态 1.5 秒推一次,跟列表无关的内容不变就什么都不做;连着几次合成一次。
+let nodeViewSig = '', nodeViewTimer = 0;
+function nodeViewKey(v) {
+  if (!v) return '';
+  const s = v.settings || {};
+  return JSON.stringify([v.nodes, v.groups, s.lineAuto, v.node, v.autoNow, v.hints, v.v6Blocked, v.v6NoNet, v.state && v.state.status, v.selNote, v.profile && v.profile.id, v.profile && v.profile.fetchedAt]);
+}
+function watchNodes(v) {
+  const k = nodeViewKey(v);
+  if (k === nodeViewSig) return;
+  nodeViewSig = k;
+  if (!nodesOpen()) return;
+  clearTimeout(nodeViewTimer);
+  nodeViewTimer = setTimeout(() => {
+    // 测速时本来就 0.4 秒取一次;正在翻「线路自动」、正在切节点时,它们回来自己会按新状态重画
+    if (nodesOpen() && !nodeTesting && !lineBusy && !nodePicking) drawNodes(false);
+  }, 250);
 }
 // applyNodeFilter 搜索框与地区标签只是把行藏起来,不重画列表:测速正在跑时列表也不会闪。
 // 线路组那一行按成员名也能搜到(搜服务器名找得到它所在的线路)。
@@ -1254,40 +1317,59 @@ async function toggleLineAuto(el) {
     lineBusy = false;
   }
 }
+// latCell 一行右边那一列:延迟数字,下面一条短的延迟条(bar:这一行测不测速;没测出来时条子藏着,测出来再亮)
+function latCell(n, max, testing, bar) {
+  return `<span class="lat"><span class="ms ${msClass(n.delay)}">${n.name === 'auto' ? '' : msCell(n, testing)}</span>`
+    + (bar ? `<span class="bar${n.delay > 0 ? '' : ' bar-off'}"><i style="width:${barWidth(n.delay, max)}"></i></span>` : '') + '</span>';
+}
+// nodeRow 节点面板的一行(11-23 重排):第一行只放名字(最多两行;名字里写的倍率拿掉,改成第二行的小标签),
+// 第二行小字是协议 + 小标签(倍率 / IPv6 / 新 / 已更新 / 不支持),右边一列是延迟和延迟条。以前这些和名字挤在一行、都不许缩,
+// 窗口一窄名字就只剩一两个字,安卓上有的整个没了。
 function nodeRow(n, i, max, testing) {
   if (n.name === 'auto') {
     return `<div class="item auto ${n.current ? 'current' : ''}" data-name="auto"><span class="check"></span>
-      <div class="name"><b>${t('node.auto')}</b><span>${n.autoNow ? t('node.now', { n: esc(n.autoNow) }) : t('node.autoDesc')}</span></div>
-      <span class="ms ${msClass(n.delay)}"></span></div>`;
+      <div class="name"><b>${t('node.auto')}</b><div class="nmeta"><span class="asub">${esc(n.autoNow ? t('node.now', { n: cleanName(n.autoNow) }) : t('node.autoDesc'))}</span></div></div>
+      ${latCell(n, max, testing, false)}</div>`;
   }
-  if (n.group) { // 线路组:和自动选择一样是粗体名字 + 小字;成员里有倍率不是 1 的服务器就挂「含倍率」
+  if (n.group) { // 线路组:粗体名字 + 小字「自动 · N 台 / 当前 xx」;成员里有倍率不是 1 的服务器就挂「含倍率」
     const gc = groupGeo(n.name, n.members);
+    const tags = (n.mult ? `<em class="mt warn">${t('node.groupMult')}</em>` : '') + (n.v6 ? `<em class="mt warn">${t('node.v6')}</em>` : '') + (n.hint ? `<em class="mt">${t('node.hint')}</em>` : '');
     return `<div class="item ${n.current ? 'current' : ''}" data-name="${esc(n.name)}" data-group="1" data-search="${esc(n.members.join(' '))}" data-geo="${gc}" style="animation-delay:${Math.min(i, 12) * 25}ms"><span class="check"></span>
     ${flagHTML(gc, 'sm')}
-    <div class="name">
-      <div class="ntop"><b>${esc(cleanName(n.name))}</b>${n.hint ? `<em class="tag">${t('node.hint')}</em>` : ''}${n.mult ? `<em class="tag warn">${t('node.groupMult')}</em>` : ''}${n.v6 ? `<em class="tag warn">${t('node.v6')}</em>` : ''}</div>
-      <span class="gsub">${esc(groupSub(n))}</span>
-    </div>
-    <span class="ms ${msClass(n.delay)}">${msCell(n, testing)}</span></div>`;
+    <div class="name"><b title="${esc(cleanName(n.name))}">${esc(cleanName(n.name))}</b><div class="nmeta"><span class="gsub">${esc(groupSub(n))}</span>${tags}</div></div>
+    ${latCell(n, max, testing, true)}</div>`;
   }
-  const code = geoCode(n.name), mult = nodeMult(n.name);
+  // 订阅里的提示行(剩余流量、到期时间……):不是服务器,不挂国旗、不认地区(「128.5 GB」不是英国),不测速;第二行写明不能上网
+  const code = n.hint ? '' : geoCode(n.name), mult = n.hint ? 0 : nodeMult(n.name);
   // 本客户端的内核建不起来的节点(订阅里 naive、SSR 之类):照样列出来、标明,点它只说原因不去选
   const bad = n.unsupported ? ` data-unsupported="${esc(n.unsupported)}"` : '';
-  return `<div class="item ${n.current ? 'current' : ''}${n.unsupported ? ' unsupported' : ''}" data-name="${esc(n.name)}"${bad} data-geo="${code}" style="animation-delay:${Math.min(i, 12) * 25}ms"><span class="check"></span>
-    ${flagHTML(code, 'sm')}
-    <div class="name">
-      <div class="ntop"><b>${esc(cleanName(n.name))}</b>${n.hint ? `<em class="tag">${t('node.hint')}</em>` : ''}${mult ? `<em class="tag warn">${t('node.mult', { n: mult })}</em>` : ''}${n.v6 ? `<em class="tag warn">${t('node.v6')}</em>` : ''}${n.unsupported ? `<em class="tag">${t('node.unsupported')}</em>` : ''}${n.pending ? `<em class="tag">${t('node.pending')}</em>` : ''}${n.changed ? `<em class="tag">${t('node.changed')}</em>` : ''}${n.type ? `<em class="ntype">${esc(n.type)}</em>` : ''}</div>
-      <div class="bar"><i style="width:${barWidth(n.delay, max)}"></i></div>
-    </div>
-    <span class="ms ${msClass(n.delay)}">${msCell(n, testing)}</span></div>`;
+  const meta = n.hint ? `<span>${t('node.hintMeta')}</span>`
+    : (n.type ? `<span class="proto">${esc(protoName(n.type))}</span>` : '') + multTag(mult)
+      + (n.v6 ? `<em class="mt warn">${t('node.v6')}</em>` : '') + (n.pending ? `<em class="mt new">${t('node.pending')}</em>` : '')
+      + (n.changed ? `<em class="mt">${t('node.changed')}</em>` : '') + (n.unsupported ? `<em class="mt">${t('node.unsupported')}</em>` : '');
+  return `<div class="item ${n.current ? 'current' : ''}${n.unsupported ? ' unsupported' : ''}${n.hint ? ' hint' : ''}" data-name="${esc(n.name)}"${bad} data-geo="${code}" style="animation-delay:${Math.min(i, 12) * 25}ms"><span class="check"></span>
+    ${n.hint ? `<span class="flag sm none info">${ICON_INFO}</span>` : flagHTML(code, 'sm')}
+    <div class="name"><b title="${esc(cleanName(n.name))}">${esc(n.hint ? cleanName(n.name) : dispName(n.name))}</b><div class="nmeta">${meta}</div></div>
+    ${latCell(n, max, testing, !n.hint && !n.unsupported && !n.pending)}</div>`;
 }
-async function drawNodes(testing) {
+// nodeCache 上一次从服务取到的节点列表(原样的一份)和它属于哪个订阅。再打开节点面板时先照它画出来(当前选的是哪个按此刻的状态改),
+// 马上就有东西可看可点,再去取新的、只改有变化的格子 —— 以前每次打开都是先转圈、等取完整个列表(安卓上要经桥,一两秒)再画。
+let nodeCache = null;
+async function drawNodes(testing, cached) {
   // 节点面板是不是还开着、还是开它那一次(取节点列表要等,这期间用户可能关了面板、开了模式 / 订阅面板):不是就什么都不画
   const seq = sheetSeq;
   const mine = () => sheetIs('nodes', seq);
   let nodes = [];
-  try { nodes = await App().GetNodes() || []; } catch (e) { if (mine()) $('#sheet-body').innerHTML = `<div class="empty">${esc(errText(e))}</div>`; return; }
-  if (!mine()) return;
+  if (cached) {
+    const cur = (state && state.view && state.view.node) || '';
+    nodes = cached.map(n => Object.assign({}, n, { current: n.name === cur || (n.name === 'auto' && !cur) }));
+  } else {
+    try { nodes = await App().GetNodes() || []; } catch (e) { if (mine()) $('#sheet-body').innerHTML = `<div class="empty">${esc(errText(e))}</div>`; return; }
+    if (!mine()) return;
+    const pid = state && state.view && state.view.profile && state.view.profile.id;
+    if (nodes.length) nodeCache = { pid, nodes: nodes.map(n => Object.assign({}, n)) };
+    nodeViewSig = nodeViewKey(state && state.view); // 这份列表对应的就是此刻的状态:随后推来同样的内容不用再取
+  }
   if (!nodes.length) {
     const p = state && state.view.profile;
     if (p && !nodeFetchTried) { // 有订阅却没有节点 = 还没拉取过(比如刚导入设置),拉一次再画
@@ -1310,12 +1392,14 @@ async function drawNodes(testing) {
   const max = Math.max(1, ...nodes.filter(n => n.delay > 0).map(n => n.delay));
   // 节点集合没变就只改数字,别整块重画:一百来个节点重画一次会先空一下,入场动画还要错峰放完,
   // 滚动位置和筛选框里的字也跟着丢 —— 测速结束那一下看着就是"闪一下白再出来"。
-  const sig = (hasGroups ? (lineOn ? 'L|' : 'N|') : '') // 开关翻了 / 线路组出现或消失:整块重画
+  const st = v.state && v.state.status, online = st === 'connected' || st === 'degraded';
+  const note = selNoteText(v); // 选的节点 / 线路组订阅里没了:列表里也写明这一轮用的是什么
+  // 连没连上(列表上面那句「没连接时测的是直连延迟」)和上面这句说明只在整块重画时写,所以也算进结构里
+  const sig = (online ? 'on|' : 'off|') + (note ? note + '|' : '')
+    + (hasGroups ? (lineOn ? 'L|' : 'N|') : '') // 开关翻了 / 线路组出现或消失:整块重画
     + rows.map(n => n.name + (n.group ? '#' : '') + (n.pending ? '+' : '') + (n.changed ? '~' : '') + (n.unsupported ? '!' : '') + (n.v6 ? '6' : '') + (n.hint ? '?' : '') + '/' + (n.type || '')).join(' '); // 新节点重连后用上了,标签要跟着变
   if (sig === nodeSig && patchNodes(rows, max, testing)) return;
   nodeSig = sig;
-  const st = v.state && v.state.status, online = st === 'connected' || st === 'degraded';
-  const note = selNoteText(v); // 选的节点 / 线路组订阅里没了:列表里也写明这一轮用的是什么
   const hint = (online ? '' : `<div class="small muted" style="padding:0 4px 8px">${t('node.offlineHint')}</div>`)
     + (note ? `<div class="small muted" style="padding:0 4px 8px">${esc(note)}</div>` : '');
   // 筛选只认这一次画出来的控件:选过的地区标签这次不在了(翻了「线路自动」、订阅变了)、搜索框这次不画(行数不多),
@@ -1325,12 +1409,13 @@ async function drawNodes(testing) {
   // 搜索在标题行(放大镜,见 openSheet):节点不多时不出现,搜索词也清掉
   if (rows.length <= 8) nodeFilter = '';
   sheetSearchAvail(rows.length > 8);
-  // 「线路自动」开关:订阅里有线路组才出现,排在最上面。data-name 让重画之后焦点落回它(电视遥控器)
-  const sw = hasGroups ? `<div class="srow"><div class="lbl">${t('node.lineAuto')}<div>${t('node.lineAutoHelp')}</div></div><label class="switch"><input type="checkbox" id="node-lineauto" data-name="__lineauto" data-tvskip ${lineOn ? 'checked' : ''}></label></div>` : '';
+  // 「线路自动」开关:订阅里有线路组才出现。做成列表卡片的表头(整行是一个 label,点哪儿都是翻它),和它管的那份列表在一起;
+  // data-name 让重画之后焦点落回它(电视遥控器),data-tvskip 让打开面板时的第一个焦点不落在它上面
+  const sw = hasGroups ? `<label class="lahead"><span class="la-ic">${ICON_LINES}</span><span class="la-t"><b>${t('node.lineAuto')}</b><span>${t('node.lineAutoHelp')}</span></span><span class="switch"><input type="checkbox" id="node-lineauto" data-name="__lineauto" data-tvskip ${lineOn ? 'checked' : ''}></span></label>` : '';
   const keep = focusKey($('#sheet-body'), 'data-name');
-  $('#sheet-body').innerHTML = sw + hint
+  $('#sheet-body').innerHTML = hint
     + regionChips(regions)
-    + `<div class="list">${rows.map((n, i) => nodeRow(n, i, max, testing)).join('')}</div><div class="nomatch" id="node-nomatch" hidden></div>`;
+    + `<div class="list">${sw}${rows.map((n, i) => nodeRow(n, i, max, testing)).join('')}</div><div class="nomatch" id="node-nomatch" hidden></div>`;
   $('#sheet-body').querySelectorAll('.item').forEach(it => it.addEventListener('click', async () => {
     if (it.dataset.unsupported) { toast(t('node.unsupportedWhy', { why: it.dataset.unsupported }), 'err'); return; }
     // 上一下还没回来(头一回选线路组要重连,好几秒;电视上连按 OK)就不再选:不然排着队再选一次,刚重连好的连接又被掐一次。
@@ -1378,11 +1463,11 @@ function patchNodes(nodes, max, testing) {
     it.classList.toggle('current', !!n.current);
     const ms = it.querySelector('.ms');
     if (ms) { ms.className = 'ms ' + msClass(n.delay); ms.innerHTML = n.name === 'auto' ? '' : msCell(n, testing); } // 提示节点、跳过的、还没进内核的节点不测速
-    const bar = it.querySelector('.bar i');
-    if (bar) bar.style.width = barWidth(n.delay, max);
+    const bar = it.querySelector('.bar');
+    if (bar) { bar.firstChild.style.width = barWidth(n.delay, max); bar.classList.toggle('bar-off', !(n.delay > 0)); }
     if (n.name === 'auto') {
-      const sub = it.querySelector('.name span');
-      if (sub) sub.textContent = n.autoNow ? t('node.now', { n: n.autoNow }) : t('node.autoDesc');
+      const sub = it.querySelector('.asub');
+      if (sub) sub.textContent = n.autoNow ? t('node.now', { n: cleanName(n.autoNow) }) : t('node.autoDesc');
     }
     if (n.group) {
       const sub = it.querySelector('.gsub');
@@ -2541,6 +2626,7 @@ async function init() {
     if (view === 'onboard' && has) nav('home');
     else if (view === 'home' && !has && hadProfiles) nav('onboard');
     updateHome(); updateOnboardSvc(); renderTopNew();
+    watchNodes(st.view); // 节点面板开着就跟着变,不用关掉再开
     checkRefreshWaits(st.view.profiles);
     if (view === 'about' && $('#about-svc')) $('#about-svc').textContent = svcText(st);
     // 关于页只渲染一次:没权限 ↔ 已登记来回变时,「修复」按钮与「退出」的说明要跟着变,否则说明会和实际行为相反

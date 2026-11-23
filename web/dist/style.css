@@ -101,10 +101,12 @@ body.mac .topbar-title { left: -78px; }
 .idcard:hover { border-color: #2f8bff; box-shadow: 0 8px 24px rgba(47, 139, 255, .14); }
 .idcard:active { transform: scale(.985); }
 .idmid { flex: 1; min-width: 0; }
-.idtop { display: flex; align-items: center; gap: 6px; min-width: 0; }
-.nogap .idtop > *:not([hidden]) + *:not([hidden]) { margin-left: 6px; }
-.idtop b { flex: 0 1 auto; min-width: 0; font-size: 15px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.idsub { display: block; font-size: 11.5px; color: var(--muted2); margin-top: 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-variant-numeric: tabular-nums; }
+/* 名字单独一行、占满整宽;「自动 / 线路自动」「2倍」两个小标签在第二行开头,后面是出口(11-23:以前三样挤在一行,长名字只剩一半) */
+.idname { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; word-break: break-word; font-size: 15px; font-weight: 600; line-height: 1.3; } /* 长名字折成两行,不截;上面的圆环区会让出这点高度 */
+.idsub { display: flex; align-items: center; gap: 6px; margin-top: 4px; min-width: 0; }
+.nogap .idsub > *:not([hidden]) + *:not([hidden]) { margin-left: 6px; }
+.idsub .mt { flex: none; }
+.idsub-t { flex: 1 1 auto; min-width: 0; font-size: 11.5px; color: var(--muted2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-variant-numeric: tabular-nums; }
 .idms { flex: none; text-align: right; min-width: 40px; }
 .idms b { display: block; font-size: 17px; font-weight: 600; font-variant-numeric: tabular-nums; line-height: 1.15; }
 .idms span { font-size: 10px; color: var(--muted2); }
@@ -125,7 +127,10 @@ body.mac .topbar-title { left: -78px; }
 .sq.d { background: var(--brand2); } .sq.u { background: var(--brand3); }
 .spark { flex: none; height: 56px; width: 100%; display: block; margin-top: 6px; }
 
-.pickers { display: grid; grid-template-columns: repeat(3, 1fr); grid-gap: 10px; gap: 10px; width: 100%; flex: none; }
+/* 三格按固定比例分(节点名一般最长),每格都能缩窄、字多了省略。以前是 repeat(3, 1fr):1fr 最窄只能到内容宽,
+   节点名一长「节点」那格就被撑宽,手机上直接伸出屏幕右边(11-23 全端截图量到:320 / 360 / 390 宽都伸出) */
+.pickers { display: grid; grid-template-columns: .75fr 1fr 1.5fr; grid-gap: 10px; gap: 10px; width: 100%; flex: none; }
+.pickers > .picker { min-width: 0; } /* 格子的最小宽度不按内容算(网格默认按内容),fr 才能缩窄;不用 minmax(),兼容检查按字面挡 max( */
 .picker { border: 1px solid var(--line); background: var(--card); border-radius: 16px; padding: 10px 12px 9px; text-align: left; transition: transform .15s var(--ease), border-color .15s, box-shadow .2s; }
 .picker:hover { border-color: #2f8bff; box-shadow: 0 6px 20px rgba(47, 139, 255, .12); }
 .picker:active { transform: scale(.97); }
@@ -150,7 +155,7 @@ body.mac .topbar-title { left: -78px; }
 .nogap .field > *:not([hidden]) + *:not([hidden]) { margin-top: 6px; }
 .field label { font-size: 12px; color: var(--muted); }
 .field .help { font-size: 11px; color: var(--muted2); line-height: 1.4; }
-input[type=text], input[type=url], input[type=number], select, textarea { width: 100%; border: 1px solid var(--line); background: var(--bg2); color: var(--text); border-radius: 12px; padding: 10px 12px; font-size: 13px; outline: none; transition: border-color .15s, box-shadow .15s; }
+input[type=text], input[type=url], input[type=number], input[type=password], select, textarea { width: 100%; border: 1px solid var(--line); background: var(--bg2); color: var(--text); border-radius: 12px; padding: 10px 12px; font-size: 13px; outline: none; transition: border-color .15s, box-shadow .15s; }
 input:focus, select:focus, textarea:focus { border-color: #2f8bff; box-shadow: 0 0 0 3px rgba(47, 139, 255, .18); }
 textarea { min-height: 80px; resize: vertical; font-family: Consolas, monospace; }
 .btn { border: 1px solid var(--line); background: var(--card); color: var(--text); padding: 9px 16px; border-radius: 12px; font-size: 13px; font-weight: 500; white-space: nowrap; flex: none; transition: transform .12s var(--ease), background .15s, opacity .15s; }
@@ -258,8 +263,13 @@ pre.log .warn { color: #fbbf24; } pre.log .err { color: #f87171; } pre.log .dim 
 .cond .val { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: Consolas, "Cascadia Mono", monospace; }
 .icon-btn.xs { width: 24px; height: 24px; border-radius: 8px; } .icon-btn.xs svg { width: 14px; height: 14px; }
 /* 节点面板里几块之间的间距:开关行下面不要分隔线(紧跟着就是地区标签),文字和标题左对齐、标签和列表的框左对齐 */
-.sheet[data-kind="nodes"] .sheet-body > .srow { padding: 2px 4px 12px; border-bottom: 0; }
 .sheet[data-kind="nodes"] .sheet-body > .chips { padding: 0 0 10px; }
+/* 触屏(安卓、手机浏览器)上地区标签排成一行、左右滑(11-23:320 宽时排了三行,把列表挤下去一大截);
+   桌面(鼠标)照旧换行 —— 桌面没有横向滚动条、滚轮推不动;电视的遥控器不算触屏,也照旧换行 */
+@media (pointer: coarse) {
+  body:not(.tv) .sheet[data-kind="nodes"] .sheet-body > .chips { flex-wrap: nowrap; overflow-x: auto; margin: 0 -14px; padding: 0 14px 10px; scrollbar-width: none; -webkit-overflow-scrolling: touch; }
+  body:not(.tv) .sheet[data-kind="nodes"] .sheet-body > .chips::-webkit-scrollbar { display: none; }
+}
 .nomatch { padding: 14px 4px 2px; font-size: 12px; color: var(--muted2); text-align: center; }
 /* 面板标题行里的搜索:平时只是右边一个放大镜;点了搜索框在标题行里展开(标题让位),× 收起 */
 .sheet-head { min-height: 44px; }
@@ -322,7 +332,7 @@ body.tv .home .hero { grid-column: 1; grid-row: 2 / 5; min-height: 0; }
 body.tv .home .idcard { grid-column: 2; grid-row: 2; align-self: end; }
 body.tv .home .speed { grid-column: 2; grid-row: 3; margin-top: 12px; }
 body.tv .home .pickers { grid-column: 2; grid-row: 4; align-self: start; grid-template-columns: 1fr; grid-gap: 12px; gap: 12px; margin-top: 12px; }
-body.tv .idcard .idtop b { font-size: 19px; } body.tv .idcard .idsub { font-size: 13px; }
+body.tv .idcard .idname { font-size: 19px; } body.tv .idcard .idsub-t { font-size: 13px; }
 body.tv .uptime b { font-size: 34px; }
 body.tv .power-wrap { width: 300px; height: 300px; } body.tv .power svg { width: 64px; height: 64px; } body.tv .power b { font-size: 16px; }
 body.tv .status-text { font-size: 24px; } body.tv .status-sub { font-size: 14px; max-width: 440px; }
@@ -381,10 +391,37 @@ body.tv .dialog-card { max-width: 520px; padding: 24px; } body.tv .dialog-text {
 .tag.warn { background: rgba(217, 119, 6, .12); border-color: rgba(217, 119, 6, .35); color: var(--warn); }
 .list .item { gap: 10px; }
 .nogap .list .item > *:not([hidden]) + *:not([hidden]) { margin-left: 10px; }
-.item .ntop { display: flex; align-items: center; gap: 6px; min-width: 0; }
-.nogap .item .ntop > *:not([hidden]) + *:not([hidden]) { margin-left: 6px; }
-.item .ntop b { flex: 0 1 auto; min-width: 0; }
-.ntype { font-style: normal; font-size: 10px; color: var(--muted2); text-transform: uppercase; letter-spacing: .3px; margin-left: auto; flex: none; padding-left: 6px; }
+/* ---- 节点列表的一行(11-23 重排。用户:「计费标签会把节点名称掩盖得只剩一两个字」「长一点的协议名称,没有计费标签也只剩前面一两个字」):
+   名字单独占第一行,最多两行 —— 长名字的区别常在末尾(「新加坡 01」「新加坡 02」),截成一行会把它截掉;
+   协议和倍率、新、已更新、IPv6、不支持这些小标签放第二行的小字里,再多也只会换行,不再挤名字;延迟和延迟条在右边一列对齐。 ---- */
+.sheet[data-kind="nodes"] .item .name b { white-space: normal; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; word-break: break-word; line-height: 1.32; }
+.nmeta { display: flex; flex-wrap: wrap; align-items: center; gap: 3px 6px; margin-top: 3px; min-width: 0; font-size: 11px; line-height: 16px; color: var(--muted2); }
+.nogap .nmeta > *:not([hidden]) + *:not([hidden]) { margin-left: 6px; }
+/* 小标签:比 .tag 轻,没有描边,只有淡淡的底色(用户:「协议名称与计费标签做得小点、轻量」) */
+.mt { font-style: normal; font-size: 10.5px; font-weight: 500; line-height: 16px; padding: 0 5px; border-radius: 5px; background: rgba(100, 116, 139, .12); color: var(--muted); white-space: nowrap; }
+.mt.warn { background: rgba(217, 119, 6, .12); color: var(--warn); }
+.mt.save { background: rgba(22, 163, 74, .12); color: var(--ok); }
+.mt.new { background: rgba(47, 139, 255, .13); color: #2f8bff; }
+.lat { flex: none; min-width: 56px; display: flex; flex-direction: column; align-items: flex-end; }
+.lat .bar { width: 48px; height: 3px; margin-top: 6px; }
+.lat .bar.bar-off { visibility: hidden; } /* 没测出延迟的行不画空槽(类名别用 empty:那是空状态提示的通用类,带一大圈内边距) */
+/* 订阅里的提示行(剩余流量、到期时间……)不是服务器:不挂国旗,用一个「i」,字是灰的,第二行写明不能上网 */
+.item.hint .name b { color: var(--muted); font-weight: 400; }
+.flag.info { color: var(--muted2); }
+/* 「线路自动」做成节点列表的表头(11-23,用户:「线路自动的按钮开关,要自然点在页面融合」):和列表同一张卡片,整行都能点;
+   图标落在旗帜那一列、字和节点名对齐,说明是一行小字 */
+.lahead { display: flex; align-items: center; gap: 10px; padding: 9px 14px 9px 42px; border-bottom: 1px solid var(--line); background: rgba(100, 116, 139, .06); cursor: pointer; }
+.nogap .lahead > *:not([hidden]) + *:not([hidden]) { margin-left: 10px; }
+.la-ic { flex: none; width: 26px; height: 26px; border-radius: 9px; display: inline-flex; align-items: center; justify-content: center; background: rgba(47, 139, 255, .12); color: #2f8bff; }
+.la-ic svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.la-t { flex: 1; min-width: 0; }
+.la-t b { display: block; font-size: 13px; font-weight: 600; }
+.la-t span { display: block; font-size: 11px; color: var(--muted2); line-height: 1.35; margin-top: 1px; }
+body.tv .lahead { padding: 12px 18px 12px 46px; }
+/* 电视隔得远:第二行小字、小标签、表头的字都放大一档(和电视上别的次要文字一样 12–15px) */
+body.tv .item .nmeta, body.tv .item .nmeta span { font-size: 13px; line-height: 18px; }
+body.tv .mt { font-size: 12px; line-height: 18px; padding: 0 6px; }
+body.tv .la-t b { font-size: 15px; } body.tv .la-t span { font-size: 13px; }
 .item.auto .name b { font-weight: 600; }
 .item.unsupported { opacity: .55; }
 
@@ -481,7 +518,7 @@ body.tv .drawer-brand b { font-size: 22px; }
 .pc-ago { font-size: 11px; color: var(--muted2); flex: none; }
 .pc-use { display: flex; align-items: baseline; gap: 6px; margin-top: 13px; }
 .nogap .pc-use > *:not([hidden]) + *:not([hidden]) { margin-left: 6px; }
-.pc-use b { font-size: 23px; font-weight: 700; letter-spacing: -.5px; font-variant-numeric: tabular-nums; }
+.pc-use b { flex: none; white-space: nowrap; font-size: 23px; font-weight: 700; letter-spacing: -.5px; font-variant-numeric: tabular-nums; } /* 「60.7 GB」别在窄屏上折成两行;旁边的小字可以折 */
 .pc-use span { font-size: 12px; color: var(--muted); }
 .pc-bar { height: 6px; border-radius: 3px; background: var(--bg2); border: 1px solid var(--line); margin-top: 8px; overflow: hidden; }
 .pc-bar i { display: block; height: 100%; border-radius: 3px; background: linear-gradient(90deg, var(--brand1), var(--brand2), var(--brand3)); transition: width .5s var(--ease); }
