@@ -853,9 +853,9 @@ function renderHome(el) {
       <div class="uptime" id="uptime" hidden><b id="s-time">–</b><span>${t('home.uptime')}</span></div>
       <div class="status-text" id="status"></div>
       <div class="status-sub" id="status-sub"></div>
-      <div class="guard-pill" id="guard-pill" hidden></div>
+      <button type="button" class="guard-pill" id="guard-pill" hidden></button>
       <div class="guard-pill warn" id="nic-pill" hidden></div>
-      <div class="guard-pill warn" id="privacy-pill" hidden></div>
+      <button type="button" class="guard-pill warn" id="privacy-pill" hidden></button>
       <div class="guard-pill warn" id="v6-pill" hidden></div>
       <div class="guard-pill warn" id="sel-pill" hidden></div>
     </div>
@@ -887,6 +887,8 @@ function renderHome(el) {
     </div>`;
   $('#power').addEventListener('click', togglePower);
   $('#id-card').addEventListener('click', sheetNodes);
+  $('#guard-pill').addEventListener('click', sheetGuard);
+  $('#privacy-pill').addEventListener('click', sheetPrivacy);
   $('#pk-mode').addEventListener('click', sheetMode);
   $('#pk-prof').addEventListener('click', sheetProfiles);
   $('#pk-node').addEventListener('click', sheetNodes);
@@ -920,14 +922,18 @@ function updateHome() {
   const errSub = v6Text && (v.state.code === 'E_NODE_V6' || v.state.code === 'E_NODE_V6_NET') ? '' : err;
   $('#status-sub').hidden = !errSub;
   $('#status-sub').textContent = errSub;
-  // 防流量逃逸的闸:开着就亮一颗小盾;该开却没开成(防火墙不可用之类)标成警告
+  // 防流量逃逸的闸:开着就亮一颗小盾;该开却没开成(防火墙不可用之类)标成警告。
+  // 胶囊里只放一句短标题和「›」,点开(sheetGuard)看服务给的完整说明和能直接解决的按钮。以前把那段说明接在标题后面,
+  // 手机上只剩「…系统的「始终开…」:要紧的后半句(哪两项没开、去哪开)被截掉,手机和电视又没有悬停提示(用户 11-23)。
   const gp = $('#guard-pill');
-  // 闸开着但有异常(比如转发层没放行隧道网卡)和闸根本没开成是两回事,标题要分开说
-  if (v.guardError) { gp.hidden = false; gp.className = 'guard-pill warn'; gp.innerHTML = ICON_WARN + `<span>${t(v.guard === 'on' ? 'home.guardWarn' : 'home.guardErr')} · ${esc(v.guardError)}</span>`; }
-  // 闸开着、但平台这一层保护不完整(Android 没开「阻止未经 VPN 的连接」、Windows 开机那组没装全):同样标成警告,不亮绿盾
-  else if (v.guard === 'on' && v.guardNote) { gp.hidden = false; gp.className = 'guard-pill warn'; gp.innerHTML = ICON_WARN + `<span>${t('home.guardWarn')} · ${esc(v.guardNote)}</span>`; }
-  else if (v.guard === 'on') { gp.hidden = false; gp.className = 'guard-pill'; gp.innerHTML = ICON_SHIELD + `<span>${t('home.guard')}</span>`; }
-  else gp.hidden = true;
+  const gk = guardKind(v), gDetail = guardDetail(v), gKey = LANG + '|' + gk + '|' + gDetail;
+  if (gp.dataset.key !== gKey) { // 内容变了才重画(状态 1.5 秒推一次)
+    gp.dataset.key = gKey;
+    gp.hidden = !gk;
+    gp.className = 'guard-pill' + (gk === 'on' ? '' : ' warn');
+    gp.innerHTML = gk ? (gk === 'on' ? ICON_SHIELD : ICON_WARN) + `<span>${t(GUARD_TITLE[gk])}</span>` + ICON_CHEV : '';
+    gp.title = gDetail; // 桌面上悬停也能看全文
+  }
   // 有几张网卡动手前的 IPv6 状态丢了(备份坏了):一直挂着,直到用户点「知道了」。内容变了才重画,免得每次推送都换掉按钮
   const np = $('#nic-pill');
   const lost = v.nicLost || '';
@@ -941,14 +947,20 @@ function updateHome() {
   }
 
   // 隧道照常连着,但有一层保护没做成:系统网络保护(macOS 接管 DNS、Linux 回包规则),或规则 / 普通全局下网卡 IPv6 没停掉
+  // 同样只放短标题和「›」,点开(sheetPrivacy)看完整的原因
   const pp = $('#privacy-pill');
-  const warns = [];
-  if (v.protectWarn) warns.push(t('home.protectWarn') + ' · ' + v.protectWarn);
-  if (v.nicWarn) warns.push(t('home.nicWarn') + ' · ' + v.nicWarn);
+  const shorts = [], warns = [];
+  if (v.protectWarn) { shorts.push(t('home.protectWarnShort')); warns.push(t('home.protectWarn') + ' · ' + v.protectWarn); }
+  if (v.nicWarn) { shorts.push(t('home.nicWarnShort')); warns.push(t('home.nicWarn') + ' · ' + v.nicWarn); }
   if (pp) {
-    pp.hidden = !warns.length;
-    pp.innerHTML = warns.length ? ICON_WARN + `<span>${esc(warns.join('; '))}</span>` : '';
-    pp.title = warns.join('\n'); // 胶囊里放不下全文时,悬停可以看全
+    const pKey = LANG + '|' + warns.join('\n');
+    if (pp.dataset.key !== pKey) {
+      pp.dataset.key = pKey;
+      pp.hidden = !warns.length;
+      // 两项同时出现时胶囊里只写「保护没做完 (2)」(两句短标题连在一起,320 宽的手机上放不下),点开看两项各自的原因
+      pp.innerHTML = warns.length ? ICON_WARN + `<span>${esc(shorts.length > 1 ? t('home.privTitle') + ' (' + shorts.length + ')' : shorts[0])}</span>` + ICON_CHEV : '';
+      pp.title = warns.join('\n'); // 桌面上悬停也能看全文
+    }
   }
   // 选的节点只能走 IPv6、而现在关着 IPv6,或者选的是订阅里的提示节点(只显示续费 / 用量):一直挂着说清楚(点名是哪个节点 / 哪条线路),不让人对着「节点不稳」猜
   wrapPill($('#v6-pill'), v6Text || hintPillText(v));
@@ -1059,6 +1071,52 @@ function selNoteText(v) {
 // 只放行 http(s) —— 续费地址来自订阅响应,不能让它塞别的协议进来交给系统去开。
 const ICON_SHIELD = '<svg viewBox="0 0 24 24"><path d="M12 3l7 3v5c0 4.6-3 8.6-7 10-4-1.4-7-5.4-7-10V6z"/><path d="M9.3 12.2l2 2 3.6-4"/></svg>';
 const ICON_WARN = '<svg viewBox="0 0 24 24"><path d="M12 3l9 16H3z"/><path d="M12 10v4"/><path d="M12 17h.01"/></svg>';
+const ICON_CHEV = '<svg class="chev" viewBox="0 0 24 24"><path d="M9.5 6l6 6-6 6"/></svg>'; // 首页提醒胶囊末尾的「›」:点开看全文
+
+// ---- 首页「防流量逃逸」胶囊 ----
+// guardKind 闸现在是什么样:on 正常;warn 开着但有异常(转发层没放行隧道网卡、安卓系统那两项没全开……);err 该开没开成;'' 没开
+function guardKind(v) {
+  if (v.guardError) return v.guard === 'on' ? 'warn' : 'err';
+  if (v.guard === 'on') return v.guardNote ? 'warn' : 'on';
+  return '';
+}
+// guardDetail 服务给的那段完整说明(有异常时)
+function guardDetail(v) { return v.guardError || (v.guard === 'on' ? v.guardNote || '' : ''); }
+const GUARD_TITLE = { on: 'home.guard', warn: 'home.guardWarn', err: 'home.guardErr' };
+// sheetGuard 点那颗胶囊:状态一行、服务给的完整说明、它防的是什么(和设置里那条说明同一段),再给能直接解决的按钮 ——
+// 安卓上那段说明说的就是系统的「始终开启 VPN」/「阻止未经 VPN 的连接」没全开:给「打开系统 VPN 设置」;都给一个「去设置」(落到那个开关)。
+function sheetGuard() {
+  const v = (state && state.view) || {};
+  const kind = guardKind(v);
+  if (!kind) return;
+  const detail = guardDetail(v);
+  const android = state.platform === 'android';
+  const help = t(android ? 'set.noDirectHelpAndroid' : 'set.noDirectHelp') + (state.platform === 'darwin' ? t('set.noDirectMacNote') : '');
+  const vpnBtn = android && v.guard === 'on' && v.guardNote && !v.guardError;
+  openSheet(t('set.noDirect'), `<div class="ntc ${kind === 'on' ? 'ok' : 'warn'}">`
+    + `<div class="ntc-h">${kind === 'on' ? ICON_SHIELD : ICON_WARN}<b>${esc(t(GUARD_TITLE[kind]))}</b></div>`
+    + (detail ? `<p class="ntc-d">${esc(detail)}</p>` : '')
+    + `<p class="ntc-help">${esc(help)}</p>`
+    + `<div class="ntc-act">${vpnBtn ? `<button class="btn primary" id="ntc-vpn">${t('set.vpnAlwaysOpen')}</button>` : ''}<button class="btn" id="ntc-set">${t('home.goSettings')}</button></div></div>`, { kind: 'guard' });
+  const vb = $('#ntc-vpn');
+  if (vb) vb.addEventListener('click', () => { Promise.resolve().then(() => App().OpenVpnSettings()).catch(e => toast(errText(e), 'err')); });
+  $('#ntc-set').addEventListener('click', () => {
+    closeSheet();
+    nav('settings');
+    setTimeout(() => { const el = $('#f-nodirect'); const row = el && el.closest('.srow'); if (row) row.scrollIntoView({ block: 'center' }); }, 80);
+  });
+}
+// sheetPrivacy 点「系统网络保护没做完 / 网卡 IPv6 没能停用」那颗胶囊:每一项的完整原因。这两项服务会自己隔半分钟重试,不用操作
+function sheetPrivacy() {
+  const v = (state && state.view) || {};
+  const items = [];
+  if (v.protectWarn) items.push([t('home.protectWarn'), v.protectWarn]);
+  if (v.nicWarn) items.push([t('home.nicWarn'), v.nicWarn]);
+  if (!items.length) return;
+  openSheet(t('home.privTitle'), `<div class="ntc warn">${items.map(([h, d]) => `<div class="ntc-h">${ICON_WARN}<b>${esc(h)}</b></div><p class="ntc-d">${esc(d)}</p>`).join('')}`
+    + `<div class="ntc-act"><button class="btn" id="ntc-ok">${t('common.ok')}</button></div></div>`, { kind: 'priv' });
+  $('#ntc-ok').addEventListener('click', closeSheet);
+}
 function openExternal(url) {
   const u = String(url || '');
   if (!/^https?:\/\//i.test(u)) return;

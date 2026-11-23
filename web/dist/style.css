@@ -677,6 +677,21 @@ body.tv .drawer-brand b { font-size: 22px; }
 #nic-pill { border-radius: 12px; align-items: flex-start; }
 #nic-pill > span { white-space: normal; overflow: visible; }
 .guard-pill.warn { color: var(--warn); background: rgba(217, 119, 6, .10); border-color: rgba(217, 119, 6, .32); box-shadow: none; }
+/* 防逃逸、保护没做完这两颗是按钮(11-23):胶囊里只放短标题和「›」,点开看全文和能直接解决的按钮;电视遥控器也能落上去 */
+.guard-pill svg.chev { width: 12px; height: 12px; margin-left: -2px; opacity: .7; }
+button.guard-pill:hover { border-color: rgba(47, 139, 255, .5); } button.guard-pill.warn:hover { border-color: rgba(217, 119, 6, .6); }
+button.guard-pill:active { transform: scale(.98); }
+/* 点开后的说明面板:状态一行(图标 + 粗体)、服务给的完整说明、它防的是什么、按钮靠右 */
+.ntc { padding: 2px 4px 6px; }
+.ntc-h { display: flex; align-items: center; gap: 8px; margin: 4px 0 8px; font-size: 14px; }
+.nogap .ntc-h > *:not([hidden]) + *:not([hidden]) { margin-left: 8px; }
+.ntc-h svg { width: 18px; height: 18px; flex: none; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.ntc.ok .ntc-h { color: var(--brand2); } .ntc.warn .ntc-h { color: var(--warn); }
+.ntc-d { margin: 0 0 12px; font-size: 13px; line-height: 1.6; color: var(--text); }
+.ntc-help { margin: 0 0 16px; padding-top: 10px; border-top: 1px solid var(--line); font-size: 12px; line-height: 1.65; color: var(--muted); }
+.ntc-act { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
+.nogap .ntc-act > *:not([hidden]) + *:not([hidden]) { margin-left: 8px; }
+body.tv .ntc-h { font-size: 17px; } body.tv .ntc-d { font-size: 15px; } body.tv .ntc-help { font-size: 14px; }
 /* 刷新后待应用的提示(首页、订阅卡片、节点面板):左边图标、中间两行、右边一颗「现在应用」 */
 .notice { margin: 0 0 10px; }
 .notice-ic { flex: none; width: 30px; height: 30px; border-radius: 10px; display: grid; place-items: center; color: #fff; background: linear-gradient(120deg, var(--brand1), var(--brand2)); box-shadow: 0 4px 10px rgba(47, 139, 255, .25); }
