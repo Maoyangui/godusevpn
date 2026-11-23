@@ -1090,8 +1090,8 @@ function sheetGuard() {
   const kind = guardKind(v);
   if (!kind) return;
   const detail = guardDetail(v);
-  const android = state.platform === 'android';
-  const help = t(android ? 'set.noDirectHelpAndroid' : 'set.noDirectHelp') + (state.platform === 'darwin' ? t('set.noDirectMacNote') : '');
+  const plat = state && state.platform, android = plat === 'android';
+  const help = t(android ? 'set.noDirectHelpAndroid' : 'set.noDirectHelp') + (plat === 'darwin' ? t('set.noDirectMacNote') : '');
   const vpnBtn = android && v.guard === 'on' && v.guardNote && !v.guardError;
   openSheet(t('set.noDirect'), `<div class="ntc ${kind === 'on' ? 'ok' : 'warn'}">`
     + `<div class="ntc-h">${kind === 'on' ? ICON_SHIELD : ICON_WARN}<b>${esc(t(GUARD_TITLE[kind]))}</b></div>`
@@ -1103,7 +1103,15 @@ function sheetGuard() {
   $('#ntc-set').addEventListener('click', () => {
     closeSheet();
     nav('settings');
-    setTimeout(() => { const el = $('#f-nodirect'); const row = el && el.closest('.srow'); if (row) row.scrollIntoView({ block: 'center' }); }, 80);
+    // 设置页要先等后端给设置和开机自启两样(安卓要过桥)才画出来:每 0.1 秒看一次那一行出来没有,最多等 2 秒;人已经离开设置页就不滚了
+    let tries = 20;
+    const land = () => {
+      if (view !== 'settings') return;
+      const el = $('#f-nodirect'), row = el && el.closest('.srow');
+      if (row) row.scrollIntoView({ block: 'center' });
+      else if (--tries > 0) setTimeout(land, 100);
+    };
+    setTimeout(land, 60);
   });
 }
 // sheetPrivacy 点「系统网络保护没做完 / 网卡 IPv6 没能停用」那颗胶囊:每一项的完整原因。这两项服务会自己隔半分钟重试,不用操作
@@ -1200,9 +1208,9 @@ async function sheetNodes() {
   openSheet(t('sheet.nodes'), `<div class="empty"><span class="spinner"></span></div>`, { kind: 'nodes', action: t('sheet.retest'), onAction: () => testNodes(true),
     search: { placeholder: t('node.filter'), onInput: v => { nodeFilter = v.trim(); applyNodeFilter(); } } });
   testBtn(); // 上一轮测速还在跑(关掉面板又打开):按钮照样是「测速中」、点不了,还没轮到的照样转圈
-  // 先照上一次取到的列表画出来(同一个订阅才用),不转圈;再取新的,结构没变就只改数字
-  const pid = state && state.view && state.view.profile && state.view.profile.id;
-  if (nodeCache && nodeCache.pid === pid) { nodeSig = ''; await drawNodes(nodeTesting, nodeCache.nodes); }
+  // 先照上一次取到的列表画出来,不转圈;再取新的,结构没变就只改数字。只在同一个订阅、而且这之后没刷新过时才用:
+  // 刷新过(节点可能增删了)就照旧先转圈,免得先亮出一份旧列表、手快点到已经删掉的节点
+  if (nodeCache && nodeCache.key === nodeCacheKey()) { nodeSig = ''; await drawNodes(nodeTesting, nodeCache.nodes); }
   nodeViewSig = nodeViewKey(state && state.view);
   await drawNodes(nodeTesting);
   testNodes(false);
@@ -1413,6 +1421,11 @@ function nodeRow(n, i, max, testing) {
 // nodeCache 上一次从服务取到的节点列表(原样的一份)和它属于哪个订阅。再打开节点面板时先照它画出来(当前选的是哪个按此刻的状态改),
 // 马上就有东西可看可点,再去取新的、只改有变化的格子 —— 以前每次打开都是先转圈、等取完整个列表(安卓上要经桥,一两秒)再画。
 let nodeCache = null;
+// nodeCacheKey 缓存属于哪份订阅数据:订阅 + 它最近一次刷新的时间(刷新过就不算同一份)
+function nodeCacheKey() {
+  const p = state && state.view && state.view.profile;
+  return p ? p.id + '|' + (p.fetchedAt || 0) : '';
+}
 async function drawNodes(testing, cached) {
   // 节点面板是不是还开着、还是开它那一次(取节点列表要等,这期间用户可能关了面板、开了模式 / 订阅面板):不是就什么都不画
   const seq = sheetSeq;
@@ -1422,10 +1435,11 @@ async function drawNodes(testing, cached) {
     const cur = (state && state.view && state.view.node) || '';
     nodes = cached.map(n => Object.assign({}, n, { current: n.name === cur || (n.name === 'auto' && !cur) }));
   } else {
+    // 缓存记的是发请求那一刻的订阅:取的途中订阅刷新了(安卓过桥要一两秒),拿回来的可能还是旧列表,不能记成新的
+    const key = nodeCacheKey();
     try { nodes = await App().GetNodes() || []; } catch (e) { if (mine()) $('#sheet-body').innerHTML = `<div class="empty">${esc(errText(e))}</div>`; return; }
     if (!mine()) return;
-    const pid = state && state.view && state.view.profile && state.view.profile.id;
-    if (nodes.length) nodeCache = { pid, nodes: nodes.map(n => Object.assign({}, n)) };
+    if (nodes.length) nodeCache = { key, nodes: nodes.map(n => Object.assign({}, n)) };
     nodeViewSig = nodeViewKey(state && state.view); // 这份列表对应的就是此刻的状态:随后推来同样的内容不用再取
   }
   if (!nodes.length) {
