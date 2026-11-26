@@ -101,7 +101,7 @@ type Daemon struct {
 	// tunUpPending 隧道网卡的转发层放行没成功(网卡还没注册好之类),下一次同步再试
 	tunUpPending atomic.Bool
 	guardErr     string     // 闸该开却没开成的原因
-	guardNote    string     // 闸开着时平台这一层保护的保留(见 guardNoteNow)
+	guardNote    string     // 平台这一层保护的保留,GuardWarning 的原话(见 guardPlatformNote)
 	guardNoteAt  time.Time  // 上次问 GuardWarning 的时间
 	protectWarn  string     // 系统网络保护(macOS 接管 DNS、Linux 回包规则)没做完的原因:隧道照常建立,巡检每半分钟重做
 	nicWarn      string     // 非严格模式下网卡 IPv6 没能停用:照常连,首页标出来(严格全局仍拒绝连接,见 nicReady)
@@ -2508,6 +2508,9 @@ func (d *Daemon) stateView() ipc.StateView {
 		}
 	}
 	d.mu.Unlock()
+	if v.Guard == "on" && !guardHolds(guardInstallable(), running, d.guardPlatformNote) {
+		v.Guard = "" // 闸记着开、此刻却没东西挡着(见 guardHolds):不亮「防逃逸已生效」
+	}
 	if v.Guard == "on" && v.GuardError == "" {
 		v.GuardNote = d.guardNoteNow()
 	}
@@ -2515,25 +2518,46 @@ func (d *Daemon) stateView() ipc.StateView {
 	return v
 }
 
-// guardNoteNow 闸开着时平台这一层保护的保留(netmode.GuardWarning:Android 没开「阻止未经 VPN 的连接」时被杀 / 升级
-// 那段不受保护,Windows 开机那组没装全)。以前只写日志,首页照样亮绿盾。Android 上要问宿主,而状态一两秒推一次:
-// 10 秒内复用上一次的结果;用户去系统设置里打开之后,最多 10 秒界面就跟上。
-func (d *Daemon) guardNoteNow() string {
+// guardInstallable / guardWarning 可替换:测试里要按「闸不归我们装」的平台(Android)走一遍。
+var (
+	guardInstallable = netmode.GuardInstallable
+	guardWarning     = netmode.GuardWarning
+)
+
+// guardHolds 闸记着开(guardOn)时,此刻是不是真有东西挡着隧道外的流量。
+// 桌面三个平台的闸装在系统防火墙里(installable):装上就挡着,内核在不在跑都一样 —— 这正是它的用处。
+// Android 的「闸」就是 VPN 接口本身:隧道没起来时(正在连、没连上、内核停了在重连)流量照常走直连,
+// 只有系统里「始终开启 VPN」和「阻止未经 VPN 的连接」都开着(平台没有保留可报,platformNote 为空)才由系统拦着。
+// 以前只看 guardOn:安卓上点了连接却没连上时,首页照样亮着「防逃逸已生效」。
+// platformNote 只在前两项都不成立时才问(Android 上要过桥问宿主)。
+func guardHolds(installable, running bool, platformNote func() string) bool {
+	return installable || running || platformNote() == ""
+}
+
+// guardPlatformNote 平台这一层保护的保留(netmode.GuardWarning 的原话:Android 没开「阻止未经 VPN 的连接」时被杀 / 升级
+// 那段不受保护,Windows 开机那组没装全)。Android 上要问宿主,而状态一两秒推一次:10 秒内复用上一次的结果;
+// 用户去系统设置里打开之后,最多 10 秒界面就跟上。
+func (d *Daemon) guardPlatformNote() string {
 	d.mu.Lock()
 	note, fresh := d.guardNote, time.Since(d.guardNoteAt) < 10*time.Second
 	d.mu.Unlock()
 	if fresh {
 		return note
 	}
-	note = netmode.GuardWarning()
-	if !netmode.GuardInstallable() && !d.getSettings().Sealed() {
-		// Android 规则模式:系统的「阻止未经 VPN 的连接」会连直连一起断,不该为没开它挂告警(开关说明里写了)
-		note = ""
-	}
+	note = guardWarning()
 	d.mu.Lock()
 	d.guardNote, d.guardNoteAt = note, time.Now()
 	d.mu.Unlock()
 	return note
+}
+
+// guardNoteNow 闸开着时要在首页标出来的那句保留(见 guardPlatformNote)。以前只写日志,首页照样亮绿盾。
+func (d *Daemon) guardNoteNow() string {
+	if !guardInstallable() && !d.getSettings().Sealed() {
+		// Android 规则模式:系统的「阻止未经 VPN 的连接」会连直连一起断,不该为没开它挂告警(开关说明里写了)
+		return ""
+	}
+	return d.guardPlatformNote()
 }
 
 // ---- 控制接口 ----

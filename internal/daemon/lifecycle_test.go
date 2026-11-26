@@ -266,3 +266,57 @@ func TestStateViewCarriesGuardNote(t *testing.T) {
 		t.Fatal("闸没开时不该带 guardNote")
 	}
 }
+
+// 闸记着开时此刻是不是真有东西挡着:桌面(防火墙里装着)一直是;Android(闸就是 VPN 接口)要隧道起来了,
+// 或者系统里「始终开启 VPN」「阻止未经 VPN 的连接」都开着(平台没有保留可报)。平台那句只在前两项都不成立时才问。
+func TestGuardHolds(t *testing.T) {
+	asked := 0
+	note := func(s string) func() string { return func() string { asked++; return s } }
+	for _, c := range []struct {
+		name                 string
+		installable, running bool
+		note                 string
+		want                 bool
+		wantAsked            int
+	}{
+		{"桌面,内核没在跑:防火墙照样挡着", true, false, "开机那组没装全", true, 0},
+		{"桌面,内核在跑", true, true, "", true, 0},
+		{"Android,隧道起来了", false, true, "系统的「阻止未经 VPN 的连接」没开", true, 0},
+		{"Android,隧道没起来,系统那两项也没全开:没东西挡着", false, false, "系统的「阻止未经 VPN 的连接」没开", false, 1},
+		{"Android,隧道没起来,系统那两项都开着:系统拦着", false, false, "", true, 1},
+	} {
+		asked = 0
+		if got := guardHolds(c.installable, c.running, note(c.note)); got != c.want || asked != c.wantAsked {
+			t.Fatalf("%s:得 %v(问了平台 %d 次),应 %v(%d 次)", c.name, got, asked, c.want, c.wantAsked)
+		}
+	}
+}
+
+// Android 上点了连接却没连上(正在连、连接失败、内核停了在重连):闸记着开,可是没有隧道、系统那两项也没全开,
+// 流量照常走直连 —— 首页不能亮「防逃逸已生效」,也不带那句保留;系统那两项都开着时由系统拦着,照常亮。桌面平台不受影响。
+func TestStateViewGuardNeedsTunnelWhenNotInstallable(t *testing.T) {
+	d := newPolicyTestDaemon(t)
+	d.guardOn = true
+	d.guardNote, d.guardNoteAt = "系统的「始终开启 VPN」/「阻止未经 VPN 的连接」没全开", time.Now()
+	if v := d.stateView(); v.Guard != "on" {
+		t.Fatalf("桌面平台:闸装在防火墙里,内核没在跑也挡着,得 %q", v.Guard)
+	}
+	old := guardInstallable
+	guardInstallable = func() bool { return false }
+	t.Cleanup(func() { guardInstallable = old })
+	if v := d.stateView(); v.Guard != "" || v.GuardNote != "" {
+		t.Fatalf("Android:隧道没起来、系统那两项没全开,不该亮「防逃逸已生效」,得 %q / %q", v.Guard, v.GuardNote)
+	}
+	d.guardNote, d.guardNoteAt = "", time.Now() // 系统那两项都开着:平台没有保留可报
+	if v := d.stateView(); v.Guard != "on" {
+		t.Fatalf("Android:系统的「阻止未经 VPN 的连接」开着时由系统拦着,应照常亮,得 %q", v.Guard)
+	}
+	// 缓存过期就重新问平台(测试里换成固定的回答)
+	oldW := guardWarning
+	guardWarning = func() string { return "没全开" }
+	t.Cleanup(func() { guardWarning = oldW })
+	d.guardNoteAt = time.Now().Add(-time.Minute)
+	if v := d.stateView(); v.Guard != "" {
+		t.Fatalf("Android:重新问到系统那两项没全开,不该再亮,得 %q", v.Guard)
+	}
+}
