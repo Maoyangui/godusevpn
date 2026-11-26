@@ -80,7 +80,7 @@
   const view = {
     state: { status: 'connected', since: 0, wanted: true, retries: 0 },
     mode: 'rule', node: '香港3-高带宽', autoNow: '香港3-高带宽',
-    guard: 'on', // 防流量逃逸的闸:全局和规则模式都亮着,切到直连才灭(见 SetMode)
+    guard: 'on', // 防流量逃逸的闸:想连着、而且不是直连模式时亮着;断开以后撤掉(见 connect / disconnect / SetMode)
     nodes: NODES.map(n => n.name), ping: 81,
     exitIp: '', exitLoc: '', exitCity: '', exitRegion: '', exitIsp: '',
     uptime: 4127,
@@ -173,6 +173,7 @@
   async function connect() {
     if (on()) return;
     view.state.wanted = true;
+    view.guard = view.mode !== 'direct' ? 'on' : '';
     view.state.status = 'preparing'; push(); await sleep(450);
     view.state.status = 'starting'; push(); await sleep(700);
     view.state.status = 'connected'; view.uptime = 0;
@@ -186,6 +187,7 @@
   async function disconnect() {
     if (!view.state.wanted) return;
     view.state.wanted = false;
+    view.guard = '';
     view.state.status = 'stopping'; push(); await sleep(500);
     view.state.status = 'disconnected'; view.uptime = 0; view.ping = 0;
     up = down = 0; totalUp = totalDown = 0;
@@ -274,7 +276,7 @@
       push();
       return view;
     },
-    SetMode: async m => { view.mode = m; settings.mode = m; view.guard = m !== 'direct' ? 'on' : ''; log('模式 → ' + m); push(); },
+    SetMode: async m => { view.mode = m; settings.mode = m; view.guard = m !== 'direct' && view.state.wanted ? 'on' : ''; log('模式 → ' + m); push(); },
     Connect: connect,
     Disconnect: disconnect,
     TestAll: async () => {
