@@ -268,26 +268,28 @@ func TestStateViewCarriesGuardNote(t *testing.T) {
 }
 
 // 闸记着开时此刻是不是真有东西挡着:桌面(防火墙里装着)一直是;Android(闸就是 VPN 接口)要隧道起来了,
-// 或者系统里「始终开启 VPN」「阻止未经 VPN 的连接」都开着(平台没有保留可报)。平台那句只在前两项都不成立时才问。
+// 或者系统里「始终开启 VPN」「阻止未经 VPN 的连接」都开着(平台没有保留可报)。接口在不在、平台那句都只在前一项不成立时才问。
 func TestGuardHolds(t *testing.T) {
-	asked := 0
+	asked, askedTun := 0, 0
 	note := func(s string) func() string { return func() string { asked++; return s } }
+	tun := func(up bool) func() bool { return func() bool { askedTun++; return up } }
 	for _, c := range []struct {
 		name                 string
 		installable, running bool
 		note                 string
 		want                 bool
 		wantAsked            int
+		wantAskedTun         int
 	}{
-		{"桌面,内核没在跑:防火墙照样挡着", true, false, "开机那组没装全", true, 0},
-		{"桌面,内核在跑", true, true, "", true, 0},
-		{"Android,隧道起来了", false, true, "系统的「阻止未经 VPN 的连接」没开", true, 0},
-		{"Android,隧道没起来,系统那两项也没全开:没东西挡着", false, false, "系统的「阻止未经 VPN 的连接」没开", false, 1},
-		{"Android,隧道没起来,系统那两项都开着:系统拦着", false, false, "", true, 1},
+		{"桌面,内核没在跑:防火墙照样挡着", true, false, "开机那组没装全", true, 0, 0},
+		{"桌面,内核在跑", true, true, "", true, 0, 0},
+		{"Android,VPN 接口在(连着,或内核停了接口留着当闸)", false, true, "系统的「阻止未经 VPN 的连接」没开", true, 0, 1},
+		{"Android,接口不在,系统那两项也没全开:没东西挡着", false, false, "系统的「阻止未经 VPN 的连接」没开", false, 1, 1},
+		{"Android,接口不在,系统那两项都开着:系统拦着", false, false, "", true, 1, 1},
 	} {
-		asked = 0
-		if got := guardHolds(c.installable, c.running, note(c.note)); got != c.want || asked != c.wantAsked {
-			t.Fatalf("%s:得 %v(问了平台 %d 次),应 %v(%d 次)", c.name, got, asked, c.want, c.wantAsked)
+		asked, askedTun = 0, 0
+		if got := guardHolds(c.installable, tun(c.running), note(c.note)); got != c.want || asked != c.wantAsked || askedTun != c.wantAskedTun {
+			t.Fatalf("%s:得 %v(问了平台 %d 次、接口 %d 次),应 %v(%d 次、%d 次)", c.name, got, asked, askedTun, c.want, c.wantAsked, c.wantAskedTun)
 		}
 	}
 }
@@ -307,6 +309,16 @@ func TestStateViewGuardNeedsTunnelWhenNotInstallable(t *testing.T) {
 	if v := d.stateView(); v.Guard != "" || v.GuardNote != "" {
 		t.Fatalf("Android:隧道没起来、系统那两项没全开,不该亮「防逃逸已生效」,得 %q / %q", v.Guard, v.GuardNote)
 	}
+	// 内核没在跑,但宿主手里还留着 VPN 接口(连上过、内核崩了在重连,接口留着吞流量):照常亮
+	d.tunHeld = func() bool { return true }
+	if v := d.stateView(); v.Guard != "on" {
+		t.Fatalf("Android:接口留着当闸时应照常亮,得 %q", v.Guard)
+	}
+	d.tunHeld = func() bool { return false }
+	if v := d.stateView(); v.Guard != "" {
+		t.Fatalf("Android:接口已经关掉、系统那两项没全开,不该亮,得 %q", v.Guard)
+	}
+	d.tunHeld = nil
 	d.guardNote, d.guardNoteAt = "", time.Now() // 系统那两项都开着:平台没有保留可报
 	if v := d.stateView(); v.Guard != "on" {
 		t.Fatalf("Android:系统的「阻止未经 VPN 的连接」开着时由系统拦着,应照常亮,得 %q", v.Guard)

@@ -72,7 +72,7 @@ func NewEngine(dataDir, cacheDir string, host Host, listener EventListener) (*En
 		}
 	}
 	p := newPlatform(host)
-	d, err := daemon.NewWithOptions(daemon.Options{Platform: p, NoListen: true, ReleaseTun: host.CloseTun})
+	d, err := daemon.NewWithOptions(daemon.Options{Platform: p, NoListen: true, ReleaseTun: host.CloseTun, TunHeld: host.TunOpen})
 	if err != nil {
 		return nil, err
 	}

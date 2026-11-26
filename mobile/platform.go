@@ -31,6 +31,9 @@ type Host interface {
 	Protect(fd int32) bool
 	// CloseTun 内核已经关掉 TUN:宿主把自己留着的那份文件描述符也关掉,系统的 VPN 才会真正消失(否则流量还往一个没人读的接口里灌,手机就断网)
 	CloseTun()
+	// TunOpen 宿主手里此刻有没有留着 VPN 接口:建成功之后、关掉之前都算 —— 内核停了、「防流量逃逸」把接口留着当闸的时候也算。
+	// 只读;首页「防逃逸已生效」亮不亮看它(见 daemon.guardHolds)
+	TunOpen() bool
 	// FindConnectionOwner 查一条连接属于哪个 uid(ConnectivityManager.getConnectionOwnerUid);找不到返回 -1
 	FindConnectionOwner(ipProtocol int32, sourceAddress string, sourcePort int32, destinationAddress string, destinationPort int32) int32
 	// PackageNamesByUid 逗号分隔的包名列表

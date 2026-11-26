@@ -28,6 +28,8 @@ object HostProxy : Host {
 
     override fun closeTun() { svc()?.closeTun() }
 
+    override fun tunOpen(): Boolean = svc()?.tunOpen() ?: false
+
     override fun findConnectionOwner(ipProtocol: Int, sourceAddress: String, sourcePort: Int, destinationAddress: String, destinationPort: Int): Int =
         NetInfo.findConnectionOwner(App.instance, ipProtocol, sourceAddress, sourcePort, destinationAddress, destinationPort)
 

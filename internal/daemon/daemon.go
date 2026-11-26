@@ -130,8 +130,9 @@ type Daemon struct {
 	// 与 nicHold 一样由 d.mu 保护。
 	guardHold    bool
 	nicHold      bool
-	settingsOpMu sync.Mutex // privacy-setting transactions cannot overlap
-	releaseTun   func()     // 见 Options.ReleaseTun
+	settingsOpMu sync.Mutex  // privacy-setting transactions cannot overlap
+	releaseTun   func()      // 见 Options.ReleaseTun
+	tunHeld      func() bool // 见 Options.TunHeld
 	machine      *state.Machine
 	server       *ipc.Server
 	secret       string
@@ -179,6 +180,8 @@ type Options struct {
 	NoListen bool                      // 不开本机控制口(Android 只在进程内 Dispatch)
 	// ReleaseTun Android:「防流量逃逸」撤闸时把留着的 VPN 接口关掉(内核没在跑时它是个黑洞);别的平台为 nil
 	ReleaseTun func()
+	// TunHeld Android:宿主手里此刻有没有留着 VPN 接口(内核停了、接口留着当闸的时候也算);别的平台为 nil
+	TunHeld func() bool
 }
 
 // New 读设置与订阅缓存,装配各部件;不启动任何东西。
@@ -194,7 +197,7 @@ func NewWithOptions(o Options) (*Daemon, error) {
 	// 铺不下去也只是少几条规则、连接照常,所以不当致命错误,等日志建好再说一声。
 	installErr := ruleset.Install(paths.RuleSets())
 	d := &Daemon{
-		noListen: o.NoListen, releaseTun: o.ReleaseTun,
+		noListen: o.NoListen, releaseTun: o.ReleaseTun, tunHeld: o.TunHeld,
 		log:      logx.New(filepath.Join(paths.Logs(), "service.log"), 5<<20, 3),
 		coreLog:  logx.New(filepath.Join(paths.Logs(), "core.log"), 5<<20, 3),
 		profiles: map[string]*profile.Profile{},
@@ -2508,7 +2511,8 @@ func (d *Daemon) stateView() ipc.StateView {
 		}
 	}
 	d.mu.Unlock()
-	if v.Guard == "on" && !guardHolds(guardInstallable(), running, d.guardPlatformNote) {
+	tunnelUp := func() bool { return running || (d.tunHeld != nil && d.tunHeld()) }
+	if v.Guard == "on" && !guardHolds(guardInstallable(), tunnelUp, d.guardPlatformNote) {
 		v.Guard = "" // 闸记着开、此刻却没东西挡着(见 guardHolds):不亮「防逃逸已生效」
 	}
 	if v.Guard == "on" && v.GuardError == "" {
@@ -2526,12 +2530,13 @@ var (
 
 // guardHolds 闸记着开(guardOn)时,此刻是不是真有东西挡着隧道外的流量。
 // 桌面三个平台的闸装在系统防火墙里(installable):装上就挡着,内核在不在跑都一样 —— 这正是它的用处。
-// Android 的「闸」就是 VPN 接口本身:隧道没起来时(正在连、没连上、内核停了在重连)流量照常走直连,
+// Android 的「闸」就是 VPN 接口本身:接口在(内核在跑;或者内核停了、宿主把接口留着吞流量,见 mobile 的 hostTun.Close)才挡得住。
+// 接口从没建起来(正在连、TUN 建不起来)、或者已经被宿主关掉时,流量照常走直连,
 // 只有系统里「始终开启 VPN」和「阻止未经 VPN 的连接」都开着(平台没有保留可报,platformNote 为空)才由系统拦着。
 // 以前只看 guardOn:安卓上点了连接却没连上时,首页照样亮着「防逃逸已生效」。
-// platformNote 只在前两项都不成立时才问(Android 上要过桥问宿主)。
-func guardHolds(installable, running bool, platformNote func() string) bool {
-	return installable || running || platformNote() == ""
+// tunnelUp、platformNote 都只在前一项不成立时才问(Android 上要过桥问宿主)。
+func guardHolds(installable bool, tunnelUp func() bool, platformNote func() string) bool {
+	return installable || tunnelUp() || platformNote() == ""
 }
 
 // guardPlatformNote 平台这一层保护的保留(netmode.GuardWarning 的原话:Android 没开「阻止未经 VPN 的连接」时被杀 / 升级

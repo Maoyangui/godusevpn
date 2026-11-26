@@ -40,7 +40,7 @@ class GodVpnService : VpnService() {
         }
     }
 
-    private var tun: ParcelFileDescriptor? = null
+    @Volatile private var tun: ParcelFileDescriptor? = null
     private var lastSpec: String? = null // 上一次建接口用的参数:参数没变就沿用现有接口(见 openTun)
     private val listener: (String, String) -> Unit = { name, data -> if (name == "state") runCatching { updateNotification(JSONObject(data)) } }
 
@@ -111,6 +111,9 @@ class GodVpnService : VpnService() {
         val (ip, len) = cidr.split('/').let { Pair(it[0], it.getOrNull(1)?.toIntOrNull() ?: 0) }
         runCatching { b.addRoute(ip, len) }.onFailure { Log.w(App.TAG, "addRoute $cidr: $it") }
     }
+
+    /** 手里此刻有没有留着 VPN 接口(引擎问:首页「防逃逸已生效」亮不亮看它)。 */
+    fun tunOpen(): Boolean = tun != null
 
     /** 关掉自己留着的那份 fd,系统的 VPN 随之消失。内核关 TUN 时经宿主接口调;状态变成断开 / 出错时再兜一次底。 */
     fun closeTun() {
